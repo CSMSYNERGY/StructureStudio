@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 9747ac6803ca)
+// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 3f366c97a9ad)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -70,7 +70,12 @@ var SHOW_EMAIL_SENDER = false;
 // never throws, never blocks the UI. Auto-captures uncaught errors + unhandled promise
 // rejections, and anything reported explicitly via window.ssLogError(source,msg,code,ctx). ──
 var SS_ERR_SOURCE = "admin";
-function ssLogError(source, message, code, context) {
+// `severity` is optional and defaults to "error", so every existing call site keeps its
+// current meaning. Pass "info" for a REFUSAL — the product correctly declining something
+// ("send the invoice first", "that width isn't valid"). Those still get a row, because a
+// refusal that fires constantly is a bug in disguise (see migration 140), but they no
+// longer sit in the same bucket as things that actually broke.
+function ssLogError(source, message, code, context, severity) {
   try {
     var params = new URLSearchParams(location.search);
     fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
@@ -87,7 +92,8 @@ function ssLogError(source, message, code, context) {
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
         p_url: location.href.slice(0, 600),
-        p_context: context || null
+        p_context: context || null,
+        p_severity: severity || "error"
       })
     })["catch"](function () {});
   } catch (_) {/* logging must never break the app */}

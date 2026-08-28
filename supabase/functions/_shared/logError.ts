@@ -25,6 +25,17 @@ const MAX_URL = 600;
 const MAX_UA = 400;
 const MAX_CONTEXT_BYTES = 8000;
 
+/**
+ * Set this header to "1" on a response that is a DELIBERATE REFUSAL rather than a fault,
+ * in the rare case where the refusal has to answer with a 5xx (a disabled feature is a
+ * 503, and there is no 4xx that says "this tenant has not switched that on"). withErrorLog
+ * then files it as info instead of parking it in the fault queue.
+ *
+ * Only for a refusal the code MEANT to return. A 5xx that means something broke must never
+ * carry it — that would hide the very rows this table exists to surface.
+ */
+export const SS_REFUSAL_HEADER = "x-ss-refusal";
+
 export interface EdgeErrorInput {
   /** Function name, e.g. 'submit-estimate' → stored as source 'edge:submit-estimate'. */
   fn: string;
@@ -35,6 +46,8 @@ export interface EdgeErrorInput {
   req?: Request | null;
   clientId?: string | null;
   context?: Record<string, unknown> | null;
+  /** Defaults to "error". "info" marks a refusal — the product correctly declining. */
+  severity?: "error" | "warn" | "info";
 }
 
 function truncate(value: string | null | undefined, max: number): string | null {
@@ -73,7 +86,7 @@ export async function logEdgeError(input: EdgeErrorInput): Promise<void> {
     const sb = createClient(url, serviceKey);
     const { error } = await sb.from("app_errors").insert({
       source: `edge:${input.fn}`.slice(0, 100),
-      severity: "error",
+      severity: input.severity ?? "error",
       code: truncate(input.code == null ? null : String(input.code), MAX_CODE),
       message: truncate(input.message || "unknown error", MAX_MESSAGE),
       url: truncate(path, MAX_URL),
@@ -145,6 +158,14 @@ export function withErrorLog(
 
       if (res.status >= minStatus) {
         const body = await res.clone().text().catch(() => "");
+        // A handful of DELIBERATE refusals answer with a 5xx because no other status fits
+        // — "sign-in by text isn't available yet" and "email sending isn't switched on for
+        // your account" are 503s, and both are the product correctly declining, not
+        // something broken. Those returns declare themselves with SS_REFUSAL_HEADER so
+        // they land as info instead of sitting in the fault queue for someone to
+        // investigate. The header is set at the return site, which is the only place that
+        // knows the difference; nothing here guesses from the status.
+        const refusal = res.headers.get(SS_REFUSAL_HEADER) === "1";
         await logEdgeError({
           fn,
           req,
@@ -152,6 +173,7 @@ export function withErrorLog(
           message: messageFromBody(body) ?? `HTTP ${res.status}`,
           clientId: await clientIdFrom(clone),
           context: { returnedStatus: res.status },
+          severity: refusal ? "info" : "error",
         });
       }
 

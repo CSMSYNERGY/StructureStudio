@@ -24,8 +24,10 @@ const schedBuildDate = (job) => job.due_date || job.scheduled_start || null;
 // UTC midnight through bare new Date(), so they render and compare a DAY EARLY in every
 // US timezone (audit 2026-08-20). The constraint: parse a date-only string as LOCAL
 // midnight, and build a day key / "today" from LOCAL components — never toISOString().
-const schedLocalDate = (iso) => (iso ? new Date(String(iso).slice(0, 10) + "T00:00:00") : null);
-const schedLocalIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+// Aliases onto the shared implementations in 01-core.jsx (lifted 2026-08-27 so the
+// Projects table engine and this tab share one WHEN filter / local-date kernel).
+const schedLocalDate = ssLocalDate;
+const schedLocalIso = ssLocalIso;
 // Past due = has a build date, that date is before today, and the stage isn't finished.
 const schedPastDue = (job, kind) => {
   const d = schedBuildDate(job);
@@ -55,65 +57,13 @@ const schedStyle = (j) => String(j.building_label || "")
 // plus a contextual parameter input (`param` says which). All date math on ISO strings via
 // schedLocalDate/schedLocalIso; weeks are Sunday-first (the tab's convention throughout);
 // quarters are calendar quarters.
-const SCHED_WHEN = [
-  ["any", "Any date", "none"],
-  ["today", "Today", "none"],
-  ["yesterday", "Yesterday", "none"],
-  ["this_week", "This week", "none"],
-  ["this_month", "This month", "none"],
-  ["this_quarter", "This quarter", "none"],
-  ["in_month", "In month", "month"],
-  ["this_year", "This year", "none"],
-  ["on", "On", "date"],
-  ["between", "Between", "date2"],
-  ["more_than", "More than", "count"],
-  ["after", "After date", "date"],
-  ["less_than", "Less than", "count"],
-  ["before", "Before date", "date"],
-  ["in_next", "In the next", "count"],
-  ["in_last", "In the last", "count"],
-];
-const SCHED_WHEN_PARAM = Object.fromEntries(SCHED_WHEN.map(([k, _l, p]) => [k, p]));
-// ISO date + or - N days/weeks/months, in local time.
-const schedShiftIso = (iso, n, unit) => {
-  const d = schedLocalDate(iso);
-  if (unit === "months") d.setMonth(d.getMonth() + n);
-  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
-  return schedLocalIso(d);
-};
-// Does a build date pass the condition? Pure function of strings so it unit-tests cleanly.
-// p = { a, b, month, n, unit }. A condition whose parameter is not filled in yet MATCHES
-// EVERYTHING — filtering nothing while she types beats blanking the list mid-keystroke.
-// More than / Less than measure distance FORWARD from today: this is a build schedule, so
-// "more than 30 days" means further out than 30 days ("In the last" covers looking back).
-// Between is inclusive at both ends.
-const schedWhenMatch = (cond, p, iso, todayIso) => {
-  switch (cond) {
-    case "today": return iso === todayIso;
-    case "yesterday": return iso === schedShiftIso(todayIso, -1, "days");
-    case "this_week": {
-      const t = schedLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
-      const sun = schedLocalIso(t);
-      return iso >= sun && iso <= schedShiftIso(sun, 6, "days");
-    }
-    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
-    case "this_quarter": {
-      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
-      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
-    }
-    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
-    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
-    case "on": return !p.a || iso === p.a;
-    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
-    case "more_than": return !p.n || iso > schedShiftIso(todayIso, Number(p.n), p.unit || "days");
-    case "after": return !p.a || iso > p.a;
-    case "less_than": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
-    case "before": return !p.a || iso < p.a;
-    case "in_next": return !p.n || (iso >= todayIso && iso <= schedShiftIso(todayIso, Number(p.n), p.unit || "days"));
-    case "in_last": return !p.n || (iso <= todayIso && iso >= schedShiftIso(todayIso, -Number(p.n), p.unit || "days"));
-    default: return true;
-  }
-};
+// The condition list, param map, shifter and matcher now live in 01-core.jsx (SS_WHEN /
+// SS_WHEN_PARAM / ssShiftIso / ssWhenMatch) — one implementation for this tab and the
+// Projects table engine. These aliases keep every call site below unchanged.
+const SCHED_WHEN = SS_WHEN;
+const SCHED_WHEN_PARAM = SS_WHEN_PARAM;
+const schedShiftIso = ssShiftIso;
+const schedWhenMatch = ssWhenMatch;
 
 // ── What a set of jobs is worth, and how much building it is ──────────────────────────────
 // ONE computation, at module scope, because four places need it: the calendar's day headers,
@@ -972,6 +922,19 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   const sorted = sortRows(tableRows, SCHED_SORT[sortKey] || ((j) => j[sortKey]), sortDir);
   const onSort = makeOnSort(sortKey, setSortKey, sortDir, setSortDir);
 
+  // Paging is the LAST step, over the filtered and sorted list, so the count pill and the
+  // stage chips keep describing the whole board rather than the visible page. It applies to
+  // the UNSEGMENTED table only — see the render site for why a segment must never be paged,
+  // and note the calendar and the board are not lists at all.
+  const [pageSize, setPageSize] = usePageSize("build-jobs");
+  const [page, setPage] = useState(1);
+  // Anything that changes WHAT is listed sends you back to page 1 — staying on page 7 of a
+  // search that now returns four jobs shows an empty table and reads as a broken page.
+  useEffect(() => { setPage(1); }, [query, stageFilter, crewFilter, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, segment, view]);
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   // ── Table SEGMENTING — labelled sections, with every row still present ──
   // The chosen sort applies WITHIN a group; group order comes from the mode, never from
   // sortKey — sorting the groups themselves would dissolve the segmentation.
@@ -1126,7 +1089,10 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
 
   return (
     <div style={S.card}>
-      <CardHead title="Build Schedule" count={jobs.length}
+      {/* `count={data ? … : null}` — while the board is loading, `jobs` is [] and the pill
+          read a confident "0", which is a false statement about the tenant's board for the
+          whole wait (CardHead hides the pill only on null). Same rule as Designs/Contacts. */}
+      <CardHead title="Build Schedule" count={data ? jobs.length : null}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
             {[["calendar", "Calendar"], ["table", "Table"], ["board", "Board"]].map(([v, label]) => (
@@ -1157,11 +1123,83 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           ))}
         </div>
       )}
+      {/* The tiles hold their place in grey rather than appearing on arrival: they sit
+          directly above the calendar, so materialising them shoved the whole grid down at the
+          moment the eye had just settled on it. Precedent: OrdersTab's money tiles. */}
+      {data === null && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
+          {["In queue", "In progress", "Built — awaiting delivery", "Past due"].map((t) => (
+            <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
+              {/* 21px bar + 2px above and below = the 25px line box the real number occupies,
+                  so the tile is exactly its final height before the count arrives. */}
+              <SkelBar w="30%" h={21} style={{ margin: "2px 0" }} />
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the shape of the answer instead of the word "Loading…" — SkelRows'
+          own comment carries the reasoning. Shape has to follow the VIEW here: this tab opens
+          on the calendar, and a table skeleton would resolve into a grid that looks nothing
+          like it, so the default branch is a week of day columns sized to the real cells
+          further down. `view`/`calView` are plain useState ("calendar"/"week") and `data`
+          never goes back to null once loaded, so the calendar branch is the one that renders
+          today; the other two are here because `view` is one localStorage line away from
+          being remembered the way `segment` and `showWeekends` already are.
+          ⚠️ This skeleton IS the whole win available in this file. load() awaits one
+          build_board invoke and nothing else, so there is no fast leg to paint from ahead of
+          a slow one the way Contacts has — splitting that payload's tray reads (which feed
+          only the Unscheduled strip) out of its board reads would halve the wait, and that is
+          a server change, not one this file can make. */}
+      {data === null && !error && (
+        view === "table" ? (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                {["Serial", "Customer", "Building", "Size", "Source", "Stage", "Build date", "Crew", "Delivery"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+              </tr></thead>
+              <tbody><SkelRows cols={9} rows={6} /></tbody>
+            </table>
+          </div>
+        ) : view === "board" ? (
+          <div style={{ display: "flex", gap: 11, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
+            {/* Four columns is an honest guess, not a measurement: stages are tenant-custom
+                and arrive in the same payload, so their number cannot be known yet. */}
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} style={{ width: 250, flex: "0 0 250px", background: "#F4F6FA", borderRadius: 12, padding: 9, minHeight: 190, opacity: 1 - i * 0.13 }}>
+                <SkelBar w="52%" h={10} style={{ margin: "3px 3px 11px" }} />
+                {[0, 1, 2].map((c) => (
+                  <div key={c} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "9px 10px", marginBottom: 8 }}>
+                    <SkelBar w="76%" />
+                    <SkelBar w="48%" h={9} style={{ marginTop: 7 }} />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
+            {/* The same 218px column and 190px floor the real week grid uses below, so the
+                days do not resize under the cursor when the cards land. Weekends follow the
+                toggle — it reads localStorage at mount, before any of this is fetched. */}
+            {Array.from({ length: showWeekends ? 7 : 5 }, (_, i) => (
+              <div key={i} style={{ width: 218, flex: "0 0 218px", background: "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 190, opacity: 1 - i * 0.1 }}>
+                <SkelBar w="44%" h={10} style={{ margin: "3px 3px 11px" }} />
+                {[0, 1].map((c) => (
+                  <div key={c} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: "9px 10px", marginBottom: 7 }}>
+                    <SkelBar w="80%" />
+                    <SkelBar w="52%" h={9} style={{ marginTop: 7 }} />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )
+      )}
 
       {/* ── The FILTER row (round 8) — narrows; the Segment dropdown arranges; they compose.
           Crew chips are ONE tab-level control obeyed by calendar, board and table alike.
@@ -1392,8 +1430,13 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 its own widths, which is worse than no grouping on a table this wide. Group
                 headers are full-width rows, the same idiom as the expanded editor row. */}
             <tbody>
+              {/* Paged in the UNSEGMENTED list only. A segment must never be paged: Carolyn
+                  asked to "see the ENTIRE LIST, but segmented by crews" (the comment on
+                  `segment` above), every group heading is a drop target, and a group whose
+                  tail fell off the page would read as an empty crew — the same reason the
+                  pipeline board carries no PageBar (see DesignsTable). */}
               {segmentGroups === null
-                ? sorted.map((j) => tableRow(j))
+                ? paged.map((j) => tableRow(j))
                 : segmentGroups.map((g) => {
                   const hot = dropGroup === g.key && dragRowId;
                   const weekMode = segment === "week" && !!g.key;
@@ -1451,6 +1494,9 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
                 })}
             </tbody>
           </table>
+          {segmentGroups === null && sorted.length > 0 && (
+            <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={sorted.length} noun="job" />
+          )}
         </div>
         {sorted.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No jobs match.</p>}
         {/* Say plainly whether dragging does anything in the current mode. The four modes
@@ -1886,6 +1932,19 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
     return rowMatchesQuery(r, query, "R-" + (r.repair_no || "") + " #" + (r.serial || ""));
   });
 
+  // Paging over the filtered list — the flattest case in this file: one sorted list, no
+  // grouping, no drop targets, and list_repairs reads up to 1000 rows. The chips and tiles
+  // keep counting the whole set because they read `repairs`/`counts`, not the page.
+  // Two things this deliberately does NOT touch: the auto-select effect above picks
+  // `repairs[0]`, not the first visible row, so which repair opens is unchanged; and the
+  // detail pane keys off `selectedId`, so a repair paged out of the list still renders.
+  const [pageSize, setPageSize] = usePageSize("repairs");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [query, statusFilter]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const curPage = Math.min(page, pageCount);
+  const paged = filtered.slice((curPage - 1) * pageSize, curPage * pageSize);
+
   const createRepair = async () => {
     if (!intake.customerName.trim() || !intake.description.trim()) {
       setMsg({ err: "Customer name and a description of the problem are required." }); return;
@@ -2010,7 +2069,10 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
 
   return (
     <div style={S.card}>
-      <CardHead title="Repairs" count={repairs.length}
+      {/* Null, not 0, while the list is in flight — `repairs` is [] until it lands, and a "0"
+          pill is a false statement about the tenant's open work (CardHead hides the pill only
+          on null). Same rule as Designs/Contacts. */}
+      <CardHead title="Repairs" count={data ? repairs.length : null}
         right={<>
           <button type="button" onClick={refresh} disabled={refreshing} style={{ ...S.btn("#F1F5F9", "#334155"), opacity: refreshing ? 0.6 : 1, cursor: refreshing ? "default" : "pointer" }}>
             {refreshing ? "↻ Refreshing…" : "↻ Refresh"}
@@ -2032,10 +2094,49 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
         </div>
       )}
 
+      {/* Grey tiles rather than no tiles: they sit above the list, so letting them appear
+          only on arrival pushed the whole table down a beat after the eye had settled on it. */}
+      {data === null && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
+          {["Open", "In progress", "Completed · 30 days", "Repair $ · open"].map((t) => (
+            <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
+              {/* 21px bar + 2px above and below = the 25px line box the real number occupies,
+                  so the tile is exactly its final height before the count arrives. */}
+              <SkelBar w="30%" h={21} style={{ margin: "2px 0" }} />
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the real six-column shape instead of the word "Loading…" — see
+          SkelRows. Rendered inside the SAME two-column grid the loaded tab uses, so the
+          detail pane's width is already reserved and the list does not narrow under the
+          cursor when the rows arrive.
+          Honest note on what this does and does not fix: list_repairs is one invoke of three
+          light reads with no enrichment leg, so there is nothing here to paint ahead of — the
+          Contacts split does not apply. This makes the wait legible, not shorter. */}
+      {data === null && !error && (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(330px, 1.5fr) minmax(300px, 1fr)", gap: 14, alignItems: "start" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                {["Repair", "Customer", "Building", "Requested", "Repair $", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+              </tr></thead>
+              <tbody><SkelRows cols={6} rows={6} /></tbody>
+            </table>
+          </div>
+          <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "14px 16px" }}>
+            <SkelBar w="54%" h={14} />
+            <SkelBar w="80%" style={{ marginTop: 14 }} />
+            <SkelBar w="66%" style={{ marginTop: 9 }} />
+            <SkelBar w="72%" style={{ marginTop: 9 }} />
+          </div>
+        </div>
+      )}
 
       {/* ── Intake ── */}
       {intakeOpen && canEdit && (
@@ -2112,7 +2213,7 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
                 {["Repair", "Customer", "Building", "Requested", "Repair $", "Status"].map((h) => <th key={h} style={S.th}>{h}</th>)}
               </tr></thead>
               <tbody>
-                {filtered.map((r) => (
+                {paged.map((r) => (
                   <tr key={r.id} onClick={() => setSelectedId(r.id)}
                     style={{ cursor: "pointer", background: r.id === selectedId ? "#F7F9FF" : "transparent" }}>
                     <td style={{ ...S.td, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>R-{r.repair_no}</td>
@@ -2125,6 +2226,9 @@ function RepairsTab({ clientId, canAdmin, access = null }) {
                 ))}
               </tbody>
             </table>
+            {filtered.length > 0 && (
+              <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={filtered.length} noun="repair" />
+            )}
             {filtered.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>No repairs match.</p>}
           </div>
 
@@ -2381,18 +2485,54 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
     if (okMsg) setMsg({ ok: okMsg });
     return r.data;
   };
+  // Two independent legs mean two independent round trips, and nothing makes the SECOND call's
+  // pool land after the FIRST call's pool. Two quick mutations (drop a building on a day, then
+  // another) can interleave so a stale pool overwrites a fresh one, putting a building back in
+  // the "To be loaded" strip that the loads list already shows on a truck. The joined await this
+  // replaced could not do that, so the generation counter comes in with the split: a leg only
+  // writes state if it is still the newest load().
+  const gen = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++gen.current;
+    const fresh = () => gen.current === mine;
     setError(null);
-    const [l, p] = await Promise.all([
-      sb.functions.invoke("portal-schedule", { body: { action: "loads" } }),
-      sb.functions.invoke("portal-schedule", { body: { action: "pool" } }),
-    ]);
-    if (l.error || !l.data || l.data.error) {
-      setError((l.data && l.data.error) || (l.error ? await fnError(l.error) : "Could not load the delivery schedule."));
-      setData({ loads: [], stops: [], buildByJob: {}, drivers: [], territories: [], team: [] });
-    } else setData(l.data);
-    if (!p.error && p.data && !p.data.error) setPool(p.data);
-    else setPool({ orders: [], inventory: [], repairs: [] });
+    // Both invokes still fire at the same instant with byte-identical bodies. What changed is
+    // that each leg writes its OWN state the moment it lands, instead of both sitting behind
+    // one joined await — first paint used to be max(loads, pool).
+    //
+    // `pool` is the heavier leg by round-trip count (portal-schedule runs ~12 sequential
+    // waves for it against ~9 for loads, and it is the one that reads designs, sold
+    // inventory, builder_locations, repairs and lifecycleByUnit) — and it feeds ONLY the
+    // "To be loaded" strip. Every load card, day section and driver chip below it reads
+    // `data` alone. That is the LeadsTable shape exactly: paint what is ready, repaint when
+    // the slow leg lands. If a given tenant's pool happens to come back first, nothing
+    // regresses — neither leg waits on the other either way.
+    const lp = sb.functions.invoke("portal-schedule", { body: { action: "loads" } }).then(async (l) => {
+      if (l.error || !l.data || l.data.error) {
+        const m = (l.data && l.data.error) || (l.error ? await fnError(l.error) : "Could not load the delivery schedule.");
+        if (!fresh()) return;
+        setError(m);
+        setData({ loads: [], stops: [], buildByJob: {}, drivers: [], territories: [], team: [] });
+      } else if (fresh()) setData(l.data);
+    });
+    const pp = sb.functions.invoke("portal-schedule", { body: { action: "pool" } }).then((p) => {
+      if (!fresh()) return;
+      if (!p.error && p.data && !p.data.error) setPool(p.data);
+      else setPool({ orders: [], inventory: [], repairs: [] });
+    // A REJECTION (rather than an {error} result) would leave `pool` null forever, and null is
+    // now a rendered state: a permanent grey tile and a permanent skeleton tray, with no error
+    // because only the loads leg sets one. Empty is the honest fallback.
+    }).catch(() => { if (fresh()) setPool({ orders: [], inventory: [], repairs: [] }); });
+    // The trailing await is LOAD-BEARING — do not drop it to "resolve early". createLoad
+    // (`await load()` before it returns the new load) reads its resolution as "everything is
+    // fresh"; resolving on the loads leg alone would leave a building that was just put on a
+    // truck still sitting in the pool. addToLoad, dropOnDay and Refresh call load() without
+    // awaiting it, so only createLoad depends on this today — but the guarantee is what makes
+    // the two-leg split safe to await at all, and one caller relying on it is enough.
+    // Note what it means for a SUPERSEDED generation: both responses arrived and were
+    // discarded, not "state is fresh". No caller reads it that way (createLoad returns the
+    // create_load response, not state), but do not add one.
+    await Promise.all([lp, pp]);
   }, [clientId]);
   useEffect(() => { load(); }, [load]);
 
@@ -2450,6 +2590,16 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
     if (!byDay[k]) { byDay[k] = []; dayKeys.push(k); }
     byDay[k].push(l);
   });
+
+  // Paging for the TABLE view's flat stop list only. Not the loads view — those are
+  // day-grouped load cards, the board case DesignsTable already settled; not the pool strip
+  // — it is grouped by territory and every row carries an "Add to load" button, so a hidden
+  // tail is a building nobody dispatches; not the calendar.
+  const [pageSize, setPageSize] = usePageSize("delivery-stops");
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [view]);
+  const pageCount = Math.max(1, Math.ceil(stops.length / pageSize));
+  const curPage = Math.min(page, pageCount);
 
   // ── Actions ──
   const createLoad = async (fields) => {
@@ -2667,7 +2817,10 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
 
   return (
     <div style={S.card}>
-      <CardHead title="Delivery Schedule" count={loads.length}
+      {/* Null, not 0, while the loads leg is in flight — `loads` is [] until it lands, and a
+          confident "0" pill is a false statement about the tenant's week (CardHead hides the
+          pill only on null). Same rule as Designs/Contacts. */}
+      <CardHead title="Delivery Schedule" count={data ? loads.length : null}
         right={<>
           <div style={{ display: "flex", background: "#EDF1F7", borderRadius: 9, padding: 3, gap: 2 }}>
             {[["loads", "Loads"], ["table", "Table"], ["calendar", "Calendar"]].map(([v, label]) => (
@@ -2683,11 +2836,30 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           {canEdit && <button type="button" onClick={() => setNewLoad(newLoad ? null : { driverId: "", loadDate: "", routeLabel: "" })} style={S.btn(ACCENT, "#FFF")}>+ New load</button>}
         </>} />
 
+      {/* "To be loaded" stays GREY until the pool leg lands — it is the one tile the board
+          now paints ahead of, and `poolCount` is 0 while `pool` is null, so printing it would
+          state a confident zero over a real backlog. The precedent is OrdersTab's money
+          tiles: "the first number is the one someone reads out loud." The other three derive
+          from `data` alone and are true at first paint. */}
       {data && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
-          {[["To be loaded", poolCount, "#1E293B"], ["Loads this week", thisWeek, "#1E293B"], ["Wide loads", wideCount, wideCount ? "#92400E" : "#1E293B"], ["Date conflicts", conflictCount, conflictCount ? "#DC2626" : "#1E293B"]].map(([t, n, c]) => (
+          {[["To be loaded", poolCount, "#1E293B", pool === null], ["Loads this week", thisWeek, "#1E293B", false], ["Wide loads", wideCount, wideCount ? "#92400E" : "#1E293B", false], ["Date conflicts", conflictCount, conflictCount ? "#DC2626" : "#1E293B", false]].map(([t, n, c, pending]) => (
             <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
-              <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: c }}>{n}</div>
+              {pending
+                ? <SkelBar w="30%" h={21} style={{ margin: "2px 0" }} />
+                : <div style={{ fontSize: 21, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: c }}>{n}</div>}
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* All four grey while the loads leg is still out, so the tiles hold their place
+          instead of shoving the board down when they appear. */}
+      {data === null && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 13 }}>
+          {["To be loaded", "Loads this week", "Wide loads", "Date conflicts"].map((t) => (
+            <div key={t} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "10px 14px" }}>
+              <SkelBar w="30%" h={21} style={{ margin: "2px 0" }} />
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, marginTop: 1 }}>{t}</div>
             </div>
           ))}
@@ -2697,7 +2869,56 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {error && <div style={S.err}>{error}</div>}
-      {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Loading…</p>}
+      {/* Grey blocks in the shape of the view instead of the word "Loading…" — see SkelRows.
+          This is only the wait for the LOADS leg now; the pool has its own placeholder inside
+          the strip below and no longer holds the whole board back. */}
+      {data === null && !error && (
+        view === "table" ? (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>
+                {["Serial", "Customer", "Size", "Destination", "Territory", "Built", "Load", "Date", "Driver"].map((h) => <th key={h} style={S.th}>{h}</th>)}
+              </tr></thead>
+              <tbody><SkelRows cols={9} rows={6} /></tbody>
+            </table>
+          </div>
+        ) : view === "calendar" ? (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", overflowX: "auto", paddingBottom: 6 }}>
+            {/* Weekends are off by default here, so five columns is the honest default shape. */}
+            {Array.from({ length: showWeekends ? 7 : 5 }, (_, i) => (
+              <div key={i} style={{ flex: "1 1 150px", minWidth: 150, background: "#EEF2F8", borderRadius: 12, padding: 9, minHeight: 180, opacity: 1 - i * 0.1 }}>
+                <SkelBar w="44%" h={10} style={{ margin: "3px 3px 11px" }} />
+                <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "9px 10px" }}>
+                  <SkelBar w="70%" />
+                  <SkelBar w="50%" h={9} style={{ marginTop: 7 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          // Loads view: a day heading, then load cards — the shape the tab opens on.
+          <div>
+            {[0, 1].map((d) => (
+              <div key={d} style={{ opacity: 1 - d * 0.2 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, margin: "16px 2px 8px" }}>
+                  <SkelBar w={110} h={11} />
+                  <span style={{ flex: 1, height: 1, background: "#E2E8F0" }}></span>
+                </div>
+                <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, marginBottom: 12, overflow: "hidden" }}>
+                  <div style={{ padding: "12px 14px", background: "#F8FAFF", borderBottom: "1px solid #E2E8F0", display: "flex", gap: 11, alignItems: "center" }}>
+                    <SkelBar w={90} h={12} />
+                    <SkelBar w={150} h={10} />
+                  </div>
+                  <div style={{ padding: "12px 14px" }}>
+                    <SkelBar w="72%" />
+                    <SkelBar w="54%" style={{ marginTop: 9 }} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
 
       {/* ── New load form ── */}
       {newLoad && canEdit && (
@@ -2717,9 +2938,24 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
       )}
 
       {/* ── LOADS VIEW ── */}
-      {data && pool && view === "loads" && (<>
-        {/* Pool */}
-        {poolCount > 0 && (
+      {/* Gated on `data` ALONE. It used to read `data && pool`, which withheld the entire
+          board on the slower of the two legs even though the pool strip below is the only
+          thing in here that reads `pool` — every load card, day section and driver chip
+          under it reads `data`. */}
+      {data && view === "loads" && (<>
+        {/* Pool. While its leg is still out the strip stands in at roughly its real height,
+            so the loads underneath do not get shoved down when it arrives. */}
+        {pool === null ? (
+          <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "8px 12px 2px", marginBottom: 14, overflowX: "auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 6px" }}>
+              <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>To be loaded</span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead><tr>{["Serial", "Customer", "Building", "Size", "Destination", "Ready", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+              <tbody><SkelRows cols={7} rows={3} /></tbody>
+            </table>
+          </div>
+        ) : poolCount > 0 && (
           <div style={{ border: "1px dashed #B9C4D6", borderRadius: 12, padding: "8px 12px 2px", marginBottom: 14, overflowX: "auto" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 6px" }}>
               <span style={{ ...S.lbl, marginBottom: 0, color: "#475569" }}>To be loaded</span>
@@ -2939,10 +3175,13 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>{["Serial", "Customer", "Size", "Destination", "Territory", "Built", "Load", "Date", "Driver"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
+              {/* Paged AFTER the sort, so the order is the same list it always was — just
+                  30 rows of it at a time. Sorting is a permutation, so stops.length below is
+                  the same total either way. */}
               {stops.slice().sort((a, b) => {
                 const la = loads.find((x) => x.id === a.load_id) || {}; const lb = loads.find((x) => x.id === b.load_id) || {};
                 return String(la.load_date || "9999").localeCompare(String(lb.load_date || "9999")) || a.stop_order - b.stop_order;
-              }).map((s) => {
+              }).slice((curPage - 1) * pageSize, curPage * pageSize).map((s) => {
                 const l = loads.find((x) => x.id === s.load_id) || {};
                 return (
                   <tr key={s.id}>
@@ -2960,6 +3199,9 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
               })}
             </tbody>
           </table>
+          {stops.length > 0 && (
+            <PageBar size={pageSize} onSize={setPageSize} page={curPage} onPage={setPage} total={stops.length} noun="stop" />
+          )}
           {stops.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: 12 }}>Nothing scheduled yet.</p>}
         </div>
       )}
@@ -3117,7 +3359,21 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
               </div>
             )}
 
-            {canEdit && trayItems.length > 0 && (
+            {/* While the pool leg is still out, the strip stands in at roughly its real height —
+                the same placeholder the loads view gets. Without it the orange tray materialises
+                a second after the grid and shoves every day cell down, which is exactly the jump
+                the skeletons everywhere else exist to prevent. `pool === null` is the only
+                honest test: trayItems is empty both while loading and when there is genuinely
+                nothing to load, and those two must not look alike. */}
+            {canEdit && pool === null && (
+              <div style={{ background: "#FFF7ED", border: "0.5px dashed #FDBA74", borderRadius: 10, padding: "8px 11px", marginBottom: 12 }}>
+                <div style={{ marginBottom: 6 }}><SkelBar w="42%" h={10} /></div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {[0, 1, 2, 3].map((k) => <SkelBar key={k} w={78} h={22} style={{ borderRadius: 8 }} />)}
+                </div>
+              </div>
+            )}
+            {canEdit && pool !== null && trayItems.length > 0 && (
               <div style={{ background: "#FFF7ED", border: "0.5px dashed #FDBA74", borderRadius: 10, padding: "8px 11px", marginBottom: 12 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, color: "#9A3412", marginBottom: 6 }}>To be loaded · {trayItems.length}<span style={{ fontWeight: 600, color: "#B45309" }}> — drag onto a day to start a load, or onto an existing load</span></div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

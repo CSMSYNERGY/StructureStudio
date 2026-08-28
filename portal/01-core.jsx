@@ -62,7 +62,12 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { global: { fetch: ssFe
 const ssIsEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || "").trim());
 
 const SS_ERR_SOURCE = "portal";
-function ssLogError(source, message, code, context) {
+// `severity` is optional and defaults to "error", so every existing call site keeps its
+// current meaning. Pass "info" for a REFUSAL — the product correctly declining something
+// ("send the invoice first", "that width isn't valid"). Those still get a row, because a
+// refusal that fires constantly is a bug in disguise (see migration 140), but they no
+// longer sit in the same bucket as things that actually broke.
+function ssLogError(source, message, code, context, severity) {
   try {
     const params = new URLSearchParams(location.search);
     fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
@@ -75,6 +80,7 @@ function ssLogError(source, message, code, context) {
         p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
         p_url: location.href.slice(0, 600),
         p_context: context || null,
+        p_severity: severity || "error",
       }),
     }).catch(() => {});
   } catch (_) { /* logging must never break the app */ }
@@ -178,8 +184,12 @@ __ssFunctions.invoke = async (name, opts) => {
       // "the race is fixed" from "the race now happens fifty times a day in silence".
       // Deliberately NOT routed through the 401 path below: this is a counter, not a fault.
       try {
+        // info, not error: this is a COUNTER for a transient condition the app then
+        // recovers from by itself, and filing it as a fault would put it straight back in
+        // the queue the severity split exists to keep clean. It shipped as an error for
+        // one afternoon and promptly became the top row there.
         ssLogError(SS_ERR_SOURCE, "call skipped: no session on the wire", "session_reconnecting",
-          { fn: name, action: opts && opts.body && opts.body.action, target: injected, status: null });
+          { fn: name, action: opts && opts.body && opts.body.action, target: injected, status: null }, "info");
       } catch (_l) { /* logging must never break the guard */ }
       const err = new Error("Your session is reconnecting — try that again in a moment.");
       err.ssNoSession = true;
@@ -216,11 +226,26 @@ __ssFunctions.invoke = async (name, opts) => {
   }
   try {
     if (res && (res.error || (res.data && res.data.error))) {
+      // A 4xx is the SERVER REFUSING this request, and every one of ours answers with a
+      // sentence written for the person reading it ("send the invoice first", "that width
+      // isn't valid", "ask an owner or admin to do this"). That is the product working, so
+      // it is logged as info, not as a fault. 5xx, a network failure and an unreadable
+      // response stay errors: those are things that broke.
+      //
+      // Demoted, NOT dropped — the distinction earns its keep. "Driver not found." was a
+      // 400 that read exactly like a validation message and was really the client posting
+      // driver_profiles.user_id where the server matches on .id, so reassigning a driver
+      // failed every single time for twelve days. It was caught by reading these rows.
+      // What makes a refusal suspicious is REPETITION, so the row has to survive:
+      //   select message, count(*) from app_errors where severity = 'info'
+      //   group by 1 having count(*) > 20 order by 2 desc;
+      const st = (res.error && res.error.ssStatus) || null;
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
         (res.error && res.error.name) || null,
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
-          status: (res.error && res.error.ssStatus) || null,
-          reason: (res.error && res.error.ssReason) || null });
+          status: st,
+          reason: (res.error && res.error.ssReason) || null },
+        (st >= 400 && st < 500) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
@@ -247,6 +272,7 @@ const TAB_META = {
   designer: ["Designer", "Design a building and build a quote"],
   accounts: ["Accounts", "Open any builder's portal — operators only"],
   admin: ["Admin", "Operator console — master catalog, builder setup, and onboarding"],
+  projects: ["Projects", "Internal boards — bugs, feature requests, roadmap. Operators only"],
   // TWO SECTIONS AGAIN, reversing the 2026-08-24 merge (commit 4a54dad).
   //
   // She asked for the merge on 08-24 after walking Pipedrive — "these two needs to be
@@ -398,9 +424,9 @@ function ssFallbackTab(access) {
   return t || "releases";
 }
 
-// "accounts" and "admin" are operator-gated (independent of tenant role) and sit OUTSIDE
-// the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
-// that array is the role escape hatch and would hand the operator console to every team
+// "accounts", "admin" and "projects" are operator-gated (independent of tenant role) and sit
+// OUTSIDE the role clamp; everything else keeps it. Note none of them may go in NONADMIN_TABS —
+// that array is the role escape hatch and would hand the operator surfaces to every team
 // member. Content renders are ALSO gated (and the server re-checks regardless).
 //
 // At module scope so the router's URL-normalising effect can call it too. That effect has
@@ -408,7 +434,7 @@ function ssFallbackTab(access) {
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
 function ssClampTab(tab, isOperator, canAdmin, access) {
-  if (tab === "accounts" || tab === "admin") return isOperator ? tab : ssFallbackTab(access);
+  if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
@@ -429,6 +455,75 @@ const S = {
   okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   th: { textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, padding: "8px 10px", borderBottom: "2px solid #E2E8F0", whiteSpace: "nowrap" },
   td: { fontSize: 13, color: "#1E293B", padding: "10px", borderBottom: "1px solid #F1F5F9", verticalAlign: "top" },
+};
+
+// ── The WHEN date filter — Carolyn's full Monday-style condition list ────────────────────
+// LIFTED from 05-schedule.jsx (2026-08-27) so the Projects table engine and the Build
+// Schedule share ONE implementation; the sched* names there are aliases onto these. Pure
+// functions of ISO strings; weeks are Sunday-first; quarters are calendar quarters.
+//
+// Date-ONLY strings (YYYY-MM-DD) parse as UTC midnight through bare new Date(), so they
+// render and compare a DAY EARLY in every US timezone (audit 2026-08-20). The constraint:
+// parse a date-only string as LOCAL midnight, and build a day key / "today" from LOCAL
+// components — never toISOString().
+const ssLocalDate = (iso) => (iso ? new Date(String(iso).slice(0, 10) + "T00:00:00") : null);
+const ssLocalIso = (d) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const SS_WHEN = [
+  ["any", "Any date", "none"],
+  ["today", "Today", "none"],
+  ["yesterday", "Yesterday", "none"],
+  ["this_week", "This week", "none"],
+  ["this_month", "This month", "none"],
+  ["this_quarter", "This quarter", "none"],
+  ["in_month", "In month", "month"],
+  ["this_year", "This year", "none"],
+  ["on", "On", "date"],
+  ["between", "Between", "date2"],
+  ["more_than", "More than", "count"],
+  ["after", "After date", "date"],
+  ["less_than", "Less than", "count"],
+  ["before", "Before date", "date"],
+  ["in_next", "In the next", "count"],
+  ["in_last", "In the last", "count"],
+];
+const SS_WHEN_PARAM = Object.fromEntries(SS_WHEN.map(([k, _l, p]) => [k, p]));
+// ISO date + or - N days/weeks/months, in local time.
+const ssShiftIso = (iso, n, unit) => {
+  const d = ssLocalDate(iso);
+  if (unit === "months") d.setMonth(d.getMonth() + n);
+  else d.setDate(d.getDate() + n * (unit === "weeks" ? 7 : 1));
+  return ssLocalIso(d);
+};
+// Does a date pass the condition? p = { a, b, month, n, unit }. A condition whose parameter
+// is not filled in yet MATCHES EVERYTHING — filtering nothing while she types beats blanking
+// the list mid-keystroke. More than / Less than measure distance FORWARD from today ("In the
+// last" covers looking back). Between is inclusive at both ends.
+const ssWhenMatch = (cond, p, iso, todayIso) => {
+  switch (cond) {
+    case "today": return iso === todayIso;
+    case "yesterday": return iso === ssShiftIso(todayIso, -1, "days");
+    case "this_week": {
+      const t = ssLocalDate(todayIso); t.setDate(t.getDate() - t.getDay());
+      const sun = ssLocalIso(t);
+      return iso >= sun && iso <= ssShiftIso(sun, 6, "days");
+    }
+    case "this_month": return iso.slice(0, 7) === todayIso.slice(0, 7);
+    case "this_quarter": {
+      const q = (m) => Math.floor((Number(m.slice(5, 7)) - 1) / 3);
+      return iso.slice(0, 4) === todayIso.slice(0, 4) && q(iso) === q(todayIso);
+    }
+    case "in_month": return !p.month || iso.slice(0, 7) === p.month;
+    case "this_year": return iso.slice(0, 4) === todayIso.slice(0, 4);
+    case "on": return !p.a || iso === p.a;
+    case "between": return (!p.a || iso >= p.a) && (!p.b || iso <= p.b);
+    case "more_than": return !p.n || iso > ssShiftIso(todayIso, Number(p.n), p.unit || "days");
+    case "after": return !p.a || iso > p.a;
+    case "less_than": return !p.n || (iso >= todayIso && iso <= ssShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "before": return !p.a || iso < p.a;
+    case "in_next": return !p.n || (iso >= todayIso && iso <= ssShiftIso(todayIso, Number(p.n), p.unit || "days"));
+    case "in_last": return !p.n || (iso <= todayIso && iso >= ssShiftIso(todayIso, -Number(p.n), p.unit || "days"));
+    default: return true;
+  }
 };
 
 function fmtDate(iso) {
@@ -711,7 +806,10 @@ const ssSafeUrl = (u) => {
 // The "Open in a new tab" link stays, deliberately. Some browsers and enterprise policies
 // refuse to render PDFs inline, and a viewer that silently shows a grey rectangle with no
 // way out is worse than the tab we just took away. It is the escape hatch, not the default.
-function PdfModal({ url, title, onClose }) {
+// `image: true` renders the file as an <img> instead of framing it. Screenshots are the
+// common attachment on a bug report, and an iframe shows them tiny in the corner of a
+// grey page — same modal, same guards, right presentation for the thing being opened.
+function PdfModal({ url, title, onClose, image }) {
   const safe = ssSafeUrl(url);
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -738,7 +836,13 @@ function PdfModal({ url, title, onClose }) {
             style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "5px 12px", fontSize: 12 }}>Close</button>
         </div>
         {safe ? (
-          <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+          image ? (
+            <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#0F172A", padding: 12 }}>
+              <img src={safe} alt={title || "Attachment"} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+            </div>
+          ) : (
+            <iframe src={safe} title={title || "Document"} style={{ flex: 1, width: "100%", border: "none" }} />
+          )
         ) : (
           <div style={{ padding: 20, fontSize: 13, color: "#B91C1C" }}>
             This document's address is not one we can open safely, so it has not been loaded.
