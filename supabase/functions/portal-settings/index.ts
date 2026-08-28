@@ -3163,34 +3163,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       optedOut: !!(contact && contact.sms_opt_out_at),
     };
 
-    // CUSTOMER UPLOADS ride this fetch too (migration 151), already paired with signed read
-    // URLs. The bucket has no storage policies on purpose, so the browser cannot mint these
-    // itself — and would get nothing in operator view-as if it tried.
-    let files: any[] = [];
-    if (contact?.id) {
-      const { data: fs } = await admin.from("crm_files")
-        .select("id, name, size_bytes, mime, short_code, created_at, path")
-        .eq("client_id", clientId).eq("contact_id", contact.id).is("deleted_at", null)
-        .order("created_at", { ascending: false }).limit(100);
-      const rows = fs ?? [];
-      if (rows.length) {
-        // One round trip for every URL. An hour is long enough to read a page and open a
-        // file without being a link worth passing on.
-        const { data: urls } = await admin.storage.from("customer-uploads")
-          .createSignedUrls(rows.map((r: any) => r.path), 3600);
-        const byPath = new Map((urls ?? []).map((u: any) => [u.path, u.signedUrl]));
-        files = rows.map((r: any) => ({
-          id: r.id, name: r.name, size: Number(r.size_bytes || 0), mime: r.mime,
-          shortCode: r.short_code, at: r.created_at,
-          // A row whose object has gone is listed WITHOUT a url rather than dropped: the
-          // record should still show that something was sent, and a missing file is a fact
-          // worth seeing rather than a gap that looks like the customer never sent anything.
-          url: byPath.get(r.path) ?? null,
-        }));
-      }
-    }
-
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, files });
+    // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
+    // the documents we generate, because Carolyn asked for exactly one place: "the top part
+    // is about things to do. The bottom part is about history … instead of in two places."
+    // crmFeed signs their URLs; keeping a second copy here would be the second access path
+    // this file exists to avoid.
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms });
   }
 
   if (action === "crm_feed") {

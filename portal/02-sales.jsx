@@ -1147,7 +1147,15 @@ const CRM_TABS = [
       ? "This design has no contact record yet, so there is nowhere to file an upload."
       : "You don't have permission to add files to contacts."),
   },
-  { key: "documents", label: "Design Documents", enabled: () => true },
+  // NO "Design Documents" TAB. Carolyn, 2026-08-26 24:01, having found the same documents
+  // listed both here and in History: "the top part is about things to do. The bottom part is
+  // about history … instead of in two places", and at 26:29 — "this shows all of the past
+  // emails … all of the past notes, all of the past activities, all of that down here. Up
+  // here is where you set what you're going to do."
+  //
+  // A quote PDF is not something you DO. So the list moved into the History feed under the
+  // Documents chip, which now carries the files themselves (crmFeed emits `quote_pdf` and
+  // `floor_plan` with a url) instead of only the events describing them.
   { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
 ];
 
@@ -1165,7 +1173,10 @@ const CRM_CHIPS = [
   // Shown only once the account can actually text: a permanently empty filter teaches
   // people the chip is broken. Mirrors CRM_FEED_TYPES.message; keep the two identical.
   { key: "messages", label: "Messages", types: ["sms", "sms_in"], when: (c) => !!(c.sms && c.sms.ready) },
-  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent"] },
+  // Where the documents live now — ours AND theirs, one list, because "I don't want it all
+  // mixed together" was about the two NAMES being interchangeable, not about them being far
+  // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
+  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
   // Everything that happened, not three types two of which were never emitted — see the
@@ -1878,15 +1889,16 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             {/* DOCUMENTS. Everything this record has actually produced, as links. The tab was
                 enabled and rendered nothing, which reads as a broken page rather than an
                 empty one — and on a record with a quote there is never nothing to show. */}
-            {/* CUSTOMER UPLOADS — what THEY sent, never mixed with what we generated
-                (Carolyn 2026-08-26). Files ride the record's single crm_record fetch,
-                already carrying one-hour signed URLs; the browser cannot mint those itself
-                because the bucket has no storage policies. See migration 151. */}
+            {/* CUSTOMER UPLOADS — the CONTROL only. The list of what has been sent lives in
+                the History feed under Documents, with everything else that happened
+                (Carolyn 2026-08-26 24:01: "the top part is about things to do. The bottom
+                part is about history"). Uploading IS something you do, so the button stays
+                here; the files it produces belong down there. */}
             {tab === "files" && canEdit && data.contact && data.contact.id && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{
                   display: "inline-block", ...S.btn(ACCENT, "#FFF"),
-                  cursor: upBusy ? "default" : "pointer", opacity: upBusy ? 0.6 : 1, marginBottom: 8,
+                  cursor: upBusy ? "default" : "pointer", opacity: upBusy ? 0.6 : 1,
                 }}>
                   {upBusy ? "Uploading…" : "Add files"}
                   <input type="file" multiple disabled={upBusy}
@@ -1894,74 +1906,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                     style={{ display: "none" }} />
                 </label>
                 <span style={{ fontSize: 11.5, color: "#94A3B8", marginLeft: 9 }}>
-                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each.
+                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each. They appear below, under Documents.
                 </span>
                 {upMsg && upMsg.err && <div style={{ ...S.err, marginTop: 7 }}>{upMsg.err}</div>}
                 {upMsg && upMsg.ok && <div style={{ ...S.okMsg, marginTop: 7 }}>{upMsg.ok}</div>}
-
-                {(data.files || []).length === 0 && !upMsg && (
-                  <div style={{ fontSize: 12.5, color: "#94A3B8", marginTop: 8 }}>
-                    Nothing from this customer yet. Anything they send you — a site photo, a permit,
-                    a sketch — belongs here rather than in an email nobody else can find.
-                  </div>
-                )}
-                {(data.files || []).map((f) => (
-                  <div key={f.id} style={{
-                    display: "flex", alignItems: "center", gap: 8, background: "#F8FAFC",
-                    border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginTop: 6,
-                  }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      {/* A row whose object has gone is listed WITHOUT a link rather than
-                          hidden — that the customer sent something is worth seeing even when
-                          the file itself is missing. */}
-                      {f.url ? (
-                        <button type="button" onClick={() => setPdf({ url: f.url, title: f.name })}
-                          style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, color: ACCENT, textAlign: "left", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "block" }}>
-                          📎 {f.name}
-                        </button>
-                      ) : (
-                        <span style={{ fontSize: 13, fontWeight: 700, color: "#94A3B8" }}>📎 {f.name} — file missing</span>
-                      )}
-                      <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>
-                        {fmtDate(f.at)}{f.size ? ` · ${f.size < 1048576 ? Math.max(1, Math.round(f.size / 1024)) + " KB" : (f.size / 1048576).toFixed(1) + " MB"}` : ""}
-                      </div>
-                    </div>
-                    <button type="button" onClick={() => deleteFile(f)} disabled={upBusy}
-                      title="Delete this file"
-                      style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = "#DC2626"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = "#94A3B8"; }}>
-                      Delete
-                    </button>
-                  </div>
-                ))}
               </div>
             )}
-            {tab === "documents" && (
-              <div style={{ marginBottom: 12 }}>
-                {(() => {
-                  const docs = [];
-                  (data.designs || []).forEach((d) => {
-                    const what = [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code;
-                    if (d.ss_quote_pdf_url) docs.push({ k: `q:${d.short_code}`, label: `Quote ${d.ss_quote_number || ""}`.trim() + ` — ${what}`, url: d.ss_quote_pdf_url });
-                    if (d.image_url) docs.push({ k: `p:${d.short_code}`, label: `Floor plan — ${what}`, url: d.image_url });
-                  });
-                  if (docs.length === 0) {
-                    return <div style={{ fontSize: 12.5, color: "#94A3B8" }}>No documents yet. A quote PDF appears here as soon as one is sent.</div>;
-                  }
-                  // Pop-up, never a new tab (Carolyn 2026-08-26 21:15). This is the list she
-                  // was looking at when she said it.
-                  return docs.map((doc) => (
-                    <button key={doc.k} type="button" onClick={() => setPdf({ url: doc.url, title: doc.label })}
-                      style={{
-                        display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6,
-                        padding: "7px 9px", marginBottom: 5, fontSize: 13, fontWeight: 600, color: ACCENT, cursor: "pointer", fontFamily: "inherit",
-                      }}>📄 {doc.label}</button>
-                  ));
-                })()}
-              </div>
-            )}
-
             {/* INVOICE. Invoicing lives on the order, which is where payments, change orders
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
@@ -2072,6 +2022,50 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                         💬 {e.actor || "Customer"} texted
                       </div>
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap" }}>{e.body}</div>}
+                    </div>
+                  ) : e.url ? (
+                    /* A DOCUMENT ROW *IS* THE FILE. This is where the Design Documents tab's
+                       list went (Carolyn 2026-08-26 24:01) — ours and the customer's, in one
+                       timeline. Opens in the pop-up viewer, never a new tab (21:15). */
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <button type="button" onClick={() => setPdf({ url: e.url, title: e.title })}
+                        style={{ flex: 1, minWidth: 0, textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {e.type === "customer_file" ? "📎" : "📄"} {e.title}
+                        </div>
+                        {e.body && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>{e.body}</div>}
+                      </button>
+                      {/* Only the customer's own uploads can be deleted here. A quote PDF or
+                          floor plan is generated paperwork — removing it is a design deletion,
+                          which has its own dialog and its own consequences. */}
+                      {e.type === "customer_file" && canEdit && e.meta && e.meta.fileId && (
+                        <button type="button" disabled={upBusy}
+                          onClick={() => deleteFile({ id: e.meta.fileId, name: e.title })}
+                          title="Delete this file"
+                          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                          onMouseEnter={(ev) => { ev.currentTarget.style.color = "#DC2626"; }}
+                          onMouseLeave={(ev) => { ev.currentTarget.style.color = "#94A3B8"; }}>
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  ) : e.type === "customer_file" ? (
+                    /* The object is gone but the row is not: that the customer sent something
+                       is worth seeing even when the file itself has vanished. Delete stays
+                       available here — without it a broken row could never be cleared, which
+                       is the one state that genuinely has nothing left to look at. */
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#94A3B8" }}>📎 {e.title} — file missing</div>
+                      {canEdit && e.meta && e.meta.fileId && (
+                        <button type="button" disabled={upBusy}
+                          onClick={() => deleteFile({ id: e.meta.fileId, name: e.title })}
+                          title="Remove this entry"
+                          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12 }}
+                          onMouseEnter={(ev) => { ev.currentTarget.style.color = "#DC2626"; }}
+                          onMouseLeave={(ev) => { ev.currentTarget.style.color = "#94A3B8"; }}>
+                          Delete
+                        </button>
+                      )}
                     </div>
                   ) : e.type === "note" ? (
                     <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 6, padding: "6px 8px", fontSize: 13, color: "#1E293B" }}>{e.body}</div>
