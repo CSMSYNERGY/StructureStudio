@@ -455,7 +455,7 @@ function MySubmissions({ refreshKey }) {
 // it, assigned from the template operators keep in Projects. Reads are RLS-scoped direct
 // (tenant_setup_items is readable to its own tenant); the tick goes through portal-setup
 // so that WHO completed it — the builder, or us on a call — is decided server-side.
-function SetupChecklist({ onNavigate }) {
+function SetupChecklist({ onNavigate, onCount }) {
   const [items, setItems] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
@@ -467,7 +467,10 @@ function SetupChecklist({ onNavigate }) {
       .order("position", { ascending: true });
     if (err) { setError(err.message); setItems([]); return; }
     setItems(data || []);
-  }, []);
+    // Hand the tally back up so the tab badge above cannot sit stale at the number it
+    // had on page load while the list underneath it says something else.
+    if (onCount) onCount({ total: (data || []).length, open: (data || []).filter((r) => !r.completed_at).length });
+  }, [onCount]);
   useEffect(() => { load(); }, [load]);
 
   const toggle = async (it) => {
@@ -581,11 +584,14 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   // How many setup steps are still open. Drives both the badge and whether the tab
   // exists at all: a builder who was never assigned a list should see no change here.
   const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  const [landed, setLanded] = useState(null);         // the once-only default sub-tab
   useEffect(() => {
     (async () => {
       const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) { setSetupOpen(null); return; }
-      setSetupOpen({ total: data.length, open: data.filter((r) => !r.completed_at).length });
+      if (!data) { setLanded("features"); return; }
+      const open = data.filter((r) => !r.completed_at).length;
+      setSetupOpen({ total: data.length, open });
+      setLanded(open > 0 ? "setup" : "features");
     })();
   }, []);
 
@@ -680,7 +686,9 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   }
   // An unfinished setup list is the first thing a new builder should land on; everyone
   // else lands on New Features exactly as before. Only applies until they pick a tab.
-  const effTab = subtab || (setupOpen && setupOpen.open > 0 ? "setup" : "features");
+  // `landed` LATCHES that decision on the first read: recomputing it live would move the
+  // page out from under someone the moment they ticked their last step.
+  const effTab = subtab || landed || "features";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
@@ -711,7 +719,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
         })}
       </div>
 
-      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} />
+      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} onCount={setSetupOpen} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
