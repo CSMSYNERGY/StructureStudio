@@ -90,7 +90,10 @@ const PM_TYPES = {
     facet: true,
   },
   date: {
-    renderCell: (v) => v ? <span style={{ whiteSpace: "nowrap" }}>{fmtDate(v)}</span> : <span style={{ color: "#94A3B8" }}>—</span>,
+    // Date-ONLY strings parse as UTC midnight through bare new Date() (which is what
+    // fmtDate does), so every date rendered a DAY EARLY in US timezones - the exact trap
+    // the 2026-08-20 audit documented for the schedule. ssLocalDate parses local midnight.
+    renderCell: (v) => v ? <span style={{ whiteSpace: "nowrap" }}>{ssLocalDate(v).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span> : <span style={{ color: "#94A3B8" }}>—</span>,
     sortVal: (v) => v || "",
     groupsFor: () => null,
     groupKeyOf: (v) => v || null,
