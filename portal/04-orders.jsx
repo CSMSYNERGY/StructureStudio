@@ -586,11 +586,18 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   // How many setup steps are still open. Drives both the badge and whether the tab
   // exists at all: a builder who was never assigned a list should see no change here.
   const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  // Which tab leads the strip and gets landed on. LATCHED on the first read and never
+  // recomputed: ticking the last setup step would otherwise reorder the tabs and switch
+  // the page out from under the person who just ticked it. They graduate to My Requests
+  // leading on their next visit, which is the right moment for the strip to change.
+  const [lead, setLead] = useState(null);
   useEffect(() => {
     (async () => {
       const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) return;
-      setSetupOpen({ total: data.length, open: data.filter((r) => !r.completed_at).length });
+      if (!data) { setLead("mine"); return; }
+      const open = data.filter((r) => !r.completed_at).length;
+      setSetupOpen({ total: data.length, open });
+      setLead(open > 0 ? "setup" : "mine");
     })();
   }, []);
 
@@ -680,16 +687,17 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
     { id: "fixes",    label: "Bug Fixes",    dot: "#F59E0B", list: fixes,    empty: "No bug fixes to report right now." },
     { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
   ];
-  // Setup slots in SECOND — behind My Requests, which leads unconditionally (Carolyn's
-  // call). Hidden entirely for tenants who were never assigned a list, so nothing about
-  // this strip changes for them. Its remaining-steps badge is what draws a new builder
-  // over; it no longer takes the lead position to do it.
+  // Setup LEADS while there are steps left — finishing the account is what a new builder
+  // is here to do — and drops to second once it is done, where it stays as a record of
+  // what was set up. Hidden entirely for tenants who were never assigned a list, so
+  // nothing about this strip changes for them.
   if (setupOpen && setupOpen.total > 0) {
-    TABS.splice(1, 0, { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
+    TABS.splice(lead === "setup" ? 0 : 1, 0,
+      { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
   // An explicit choice — a click, or a /portal/releases/<sub> link — always wins; with
-  // none, the page lands on the leading tab.
-  const effTab = subtab || "mine";
+  // none, the page lands on whichever tab leads.
+  const effTab = subtab || lead || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
