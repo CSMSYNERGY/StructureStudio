@@ -1417,6 +1417,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [pendingDelete, setPendingDelete] = useState(null);  // style pending permanent delete (confirm modal)
   const [editStyle, setEditStyle] = useState(null);          // style being edited (name/photo modal)
   const [editName, setEditName] = useState("");
+  const [editCode, setEditCode] = useState("");
   const [editImg, setEditImg] = useState(null);              // { base64, contentType } | null
   const [editFileKey, setEditFileKey] = useState(0);
   const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
@@ -1534,7 +1535,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     } catch (e) { setMsg({ err: e.message }); await load(); }
     setStyleBusy(false);
   };
-  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
+  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditCode(s.code || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
   const onEditImg = (file) => {
     if (!file) { setEditImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
@@ -1549,7 +1550,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     if (!s || !editName.trim()) return;
     setStyleBusy(true); setMsg(null);
     try {
-      const body = { action: "update_style", styleId: s.id, label: editName.trim() };
+      const body = { action: "update_style", styleId: s.id, label: editName.trim(), code: editCode.trim() };
       if (editImg) { body.imageBase64 = editImg.base64; body.imageContentType = editImg.contentType; }
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -1740,7 +1741,19 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
             <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Edit building style</div>
             <span style={S.lbl}>Name</span>
-            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 14 }} />
+            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 10 }} />
+            {/* Serial code (163). Carolyn @57:20: "all of their buildings have codes. They
+                come up with them. LBA. Okay. Stands for Lofted Barn." Optional -- a style
+                with no code still sells, its serials just read XXX in this position rather
+                than shifting every later segment left. */}
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code</label>
+            <input value={editCode} maxLength={4}
+              onChange={(e) => setEditCode(e.target.value.toUpperCase().slice(0, 4))}
+              placeholder="e.g. LBA"
+              style={{ ...S.input, marginBottom: 4, textTransform: "uppercase" }} />
+            <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 0, marginBottom: 14, lineHeight: 1.5 }}>
+              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>0826<b>LBA</b>1016REBLDWS5000</code>.
+            </p>
             <span style={S.lbl}>Photo</span>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
               {(editImg || editStyle.image_url)
@@ -1827,7 +1840,13 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                     {s.image_url
                       ? <img src={s.image_url} alt="" loading="lazy" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
-                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>
+                      {s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}
+                      {/* Shown on the row, not just inside Edit: the code is the thing a
+                          builder cross-checks against their paper list, and opening six
+                          dialogs to read six codes is the friction that stops them being set. */}
+                      {s.code && <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>}
+                    </div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
                         setting one needs the live 3D preview, so it lives in
                         Settings → Designer → 3D. */}
@@ -4070,7 +4089,7 @@ Anything not shown here will be removed from their account.`)) return;
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
-        doorRate: numOf(r.door_rate), taxable: r.taxable !== false,
+        doorRate: numOf(r.door_rate), taxable: r.taxable !== false, code: r.code || "",
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -4127,22 +4146,25 @@ Anything not shown here will be removed from their account.`)) return;
                   is the longest at 54px) and clip below that. The Doors + Door price columns
                   (2026-08-24) squeezed name/method further; short checkbox headers (Siding/
                   Trim/Doors) tolerate 5-6% because thc wraps, Custom/Default keep 8%. */}
+              {/* Code (163) came out of swatch/name/method/rate rather than being appended,
+                  so each branch still sums to 100 — 15 columns here, 11 below. */}
               {showST ? (
                 <>
-                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "10%" }} />
-                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "4%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "5%" }} /><col style={{ width: "10%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "5%" }} /><col style={{ width: "5%" }} /><col style={{ width: "5%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "6%" }} /><col style={{ width: "4%" }} /><col style={{ width: "5%" }} />
                 </>
               ) : (
                 <>
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "19%" }} />
-                  <col style={{ width: "15%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "7%" }} /><col style={{ width: "16%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "14%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "4%" }} />
                 </>
               )}
             </colgroup>
             <thead><tr>
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              <th style={thc} title="Your short code for this colour. It becomes a segment of every building serial number, e.g. the RE, BL and DW in 0826LBA1016REBLDWS5000.">Code</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
               {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
@@ -4166,6 +4188,17 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   <td style={tdc}>
                     <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(gi, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  {/* Placeholder SUGGESTS, it never fills. Carolyn: "they might have other
+                      color codes that they want to change it to" — a builder's paper system
+                      already has codes and the app has to match it, not the reverse. Upper-
+                      casing on the way in matches what the server stores, so the field does
+                      not appear to change under you after a save. */}
+                  <td style={tdc}>
+                    <input type="text" value={r.code || ""} maxLength={4}
+                      placeholder={(r.label || "").replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase() || "??"}
+                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().slice(0, 4))}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase" }} />
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}

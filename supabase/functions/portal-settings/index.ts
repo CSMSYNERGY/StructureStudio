@@ -1123,7 +1123,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
@@ -1131,7 +1131,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
-      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
       admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
@@ -2055,6 +2055,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!label) return json({ error: "Building style name can't be empty." }, 400);
       updates.label = label;
     }
+    // Serial-number code (163). Carolyn, 2026-08-28 @57:20: "all of their buildings have
+    // codes. They come up with them. LBA. Okay. Stands for Lofted Barn." It is the second
+    // segment of every serial this style produces, so it is upper-cased and capped at 4 --
+    // 0826LBA1016REBLDWS5000. Presence-guarded like `label`, so a caller sending only an
+    // image cannot blank it. An empty string stores NULL rather than '', which is what makes
+    // the partial unique index treat un-coded styles as un-set instead of as duplicates.
+    if ("code" in payload) {
+      updates.code = String(payload.code ?? "").trim().toUpperCase().slice(0, 4) || null;
+    }
     if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
       const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
       const ct = String(payload.imageContentType || "image/jpeg");
@@ -2513,6 +2522,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Sales tax (migration 148) — same presence guard, same reason: an older client that
       // does not know this key must not silently make an exempted colour taxable again.
       if (Object.prototype.hasOwnProperty.call(row, "taxable")) rec.taxable = row.taxable !== false;
+      // Serial-number code (163). Carolyn, 2026-08-28 @58:32: "I want them to be able to put
+      // their codes in for the colors ... we probably need to put the color code in here so
+      // that they can change it, because they might have other color codes that they want."
+      // Same presence guard as every optional column above: an older client that does not
+      // send this key must not blank a code the builder has already set.
+      //
+      // Upper-cased and capped at 4 because it is a fixed-width segment of a serial someone
+      // reads off a tag in front of a customer (0826LBA1016REBLDWS5000). Blank stores NULL
+      // rather than '', so the partial unique indexes in 163 treat "not set yet" as one
+      // builder's many un-coded rows instead of a pile of duplicates.
+      if (Object.prototype.hasOwnProperty.call(row, "code")) {
+        rec.code = String(row.code ?? "").trim().toUpperCase().slice(0, 4) || null;
+      }
       if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
         const dr = Number(row.doorRate);
         rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
