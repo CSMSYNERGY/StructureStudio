@@ -252,7 +252,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     if (!body || busy) return;
     if (toClient) {
       const who = sub ? (sub.client_id || "this client") : "this client";
-      if (!window.confirm(`Publish this update to ${who}? They will see it in My Submissions.`)) return;
+      if (!window.confirm(`Publish this update to ${who}? They will see it in My Requests.`)) return;
     }
     setBusy(true); setErr("");
     try {
@@ -268,7 +268,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   };
   const publishExisting = async (u) => {
     const who = sub ? (sub.client_id || "this client") : "this client";
-    if (!window.confirm(`Publish this update to ${who}? They will see it in My Submissions.`)) return;
+    if (!window.confirm(`Publish this update to ${who}? They will see it in My Requests.`)) return;
     try { await pmCall({ action: "publish_update", id: u.id }); loadDetail(); }
     catch (e) { setErr(e.message); }
   };
@@ -315,7 +315,7 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
               value={compose} onChange={(e) => setCompose(e.target.value)} />
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
               <label style={{ fontSize: 12, fontWeight: 600, color: item.feedback_submission_id ? "#334155" : "#94A3B8", display: "flex", alignItems: "center", gap: 5 }}
-                title={item.feedback_submission_id ? "Publishes this one note to the client's My Submissions feed" : "This item isn't linked to a client submission"}>
+                title={item.feedback_submission_id ? "Publishes this one note to the client's My Requests feed" : "This item isn't linked to a client submission"}>
                 <input type="checkbox" checked={toClient} disabled={!item.feedback_submission_id}
                   onChange={(e) => setToClient(e.target.checked)} />
                 Visible to client

@@ -182,7 +182,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
               </button>
             ))}
             <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
-              Everything you send shows up under <b>What's New → My Submissions</b>, so you can track where it got to.
+              Everything you send shows up under <b>What's New → My Requests</b>, so you can track where it got to.
             </div>
           </div>
         )}
@@ -194,8 +194,8 @@ function FeedbackWidget({ clientId, onSubmitted }) {
 
         {view === "done" && (
           <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
-            Your submission is logged and on our board. You can follow it under{" "}
-            <b>What's New → My Submissions</b> — the status updates there as we work on it,
+            Your request is logged and on our board. You can follow it under{" "}
+            <b>What's New → My Requests</b> — the status updates there as we work on it,
             and any reply we post shows up alongside it.
             {!pushed && (
               <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
@@ -210,7 +210,9 @@ function FeedbackWidget({ clientId, onSubmitted }) {
   );
 }
 
-// ─── My Submissions: this tenant's bugs + feature requests, with our replies ───
+// ─── "My Requests": this tenant's bugs + feature requests, with our replies ───
+// The component and the `mine` route slug keep the older "submissions" naming — the rows
+// are still feedback_submissions, and renaming the slug would break existing links.
 function MySubmissions({ refreshKey }) {
   const [rows, setRows] = useState(null);       // null = loading
   const [comments, setComments] = useState({}); // submission_id -> [comment]
@@ -317,7 +319,7 @@ function MySubmissions({ refreshKey }) {
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ ...S.h2, marginBottom: 0 }}>My Submissions</span>
+        <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
           {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"]].map(([k, lbl]) => (
@@ -344,7 +346,7 @@ function MySubmissions({ refreshKey }) {
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              <SortTh label="Submission" col="name"   sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Request"    col="name"   sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Submitted by" col="user" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Status" col="status"     sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Date" col="date"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -588,10 +590,10 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   useEffect(() => {
     (async () => {
       const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) { setLanded("features"); return; }
+      if (!data) { setLanded("mine"); return; }
       const open = data.filter((r) => !r.completed_at).length;
       setSetupOpen({ total: data.length, open });
-      setLanded(open > 0 ? "setup" : "features");
+      setLanded(open > 0 ? "setup" : "mine");
     })();
   }, []);
 
@@ -672,23 +674,25 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
 
   // Section definitions — one per sub-tab. `empty` shows when that tab has no rows.
   // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
-  // entries, so it carries its own count instead of a `list`.
+  // entries, so it carries its own count instead of a `list`. It LEADS the strip
+  // (Carolyn 2026-08-28) — a builder's own open requests matter more to them than our
+  // changelog does. Its id stays "mine" so /portal/releases/mine keeps working.
   const TABS = [
+    { id: "mine",     label: "My Requests",  dot: "#7E22CE", count: mineCount },
     { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
     { id: "fixes",    label: "Bug Fixes",    dot: "#F59E0B", list: fixes,    empty: "No bug fixes to report right now." },
     { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
-    { id: "mine",     label: "My Submissions", dot: "#7E22CE", count: mineCount },
   ];
-  // Setup leads when there is one — it is what a new builder is here to do. Hidden
-  // entirely for tenants who were never assigned a list, so nothing changes for them.
+  // Setup leads over even that while it is unfinished — it is what a new builder is here
+  // to do. Hidden entirely for tenants who were never assigned a list.
   if (setupOpen && setupOpen.total > 0) {
     TABS.unshift({ id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
-  // An unfinished setup list is the first thing a new builder should land on; everyone
-  // else lands on New Features exactly as before. Only applies until they pick a tab.
-  // `landed` LATCHES that decision on the first read: recomputing it live would move the
-  // page out from under someone the moment they ticked their last step.
-  const effTab = subtab || landed || "features";
+  // Land on whichever tab leads: setup while there are steps left, otherwise the
+  // builder's own requests. `landed` LATCHES that on the first read — recomputing it
+  // live would move the page out from under someone the moment they ticked their last
+  // step. An explicit choice (a click, or a /portal/releases/<sub> link) always wins.
+  const effTab = subtab || landed || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
