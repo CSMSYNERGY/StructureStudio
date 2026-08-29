@@ -750,6 +750,13 @@ async function readXlsxWorkbook(file, ExcelJS) {
   });
 }
 
+// The brand teal, and the ONE card on the Billing tab that wears it: Synergy CRM. Everything
+// else here is ACCENT purple, which on this tab means "buy this, now, from us". Synergy CRM is
+// a different product bought on a different site, so it gets the other half of the header
+// gradient (01-core.jsx: linear-gradient(#3D3672 → #1B7895)) rather than a colour invented for
+// it. Don't reuse this for a purchasable feature — the whole job it does is being the exception.
+const SYNERGY_TEAL = "#1B7895";
+
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
 // subscription, chosen monthly or yearly independently. Simple Layout is the
@@ -1346,9 +1353,18 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
 
       {/* Synergy CRM — a separate offering with tiered per-user pricing. Sign-up is EXTERNAL (its
           own enrollment page), not the in-app Deposyt checkout, so this is an informational card
-          with an outbound link rather than a purchasable billing_plans feature. */}
-      <div style={S.card}>
-        <div style={S.h2}>Synergy CRM</div>
+          with an outbound link rather than a purchasable billing_plans feature.
+          
+          TEAL, NOT PURPLE, and that is the point (Carolyn 2026-08-29). Since Built-in CRM went
+          on sale there are two cards on this tab with "CRM" in the name, and they are not
+          alternatives: one is a feature of Structure Studio bought right here, the other is a
+          separate per-user product bought somewhere else. Purple is the buy-here colour — it is
+          on every plan tile, the Suite, the toggles and the Subscribe button — so wearing it made
+          this card look like a fourth plan in the same list. The brand's teal (already half of
+          the header gradient) says "related, but not the same thing" without a word of
+          explanation, and the left edge carries it so the difference survives a glance. */}
+      <div style={{ ...S.card, borderLeft: `4px solid ${SYNERGY_TEAL}` }}>
+        <div style={{ ...S.h2, color: SYNERGY_TEAL }}>Synergy CRM</div>
         <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
         </p>
@@ -1366,18 +1382,18 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                   {["monthly", "annual"].map((k) => (
                     <button key={k} type="button" onClick={() => setCrmIv((p) => ({ ...p, [t.tier]: k }))}
-                      style={{ background: iv === k ? ACCENT : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                      style={{ background: iv === k ? SYNERGY_TEAL : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                       {k === "annual" ? "Yearly" : "Monthly"}
                     </button>
                   ))}
                 </div>
-                <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: SYNERGY_TEAL }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
               </div>
             );
           })}
         </div>
         <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
-          style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}>
+          style={{ ...S.btn(SYNERGY_TEAL, "#FFF"), display: "inline-block", textDecoration: "none" }}>
           Sign up for Synergy CRM →
         </a>
       </div>
