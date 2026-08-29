@@ -2063,11 +2063,25 @@ const D3_CLADDING = {
   lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
-  // reliefTrim: the proud strip takes TRIM colour, not body. Carolyn, 2026-08-24: board and
-  // batten is "boards further apart and it has like a piece of TRIM over the top of it".
-  // It is a flag rather than a string compare on id so a future cladding can opt in.
-  // `rib` deliberately does NOT: a metal rib is the same sheet of steel, not a second board.
-  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40, reliefTrim: true },
+  // reliefTrim: the proud strip takes TRIM colour instead of body. NOTHING SETS IT TODAY --
+  // the flag stays because it is the seam a future cladding would opt in through, and
+  // because `rib` must never take it (a metal rib is the same sheet of steel, not a second
+  // board).
+  //
+  // ⚠️ BATTEN CARRIED IT UNTIL 2026-08-28 AND CAROLYN REVERSED HER OWN INSTRUCTION.
+  // She set it on 08-24 -- board and batten is "boards further apart and it has like a piece
+  // of TRIM over the top of it" -- then saw it rendered on 08-28 @48:22 and corrected
+  // herself: "Borden batten is showing white. Oh, you made that trim pieces. Got it. Because
+  // I told you Borden batten that that's a trim piece. It IS, but it is painted the same
+  // color as the Borden. It's considered part of it ... So make that change."
+  //
+  // So it is a trim piece in the lumber yard and a body-coloured surface on the finished
+  // building, and only the second one is a rendering question. Do not restore the flag from
+  // the 08-24 quote alone; the later call supersedes it.
+  //
+  // This changes NORTHWOOD and FARMLAND together -- both carry siding:"batten" -- which is
+  // the whole visible effect and is intended.
+  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40 },
 };
 // The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
 // siding, lap siding, board and batten, and metal". `batten` joined the list that day --
@@ -3556,8 +3570,15 @@ function buildShed3DModel(THREE, p) {
   //
   // Skipped on a shed roof: a dormer on a single slope is a shed dormer, which is a
   // different massing, and drawing a gable dormer there would be wrong rather than simple.
+  // TWO SHAPES SINCE 2026-08-28. Carolyn @52:43, looking at what was here: "what you have
+  // in here for a dormer right now is a gable dormer ... the other is a transom dormer, so
+  // we have two different dormers. This one runs the pitch THAT way, the other works like a
+  // lean-to, it comes off of the roof here and comes out here and then drops down."
+  //
+  // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
-  if (dormW > 0.5 && roofCfg.type !== "shed") {
+  const dormerIsTransom = roofCfg.dormerType === "transom";
+  if (dormW > 0.5 && roofCfg.type !== "shed" && !dormerIsTransom) {
     const dRise = roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5;
     // offsetU is a fraction of the HALF-SPAN, so it reads the way kneeU does. Held off
     // the ridge and the eave so the dormer cannot overhang either edge.
@@ -3580,6 +3601,56 @@ function buildShed3DModel(THREE, p) {
       cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
       rg.add(cap);
     });
+  }
+
+  // ── TRANSOM DORMER (2026-08-28) ──────────────────────────────────────────────────
+  // Carolyn's own comparison is the spec: it "works like a lean-to". So it is built like
+  // one -- a single shallow slope running OUT toward the eave and dropping -- rather than
+  // like the gable dormer above, whose pitch runs across the ridge.
+  //
+  // Cosmetic on the same terms as the gable dormer: no CSG, so it sits ON the slope and
+  // intersects the slab rather than cutting a hole. From outside that reads correctly, and
+  // "look inside" hides the whole roofGroup, so the missing opening is never visible.
+  // Skipped on a shed roof for the same reason the gable dormer is.
+  if (dormW > 0.5 && roofCfg.type !== "shed" && dormerIsTransom) {
+    const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
+    const uTop = (S / 2) * fr;
+    const yTop = profYAt(uTop);
+    // It projects toward the eave it already sits nearest, so a dormer placed on the right
+    // half runs right. Held back from the eave so it can never overhang the edge.
+    const dirU = fr < 0 ? -1 : 1;
+    const uOut = dirU > 0 ? Math.min(uTop + 3.0, S / 2 - 0.3) : Math.max(uTop - 3.0, -S / 2 + 0.3);
+    const run = Math.abs(uOut - uTop);
+    if (run > 0.6) {
+      const mainDrop = yTop - profYAt(uOut);
+      // ⚠️ THE RISE IS CLAMPED BY THE MAIN ROOF, not by the input. The face can only be as
+      // tall as the main roof falls across the run: any taller and this dormer's own roof
+      // would slope UP on its way out, which is not a dormer, it is a ramp. Clamping here
+      // rather than at the input is deliberate -- the ceiling depends on pitch and position,
+      // so a fixed max on the number box would be wrong for most styles.
+      const rise = Math.max(0.3, Math.min(roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5, mainDrop - 0.3));
+      const yOut = profYAt(uOut) + rise;
+      const du = uOut - uTop, dy = yOut - yTop;
+      const slen = Math.sqrt(du * du + dy * dy) || 1;
+      const ang = Math.atan2(dy, du);
+      // ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
+      // dormer's single box does. Tilting it to the dormer's OWN pitch is what makes the
+      // top face meet the slab instead of leaving an air gap under it, and it buries the
+      // upslope end inside the main roof, which is where a real shed dormer's framing goes.
+      const body = box(mat(bodyColor), slen, rise, dormW);
+      body.rotation.z = ang;
+      body.position.set((uTop + uOut) / 2 + Math.sin(ang) * rise / 2,
+                        (yTop + yOut) / 2 - Math.cos(ang) * rise / 2,
+                        L / 2);
+      rg.add(body);
+      const tslab = box(roofMat, slen + OV, D3.ROOF_T, dormW + 0.5);
+      d3RoofSlabUVs(tslab);
+      tslab.rotation.z = ang;
+      tslab.position.set((uTop + uOut) / 2 + (du / slen) * OV / 2,
+                         (yTop + yOut) / 2 + (dy / slen) * OV / 2 + D3.ROOF_T / 2,
+                         L / 2);
+      rg.add(tslab);
+    }
   }
 
   // PROUD RELIEF DOES NOT STOP AT THE PLATE LINE.
@@ -10364,8 +10435,45 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                {/* ROOF MATERIAL HAD NO CONTROL AT ALL until 2026-08-28. It could only ever
+                    be photo-derived by the AI drafter or inferred from whatever the CUSTOMER
+                    later picked -- so a builder who sells metal roofs had no way to say so,
+                    and Carolyn hit exactly that at @47:40: "they need to specify if they want
+                    this to be a metal roof, right now they can't make this a metal roof if
+                    they want, and then segment the colors out to metal colors or not metal
+                    colors."
+
+                    No backend work: styleD3.ts already whitelists roofMaterial as
+                    "shingle" | "metal" and d3ResolveStyleSpec already validates it. The field
+                    round-tripped fine; nothing on screen ever wrote it.
+
+                    Blank stays meaningful -- it means the style has not said, which is every
+                    un-calibrated style today, and it leaves the customer's own roof-type pick
+                    in charge exactly as before. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof material
+                  <select value={adminCal.spec.roofMaterial || ""} onChange={(e) => calSet({ roofMaterial: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="">Not set (customer chooses)</option>
+                    <option value="shingle">Shingle</option>
+                    <option value="metal">Metal</option>
+                  </select>
+                </label>
+                {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
+                    roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
+                    and the drawing came back "120:12" with a 76'6" peak, because this field
+                    held the rise/run RATIO while the dimension label multiplies it by 12.
+                    Her instruction: "we want to put a number in here that actually is 10:12
+                    or 6:12 or whatever ... otherwise we're messing with math that we don't
+                    want to mess with."
+
+                    ONLY THE INPUT BOUNDARY MOVES. The spec still stores the ratio, so every
+                    saved style, scanMeasure's measured pitch and the AI calibration keep
+                    writing and reading exactly what they did before -- there is no data
+                    migration here and no existing design changes shape.
+
+                    Rounded for display because 10/12 round-trips to 9.999999999999998, and
+                    a field that shows that after you typed 10 reads as broken. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise, as in 6 for 6:12)
+                  <input type="number" step="0.5" min="0" max="12" value={Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100} onChange={(e) => calSetRoof({ pitch: (parseFloat(e.target.value) || 0) / 12 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
                   <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("overhang")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -10449,6 +10557,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <input type="number" step="0.5" min="0" value={adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0} onChange={(e) => calSetRoof({ dormerWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
+                {/* Shape, not size, so it sits with the other dormer fields and only once
+                    there is a dormer to shape. Gable is what every existing style already
+                    draws, which is why it is the blank/default rather than a third option. */}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer type
+                    <select value={adminCal.spec.roof.dormerType === "transom" ? "transom" : "gable"} onChange={(e) => calSetRoof({ dormerType: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="gable">Gable (pitch runs across)</option>
+                      <option value="transom">Transom (lean-to off the roof)</option>
+                    </select>
+                  </label>
+                )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
                     <input type="number" step="0.25" min="0" value={adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5} onChange={(e) => calSetRoof({ dormerRiseFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -10485,11 +10604,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     there is no server change, no migration and no new save action. A builder
                     who wants a colour that is not in their catalog can still type one.
 
-                    Roof pulls from shingle OR metal rows because the unpainted roof colour is
-                    a roofing product, not a paint. */}
+                    Roof pulls from roofing rows rather than paint, NARROWED to the material
+                    this style sells -- see below. */}
                 {["body", "trim", "roof"].map((k) => {
+                  // ONE PICKER WAS STILL RE-MIXING THE PALETTES. Settings keeps paint,
+                  // shingle and metal in three separate tables, but this list asked for
+                  // `shingle || metal` and so offered Driftwood next to Copper Metallic with
+                  // nothing to tell them apart -- which is the list Carolyn read aloud at
+                  // @47:40 when she asked for the colours to be segmented.
+                  //
+                  // Falls back to both only when roofMaterial is unset, because then the
+                  // style genuinely has not said which it sells and narrowing would hide
+                  // rows a builder can legitimately pick.
+                  const roofMat = adminCal.spec.roofMaterial;
+                  const roofRow = (c) => roofMat === "metal" ? c.metal : roofMat === "shingle" ? c.shingle : (c.shingle || c.metal);
                   const pool = (Array.isArray(C.colors) ? C.colors : []).filter((c) =>
-                    (k === "body" ? c.siding : k === "trim" ? c.trim : (c.shingle || c.metal)) && c.hex && !c.allowCustom);
+                    (k === "body" ? c.siding : k === "trim" ? c.trim : roofRow(c)) && c.hex && !c.allowCustom);
                   return (
                   <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
                     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>

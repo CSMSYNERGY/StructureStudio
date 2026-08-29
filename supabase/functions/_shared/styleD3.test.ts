@@ -183,6 +183,33 @@ Deno.test("lean-to and dormer round-trip as additive roof keys, clamped", () => 
   assert(s.ok && !("leanToSide" in s.d3.roof), "an unknown side never persists");
 });
 
+Deno.test("dormerType round-trips transom, defaults by ABSENCE, and drops junk", () => {
+  // Carolyn, 2026-08-28 @52:43, naming the second shape: "we have two different dormers.
+  // This one runs the pitch that way, the other works like a lean-to."
+  //
+  // This test exists because the sanitiser is a WHITELIST REBUILD: a key missing from the
+  // list is dropped in silence, which to a builder is indistinguishable from "the save
+  // didn't work". That is the failure the file's own warning is about, and it is only
+  // catchable here.
+  const t = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerWidthFt: 4, dormerType: "transom" } });
+  assert(t.ok, "a transom dormer should be accepted");
+  if (!t.ok) return;
+  assertEquals(t.d3.roof.dormerType, "transom");
+
+  const g = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerType: "gable" } });
+  assert(g.ok && g.d3.roof.dormerType === "gable", "an explicit gable persists");
+
+  // ABSENT IS THE DEFAULT, and it must stay absent rather than being written out. The
+  // renderer tests `=== "transom"`, so an untouched row keeps its exact render -- and
+  // emitting "gable" here would also break the deep-equal on `roof` above the first time
+  // anyone opened and saved the calibration panel.
+  const a = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerWidthFt: 4 } });
+  assert(a.ok && !("dormerType" in a.d3.roof), "an unset dormer type is never materialised");
+
+  const j = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, dormerType: "hip" } });
+  assert(j.ok && !("dormerType" in j.d3.roof), "an unknown dormer type never persists");
+});
+
 Deno.test("a style that mentions neither stays byte-identical", () => {
   // The whole back-compat claim in one assertion: adding five clamps and a side enum must
   // not put a single new key on a spec that did not ask for them.
