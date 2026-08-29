@@ -180,3 +180,12 @@ verify_jwt = false
 # no directory in this repo, so they are deliberately absent here — a [functions] block for
 # a function the CLI cannot find is not something to invent. `github-monday-bug` runs with
 # verify_jwt = false; leave it alone unless it is brought into the repo.
+
+[functions.portal-sms]
+verify_jwt = true
+
+# Twilio Event Streams cannot send a Supabase JWT. With verification ON the gateway
+# 401s every delivery BEFORE the function runs — the billing-webhook failure mode,
+# invisible from inside the database. Auth is the shared URL secret.
+[functions.twilio-events]
+verify_jwt = false

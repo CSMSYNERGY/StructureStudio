@@ -32,9 +32,11 @@ function apiKey(): string | null {
 function apiSecret(): string | null {
   return Deno.env.get("TWILIO_API_SECRET") || null;
 }
-function messagingServiceSid(): string | null {
-  return Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || null;
-}
+/** ⚠️ REMOVED, deliberately: there is no platform-wide Messaging Service any more.
+ *  Under the ISV model each BUILDER has their own service (their own A2P campaign), so the
+ *  SID is a per-tenant column (sms_registrations.messaging_service_sid), never an env var.
+ *  A platform default here would silently send one builder's text under another builder's
+ *  carrier registration — which is the exact campaign-sharing carriers prohibit. */
 
 /** Basic auth as EITHER ApiKeySid:ApiKeySecret or AccountSid:AuthToken — the key pair
  *  wins. This deployment's TWILIO_AUTH_TOKEN landed as an EMPTY STRING on 2026-08-11
@@ -51,11 +53,19 @@ function basicAuthPair(): { user: string; pass: string } | null {
   return null;
 }
 
-/** Credentials + a Messaging Service — the ONE test for "may the send path run at all".
+/** Credentials only — "does this DEPLOYMENT have Twilio at all".
+ *
+ *  ⚠️ This deliberately no longer asks about a Messaging Service. It used to, and that
+ *  coupling was the shared-campaign model: one platform service, every tenant on it. Under
+ *  the ISV model the service is the BUILDER'S, so "is this tenant able to send" is a
+ *  different question with a different answer per tenant, and it is asked in smsSend.ts
+ *  against sms_registrations. Keeping both questions in one boolean is how a tenant with no
+ *  registration would inherit the platform's.
+ *
  *  The account SID is needed separately because it is in the request PATH, not just the
  *  auth header, and an API-key pair does not carry it. */
-export function smsConfigured(): boolean {
-  return basicAuthPair() !== null && !!messagingServiceSid() && !!accountSid();
+export function smsCredentialsConfigured(): boolean {
+  return basicAuthPair() !== null && !!accountSid();
 }
 
 export class SmsNotConfigured extends Error {
@@ -105,7 +115,7 @@ export type SmsSendResult = { sid: string; segments: number; status: string };
 /**
  * Send one message.
  *
- * BOTH `MessagingServiceSid` AND `From` are sent. The service supplies the shared A2P
+ * BOTH `MessagingServiceSid` AND `From` are sent. The service supplies THAT BUILDER'S A2P
  * campaign registration, the opt-out handling and the status-callback URL; the explicit
  * `From` overrides the service's sender pool so the customer sees THEIR builder's number
  * rather than whichever number the pool would have picked. Sending only the service SID
@@ -113,18 +123,21 @@ export type SmsSendResult = { sid: string; segments: number; status: string };
  * tenant's own — see migration 148.
  */
 export async function sendSms(opts: {
-  to: string;            // E.164
-  from: string;          // E.164, the tenant's own number
+  to: string;                  // E.164
+  from: string;                // E.164, the tenant's own number
+  /** ⚠️ THE TENANT'S OWN Messaging Service (MG...), passed in — never read from the
+   *  environment. This is what binds the message to THAT BUILDER'S A2P campaign. */
+  messagingServiceSid: string;
   body: string;
   statusCallback?: string | null;
 }): Promise<SmsSendResult> {
   const pair = basicAuthPair();
-  const svc = messagingServiceSid();
+  const svc = opts.messagingServiceSid;
   const acct = accountSid();
   if (!pair || !svc || !acct) {
     const missing = [
       pair ? null : "TWILIO_API_KEY+TWILIO_API_SECRET (or TWILIO_ACCOUNT_SID+TWILIO_AUTH_TOKEN)",
-      svc ? null : "TWILIO_MESSAGING_SERVICE_SID",
+      svc ? null : "the tenant's messaging_service_sid",
       acct ? null : "TWILIO_ACCOUNT_SID",
     ].filter((n): n is string => n !== null).join(", ");
     throw new SmsNotConfigured(`${missing} is not set.`);
