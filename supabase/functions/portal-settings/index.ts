@@ -3569,13 +3569,26 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // It rides THIS fetch rather than adding a second round-trip from the browser: the
     // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
     // current_client_id() and a direct read returns nothing in operator view-as.
-    let orders: any[] = [];
+    // orders has NO `status` column -- verified against live 2026-08-29 (information_schema:
+    // id, client_id, short_code, order_no, total_cents, currency, total_source, ordered_at,
+    // notes, created_at, updated_at, submitter_user_id, pretax_subtotal_cents, tax_cents).
+    // Asking for it made PostgREST answer 42703 on EVERY call, for every tenant, since this
+    // block shipped -- and because only `data` was destructured, the error was dropped and
+    // `orders` fell to [], which the card renders as "No orders yet." on contacts holding
+    // real orders. There are 43 of them across three tenants. The status shown on the Orders
+    // TAB is derived from payments client-side, not stored, so nothing here needs it.
+    let orders: any[] | undefined = [];
     if (codes.length) {
-      const { data: os } = await admin.from("orders")
-        .select("id, order_no, short_code, status, total_cents, ordered_at")
+      const { data: os, error: oe } = await admin.from("orders")
+        .select("id, order_no, short_code, total_cents, ordered_at")
         .eq("client_id", clientId).in("short_code", codes)
         .order("ordered_at", { ascending: false }).limit(50);
-      orders = os ?? [];
+      // A FAILED READ IS NOT AN EMPTY ONE. Leaving it undefined makes the card say "Orders
+      // appear here once the server update lands" -- the absent state the section already
+      // has -- instead of stating that a customer who has bought two buildings bought none.
+      // That distinction is written into the card's own comment; swallowing the error is
+      // exactly what defeated it.
+      orders = oe ? undefined : (os ?? []);
     }
 
     // Whether this tenant can text at all, so the SMS tab can give the RIGHT reason when
