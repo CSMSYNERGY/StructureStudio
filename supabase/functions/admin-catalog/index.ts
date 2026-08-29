@@ -725,7 +725,36 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
 
           clonedCounts = counts;
         }
-        return json({ ok: true, clientId, blank, cloned: clonedCounts });
+
+        // ── Assign the setup checklist (migration 157) ─────────────────────
+        // Carolyn 2026-08-28: a new builder should arrive with the setup steps already
+        // waiting, in the order they should do them. The active template rows are COPIED
+        // (not referenced) so editing the template later never rewrites a list somebody
+        // is already working through.
+        //
+        // Best-effort on purpose: the tenant is fully created by this point and the
+        // response is about to say so. Failing the whole creation over a checklist —
+        // when the duplicate-slug check then blocks the retry (see the note at the top of
+        // this action) — would turn a cosmetic problem into a half-made tenant.
+        let setupAssigned = 0;
+        try {
+          const tpl = await sb.from("setup_template_items")
+            .select("id, title, detail, link_page").eq("active", true).order("position");
+          if (tpl.error) throw new Error(tpl.error.message);
+          const rows = (tpl.data ?? []).map((t: any, i: number) => ({
+            client_id: clientId, template_item_id: t.id, title: t.title,
+            detail: t.detail, link_page: t.link_page, position: (i + 1) * 1024,
+          }));
+          if (rows.length) {
+            const ins = await sb.from("tenant_setup_items").insert(rows);
+            if (ins.error) throw new Error(ins.error.message);
+            setupAssigned = rows.length;
+          }
+        } catch (e) {
+          console.error("setup checklist assign failed for", clientId, e instanceof Error ? e.message : String(e));
+        }
+
+        return json({ ok: true, clientId, blank, cloned: clonedCounts, setupAssigned });
       }
 
       // ── link a user login to a client (with a role) ────────────────────

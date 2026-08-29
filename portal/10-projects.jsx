@@ -273,7 +273,11 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     catch (e) { setErr(e.message); }
   };
   const deleteUpdate = async (u) => {
-    const warn = u.client_visible ? "Delete this note? The copy the client sees will be removed too." : "Delete this note?";
+    // A client-authored entry is the COPY, not the original — the builder's own words
+    // stay on their submission either way, and the server refuses to delete them here.
+    const warn = u.author_kind === "client"
+      ? "Remove the builder's reply from this board? It stays on their submission — they will still see it."
+      : u.client_visible ? "Delete this note? The copy the client sees will be removed too." : "Delete this note?";
     if (!window.confirm(warn)) return;
     try { await pmCall({ action: "delete_update", id: u.id }); loadDetail(); }
     catch (e) { setErr(e.message); }
@@ -340,12 +344,19 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
         )}
 
         {!detail && !err && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
-        {detail && detail.updates.map((u) => (
-          <div key={u.id} style={{ borderLeft: `3px solid ${u.client_visible ? "#8ED8CF" : "#E2E8F0"}`, background: u.client_visible ? "#F2FBFA" : "#FFF", borderRadius: 6, padding: "8px 12px", marginBottom: 8, fontSize: 12.8 }}>
+        {detail && detail.updates.map((u) => {
+          // Three kinds of entry, and the tag says which way it travelled: the builder
+          // wrote it (indigo, FROM CLIENT), we published it to them (teal), or it is ours
+          // alone (grey). "VISIBLE TO CLIENT ✓" describes publishing and would read as a
+          // lie on an incoming reply — visible to them because they are the author.
+          const fromClient = u.author_kind === "client";
+          return (
+          <div key={u.id} style={{ borderLeft: `3px solid ${fromClient ? "#6366F1" : u.client_visible ? "#8ED8CF" : "#E2E8F0"}`, background: fromClient ? "#F5F5FF" : u.client_visible ? "#F2FBFA" : "#FFF", borderRadius: 6, padding: "8px 12px", marginBottom: 8, fontSize: 12.8 }}>
             <div style={{ display: "flex", gap: 7, alignItems: "center", marginBottom: 3, flexWrap: "wrap" }}>
               <b style={{ fontSize: 11.5, color: "#334155" }}>{(u.author_email || "?").split("@")[0]}</b>
               <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{pmStamp(u.created_at)}{u.edited_at ? " · edited" : ""}</span>
-              {u.client_visible ? tag("#CCF1EC", "#0F766E", "VISIBLE TO CLIENT ✓") : tag("#F1F5F9", "#64748B", "INTERNAL")}
+              {fromClient ? tag("#E0E7FF", "#4338CA", "FROM CLIENT")
+                : u.client_visible ? tag("#CCF1EC", "#0F766E", "VISIBLE TO CLIENT ✓") : tag("#F1F5F9", "#64748B", "INTERNAL")}
               {canWrite && !u.client_visible && item.feedback_submission_id && (
                 <button type="button" style={{ background: "none", border: "none", color: "#1B7895", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
                   onClick={() => publishExisting(u)}>Publish to client…</button>
@@ -363,7 +374,8 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
               </button>
             ))}
           </div>
-        ))}
+          );
+        })}
 
         {/* The original submission is the FIRST entry in the thread — oldest, so last. */}
         {sub && (
@@ -683,6 +695,222 @@ function PMPeopleEditor({ onChanged }) {
 }
 
 // ── The tab ───────────────────────────────────────────────────────────────────
+// ── Client Setup: the onboarding template, and who has worked through it ─────
+// Carolyn 2026-08-28. Two cards, and the split is the whole point: the TEMPLATE is what a
+// NEW builder is handed at creation (admin-catalog copies the active rows), and CLIENT
+// PROGRESS is the copies people are already working through. Editing the template
+// deliberately does not reach back into an assigned list — a step rewritten under
+// somebody mid-setup is worse than one that reads slightly out of date.
+function PMSetupAdmin({ canWrite }) {
+  const [tpl, setTpl] = useState(null);
+  const [clients, setClients] = useState(null);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  const [openClient, setOpenClient] = useState(null);   // clientId whose list is expanded
+  const [clientItems, setClientItems] = useState(null);
+  const [busy, setBusy] = useState(false);
+  // One "add a step" draft, shared by both cards — only one is ever open at a time.
+  const [draft, setDraft] = useState({ title: "", detail: "", linkPage: "" });
+  const [adding, setAdding] = useState(null);           // null | "template" | clientId
+
+  const loadTpl = useCallback(() => pmCall({ action: "setup_template" })
+    .then((d) => setTpl(d.items || [])).catch((e) => setErr(e.message)), []);
+  const loadClients = useCallback(() => pmCall({ action: "setup_overview" })
+    .then((d) => setClients(d.clients || [])).catch((e) => setErr(e.message)), []);
+  useEffect(() => { loadTpl(); loadClients(); }, [loadTpl, loadClients]);
+
+  const openList = (cid) => {
+    if (openClient === cid) { setOpenClient(null); setClientItems(null); return; }
+    setOpenClient(cid); setClientItems(null); setAdding(null);
+    pmCall({ action: "setup_client_items", clientId: cid })
+      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message));
+  };
+  const reloadList = () => (openClient
+    ? pmCall({ action: "setup_client_items", clientId: openClient })
+      .then((d) => setClientItems(d.items || [])).catch((e) => setErr(e.message))
+    : Promise.resolve());
+
+  const run = async (body, after) => {
+    setBusy(true); setErr(""); setNote("");
+    try { const d = await pmCall(body); if (after) await after(d); }
+    catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  const saveDraft = (target) => {
+    const title = draft.title.trim();
+    if (!title) return;
+    const body = target === "template"
+      ? { action: "setup_template_save", title, detail: draft.detail.trim(), linkPage: draft.linkPage.trim() }
+      : { action: "setup_client_save", clientId: target, title, detail: draft.detail.trim(), linkPage: draft.linkPage.trim() };
+    run(body, async () => {
+      setDraft({ title: "", detail: "", linkPage: "" }); setAdding(null);
+      if (target === "template") await loadTpl(); else { await reloadList(); await loadClients(); }
+    });
+  };
+
+  // ▲/▼ reorder, the stage-editor idiom: move locally, then send the whole order.
+  const move = (list, idx, dir, action) => {
+    const to = idx + dir;
+    if (to < 0 || to >= list.length) return;
+    const next = list.slice();
+    next.splice(to, 0, next.splice(idx, 1)[0]);
+    if (action === "setup_template_reorder") setTpl(next); else setClientItems(next);
+    run({ action, orderedIds: next.map((x) => x.id) });
+  };
+
+  const rowBox = { display: "flex", gap: 10, alignItems: "flex-start", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 12px", marginBottom: 6, background: "#FFF" };
+  const arrow = (label, onClick, dim) => (
+    <button type="button" onClick={onClick} disabled={busy || dim} title={label === "▲" ? "Move up" : "Move down"}
+      style={{ background: "none", border: "none", color: dim ? "#E2E8F0" : "#94A3B8", fontSize: 12, fontWeight: 800, cursor: dim ? "default" : "pointer", padding: "0 3px", fontFamily: "inherit" }}>{label}</button>
+  );
+
+  const addForm = (target) => (
+    <div style={{ border: "1px dashed #CBD5E1", borderRadius: 8, padding: 12, marginTop: 4, background: "#F8FAFC" }}>
+      <input autoFocus placeholder="Step title — what should they do?" style={{ ...S.input, marginBottom: 6 }}
+        value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+        onKeyDown={(e) => { if (e.key === "Enter") saveDraft(target); if (e.key === "Escape") setAdding(null); }} />
+      <input placeholder="Detail (optional) — one sentence on how" style={{ ...S.input, marginBottom: 6 }}
+        value={draft.detail} onChange={(e) => setDraft({ ...draft, detail: e.target.value })} />
+      <input placeholder="Portal page it opens (optional), e.g. settings/branding" style={{ ...S.input, marginBottom: 8 }}
+        value={draft.linkPage} onChange={(e) => setDraft({ ...draft, linkPage: e.target.value })} />
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="button" onClick={() => saveDraft(target)} disabled={busy || !draft.title.trim()}
+          style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12, opacity: draft.title.trim() ? 1 : 0.6 }}>Add step</button>
+        <button type="button" onClick={() => { setAdding(null); setDraft({ title: "", detail: "", linkPage: "" }); }}
+          style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 14px", fontSize: 12 }}>Cancel</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      {err && <div style={S.err}>{err}</div>}
+      {note && <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 700, marginBottom: 12 }}>{note}</div>}
+
+      {/* ── Card 1: the template ─────────────────────────────────────────── */}
+      <div style={{ ...S.card, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
+          <span style={{ ...S.h2, marginBottom: 0 }}>Setup template</span>
+          {canWrite && adding !== "template" && (
+            <button type="button" onClick={() => { setAdding("template"); setDraft({ title: "", detail: "", linkPage: "" }); }}
+              style={{ ...S.btn("#EEF2FF", ACCENT), marginLeft: "auto", padding: "6px 13px", fontSize: 12 }}>＋ Add step</button>
+          )}
+        </div>
+        <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12 }}>
+          The order a new builder should work through their account. Copied to each builder when
+          their account is created — <b>changes here apply to new assignments only</b>, never to a
+          list somebody is already partway through.
+        </div>
+        {tpl === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
+        {tpl && tpl.length === 0 && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No steps yet.</div>}
+        {(tpl || []).map((t, i) => (
+          <div key={t.id} style={{ ...rowBox, opacity: t.active === false ? 0.55 : 1 }}>
+            <span style={{ fontSize: 12, fontWeight: 800, color: "#94A3B8", minWidth: 18, paddingTop: 2 }}>{i + 1}.</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{t.title}</div>
+              {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
+              {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
+            </div>
+            {canWrite && (
+              <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                {arrow("▲", () => move(tpl, i, -1, "setup_template_reorder"), i === 0)}
+                {arrow("▼", () => move(tpl, i, 1, "setup_template_reorder"), i === tpl.length - 1)}
+                <button type="button" disabled={busy}
+                  onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", active: t.active === false }, loadTpl)}
+                  style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit" }}>
+                  {t.active === false ? "Enable" : "Disable"}
+                </button>
+                <button type="button" disabled={busy}
+                  onClick={() => { if (window.confirm(`Delete "${t.title}" from the template? Builders who already have it keep their copy.`)) run({ action: "setup_template_delete", id: t.id }, loadTpl); }}
+                  style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 4px", fontFamily: "inherit" }}>Delete</button>
+              </div>
+            )}
+          </div>
+        ))}
+        {adding === "template" && addForm("template")}
+      </div>
+
+      {/* ── Card 2: who is where ─────────────────────────────────────────── */}
+      <div style={S.card}>
+        <div style={S.h2}>Client progress</div>
+        {clients === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
+        {(clients || []).map((c) => {
+          const pct = c.total ? Math.round((c.done / c.total) * 100) : 0;
+          const open = openClient === c.clientId;
+          return (
+            <div key={c.clientId} style={{ borderBottom: "1px solid #F1F5F9" }}>
+              <div onClick={() => { if (c.total) openList(c.clientId); }}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 2px", cursor: c.total ? "pointer" : "default" }}>
+                <span style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B", minWidth: 160 }}>{c.clientId}</span>
+                {c.total === 0 ? (
+                  <>
+                    <span style={{ fontSize: 12.5, color: "#94A3B8", flex: 1 }}>No setup list</span>
+                    {canWrite && (
+                      <button type="button" disabled={busy}
+                        onClick={(e) => { e.stopPropagation(); run({ action: "setup_assign_template", clientId: c.clientId }, async (d) => { setNote(`Assigned ${d.added} step${d.added === 1 ? "" : "s"} to ${c.clientId}.`); await loadClients(); }); }}
+                        style={{ ...S.btn("#EEF2FF", ACCENT), padding: "5px 12px", fontSize: 12 }}>Assign template</button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <div style={{ flex: 1, minWidth: 60, height: 6, borderRadius: 999, background: "#EEF2F7", overflow: "hidden" }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: pct === 100 ? "#0E9F6E" : ACCENT }} />
+                    </div>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: pct === 100 ? "#0E9F6E" : "#64748B", minWidth: 54, textAlign: "right" }}>{c.done}/{c.total}</span>
+                    <span style={{ fontSize: 11.5, color: "#94A3B8", minWidth: 100, textAlign: "right" }}>{c.lastAt ? pmStamp(c.lastAt) : "not started"}</span>
+                    <span style={{ fontSize: 11, color: "#94A3B8" }}>{open ? "▲" : "▼"}</span>
+                  </>
+                )}
+              </div>
+
+              {open && (
+                <div style={{ padding: "2px 2px 14px 12px" }}>
+                  {clientItems === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
+                  {(clientItems || []).map((it, i) => (
+                    <div key={it.id} style={{ ...rowBox, background: it.completed_at ? "#F7FEF9" : "#FFF", borderColor: it.completed_at ? "#DCFCE7" : "#E2E8F0" }}>
+                      <input type="checkbox" checked={!!it.completed_at} disabled={!canWrite || busy}
+                        onChange={() => run({ action: "setup_client_toggle", id: it.id, done: !it.completed_at }, async () => { await reloadList(); await loadClients(); })}
+                        style={{ marginTop: 3, width: 15, height: 15, flexShrink: 0, cursor: canWrite ? "pointer" : "default" }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: it.completed_at ? "#64748B" : "#1E293B", textDecoration: it.completed_at ? "line-through" : "none" }}>
+                          {i + 1}. {it.title}
+                        </div>
+                        {it.detail && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{it.detail}</div>}
+                        {it.completed_at && (
+                          <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 3 }}>
+                            {it.completed_by_kind === "team" ? "Ticked by us" : "Done by the builder"}
+                            {it.completed_by_name ? " · " + it.completed_by_name : ""} · {pmStamp(it.completed_at)}
+                          </div>
+                        )}
+                      </div>
+                      {canWrite && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                          {arrow("▲", () => move(clientItems, i, -1, "setup_client_reorder"), i === 0)}
+                          {arrow("▼", () => move(clientItems, i, 1, "setup_client_reorder"), i === clientItems.length - 1)}
+                          <button type="button" disabled={busy}
+                            onClick={() => { if (window.confirm(`Remove "${it.title}" from ${c.clientId}'s list?`)) run({ action: "setup_client_delete", id: it.id }, async () => { await reloadList(); await loadClients(); }); }}
+                            style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 4px", fontFamily: "inherit" }}>Remove</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {canWrite && (adding === c.clientId
+                    ? addForm(c.clientId)
+                    : (
+                      <button type="button" onClick={() => { setAdding(c.clientId); setDraft({ title: "", detail: "", linkPage: "" }); }}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 12px", fontSize: 12, marginTop: 2 }}>＋ Add a step just for {c.clientId}</button>
+                    ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ProjectsTab({ sub, onSub }) {
   const [boards, setBoards] = useState(null);
   const [counts, setCounts] = useState({});
@@ -712,10 +940,14 @@ function ProjectsTab({ sub, onSub }) {
   }, []);
   useEffect(() => { loadBoards(); }, [loadBoards]);
 
+  // "setup" is a reserved slug, not a board: the Client Setup surface rides the same tab
+  // strip and the same /portal/projects/<sub> routing, but has no pm_board behind it. A
+  // real board can never take the slug — create_board suffixes it like any other clash.
+  const setupMode = sub === "setup";
   const activeBoard = useMemo(() => {
-    if (!boards || !boards.length) return null;
+    if (setupMode || !boards || !boards.length) return null;
     return boards.find((b) => b.slug === sub) || boards[0];
-  }, [boards, sub]);
+  }, [boards, sub, setupMode]);
 
   const loadBoard = useCallback((b) => {
     if (!b) return;
@@ -949,18 +1181,30 @@ function ProjectsTab({ sub, onSub }) {
                 style={{ background: "none", border: "none", padding: "9px 12px", fontSize: 13, fontWeight: 700, color: "#94A3B8", cursor: "pointer", fontFamily: "inherit" }}>＋</button>
             )
           )}
-          {canWrite && data && (
+          {/* The onboarding checklist is not a board, but it is the same KIND of thing a
+              board is — a list of work with an owner — so it belongs in this strip rather
+              than buried in a settings screen. Pushed right, away from the real boards. */}
+          <button type="button" role="tab" aria-selected={setupMode ? "true" : "false"}
+            onClick={() => onSub("setup")}
+            style={{ marginLeft: "auto", background: setupMode ? "#FFF" : "none", border: "none",
+              borderBottom: `3px solid ${setupMode ? ACCENT : "transparent"}`, marginBottom: -2,
+              padding: "9px 16px", fontSize: 13.5, fontWeight: setupMode ? 800 : 600,
+              color: setupMode ? ACCENT : "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+            Client Setup
+          </button>
+          {canWrite && data && !setupMode && (
             <button type="button" onClick={() => setSettingsOpen(true)}
-              style={{ marginLeft: "auto", background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
+              style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
         </div>
         {err && <div style={S.err}>{err}</div>}
-        {!boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
+        {setupMode && <PMSetupAdmin canWrite={canWrite} />}
+        {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
-        {boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
+        {!setupMode && boards && !data && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading board…</div>}
 
-        {data && (
+        {!setupMode && data && (
           <>
             {/* Saved views sit ABOVE the filters they restore, so the row reads
                 "which view am I in" then "how is it filtered". */}

@@ -219,6 +219,9 @@ function MySubmissions({ refreshKey }) {
   const [filter, setFilter] = useState("all");  // all | bug | feature
   const [syncing, setSyncing] = useState(false);
   const [tick, setTick] = useState(0);
+  const [draft, setDraft] = useState("");       // reply text for the open submission
+  const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
   // Column sort, same convention as DesignsTable/LeadsTable (SortTh + sortRows).
   // Default = newest first, matching the created_at DESC load order.
   const [sortKey, setSortKey] = useState("date");
@@ -241,7 +244,7 @@ function MySubmissions({ refreshKey }) {
       if (!ids.length) { setComments({}); return; }
       const { data: cs } = await sb
         .from("feedback_comments")
-        .select("id, submission_id, author_name, body, created_at")
+        .select("id, submission_id, author_name, author_kind, body, created_at")
         .in("submission_id", ids)
         .order("created_at", { ascending: true });
       if (cancelled) return;
@@ -260,6 +263,27 @@ function MySubmissions({ refreshKey }) {
     try { await sb.functions.invoke("portal-feedback", { body: { action: "refresh" } }); } catch (_) {}
     setSyncing(false);
     setTick((t) => t + 1);
+  };
+
+  // A builder replying on their own submission. The server decides who they are and
+  // records the comment as client-authored; it also copies the reply into the linked
+  // Projects item so the team reads it where they work.
+  const sendReply = async (submissionId) => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true); setSendErr("");
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-feedback", {
+        body: { action: "comment", submissionId, body: text },
+      });
+      if (err) throw new Error(err.message || "Could not send that.");
+      if (data && data.error) throw new Error(data.error);
+      setDraft("");
+      setTick((t) => t + 1);           // re-read so the thread shows it
+    } catch (e) {
+      setSendErr(e.message || "Could not send that.");
+    }
+    setSending(false);
   };
 
   const openAttachment = async (path) => {
@@ -329,7 +353,7 @@ function MySubmissions({ refreshKey }) {
               {sorted.map((r) => {
                 const isOpen = open === r.id;
                 const cs = comments[r.id] || [];
-                const toggle = () => setOpen(isOpen ? null : r.id);
+                const toggle = () => (setOpen(isOpen ? null : r.id), setDraft(""), setSendErr(""));
                 return (
                   <React.Fragment key={r.id}>
                   <tr onClick={toggle} tabIndex={0} aria-expanded={isOpen}
@@ -368,18 +392,50 @@ function MySubmissions({ refreshKey }) {
                             </button>
                           )}
                         </div>
+                        {/* The conversation, oldest first — your request, then everything
+                            either side has said since. A reply from us is teal; your own
+                            words are indigo and labelled "You", so a thread reads at a
+                            glance without anyone having to parse names. */}
                         {cs.length > 0 && (
-                          <div style={{ marginTop: 12, borderLeft: "3px solid #E2E8F0", paddingLeft: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                            {cs.map((c) => (
-                              <div key={c.id}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: "#64748B" }}>
-                                  {c.author_name || "Structure Studio"} <span style={{ fontWeight: 600, color: "#94A3B8" }}>· {fmtDT(c.created_at)}</span>
+                          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                            {cs.map((c) => {
+                              const mine = c.author_kind === "client";
+                              return (
+                                <div key={c.id} style={{
+                                  borderLeft: `3px solid ${mine ? "#6366F1" : "#8ED8CF"}`,
+                                  background: mine ? "#FFF" : "#F2FBFA",
+                                  borderRadius: 6, padding: "8px 12px",
+                                }}>
+                                  <div style={{ fontSize: 11, fontWeight: 800, color: "#64748B" }}>
+                                    {mine ? "You" : (c.author_name || "Structure Studio")}
+                                    {mine && c.author_name ? <span style={{ fontWeight: 600 }}> · {c.author_name}</span> : null}
+                                    <span style={{ fontWeight: 600, color: "#94A3B8" }}> · {fmtDT(c.created_at)}</span>
+                                  </div>
+                                  <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, whiteSpace: "pre-wrap", marginTop: 2 }}>{c.body}</div>
                                 </div>
-                                <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, whiteSpace: "pre-wrap", marginTop: 2 }}>{c.body}</div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
+
+                        {/* Reply. Clicking inside must not collapse the row — the whole
+                            <tr> above toggles `open`, so every control here stops the click. */}
+                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          {sendErr && <div style={{ ...S.err, marginBottom: 6 }}>{sendErr}</div>}
+                          <textarea rows={2} placeholder="Reply to us about this…"
+                            style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
+                            value={draft} onChange={(e) => setDraft(e.target.value)} />
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                            <span style={{ fontSize: 11.5, color: "#94A3B8" }}>
+                              Goes straight to the Structure Studio team, on this request.
+                            </span>
+                            <button type="button" disabled={sending || !draft.trim()}
+                              onClick={() => sendReply(r.id)}
+                              style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: sending || !draft.trim() ? 0.6 : 1 }}>
+                              {sending ? "Sending…" : "Send"}
+                            </button>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -394,11 +450,120 @@ function MySubmissions({ refreshKey }) {
   );
 }
 
+// ─── The builder's setup checklist ("Getting set up") ───────────────────────
+// Carolyn 2026-08-28: new builders get an ordered list of what to do, in the order to do
+// it, assigned from the template operators keep in Projects. Reads are RLS-scoped direct
+// (tenant_setup_items is readable to its own tenant); the tick goes through portal-setup
+// so that WHO completed it — the builder, or us on a call — is decided server-side.
+function SetupChecklist({ onNavigate }) {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null);      // id being toggled
+
+  const load = useCallback(async () => {
+    const { data, error: err } = await sb
+      .from("tenant_setup_items")
+      .select("id, title, detail, link_page, position, completed_at, completed_by_kind, completed_by_name")
+      .order("position", { ascending: true });
+    if (err) { setError(err.message); setItems([]); return; }
+    setItems(data || []);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = async (it) => {
+    const done = !it.completed_at;
+    setBusy(it.id); setError(null);
+    // Optimistic: ticking a box that then sits there doing nothing feels broken.
+    setItems((cur) => cur.map((x) => x.id === it.id
+      ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
+      : x));
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "toggle", id: it.id, done } });
+      if (err) throw new Error(err.message || "Could not save that.");
+      if (data && data.error) throw new Error(data.error);
+      load();                       // re-read so the real name/time replace the guess
+    } catch (e) {
+      setError(e.message || "Could not save that.");
+      load();                       // and never leave a tick the server did not accept
+    }
+    setBusy(null);
+  };
+
+  if (items === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
+  if (!items.length) return null;   // nothing assigned — the tab is hidden anyway
+
+  const done = items.filter((i) => i.completed_at).length;
+  const allDone = done === items.length;
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
+        <span style={{ ...S.h2, marginBottom: 0 }}>Getting set up</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: allDone ? "#0E9F6E" : "#64748B" }}>
+          {done} of {items.length} done
+        </span>
+        <div style={{ flex: "1 1 120px", minWidth: 80, height: 6, borderRadius: 999, background: "#EEF2F7", overflow: "hidden" }}>
+          <div style={{ width: `${Math.round((done / items.length) * 100)}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
+        {allDone
+          ? "That's everything — your account is ready to share with customers."
+          : "Work down the list in order. Each step takes you straight to the screen that does it."}
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((it, i) => {
+          const isDone = !!it.completed_at;
+          return (
+            <div key={it.id} style={{
+              display: "flex", gap: 11, alignItems: "flex-start",
+              border: "1px solid " + (isDone ? "#DCFCE7" : "#E2E8F0"),
+              background: isDone ? "#F7FEF9" : "#FFF",
+              borderRadius: 10, padding: "10px 13px",
+            }}>
+              <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                onChange={() => toggle(it)} aria-label={it.title}
+                style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: isDone ? "#64748B" : "#1E293B", textDecoration: isDone ? "line-through" : "none" }}>
+                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{i + 1}.</span>
+                  {it.title}
+                </div>
+                {it.detail && <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 3 }}>{it.detail}</div>}
+                {isDone && (
+                  <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 4 }}>
+                    Done{it.completed_by_name ? ` · ${it.completed_by_kind === "team" ? "by " + it.completed_by_name + " (Structure Studio)" : it.completed_by_name}` : ""} · {fmtDate(it.completed_at)}
+                  </div>
+                )}
+              </div>
+              {it.link_page && !isDone && (
+                <button type="button" onClick={() => {
+                  const [page, sub] = String(it.link_page).split("/");
+                  if (onNavigate) onNavigate(page, sub || null);
+                }}
+                  style={{ ...S.btn("#EEF2FF", ACCENT), padding: "6px 12px", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>
+                  Take me there →
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── What's New: global product changelog (read-only; team-populated) ───
-function ReleasesView({ submissionsKey }) {
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
-  const [subtab, setSubtab] = useState("features"); // features | fixes | roadmap | mine
+  // The sub-tab lives in the URL (/portal/releases/setup), so a "Take me there" link or a
+  // bookmark lands on the right one. `null` = the visitor has not chosen; see the default
+  // below, which only then decides for them.
+  const subtab = sub || null;
+  const setSubtab = (x) => { if (onSub) onSub(x); };
   const [mineCount, setMineCount] = useState(0);
 
   useEffect(() => {
@@ -410,6 +575,17 @@ function ReleasesView({ submissionsKey }) {
         .order("sort_order", { ascending: false });
       if (err) { setError(err.message); setRows([]); return; }
       setRows(data || []);
+    })();
+  }, []);
+
+  // How many setup steps are still open. Drives both the badge and whether the tab
+  // exists at all: a builder who was never assigned a list should see no change here.
+  const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  useEffect(() => {
+    (async () => {
+      const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
+      if (!data) { setSetupOpen(null); return; }
+      setSetupOpen({ total: data.length, open: data.filter((r) => !r.completed_at).length });
     })();
   }, []);
 
@@ -497,7 +673,15 @@ function ReleasesView({ submissionsKey }) {
     { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
     { id: "mine",     label: "My Submissions", dot: "#7E22CE", count: mineCount },
   ];
-  const active = TABS.find((t) => t.id === subtab) || TABS[0];
+  // Setup leads when there is one — it is what a new builder is here to do. Hidden
+  // entirely for tenants who were never assigned a list, so nothing changes for them.
+  if (setupOpen && setupOpen.total > 0) {
+    TABS.unshift({ id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
+  }
+  // An unfinished setup list is the first thing a new builder should land on; everyone
+  // else lands on New Features exactly as before. Only applies until they pick a tab.
+  const effTab = subtab || (setupOpen && setupOpen.open > 0 ? "setup" : "features");
+  const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
   return (
@@ -510,7 +694,7 @@ function ReleasesView({ submissionsKey }) {
       {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}
       <div role="tablist" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {TABS.map((t) => {
-          const on = t.id === subtab;
+          const on = t.id === effTab;
           return (
             <button key={t.id} type="button" role="tab" aria-selected={on} onClick={() => setSubtab(t.id)}
               style={{
@@ -527,7 +711,8 @@ function ReleasesView({ submissionsKey }) {
         })}
       </div>
 
-      {subtab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} />
+        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
         : rows.length === 0

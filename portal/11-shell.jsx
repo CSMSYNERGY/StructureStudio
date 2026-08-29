@@ -1252,7 +1252,11 @@ function Dashboard({ session }) {
             {activeTab === "projects" && isOperator && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
-            {!gateLocked && activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
+            {!gateLocked && activeTab === "releases" && (
+              <ReleasesView submissionsKey={feedbackKey}
+                sub={activeTab === "releases" ? sub : null} onSub={(x) => navigate("releases", x)}
+                onNavigate={navigate} />
+            )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
                 the clamp on that same area — so a settings_quickbooks holder deep-linking

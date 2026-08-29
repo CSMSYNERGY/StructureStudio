@@ -143,7 +143,7 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // would inject targetClientId and hand operators exactly that. The function itself refuses
 // a targetClientId with a 403, so adding it here would break every operator call rather
 // than quietly widening access — that pairing is intentional, not an oversight to fix.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
