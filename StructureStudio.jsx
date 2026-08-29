@@ -9754,10 +9754,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           name: co.name.trim(),
           qty: co.qty ? parseInt(co.qty) || 0 : 0,
           amount: co.amount ? parseFloat(co.amount) || 0 : 0,
+          taxable: co.taxable !== false,
         })),
         // Discounts → GHL invoice discount total (each shows as a $0 "Discount — <desc>" line).
         discounts: (Array.isArray(sel.discounts) ? sel.discounts : [])
-          .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0) }))
+          .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0), taxable: d.taxable !== false }))
           .filter((d) => d.amount > 0),
         roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro, idx) => ({
           name: `RO-${idx + 1}`,
@@ -11729,6 +11730,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const amtInputWrap = { display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85, flex: "0 0 auto", boxSizing: "border-box" };
             const actSpacer = { width: 28, flex: "0 0 auto" };
             const delBtn = { background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 };
+            // A compact "Tax" toggle for the discount and custom-option rows (migration 148).
+            // Deliberately a button, not a checkbox: the rows are already tight and a labelled
+            // control would not fit, so the state is carried by colour + the title text. ON is
+            // the default and reads as quiet grey; OFF is amber, because "no tax on this line"
+            // is the exceptional state a rep should be able to spot at a glance.
+            const taxBtn = (taxable, onToggle) => (
+              <button type="button" onClick={onToggle}
+                title={taxable
+                  ? "Sales tax is charged on this line. Click to make it non-taxable."
+                  : "NOT taxed — this line sits under the non-taxable subtotal on the quote and invoice. Click to tax it."}
+                style={{
+                  flex: "0 0 auto", width: 34, height: 30, borderRadius: 6, cursor: "pointer",
+                  fontSize: 10, fontWeight: 800, letterSpacing: 0.2,
+                  border: "1px solid " + (taxable ? "#CBD5E1" : "#FDE68A"),
+                  background: taxable ? "#F8FAFC" : "#FEF3C7",
+                  color: taxable ? "#64748B" : "#B45309",
+                }}>{taxable ? "TAX" : "NO"}</button>
+            );
+
             const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
           <div style={{ marginTop: 8 }}>
@@ -11834,6 +11854,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
                           style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
                       </div>
+                      {embedded && taxBtn(row.taxable !== false, () => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r)))}
                       <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))} style={delBtn}>×</button>
                     </div>
                   );
@@ -11866,6 +11887,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     ) : (
                       <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#059669", flexShrink: 0 }}>−${Number(row.amount || 0).toFixed(2)}</div>
                     )}
+                    {embedded && taxBtn(row.taxable !== false, () => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r) })))}
                     {embedded
                       ? <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
                       : <span style={{ width: 28, flexShrink: 0 }} />}
@@ -11913,15 +11935,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
             {/* Add buttons — below the subtotal, invoice-footer style. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])} style={dashBtn}>+ Add Custom Option</button>
+              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "", taxable: true }])} style={dashBtn}>+ Add Custom Option</button>
               {/* Business-only: a shopper must not be able to discount their own quote or
                   invent a delivery fee. Rows already ON a reopened design still render —
                   a rep-applied discount is part of the customer's real quote. */}
-              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>}
+              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))} style={dashBtn}>+ Add Discount</button>}
               {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
             </div>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Custom options add charges · discounts reduce the estimate total · delivery is added as a non-taxable line.
+              Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
             </div>
           </div>
             );

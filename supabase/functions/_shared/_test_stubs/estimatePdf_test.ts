@@ -17,6 +17,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
 import { buildFormalEstimatePdf } from "../estimatePdf.ts";
+import { pdfText } from "./pdfText.ts";
 
 // Generic identities only — this repo is PUBLIC; no client names or domains in fixtures.
 const BUSINESS = {
@@ -117,4 +118,119 @@ Deno.test("overflowing line items paginate", async () => {
   assertIsPdf(bytes);
   const doc = await PDFDocument.load(bytes);
   assert(doc.getPageCount() >= 2, `expected the 60-line estimate to spill pages, got ${doc.getPageCount()}`);
+});
+
+// ── Sales tax (migration 127) ────────────────────────────────────────────────────────────
+// The figures below are the plan's mock-ups 1-3, so the tests and the document a customer
+// actually receives are demonstrably the same arithmetic:
+//   taxable      11,200 + (2 x 325) + 600 = 12,450.00
+//   non-taxable  150 (setup) + 450 (delivery) =    600.00
+
+const TAX_LINES = [
+  { kind: "building", name: "12x24 Lofted Barn", desc: "Charcoal metal roof", qty: 1, amount: 11200 },
+  { kind: "door", name: "36in Steel Door", desc: "", qty: 2, amount: 325 },
+  { kind: "layout_item", name: "Loft package", desc: "", qty: 1, amount: 600 },
+  { kind: "layout_item", name: "Setup & leveling", desc: "", qty: 1, amount: 150, nonTaxable: true },
+  { kind: "delivery", name: "Delivery", desc: "Within 50 miles", qty: 1, amount: 450, nonTaxable: true },
+];
+
+const TAX_BASE = { business: BUSINESS, estimateNumber: "JB-1041", dateIso: "2026-08-27T12:00:00Z", lines: TAX_LINES };
+
+Deno.test("the taxed totals block renders both pools, the tax row and the footnote", async () => {
+  const bytes = await buildFormalEstimatePdf({
+    ...TAX_BASE,
+    tax: {
+      label: "Sales tax", rate: 0.0725, amount: 902.63, jurisdiction: "Bibb County, GA",
+      taxableSubtotal: 12450, nonTaxableSubtotal: 600, taxableBase: 12450, nonTaxableNet: 600,
+    },
+  });
+  assertIsPdf(bytes);
+  const t = await pdfText(bytes);
+
+  assert(t.includes("Taxable subtotal"), "the taxable pool must be labelled");
+  assert(t.includes("$12,450.00"), "the taxable subtotal figure must render");
+  assert(t.includes("Non-taxable subtotal"), "the non-taxable pool must be labelled");
+  assert(t.includes("$600.00"), "the non-taxable subtotal figure must render");
+  assert(t.includes("Sales tax (7.25%"), "the tax row must name the rate it charged");
+  assert(t.includes("Bibb County, GA"), "the tax row must name the jurisdiction when known");
+  assert(t.includes("$902.63"), "the tax figure must render");
+  // The grand total is the pools plus the stored tax — the number the consent sentence quotes.
+  assert(t.includes("$13,952.63"), "the tax-inclusive total must render");
+  // The marker and its footnote, together: one without the other is worse than neither.
+  assert(t.includes("Delivery *"), "a non-taxable line must wear the marker");
+  assert(t.includes("Setup & leveling *"), "every non-taxable line must wear it, not just delivery");
+  assert(!t.includes("Loft package *"), "a taxable line must NOT wear the marker");
+  assert(t.includes("* Not subject to sales tax"), "the footnote must explain the marker");
+});
+
+Deno.test("each discount sits under the pool the rep aimed it at, and is named", async () => {
+  const bytes = await buildFormalEstimatePdf({
+    ...TAX_BASE,
+    discount: 600,
+    discountRows: [
+      { description: "Spring promo", amount: 500, taxable: true },
+      { description: "Delivery waiver", amount: 100, taxable: false },
+    ],
+    tax: {
+      label: "Sales tax", rate: 0.0725, amount: 866.38, jurisdiction: "Bibb County, GA",
+      taxableSubtotal: 12450, nonTaxableSubtotal: 600, taxableBase: 11950, nonTaxableNet: 500,
+    },
+  });
+  assertIsPdf(bytes);
+  const t = await pdfText(bytes);
+
+  // Each discount named with its reason — "Discount $600.00" tells a customer nothing.
+  assert(t.includes("Discount - Spring promo"), "a taxable discount must be named");
+  assert(t.includes("Discount - Delivery waiver"), "a non-taxable discount must be named");
+  assert(t.includes("-$500.00") && t.includes("-$100.00"), "both discount amounts must render");
+  // The net of each pool is printed, so the base the tax row claims is ON THE PAGE above it
+  // rather than the output of a proration rule the reader cannot check.
+  assert(t.includes("$11,950.00"), "the taxable base must be printed, not just implied");
+  assert(t.includes("$500.00"), "the non-taxable net must be printed");
+  assert(t.includes("$866.38"), "the tax charged on 11,950 at 7.25%");
+  assert(t.includes("$13,316.38"), "the tax-inclusive total with discounts");
+});
+
+Deno.test("no tax input renders the original pre-tax block — no marker, no footnote, no tax row", async () => {
+  // Every pre-tax document still in the system takes this path, GHL-mode estimates included.
+  // A snapshot with no tax figure IS a pre-tax document; inventing a tax line for it would
+  // disagree with the number the customer already holds.
+  const t = await pdfText(await buildFormalEstimatePdf({ ...TAX_BASE, discount: 250 }));
+  assert(t.includes("Subtotal"), "the plain subtotal row stays");
+  assert(!t.includes("Taxable subtotal"), "no pool split without tax");
+  assert(!t.includes("Non-taxable subtotal"), "no pool split without tax");
+  assert(!t.includes("Sales tax"), "no tax row without tax");
+  assert(!t.includes("* Not subject to sales tax"), "no footnote without tax");
+  assert(!t.includes("Delivery *"), "no marker without tax, even on a nonTaxable line");
+  // 13,050 - 250 = 12,800.00, exactly what it printed before this shipped.
+  assert(t.includes("$12,800.00"), "the pre-tax total is unchanged");
+});
+
+Deno.test("a taxed totals block keeps its rows together across a page break", async () => {
+  // The block is measured before it is drawn so Subtotal cannot land on one page with Total on
+  // the next. The taxed variant has a VARIABLE row count, so the measure has to grow with the
+  // discounts — 60 lines forces the block near a boundary, and its last row must share a page
+  // with its first.
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    kind: "custom", itemKey: `opt-${i}`, name: `Line item ${i + 1}`,
+    desc: "Detail text that wraps onto a couple of lines so each row has realistic height.",
+    qty: 1, amount: 25,
+  }));
+  const bytes = await buildFormalEstimatePdf({
+    ...TAX_BASE,
+    lines: many,
+    discountRows: [
+      { description: "A", amount: 10, taxable: true }, { description: "B", amount: 10, taxable: true },
+      { description: "C", amount: 10, taxable: false }, { description: "D", amount: 10, taxable: false },
+    ],
+    tax: {
+      label: "Sales tax", rate: 0.07, amount: 100, taxableSubtotal: 1500,
+      nonTaxableSubtotal: 0, taxableBase: 1480, nonTaxableNet: 0,
+    },
+  });
+  assertIsPdf(bytes);
+  const doc = await PDFDocument.load(bytes);
+  assert(doc.getPageCount() >= 2, `expected pagination, got ${doc.getPageCount()}`);
+  const t = await pdfText(bytes);
+  assert(t.includes("Taxable subtotal") && t.includes("Sales tax (7%"), "the whole block still renders");
 });

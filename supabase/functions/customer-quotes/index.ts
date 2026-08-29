@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
-import { amountOwed, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -54,6 +54,36 @@ function phoneKey(value: unknown): string {
   const digits = String(value ?? "").replace(/\D/g, "");
   return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
 }
+
+/**
+ * The tax breakdown a customer sees on their own card (migration 148) — the same pools the
+ * PDF prints, so the screen and the document they were emailed cannot disagree.
+ *
+ * NULL when the snapshot carries no tax: every CRM-mode quote, and every SS quote issued
+ * before tax shipped. The caller spreads the result, so null means the key is ABSENT and
+ * those payloads stay exactly as they were.
+ *
+ * `taxable` / `nonTaxable` are the NETS — after each pool's own discounts — because that is
+ * what the tax was charged on and what the customer can check the arithmetic against.
+ */
+// deno-lint-ignore no-explicit-any
+function taxBreakdownOf(snap: any): Record<string, unknown> | null {
+  const tax = taxFromSnapshot(snap);
+  if (tax == null) return null;
+  const pools = subtotalsFromSnapshot(snap);
+  if (!pools) return null;
+  const discount = round2c(pools.taxableDiscount + pools.nonTaxableDiscount);
+  return {
+    taxable: pools.taxableBase,
+    nonTaxable: pools.nonTaxableNet,
+    tax,
+    // For the "(7.25%)" parenthetical only — never to recompute the amount above.
+    taxRate: Number(snap?.tax?.rate) || 0,
+    taxLabel: String(snap?.tax?.label || "Sales tax"),
+    ...(discount > 0 ? { discount } : {}),
+  };
+}
+const round2c = (n: number) => Math.round(n * 100) / 100;
 
 // totalFromSnapshot moved to _shared/estimateLines.ts (2026-08-23): the acceptance record
 // and the SS invoice snapshot the same number, and four copies of money math is how the
@@ -235,6 +265,8 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // The accept call's key. Revealing the short code to its OWN verified customer
           // is fine — it is the same capability their floor-plan URL already carries.
           quoteRef: d.short_code,
+          // Sales tax (migration 148). Spread, so a pre-tax quote carries no such key at all.
+          ...(taxBreakdownOf(d?.estimate_lines) ?? {}),
           canAccept: String(d?.status) === "sent" && !!d.ss_quote_number && !d.accepted_at,
           // The 3D snapshot of their own building — the card's thumbnail.
           view3dImageUrl: d.view3d_image_url || null,

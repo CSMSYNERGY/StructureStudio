@@ -1401,6 +1401,17 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
+  // Whether this style's BUILDING line carries sales tax (migration 148). On the style, not
+  // the size — taxability is a property of the product, not of how big it is.
+  const toggleStyleTaxable = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_taxable", styleId: s.id, taxable: s.taxable === false } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
   // Toggle whether this style's photo is attached to the GHL estimate (default on).
   const toggleStyleImage = async (s) => {
     setStyleBusy(true); setMsg(null);
@@ -1731,6 +1742,10 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                     <label title="Attach this style's photo to the CRM estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
+                    </label>
+                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                      <input type="checkbox" checked={s.taxable !== false} disabled={styleBusy} onChange={() => toggleStyleTaxable(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                      Taxable
                     </label>
                     <button onClick={() => openEdit(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
                     <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
@@ -2470,7 +2485,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // no longer shown or archived here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false };
     });
   };
 
@@ -2504,6 +2519,19 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   // Internal-only = still placeable in the rep (embedded) designer and still rendered on existing
   // designs, but dropped from the customer-facing designer's palette (get_config emits internalOnly;
   // the designer filters by `embedded`). Independent of archive. Optimistic local update.
+  // Sales tax (migration 148). Same optimistic shape as toggleInternal below: flip the row,
+  // call, and put it back if the call fails — a tax flag that silently did not save is how a
+  // builder discovers the exemption never applied, on an invoice.
+  const toggleTaxable = async (itemKey, taxable) => {
+    setBusy(true); setMsg(null);
+    setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable } : r));
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_taxable", itemKey, taxable }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on quotes and invoices." });
+    } catch (e) { setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable: !taxable } : r)); setMsg({ err: e.message }); }
+    finally { setBusy(false); }
+  };
   const toggleInternal = async (itemKey, internalOnly) => {
     setBusy(true); setMsg(null);
     setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, internalOnly } : r));
@@ -2638,7 +2666,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -2668,6 +2696,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     <td style={{ ...S.td, textAlign: "center" }}>
                       <label title="Internal only: reps can still place it in the designer and it stays on existing designs, but customers can't add it on the client-facing page" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
                         <input type="checkbox" checked={!!r.internalOnly} disabled={busy} onChange={() => toggleInternal(r.item_key, !r.internalOnly)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
+                      </label>
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
+                        <input type="checkbox" checked={r.taxable !== false} disabled={busy} onChange={() => toggleTaxable(r.item_key, r.taxable === false)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
                       </label>
                     </td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
@@ -2784,6 +2817,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // floor-level window back into "use the default" on the next save), so 0 is spelled out.
     sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
+    // Sales tax (migration 148). Absent reads as TAXABLE — the column defaults true, so the
+    // only way to be untaxed is for the builder to have said so.
+    taxable: d.taxable !== false,
   });
   const load = async () => {
     // Joins the sibling catalog reads fired in this same mount tick — see
@@ -2821,6 +2857,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
+    taxable: r.taxable !== false,
   });
 
   const saveLine = async () => {
@@ -2944,8 +2981,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -2958,8 +2995,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -3023,7 +3060,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
         iSill = col("height off floor"), iSillMode = col("placement"),
-        iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
+        iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iTaxable = col("taxable", "tax"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
       // Absent column (index < 0) → undefined: the key is dropped from the JSON body, and the
@@ -3041,7 +3078,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           heightIn: ftInToInches(String(cols[iH] == null ? "" : cols[iH]).replace(/\s/g, "")),
           price: cols[iPrice],
           showImageOnEstimate: bool(cols, iPhoto, true), active: bool(cols, iActive, true),
-          internalOnly: bool(cols, iInternal, false), archived: bool(cols, iArch, false),
+          internalOnly: bool(cols, iInternal, false), taxable: bool(cols, iTaxable, true), archived: bool(cols, iArch, false),
         };
         if (hasSwingOp) {
           row.swingOut = bool(cols, iSwOut, false); row.swingIn = bool(cols, iSwIn, false);
@@ -3095,7 +3132,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -3322,6 +3359,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("show_image_on_estimate", "Photo on estimate", "Attach this item's photo to its line on the customer's estimate")}
         {dCbx("active", "Active", "Unchecked = hidden from the designer entirely")}
         {dCbx("internalOnly", "Internal only", "Reps can still place it in the designer; customers can't add it on the client-facing page (already-placed items still show)")}
+        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
         <button onClick={saveLine} disabled={busy || !edit.draft.name.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim()) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
@@ -3349,6 +3387,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       </div>
       {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
       {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
+      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on quotes and invoices")}
       {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
       <button onClick={() => setEdit({ id: r.id, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
       <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
@@ -3886,6 +3925,8 @@ function ColorsView({ viewingLabel = null }) {
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
       door_rate: (c.door_rate != null ? String(c.door_rate) : "0"),
+      // Sales tax (migration 148): absent reads as taxable, matching the column default.
+      taxable: c.taxable !== false,
     })));
   };
   useEffect(() => { load(); }, []);
@@ -3897,7 +3938,7 @@ function ColorsView({ viewingLabel = null }) {
     siding: category === "paint", trim: category === "paint",
     shingle: category === "shingle", metal: category === "metal", door: false,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
-    pricing_method: "each", rate: "0", door_rate: "0",
+    pricing_method: "each", rate: "0", door_rate: "0", taxable: true,
   }]);
   const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
@@ -3933,7 +3974,7 @@ Anything not shown here will be removed from their account.`)) return;
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
-        doorRate: numOf(r.door_rate),
+        doorRate: numOf(r.door_rate), taxable: r.taxable !== false,
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3992,15 +4033,15 @@ Anything not shown here will be removed from their account.`)) return;
                   Trim/Doors) tolerate 5-6% because thc wraps, Custom/Default keep 8%. */}
               {showST ? (
                 <>
-                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "10%" }} />
+                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "4%" }} /><col style={{ width: "6%" }} />
                 </>
               ) : (
                 <>
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "21%" }} />
-                  <col style={{ width: "17%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "19%" }} />
+                  <col style={{ width: "15%" }} /><col style={{ width: "12%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "6%" }} />
                 </>
               )}
             </colgroup>
@@ -4012,7 +4053,9 @@ Anything not shown here will be removed from their account.`)) return;
               <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
               {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
-              <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+              <th style={thc}>Default</th><th style={thc}>Active</th>
+              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th>
+              <th style={thc}></th>
             </tr></thead>
             <tbody>
               {entries.map(({ r, gi }, pos) => (
@@ -4052,6 +4095,7 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   <td style={ctr}>{chk(gi, "is_default")}</td>
                   <td style={ctr}>{chk(gi, "active")}</td>
+                  <td style={ctr}>{chk(gi, "taxable")}</td>
                   <td style={ctr}>
                     <button onClick={() => removeRow(gi)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
                   </td>

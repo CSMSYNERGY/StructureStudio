@@ -55,6 +55,12 @@
 //      validation, which guards where the client secret gets sent), and the pre-existing
 //      `_shared/_test_stubs/*_test.ts`, which needs its own import map. Same skip-with-a-warning
 //      policy as step 6.
+//   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
+//      standalone HTML file, so the eslint pass never reads its inline script and the deno
+//      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
+//      are charged, and it carries the figure their consent sentence quotes. The check LIFTS
+//      the shipped block out of the file rather than re-implementing it, so a copy cannot
+//      drift into passing while the page is broken.
 //
 // Steps are numbered in the order they RUN.
 //
@@ -570,6 +576,108 @@ async function artifactCheck() {
     return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
   }
   return checkArtifacts();
+}
+
+// ── my-quotes.html: the customer's sales-tax breakdown ───────────────────────────────────
+//
+// This page has NO other automated coverage — it is a standalone HTML file, so the eslint pass
+// above never reads its inline script and the deno steps below do not know it exists. It is
+// also the only place a CUSTOMER sees what they are being charged, and the figure it renders is
+// the one their consent sentence quotes. Untested money in front of a customer is the wrong
+// thing to leave uncovered.
+//
+// Rather than re-implement the block here — a copy would drift from the page and start passing
+// while the page was broken — the SHIPPED source is lifted out of the file and executed against
+// a DOM shim. Extraction is brace-balanced, so it survives edits above and below it.
+//
+// Takes the html as an argument (rather than reading the file) so --self-test can hand it a
+// deliberately broken variant and prove this check actually fails.
+function checkMyQuotesTaxBreakdown(html) {
+  const errors = [];
+  const lines = html.split("\n");
+  const takeBlock = (needle) => {
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+
+  const fmtSrc = takeBlock("function fmtMoney(");
+  const blkSrc = takeBlock("if (hasTax) {");
+  if (!fmtSrc || !blkSrc) {
+    errors.push("my-quotes.html: the sales-tax breakdown block (`if (hasTax) {`) or fmtMoney() is gone — "
+      + "the customer's card is the only place they see the tax they are being charged, and it carries "
+      + "the figure their consent sentence quotes. If it was removed on purpose, remove this check too.");
+    return errors;
+  }
+
+  const mk = () => ({ className: "", textContent: "", children: [], appendChild(c) { this.children.push(c); return c; } });
+  let render;
+  try {
+    render = new Function("q", "document", "mk", [
+      fmtSrc,
+      "const card = mk();",
+      "const hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;",
+      blkSrc,
+      "return card;",
+    ].join("\n"));
+  } catch (e) {
+    errors.push("my-quotes.html: the tax-breakdown block does not parse in isolation — " + e.message);
+    return errors;
+  }
+
+  const flat = (n, out = []) => {
+    if (n.className.startsWith("qc-tax-row") || n.className === "qc-tax-total") {
+      out.push(n.children[0].textContent + " | " + n.children[1].textContent
+        + (n.className.includes("is-credit") ? " | credit" : ""));
+    }
+    n.children.forEach((c) => flat(c, out));
+    return out;
+  };
+  const doc = { createElement: () => mk() };
+
+  // The plan's mock-up figures, so the customer's screen and the PDF are demonstrably the same
+  // arithmetic rather than two implementations that happen to agree today.
+  const cases = [
+    ["with discounts",
+      { taxable: 11950, nonTaxable: 500, discount: 600, tax: 866.38, taxRate: 0.0725, taxLabel: "Sales tax", total: 13316.38 },
+      ["Taxable | $11,950.00", "Non-taxable | $500.00", "Discount | -$600.00 | credit", "Sales tax (7.25%) | $866.38", "Total | $13,316.38"]],
+    ["no discount",
+      { taxable: 12450, nonTaxable: 600, tax: 902.63, taxRate: 0.0725, taxLabel: "Sales tax", total: 13952.63 },
+      ["Taxable | $12,450.00", "Non-taxable | $600.00", "Sales tax (7.25%) | $902.63", "Total | $13,952.63"]],
+    // 0% must be STATED. A silently absent tax row is indistinguishable from the pre-tax bug
+    // this whole feature exists to fix.
+    ["0% stated, not hidden",
+      { taxable: 13050, nonTaxable: 0, tax: 0, taxRate: 0, taxLabel: "Sales tax", total: 13050 },
+      ["Taxable | $13,050.00", "Non-taxable | $0.00", "Sales tax | $0.00", "Total | $13,050.00"]],
+    ["whole-number rate drops the decimals",
+      { taxable: 1000, nonTaxable: 0, tax: 70, taxRate: 0.07, taxLabel: "Sales tax", total: 1070 },
+      ["Taxable | $1,000.00", "Non-taxable | $0.00", "Sales tax (7%) | $70.00", "Total | $1,070.00"]],
+    ["the builder's own label is honoured",
+      { taxable: 1000, nonTaxable: 0, tax: 50, taxRate: 0.05, taxLabel: "GST", total: 1050 },
+      ["Taxable | $1,000.00", "Non-taxable | $0.00", "GST (5%) | $50.00", "Total | $1,050.00"]],
+    // The regression that protects every pre-tax quote and every CRM tenant.
+    ["a snapshot with no tax renders no breakdown", { total: 5000 }, []],
+    ["a partial payload is not half-rendered", { taxable: 100, total: 100 }, []],
+  ];
+
+  for (const [name, q, expect] of cases) {
+    let got;
+    try { got = flat(render(q, doc, mk)); } catch (e) {
+      errors.push('my-quotes.html: tax breakdown threw on "' + name + '" — ' + e.message);
+      continue;
+    }
+    if (JSON.stringify(got) !== JSON.stringify(expect)) {
+      errors.push('my-quotes.html: tax breakdown wrong for "' + name + '"'
+        + "\n      got:      " + JSON.stringify(got)
+        + "\n      expected: " + JSON.stringify(expect));
+    }
+  }
+  return errors;
 }
 
 // ── Edge functions: deno check ───────────────────────────────────────────────────────────
@@ -1136,6 +1244,35 @@ if (process.argv.includes("--self-test")) {
     rmSync(tmpT, { recursive: true, force: true });
   }
   console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered`);
+
+  // ── The my-quotes tax-breakdown step ───────────────────────────────────────
+  // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
+  // subject from a file by pattern, so a rename could leave it quietly asserting nothing.
+  // Prove three things — it passes on the real file, it FAILS on a broken breakdown, and it
+  // fails when the block has been extracted away to nothing.
+  const mqHtml = readFileSync(join(root, "my-quotes.html"), "utf8");
+  if (checkMyQuotesTaxBreakdown(mqHtml).length) {
+    console.error("self-test FAILED: the my-quotes tax breakdown does not pass against the real file");
+    process.exit(1);
+  }
+  // Break the arithmetic the way a careless edit would: charge tax on the gross taxable pool
+  // instead of the net, which is exactly the discount bug this check exists to catch.
+  const brokenMath = mqHtml.replace("addRow(\"Taxable\", fmtMoney(q.taxable));",
+    "addRow(\"Taxable\", fmtMoney(q.taxable + (q.discount || 0)));");
+  if (brokenMath === mqHtml) {
+    console.error("self-test FAILED: could not find the Taxable row to break — the check's subject moved");
+    process.exit(1);
+  }
+  if (!checkMyQuotesTaxBreakdown(brokenMath).length) {
+    console.error("self-test FAILED: a wrong Taxable figure passed the my-quotes breakdown check");
+    process.exit(1);
+  }
+  if (!checkMyQuotesTaxBreakdown("<html><body>nothing here</body></html>").length) {
+    console.error("self-test FAILED: a my-quotes.html with no breakdown block at all passed the check");
+    process.exit(1);
+  }
+  console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
+
   process.exit(0);
 }
 
@@ -1157,6 +1294,8 @@ errors.push(...tests.errors);
 if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
+
+errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

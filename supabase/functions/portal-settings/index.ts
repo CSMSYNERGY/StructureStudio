@@ -17,7 +17,7 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // The change-order baseline, shared with submit-estimate so the two design_edit writers
 // cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
 // line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
@@ -85,6 +85,7 @@ const GATES: GateTable = {
   reorder_styles:            { area: "settings_structures", level: "edit" },
   set_style_active:          { area: "settings_structures", level: "edit" },
   set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+  set_style_taxable:         { area: "settings_structures", level: "edit" },
 
   // ── Per-style 3D appearance (the `d3` spec, photos and phone-scan model) ──
   // Grafted from beta-2.0 in the 3D merge. These write `building_styles.d3` /
@@ -112,6 +113,7 @@ const GATES: GateTable = {
   import_fixtures:                { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
+  set_layout_item_taxable:        { area: "settings_options", level: "edit" },
   save_ramp_settings:             { area: "settings_options", level: "edit" },
   // (save_doors / save_ramps / save_windows were here until 2026-08-07. They were legacy
   // full-replace writers with no caller anywhere, each of which DELETED every fixture_items
@@ -387,6 +389,17 @@ const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 // certificate every time it is rebuilt. Best-effort by contract (quotePdf.ts): a PDF
 // problem logs and returns null; it never blocks the change that triggered it.
 // deno-lint-ignore no-explicit-any
+/** The three order money columns from a snapshot (migration 148), written TOGETHER so
+ *  pretax + tax = total by construction. `fallbackTotal` covers a snapshot too old to price —
+ *  it keeps today's behaviour of writing the total on its own. Column names are spelled out
+ *  here rather than spread from orderCentsFromSnapshot, whose keys are camelCase. */
+// deno-lint-ignore no-explicit-any
+function orderMoneyCols(snap: any, fallbackTotal: number | null): Record<string, unknown> {
+  const m = orderCentsFromSnapshot(snap);
+  if (!m) return fallbackTotal == null ? {} : { total_cents: Math.round(fallbackTotal * 100) };
+  return { total_cents: m.totalCents, pretax_subtotal_cents: m.pretaxCents, tax_cents: m.taxCents };
+}
+
 async function regenerateQuotePdf(
   admin: any,
   req: Request,
@@ -414,6 +427,11 @@ async function regenerateQuotePdf(
       // deno-lint-ignore no-explicit-any
       lines: lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
       discount: Number(input.snap?.discount) || 0,
+      // The tax the snapshot was STAMPED with, not a fresh lookup (migration 148). A re-render
+      // must reproduce the document the customer already has; re-resolving here would let a
+      // regenerate silently restate what they were quoted.
+      tax: input.snap?.tax ?? null,
+      discountRows: input.snap?.discounts?.rows ?? null,
       quoteTerms: cs?.quote_terms ?? null,
       planPdfUrl: planUrl,
     });
@@ -745,7 +763,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (action === "status") {
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, email_provider, email_domain_status, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -782,6 +800,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
         ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // Sales tax (migration 148). The rate is surfaced as a PERCENT — it is stored as a
+        // fraction, and a settings card that round-trips 0.0725 into a box labelled "%" is how
+        // a tenant ends up quoting at 0.07%.
+        ssTaxRate: data?.ss_tax_rate == null ? null : Math.round(Number(data.ss_tax_rate) * 1000000) / 10000,
+        ssTaxLabel: data?.ss_tax_label ?? "Sales tax",
+        ssTaxDelivery: data?.ss_tax_delivery === true,
         // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
         // in SS mode there is no GHL fallback, so a tenant without live sending can't
         // email quotes/invoices at all — the card says so, loudly, without blocking.
@@ -883,6 +907,29 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         updates.ss_invoice_next = n;
       }
     }
+    // The sales tax rate, entered as a PERCENT and stored as a FRACTION. Blank clears it back
+    // to "not set", which the guard below then refuses to leave SS mode with. An explicit 0 is
+    // a real answer and must survive — hence the blank/zero distinction rather than falsiness.
+    if ("ssTaxRate" in payload) {
+      const raw = String(payload.ssTaxRate ?? "").trim();
+      if (!raw) updates.ss_tax_rate = null;
+      else {
+        const pct = Number(raw);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 25) {
+          return json({ error: "The sales tax rate must be a percentage between 0 and 25 — for example 7.25." }, 400);
+        }
+        // 5dp, matching numeric(7,5): 7.25% -> 0.0725. Rounded here so the stored value is the
+        // one the card will read back, rather than a float that redisplays as 7.249999.
+        updates.ss_tax_rate = Math.round((pct / 100) * 100000) / 100000;
+      }
+    }
+    if ("ssTaxLabel" in payload) {
+      // Printed on the customer's document, so bounded like the numbering prefixes are.
+      const l = String(payload.ssTaxLabel ?? "").trim().slice(0, 40);
+      updates.ss_tax_label = l || "Sales tax";
+    }
+    if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+
     if ("ssInvoicePrefix" in payload) {
       const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);
       if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
@@ -896,12 +943,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // otherwise the first SS document would begin at 1 and collide with the tenant's
     // existing paperwork. Checked against the MERGED state (the controls can arrive in
     // separate saves), the same way the beta pair below is.
-    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload) {
+    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
       const { data: curInv } = await admin
-        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next").eq("client_id", clientId).maybeSingle();
+        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next, ss_tax_rate").eq("client_id", clientId).maybeSingle();
       const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
+      const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
       if (!nextInGhl && nextQuoteStart == null) {
         return json({
           error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
@@ -910,6 +958,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!nextInGhl && nextInvoiceStart == null) {
         return json({
           error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
+        }, 400);
+      }
+      // A rate is as mandatory as a number, and for the same reason: refuse rather than invent.
+      // Rates come from each quote's delivery address, but this one is what gets charged when
+      // that lookup is unavailable — so without it there is no defensible figure to fall back
+      // to, and an untaxed invoice goes out that nobody was ever asked about. 0 is accepted;
+      // "unanswered" is not (Carolyn 2026-08-26).
+      if (!nextInGhl && nextTaxRate == null) {
+        return json({
+          error: "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.",
         }, 400);
       }
     }
@@ -1063,17 +1121,17 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
-      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -1088,7 +1146,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
+      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
@@ -1662,6 +1720,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       .update({ show_image_on_estimate: payload.show !== false })
       .eq("client_id", clientId).eq("id", styleId);
     if (error) return dbFail(req, clientId, "update that style's estimate image", error);
+    return json({ ok: true });
+  }
+
+  // Whether this style's BUILDING line carries sales tax (migration 148). On the style, not
+  // the size: taxability is a property of the product, not of how big it is.
+  if (action === "set_style_taxable") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ taxable: payload.taxable !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return dbFail(req, clientId, "update that style's tax setting", error);
     return json({ ok: true });
   }
 
@@ -2403,6 +2473,9 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Door category (116) rides the same presence-guard: `door` = usable on doors,
       // `doorRate` = FLAT $ per door painted this color (distinct from the paint rate).
       if (Object.prototype.hasOwnProperty.call(row, "door")) rec.door = row.door === true;
+      // Sales tax (migration 148) — same presence guard, same reason: an older client that
+      // does not know this key must not silently make an exempted colour taxable again.
+      if (Object.prototype.hasOwnProperty.call(row, "taxable")) rec.taxable = row.taxable !== false;
       if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
         const dr = Number(row.doorRate);
         rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
@@ -2518,6 +2591,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (has("active")) rec.active = row?.active !== false;
     if (has("archived")) rec.archived = row?.archived === true;
     if (has("internalOnly")) rec.internal_only = row?.internalOnly === true;
+    // Sales tax (migration 148). Presence-gated like its neighbours: a trimmed import sheet
+    // with the column deleted must not silently make every fixture taxable again — that is
+    // the same class of bug the 2026-08-20 audit fixed for archived/internal-only, and here
+    // it would put tax on a bill the builder deliberately exempted.
+    if (has("taxable")) rec.taxable = row?.taxable !== false;
     const isDoor = category === "door";
     // Swing/op travel as a GROUP: the exclusivity normalization is only sound when the whole
     // group is known, so one present swing/op key means the absent ones read "no" (the old
@@ -2591,6 +2669,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!("active" in rec)) rec.active = true;
     if (!("archived" in rec)) rec.archived = false;
     if (!("internal_only" in rec)) rec.internal_only = false;
+    if (!("taxable" in rec)) rec.taxable = true;
     if (!("swing_in" in rec)) {
       rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
       rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
@@ -2786,6 +2865,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const internalOnly = payload?.internalOnly === true;
     const { error } = await admin.from("client_layout_items")
       .update({ internal_only: internalOnly }).eq("client_id", clientId).eq("item_key", key);
+    if (error) return dbFail(req, clientId, "update that option", error);
+    return json({ ok: true });
+  }
+
+  // Whether this option's estimate line carries sales tax (migration 148). A single-flag
+  // action, mirroring set_layout_item_internal_only above rather than threading taxability
+  // through a bulk save the options list does not otherwise have. clientId is JWT-resolved.
+  if (action === "set_layout_item_taxable") {
+    const key = String(payload?.itemKey ?? "").trim();
+    if (!key) return json({ error: "itemKey required" }, 400);
+    const taxable = payload?.taxable !== false;
+    const { error } = await admin.from("client_layout_items")
+      .update({ taxable }).eq("client_id", clientId).eq("item_key", key);
     if (error) return dbFail(req, clientId, "update that option", error);
     return json({ ok: true });
   }
@@ -5269,14 +5361,22 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           const [coRes, ordRes] = await Promise.all([
             admin.from("change_orders").select("co_no, description, total_before_cents, total_after_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
-            admin.from("orders").select("total_cents")
+            admin.from("orders").select("total_cents, pretax_subtotal_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
           ]);
+          // PRE-TAX, deliberately (migration 148). amendedInvoiceDocument reconciles its lines
+          // against this in SUBTOTAL space — `sum(qty x amount) - discount`, the PDF's own
+          // arithmetic — and since 148 the PDF adds a tax row ON TOP of that sum. orders
+          // .total_cents is tax-INCLUSIVE for an SS order, so handing it over would leave the
+          // two disagreeing by exactly the tax, and the reconciler would invent a balancing
+          // "Change order" line worth the sales tax on every invoice. pretax_subtotal_cents is
+          // written beside total_cents by the same helper, so the pair cannot drift; it falls
+          // back to total_cents only for an untaxed order, where the two are equal anyway.
+          const ord = ordRes.error ? null : ordRes.data;
+          const pretax = ord?.pretax_subtotal_cents ?? ord?.total_cents ?? null;
           return {
             acked: coRes.error ? [] : (coRes.data ?? []),
-            orderTotalCents: ordRes.error || ordRes.data?.total_cents == null
-              ? null
-              : Number(ordRes.data.total_cents),
+            orderTotalCents: pretax == null ? null : Number(pretax),
           };
         };
 
@@ -5436,6 +5536,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
               // deno-lint-ignore no-explicit-any
               lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
               discount: amended.discount,
+              // The tax carried on the snapshot — the figure the customer ACCEPTED. The invoice
+              // deliberately does NOT re-resolve the rate: acceptance is a click on a stated
+              // total, and quietly billing a different one because a rate moved in between is
+              // the change-order case, not a re-render.
+              //
+              // It rides ON TOP of amendedInvoiceDocument's reconciled lines, which is why
+              // loadAmendments now hands that function the PRE-TAX order figure — see there.
+              tax: d.estimate_lines?.tax ?? null,
+              discountRows: d.estimate_lines?.discounts?.rows ?? null,
               quoteTerms: cur0?.quote_terms ?? null,
               planPdfUrl: planUrl,
             });
@@ -5512,7 +5621,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         // rep-set or CO-acknowledged number is never clobbered.
         if (totalNum != null) {
           await admin.from("orders")
-            .update({ total_cents: Math.round(totalNum * 100), total_source: "manual", updated_at: nowIso() })
+            .update({
+              // pretax + tax = total, written together (migration 148): total_cents alone is no
+              // longer a safe pre-tax figure and portal-commissions reads it as one.
+              ...orderMoneyCols(d.estimate_lines, totalNum),
+              total_source: "manual", updated_at: nowIso(),
+            })
             .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
         }
         if (d.inventory_unit_id) {

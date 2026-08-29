@@ -1,13 +1,21 @@
 /**
  * Money math over the designs.estimate_lines snapshot — submit-estimate step 11's shape:
- *   { version, discount, lines: [{ kind, itemKey, name, desc, qty, amount, nonTaxable }] }
+ *   {
+ *     version, discount, lines: [{ kind, itemKey, name, desc, qty, amount, nonTaxable }],
+ *     discounts: { taxable, nonTaxable, rows: [{ description, amount, taxable }] },  // 2026-08-27
+ *     tax: { rate, amount, label, taxableSubtotal, nonTaxableSubtotal, taxableBase,
+ *            source, jurisdiction, address, resolvedAt },                            // 2026-08-27
+ *   }
+ * The last two keys are written by the SS-mode branch only; a snapshot without them is a
+ * pre-tax document, and every function here returns for one exactly what it always did.
  *
  * `amount` is the UNIT price; a line's total is qty * amount. Round each line total, sum,
  * subtract a positive discount, round 2dp, clamp at >= 0 — the exact math estimatePdf.ts
  * and qboInvoice.ts use, extracted here (2026-08-23) because a THIRD consumer arrived
  * (customer acceptance snapshots the total the customer signed for; the SS invoice adds a
  * fourth). One implementation, so the PDF, the books, the acceptance record and the
- * customer's screen can never disagree about the same snapshot.
+ * customer's screen can never disagree about the same snapshot — which is also why sales
+ * tax landed HERE rather than in the renderer that first needed it.
  *
  * Returns null when there is no snapshot — older designs predate it, and null renders
  * honestly as "—" instead of a fabricated $0.00.
@@ -35,19 +43,179 @@ export const deHtml = (s: string) =>
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
     .trim();
 
+/**
+ * The two money pools a taxed document is built from (2026-08-27).
+ *
+ * Sales tax needs the estimate split in two — what tax is charged on, and what it is not —
+ * and the split has to be visible on the document so the arithmetic checks itself in front
+ * of the customer (see the totals block in estimatePdf.ts). Both pools come from data that
+ * is CHOSEN, never inferred:
+ *
+ *   - a line is non-taxable because its catalog row says so (`lines[].nonTaxable`, sourced
+ *     per item by submit-estimate), and
+ *   - a discount reduces the taxable pool or the non-taxable pool because the rep said which
+ *     (`discounts.rows[].taxable`), NOT by prorating across both.
+ *
+ * NO PRORATION. An earlier draft split each discount across the pools by their relative size;
+ * Carolyn 2026-08-27: "discounts should select whether they are taxable or not. never assume."
+ * A prorated share is a number the reader cannot check against anything printed on the page.
+ *
+ * Each pool clamps at >= 0 INDEPENDENTLY and does not spill: a discount larger than the pool
+ * it was aimed at zeroes that pool and stops, rather than eating into the other one. Spilling
+ * would silently move money across the tax boundary — the one thing this whole split exists
+ * to prevent.
+ */
+export interface Subtotals {
+  /** Taxable line totals, before discounts. */
+  taxable: number;
+  /** Non-taxable line totals, before discounts. */
+  nonTaxable: number;
+  /** Discounts the rep designated taxable. */
+  taxableDiscount: number;
+  /** Discounts the rep designated non-taxable. */
+  nonTaxableDiscount: number;
+  /** taxable - taxableDiscount, clamped at >= 0. What tax is charged on. */
+  taxableBase: number;
+  /** nonTaxable - nonTaxableDiscount, clamped at >= 0. */
+  nonTaxableNet: number;
+  /** taxableBase + nonTaxableNet — the pre-tax subtotal the Total is built from. */
+  subtotal: number;
+}
+
+/** Sum of qty * amount over the lines matching `wantTaxable`, each line total rounded first
+ *  (the same order estimatePdf.ts and qboInvoice.ts use, so the three cannot disagree). */
+function poolOf(lines: any[], wantTaxable: boolean): number {
+  let sum = 0;
+  for (const li of lines) {
+    if (!!li?.nonTaxable === wantTaxable) continue; // nonTaxable true => not the taxable pool
+    sum += round2((Number(li?.qty) || 0) * (Number(li?.amount) || 0));
+  }
+  return round2(sum);
+}
+
+/**
+ * The pools, or null when there is no snapshot (older designs predate it — see
+ * totalFromSnapshot's contract).
+ *
+ * LEGACY SNAPSHOTS: `discounts` arrived with sales tax. Every snapshot written before it has
+ * only the collapsed `discount` number and no per-row taxability, so the whole of it is
+ * treated as taxable. Those snapshots also carry no `tax` key, so nothing charges tax against
+ * the result — the assignment is inert and exists only so the shape is total.
+ */
+export function subtotalsFromSnapshot(snap: any): Subtotals | null {
+  if (!snap || !Array.isArray(snap.lines)) return null;
+  const taxable = poolOf(snap.lines, true);
+  const nonTaxable = poolOf(snap.lines, false);
+
+  let taxableDiscount: number;
+  let nonTaxableDiscount: number;
+  const rows = snap.discounts?.rows;
+  if (Array.isArray(rows)) {
+    let t = 0, n = 0;
+    for (const r of rows) {
+      const amt = round2(Math.abs(Number(r?.amount) || 0));
+      if (amt <= 0) continue;
+      // Absent `taxable` reads as taxable — the designer's default for a new row, and the
+      // reading that never quietly removes something from the tax base.
+      if (r?.taxable === false) n += amt; else t += amt;
+    }
+    taxableDiscount = round2(t);
+    nonTaxableDiscount = round2(n);
+  } else {
+    taxableDiscount = round2(Math.max(0, Number(snap.discount) || 0));
+    nonTaxableDiscount = 0;
+  }
+
+  const taxableBase = Math.max(0, round2(taxable - taxableDiscount));
+  const nonTaxableNet = Math.max(0, round2(nonTaxable - nonTaxableDiscount));
+  return {
+    taxable, nonTaxable, taxableDiscount, nonTaxableDiscount,
+    taxableBase, nonTaxableNet,
+    subtotal: round2(taxableBase + nonTaxableNet),
+  };
+}
+
+/**
+ * The tax actually charged, READ from the snapshot — never recomputed from the rate.
+ *
+ * `tax.amount` is what the customer was quoted, signed for and was billed; recomputing it
+ * from `tax.rate` here would let a rounding difference put a different number on the invoice
+ * than the one on the signed quote. The rate is carried for display ("Sales tax (7.25%)"),
+ * not as the source of the figure.
+ *
+ * Null when the snapshot carries no tax — every GHL-mode snapshot, and every SS snapshot
+ * issued before this shipped.
+ */
+export function taxFromSnapshot(snap: any): number | null {
+  const amt = snap?.tax?.amount;
+  if (amt == null) return null;
+  const n = Number(amt);
+  return Number.isFinite(n) ? Math.max(0, round2(n)) : null;
+}
+
+/**
+ * The number the customer owes: tax-inclusive when the snapshot carries tax.
+ *
+ * Returns null when there is no snapshot — older designs predate it, and null renders
+ * honestly as "—" instead of a fabricated $0.00.
+ *
+ * The no-tax branch is the ORIGINAL body, kept verbatim rather than expressed through the
+ * pools above. It is not equivalent: the old code subtracts the whole discount from the
+ * combined subtotal and clamps ONCE, where the pools clamp separately, so an over-discount
+ * would land on a different number. Every pre-tax snapshot in the database goes through this
+ * branch, so it has to be the same arithmetic it has always been, provably and not
+ * approximately. When GHL invoicing is switched off and the last untaxed snapshot is gone,
+ * this branch goes with it.
+ */
 export function totalFromSnapshot(snap: any): number | null {
   if (!snap || !Array.isArray(snap.lines)) return null;
-  let subtotal = 0;
-  for (const li of snap.lines) {
-    const qty = Number(li?.qty) || 0;
-    const unit = Number(li?.amount) || 0;
-    subtotal += round2(qty * unit);
+
+  const tax = taxFromSnapshot(snap);
+  if (tax == null) {
+    let subtotal = 0;
+    for (const li of snap.lines) {
+      const qty = Number(li?.qty) || 0;
+      const unit = Number(li?.amount) || 0;
+      subtotal += round2(qty * unit);
+    }
+    subtotal = round2(subtotal);
+    const discount = Number(snap.discount) || 0;
+    if (discount > 0) subtotal = round2(subtotal - discount);
+    // Clamped at >= 0 like estimatePdf.ts' Total row (audit 2026-08-20).
+    return Math.max(0, subtotal);
   }
-  subtotal = round2(subtotal);
-  const discount = Number(snap.discount) || 0;
-  if (discount > 0) subtotal = round2(subtotal - discount);
-  // Clamped at >= 0 like estimatePdf.ts' Total row (audit 2026-08-20).
-  return Math.max(0, subtotal);
+
+  const s = subtotalsFromSnapshot(snap)!; // non-null: snap.lines is an array by the guard above
+  return Math.max(0, round2(s.subtotal + tax));
+}
+
+/**
+ * The order ledger's money, in CENTS, from one snapshot (migration 148).
+ *
+ * `orders.total_cents` became tax-INCLUSIVE for SS orders, which silently breaks any reader
+ * that treats it as a pre-tax figure — portal-commissions being the one that mattered, since
+ * its base_type is literally 'pretax_subtotal'. So the total is never written alone any more:
+ * the three components go together, and pretax + tax = total by construction rather than by a
+ * later subtraction that could disagree.
+ *
+ * `taxCents` is NULL for an untaxed snapshot — deliberately not 0, so "not taxed" stays
+ * distinguishable from "taxed at 0%", which is the distinction the whole mandatory-rate setting
+ * exists to preserve.
+ */
+export function orderCentsFromSnapshot(
+  snap: any,
+): { totalCents: number; pretaxCents: number; taxCents: number | null } | null {
+  const total = totalFromSnapshot(snap);
+  if (total == null) return null;
+  const tax = taxFromSnapshot(snap);
+  const pools = subtotalsFromSnapshot(snap);
+  return {
+    totalCents: Math.round(total * 100),
+    // With no tax the pre-tax base IS the total — and it is taken from `total` rather than from
+    // the pools, because the legacy branch of totalFromSnapshot clamps differently (see there).
+    pretaxCents: tax == null ? Math.round(total * 100) : Math.round((pools?.subtotal ?? total) * 100),
+    taxCents: tax == null ? null : Math.round(tax * 100),
+  };
 }
 
 /**

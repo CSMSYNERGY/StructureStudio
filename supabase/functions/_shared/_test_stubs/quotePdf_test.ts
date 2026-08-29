@@ -16,6 +16,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { PDFDocument } from "npm:pdf-lib@1.17.1";
 import { buildQuotePdf } from "../quotePdf.ts";
+import { pdfText } from "./pdfText.ts";
 
 // Generic identities only — this repo is PUBLIC; no client names or domains in fixtures.
 const INPUT = {
@@ -110,42 +111,16 @@ Deno.test("every broken-plan path degrades to the estimate sheet instead of thro
 });
 
 Deno.test("docKind 'invoice' renders a real document titled Invoice, without a validity line", async () => {
-  // pdf-lib flate-compresses content streams AND hex-encodes drawn strings, so proving a
-  // title rendered means: find each stream (skipping the trailing half of "endstream"),
-  // trim the EOL pdf-lib appends before "endstream" (pako refuses trailing bytes), inflate,
-  // then decode the <hex> string operands back to text. pako is pdf-lib's own compression
-  // dependency, so this adds nothing new.
-  const { inflate } = await import("npm:pako@2.1.0");
-  const textOf = (bytes: Uint8Array) => {
-    const raw = new TextDecoder("latin1").decode(bytes);
-    let out = "";
-    const re = /stream\r?\n/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(raw)) !== null) {
-      if (raw.slice(Math.max(0, m.index - 3), m.index) === "end") continue;
-      const start = m.index + m[0].length;
-      let end = raw.indexOf("endstream", start);
-      if (end < 0) continue;
-      while (end > start && (bytes[end - 1] === 0x0a || bytes[end - 1] === 0x0d)) end--;
-      try {
-        const inflated = inflate(bytes.subarray(start, end));
-        if (inflated) out += new TextDecoder("latin1").decode(inflated);
-      } catch { /* not a flate stream */ }
-    }
-    return out.replace(/<([0-9A-Fa-f]+)>/g, (_all, h: string) => {
-      let s = "";
-      for (let i = 0; i + 1 < h.length; i += 2) s += String.fromCharCode(parseInt(h.slice(i, i + 2), 16));
-      return s;
-    });
-  };
+  // pdfText inflates the content streams and decodes the hex string operands — see that
+  // module for why reading a PDF back is fiddly enough to be worth sharing.
   const bytes = await buildQuotePdf({ ...INPUT, docKind: "invoice" });
   assertIsPdf(bytes);
   assertEquals((await PDFDocument.load(bytes)).getPageCount(), 1);
-  const invText = textOf(bytes);
+  const invText = await pdfText(bytes);
   assert(invText.includes("Invoice #JB-1041"), "invoice title must render");
   assert(!invText.includes("Valid until"), "an invoice must not carry a validity window");
   // And the default stays an estimate.
-  const estText = textOf(await buildQuotePdf(INPUT));
+  const estText = await pdfText(await buildQuotePdf(INPUT));
   assert(estText.includes("Estimate #JB-1041"), "default docKind must stay Estimate");
   assert(estText.includes("Valid until"), "estimates keep the validity window");
 });

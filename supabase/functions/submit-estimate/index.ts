@@ -7,8 +7,10 @@ import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { deHtml, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { addressFrom } from "../_shared/contactAddress.ts";
+import { resolveRate, taxOn } from "../_shared/salesTax.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -109,7 +111,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //    same as a missing row.
   const { data: settings, error: settingsErr } = await supabase
     .from("client_settings")
-    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy")
+    .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy, ss_tax_rate, ss_tax_label, ss_tax_delivery")
     .eq("client_id", clientId)
     .single();
   if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
@@ -135,6 +137,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // StructureStudio has never sent for them. The credential check above is deliberately NOT
   // relaxed for SS mode: the contact upsert and the opportunity still go to the CRM either way.
   const invoiceInGhl: boolean = settings.invoice_in_ghl !== false;
+
+  // Sales tax (migration 148) — SS mode only. In CRM mode GHL's own tax engine computes it from
+  // automaticTaxesEnabled and the line tax categories, so none of this is read on that path and
+  // no snapshot on it gains a `tax` key.
+  const ssTaxRate: number | null = settings.ss_tax_rate == null ? null : Number(settings.ss_tax_rate);
+  const ssTaxLabel: string = String(settings.ss_tax_label || "Sales tax");
+  const ssTaxDelivery: boolean = settings.ss_tax_delivery === true;
   const effectiveBetaMode: boolean = Boolean(betaMode) || Boolean(settings.beta_mode);
 
   // ⚠️ ONLY the tenant's own `beta_mode` switch redirects. The request's `betaMode` flag is
@@ -202,10 +211,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // stored design row is anon-writable too, so it is no stronger a source than the body).
   const wantsDiscounts = Array.isArray(discounts) && discounts.some((d: any) => Math.abs(Number(d?.amount) || 0) > 0);
   const wantsDeliveryFee = (Number(deliveryFee) || 0) > 0;
+  // A custom option marked NON-TAXABLE is a pricing field too (migration 148). Custom options
+  // themselves are not gated — they are positive charges, so a shopper adding one only hurts
+  // themselves — but taxability runs the other way: left ungated, a shopper could tick their
+  // own line non-taxable and shave the tax off their bill. So an untaxed custom option joins
+  // discounts and the delivery fee behind the staff check.
+  const wantsNonTaxableCustom = Array.isArray(customOptions)
+    && customOptions.some((co: any) => co?.taxable === false);
   let allowedDiscounts: any[] = Array.isArray(discounts) ? discounts : [];
   let allowedDeliveryFee: number = Number(deliveryFee) || 0;
-  if (wantsDiscounts || wantsDeliveryFee) {
-    let staffCaller = false;
+  let allowedCustomOptions: any[] = Array.isArray(customOptions) ? customOptions : [];
+  let staffCaller = false;
+  if (wantsDiscounts || wantsDeliveryFee || wantsNonTaxableCustom) {
     try {
       const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
       if (token) {
@@ -229,6 +246,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (!staffCaller) {
       allowedDiscounts = [];
       allowedDeliveryFee = 0;
+      // Not emptied — the charges stand; only the tax exemption is refused.
+      allowedCustomOptions = allowedCustomOptions.map((co: any) => ({ ...co, taxable: true }));
       // Logged (never thrown) so triage can see stripping happen — a legit rep whose
       // session expired mid-designer shows up here, not as a silently smaller quote.
       logEdgeError({
@@ -413,14 +432,49 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let styleShowImage = true;                 // per-style toggle: attach the photo to the estimate? (default yes)
   let buildingPrice = 0, priced = false;
   let buildingWidthFt = 0, buildingDepthFt = 0;   // drive sqft_building / perimeter_building add-ons
+
+  // ── Taxability, per catalog item (migration 148) ────────────────────────────────────────
+  //
+  // Read ONCE, tenant-wide, and only in SS mode — the GHL path issues exactly the queries it
+  // always did. Three whole-catalog reads rather than adding `taxable` to the six existing
+  // `.in("id", …)` selects: a tenant's catalogs are tens of rows, the maps are wanted at a
+  // dozen tagLine sites scattered over 700 lines, and one place to look is worth more here
+  // than three saved row-reads.
+  //
+  // ABSENT MEANS TAXABLE, everywhere. The column defaults true, so a missing map entry can
+  // only mean a row this code did not read — and silently exempting something the builder
+  // never exempted is the failure that shows up as an under-collected return.
+  const layoutTaxable = new Map<string, boolean>();
+  const fixtureTaxable = new Map<string, boolean>();
+  const colorTaxable = new Map<string, boolean>();
+  let styleTaxable = true;
+  if (!invoiceInGhl) {
+    try {
+      const [lt, ft, ct] = await Promise.all([
+        supabase.from("client_layout_items").select("item_key, taxable").eq("client_id", clientId),
+        supabase.from("fixture_items").select("id, taxable").eq("client_id", clientId),
+        supabase.from("colors").select("id, taxable").eq("client_id", clientId),
+      ]);
+      for (const r of (lt.data || []) as any[]) layoutTaxable.set(String(r.item_key), r.taxable !== false);
+      for (const r of (ft.data || []) as any[]) fixtureTaxable.set(String(r.id), r.taxable !== false);
+      for (const r of (ct.data || []) as any[]) colorTaxable.set(String(r.id), r.taxable !== false);
+    } catch (e) {
+      // A failed read leaves every map empty, which reads as "everything taxable" — the safe
+      // direction. Logged rather than swallowed: a builder whose exemptions silently stopped
+      // applying needs to find out from us, not from an auditor.
+      console.warn("taxability read failed; treating all lines as taxable:", (e as Error)?.message);
+    }
+  }
+
   try {
-    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate").eq("client_id", clientId);
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate, taxable").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
       styleImageUrl = styleRow.image_url || null;
       styleShowImage = styleRow.show_image_on_estimate !== false;
+      styleTaxable = styleRow.taxable !== false;
       const szRes = await supabase.from("building_sizes").select("id, base_price, label, width_ft, length_ft").eq("client_id", clientId).eq("style_id", styleRow.id);
       const sizeRow = (szRes.data || []).find((z: any) => norm(z.label) === norm(size));
       if (sizeRow && sizeRow.base_price != null) {
@@ -482,6 +536,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const creditNotes: string[] = [];  // per-declined-item notes appended to the building description
   let creditOverflow = 0;            // declined credit beyond the building price → falls back to a discount
   let discountTotal = 0;             // "+ Add Discount" rows → GHL invoice discount total
+  // The same rows, kept individually with the taxability the rep chose (migration 148). The
+  // collapsed `discountTotal` cannot carry it, and prorating one across both pools was
+  // explicitly rejected — Carolyn 2026-08-27, "discounts should select whether they are
+  // taxable or not. never assume."
+  const ssDiscountRows: { description: string; amount: number; taxable: boolean }[] = [];
   const buildingLine: any = {
     name: `${styleLabel} (${size})`,
     qty: 1,
@@ -493,7 +552,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     type: "one_time",
     description: "",   // size lives in the name; filled with the credit breakdown only when items are declined
   };
-  targetItems.push(tagLine(buildingLine, { kind: "building" }));
+  targetItems.push(tagLine(buildingLine, { kind: "building", nonTaxable: !styleTaxable }));
 
   // Add-on pricing — always from this tenant's layout_item_pricing table (keyed by item_key).
   // A style-specific override (style_id = the selected style) wins over the style_id IS NULL
@@ -595,7 +654,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         attachments: lp ? imgAttachments(lp.imageUrl) : [],
         currency: "USD", type: "one_time",
         description: description || "Included with this size",
-      }, { kind: "layout_item", itemKey: itemKey || "" }));
+      }, { kind: "layout_item", itemKey: itemKey || "", nonTaxable: layoutTaxable.get(String(itemKey || "")) === false }));
       // Under-placement credit: an AREA item placed SMALLER than its included quantity (e.g. a
       // 32 sq ft loft when 48 is included) credits the shortfall, baked into the building line like
       // a declined item. Scoped to sqft_option to stay in lock-step with the designer (lineal_ft /
@@ -651,7 +710,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: desc,
     };
-    targetItems.push(tagLine(item, { kind: "layout_item", itemKey: itemKey || "" }));
+    targetItems.push(tagLine(item, { kind: "layout_item", itemKey: itemKey || "", nonTaxable: layoutTaxable.get(String(itemKey || "")) === false }));
     if (method === "pct_estimate_total") deferredPctLines.push({ item, rate });
   };
 
@@ -679,6 +738,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   {
     let paintAmount = 0;
     let paintDesc = "Unpainted";
+    let paintTaxable = true;
     if (paintStatus === "Paint") {
       const b = String(selections.paintBodyColor || "TBD");
       const t = String(selections.paintTrimColor || "TBD");
@@ -700,15 +760,25 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           return palette.find((c) => norm(c.label) === norm(v)) || customRow || null;
         };
         const seen = new Set<string>();
+        // Body and trim collapse into ONE line, so a mixed pair has no representable answer.
+        // Resolved conservatively: the line is taxable unless EVERY charged colour on it is
+        // exempt. Erring the other way would exempt a taxable colour because the colour beside
+        // it was exempt, which under-collects — the one direction that costs the builder.
+        let anyPaintTaxable = false;
         for (const row of [resolve(selections.paintBodyColor), resolve(selections.paintTrimColor)]) {
-          if (row && !seen.has(row.id)) { seen.add(row.id); paintAmount += colorAmount(row); }
+          if (row && !seen.has(row.id)) {
+            seen.add(row.id);
+            paintAmount += colorAmount(row);
+            if (colorTaxable.get(String(row.id)) !== false) anyPaintTaxable = true;
+          }
         }
+        paintTaxable = seen.size === 0 || anyPaintTaxable;
       } catch { /* colors lookup failed → still emit the line at $0 */ }
     }
     targetItems.push(tagLine({
       name: "Paint Colors", qty: 1, amount: paintAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: paintDesc,
-    }, { kind: "paint" }));
+    }, { kind: "paint", nonTaxable: !paintTaxable }));
   }
 
   // ── Line 3: Roof ── shown whenever the tenant offers roofs (the designer then always sends a
@@ -718,6 +788,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const roofColor = String(selections.roofColor ?? "").trim();
     let roofAmount = 0;
     let roofDesc = "No roof selected";
+    let roofTaxable = true;
     if (roofType) {
       roofDesc = roofColor ? `${roofType} — ${roofColor}` : `${roofType} — (color TBD)`;
       if (roofColor && norm(roofColor) !== norm("TBD")) {
@@ -730,13 +801,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           const customRow = palette.find((c) => c.allow_custom);
           const row = palette.find((c) => norm(c.label) === norm(roofColor)) || customRow || null;
           roofAmount = colorAmount(row);
+          if (row) roofTaxable = colorTaxable.get(String(row.id)) !== false;
         } catch { /* colors lookup failed → still emit the line at $0 */ }
       }
     }
     targetItems.push(tagLine({
       name: "Roof", qty: 1, amount: roofAmount, priceId: "", productId: "",
       attachments: [], currency: "USD", type: "one_time", description: roofDesc,
-    }, { kind: "roof" }));
+    }, { kind: "roof", nonTaxable: !roofTaxable }));
   }
 
   if (summary.doubleDoors > 0) pushItem("Double Door", "doubleDoor", "", { count: summary.doubleDoors });
@@ -843,7 +915,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
         priceId: "", productId: "", attachments: atts,
         currency: "USD", type: "one_time", description: g.desc || "",
-      }, { kind: "door" }));
+      }, { kind: "door", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
     }
   }
 
@@ -930,7 +1002,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
           priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
           currency: "USD", type: "one_time", description: g.desc || "",
-        }, { kind: "ramp" }));
+        }, { kind: "ramp", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
       }
     }
     // --- simple ramps: priced from the tenant's single ramp price ---
@@ -948,13 +1020,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             name: "Ramp", qty: totalFt, amount: rampPrice,
             priceId: "", productId: "", attachments: atts,
             currency: "USD", type: "one_time", description: `${simpleRamps.length} ramp${simpleRamps.length > 1 ? "s" : ""} · priced per ft of door width`,
-          }, { kind: "ramp" }));
+          }, { kind: "ramp", nonTaxable: false }));   // simple ramp: no catalog row, no flag
         } else {
           targetItems.push(tagLine({
             name: "Ramp", qty: simpleRamps.length, amount: rampPrice,
             priceId: "", productId: "", attachments: atts,
             currency: "USD", type: "one_time", description: "",
-          }, { kind: "ramp" }));
+          }, { kind: "ramp", nonTaxable: false }));   // simple ramp: no catalog row, no flag
         }
       }
     }
@@ -1015,7 +1087,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         name: included ? g.name + " (included)" : g.name, qty: included ? g.qty : chargeable, amount: included ? 0 : g.price,
         priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
-      }, { kind: "window" }));
+      }, { kind: "window", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
     }
   }
 
@@ -1043,7 +1115,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         currency: "USD",
         type: "one_time",
         description: ro.dimensions ? String(ro.dimensions) : "",
-      }, { kind: "layout_item", itemKey: "roughOpening" }));
+      }, { kind: "layout_item", itemKey: "roughOpening", nonTaxable: layoutTaxable.get("roughOpening") === false }));
     });
   }
 
@@ -1051,8 +1123,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // duplicate subtitle). A reduction is NOT a custom option — it goes through the "+ Add Discount"
   // rows below (GHL discount total). A negative amount here is ignored so nothing silently bakes
   // into the building; only declined included items adjust the building price.
-  if (Array.isArray(customOptions)) {
-    customOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
+  if (Array.isArray(allowedCustomOptions)) {
+    allowedCustomOptions.filter((co: any) => co.name && String(co.name).trim()).forEach((co: any) => {
       const name = String(co.name).trim();
       const rawAmt = co.amount ? Number(co.amount) || 0 : 0;
       if (rawAmt < 0) return;   // reductions use the Discount button, not custom options
@@ -1061,7 +1133,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         name, qty, amount: rawAmt,
         priceId: "", productId: "", attachments: [],
         currency: "USD", type: "one_time", description: "",
-      }, { kind: "custom_option" }));
+        // Typed by the rep, so there is no catalog row to carry a flag — the choice rides on
+        // the option itself, the same way a discount row carries its own. Absent = taxable.
+      }, { kind: "custom_option", nonTaxable: co?.taxable === false }));
     });
   }
 
@@ -1174,6 +1248,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (amt <= 0) return;
       discountTotal += amt;
       const desc = String(d?.description ?? "").trim();
+      // Absent reads as TAXABLE — the designer's default for a new row, and the direction that
+      // never quietly removes money from the tax base.
+      ssDiscountRows.push({ description: desc, amount: amt, taxable: d?.taxable !== false });
       // Display-only $0 marker; the money moves in the invoice-level discount, which the
       // provenance records once as a synthetic top-level entry — so this line is skipped.
       targetItems.push(tagLine({
@@ -1221,7 +1298,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: "Delivery fee (non-taxable)",
       automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
-    }, { kind: "delivery", nonTaxable: true }));
+    }, { kind: "delivery", nonTaxable: !ssTaxDelivery }));
   }
 
   // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
@@ -1235,6 +1312,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // negative and GHL rejects the estimate ("amount must not be less than 0").
   const lineSubtotal = targetItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.amount) || 0), 0);
   let totalDiscount = Math.round((discountTotal + creditOverflow) * 100) / 100;
+  // The declined-item credit overflow is not a rep-chosen discount and has no taxability of its
+  // own: it is money coming off the BUILDING (the credits that would not fit inside the building
+  // line), so it follows the building's flag rather than defaulting to taxable.
+  if (creditOverflow > 0) {
+    ssDiscountRows.push({
+      description: "Declined included items",
+      amount: Math.round(creditOverflow * 100) / 100,
+      taxable: styleTaxable,
+    });
+  }
   if (totalDiscount > lineSubtotal) totalDiscount = Math.round(lineSubtotal * 100) / 100;
   // Declined credits are already baked into the building line amount; subtract the invoice
   // discount so the opportunity value matches the estimate total.
@@ -1437,6 +1524,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     version: 1,
     styleId: styleRowId,
     discount: totalDiscount > 0 ? totalDiscount : 0,
+    // Per-discount taxability, SS mode only (migration 148). `discount` above stays the single
+    // clamped number every existing reader expects; this is the breakdown the two-pool totals
+    // block is built from. Rows are UNCLAMPED — subtotalsFromSnapshot clamps each pool at >= 0
+    // independently, which is the behaviour that stops an over-discount on one pool from eating
+    // into the other.
+    ...(invoiceInGhl ? {} : {
+      discounts: {
+        taxable: round2(ssDiscountRows.filter((r) => r.taxable).reduce((a, r) => a + r.amount, 0)),
+        nonTaxable: round2(ssDiscountRows.filter((r) => !r.taxable).reduce((a, r) => a + r.amount, 0)),
+        rows: ssDiscountRows,
+      },
+    }),
     lines: targetItems
       .filter((li) => !lineProv.get(li)?.skip)
       .map((li) => {
@@ -1489,6 +1588,48 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }, 400);
     }
 
+    // ── Sales tax (migration 148) ───────────────────────────────────────────────────────
+    //
+    // Resolved HERE, before the document is built and before the change-order delta below, so
+    // both the PDF and `totalBefore`/`totalAfter` see the same tax-inclusive figures.
+    //
+    // A RESUBMIT RE-RESOLVES. That is the live-until-signed rule (Carolyn 2026-08-27): a quote
+    // is a live offer, so each time it is issued it is priced at today's rate for today's
+    // address. What freezes is the acceptance — customer-accept writes the rate it signed
+    // under into design_acceptances, because a later resubmit overwrites this snapshot.
+    //
+    // The tenant has a rate because portal-settings refuses to turn invoice_in_ghl off without
+    // one. Reaching here with NULL means the row was edited around the portal, and quoting an
+    // untaxed bill is the one outcome worth refusing over — the same posture the missing quote
+    // number takes immediately above.
+    if (ssTaxRate == null) {
+      return json({
+        error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+      }, 400);
+    }
+    const taxAddr = addressFrom(contact);
+    const resolved = await resolveRate(taxAddr, ssTaxRate);
+    {
+      const pools = subtotalsFromSnapshot(estimateLines)!;
+      const amount = taxOn(pools.taxableBase, resolved.rate);
+      // Stamped onto the object that is about to be persisted AND handed to the PDF builder, so
+      // the stored figure and the printed one are the same object, not two computations.
+      (estimateLines as Record<string, unknown>).tax = {
+        rate: resolved.rate,
+        amount,
+        label: ssTaxLabel,
+        taxableSubtotal: pools.taxable,
+        nonTaxableSubtotal: pools.nonTaxable,
+        taxableBase: pools.taxableBase,
+        nonTaxableNet: pools.nonTaxableNet,
+        source: resolved.source,
+        jurisdiction: resolved.jurisdiction,
+        address: { state: taxAddr.state, zip: taxAddr.zip },
+        resolvedAt: new Date().toISOString(),
+        ...(resolved.reason ? { reason: resolved.reason } : {}),
+      };
+    }
+
     // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).
     // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
     // URL, since this one is fetched server-side.
@@ -1512,6 +1653,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         dateIso: today,
         lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
         discount: estimateLines.discount,
+        // The two-pool totals block and the per-discount rows (migration 148). Both read the
+        // object just stamped above, so the printed figures ARE the persisted ones.
+        tax: (estimateLines as Record<string, any>).tax,
+        discountRows: (estimateLines as Record<string, any>).discounts?.rows ?? null,
         quoteTerms: quoteTerms || null,
         planPdfUrl: planUrl,
         onSheetSkipped: (r) => skippedSheets.push(r),

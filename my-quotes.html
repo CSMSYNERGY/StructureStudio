@@ -42,6 +42,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 .qc-meta{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:6px}
 .qc-date{font-size:12px;color:#64748B}
 .qc-total{font-size:15px;font-weight:700}
+/* Sales-tax breakdown (migration 148). Only rendered when the quote actually carries tax,
+   so a pre-tax quote's card is untouched. Tabular figures so the column lines up. */
+.qc-tax{margin-top:8px;font-size:12.5px;color:#475569;font-variant-numeric:tabular-nums}
+.qc-tax-row{display:flex;justify-content:space-between;gap:12px;padding:2px 0}
+.qc-tax-row.is-credit{color:#059669}
+.qc-tax-rule{border-top:1px solid #E2E8F0;margin:6px 0 4px}
+.qc-tax-total{display:flex;justify-content:space-between;gap:12px;font-size:15px;font-weight:800;color:#0F172A}
 .qc-thumb{display:block;width:100%;max-height:190px;object-fit:cover;border-radius:10px;margin-top:10px;background:#F1F5F9}
 .qc-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
 .qc-actions .btn{flex:1 1 auto;font-size:14px;padding:10px 14px}
@@ -556,9 +563,16 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       card.appendChild(line);
     }
 
-    // Date + total
+    // Date + total.
+    //
+    // When the quote carries sales tax the total moves DOWN into the breakdown block below,
+    // so it is not printed twice — the meta row keeps only the date. `hasTax` is the single
+    // switch for that, and it is false for every pre-tax quote, which keeps those cards
+    // byte-identical to what they were.
     var dateStr = fmtDate(q.date || q.createdAt || q.created_at || q.updatedAt || q.updated_at);
     var totalStr = fmtMoney(q.total != null ? q.total : (q.totalAmount != null ? q.totalAmount : q.total_amount));
+    var hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;
+    if (hasTax) totalStr = null;
     if (dateStr || totalStr) {
       var meta = document.createElement("div");
       meta.className = "qc-meta";
@@ -573,6 +587,37 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         meta.appendChild(totalEl);
       }
       card.appendChild(meta);
+    }
+
+    // The sales-tax breakdown (migration 148). Same pools the PDF prints, in the same order,
+    // so the screen and the document the customer was emailed cannot tell different stories.
+    if (hasTax) {
+      var tb = document.createElement("div");
+      tb.className = "qc-tax";
+      var addRow = function (label, value, credit) {
+        var r = document.createElement("div");
+        r.className = credit ? "qc-tax-row is-credit" : "qc-tax-row";
+        var l = document.createElement("div"); l.textContent = label;
+        var v = document.createElement("div"); v.textContent = value;
+        r.appendChild(l); r.appendChild(v); tb.appendChild(r);
+        return r;
+      };
+      addRow("Taxable", fmtMoney(q.taxable));
+      addRow("Non-taxable", fmtMoney(q.nonTaxable));
+      if (q.discount != null && q.discount > 0) addRow("Discount", "-" + fmtMoney(q.discount), true);
+      // The rate is a LABEL. The amount beside it is the figure that was charged — never
+      // rate x base recomputed in the browser, which is how a screen comes to disagree with
+      // a signed document by a cent.
+      var pct = (typeof q.taxRate === "number" && q.taxRate > 0)
+        ? " (" + String(Math.round(q.taxRate * 10000) / 100).replace(/\.0+$/, "") + "%)"
+        : "";
+      addRow((q.taxLabel || "Sales tax") + pct, fmtMoney(q.tax));
+      var rule = document.createElement("div"); rule.className = "qc-tax-rule"; tb.appendChild(rule);
+      var tot = document.createElement("div"); tot.className = "qc-tax-total";
+      var tl = document.createElement("div"); tl.textContent = "Total";
+      var tv = document.createElement("div"); tv.textContent = fmtMoney(q.total);
+      tot.appendChild(tl); tot.appendChild(tv); tb.appendChild(tot);
+      card.appendChild(tb);
     }
 
     // Pending change orders (SS mode): the builder changed something after the signature —
