@@ -586,14 +586,11 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   // How many setup steps are still open. Drives both the badge and whether the tab
   // exists at all: a builder who was never assigned a list should see no change here.
   const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
-  const [landed, setLanded] = useState(null);         // the once-only default sub-tab
   useEffect(() => {
     (async () => {
       const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) { setLanded("mine"); return; }
-      const open = data.filter((r) => !r.completed_at).length;
-      setSetupOpen({ total: data.length, open });
-      setLanded(open > 0 ? "setup" : "mine");
+      if (!data) return;
+      setSetupOpen({ total: data.length, open: data.filter((r) => !r.completed_at).length });
     })();
   }, []);
 
@@ -683,16 +680,16 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
     { id: "fixes",    label: "Bug Fixes",    dot: "#F59E0B", list: fixes,    empty: "No bug fixes to report right now." },
     { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
   ];
-  // Setup leads over even that while it is unfinished — it is what a new builder is here
-  // to do. Hidden entirely for tenants who were never assigned a list.
+  // Setup slots in SECOND — behind My Requests, which leads unconditionally (Carolyn's
+  // call). Hidden entirely for tenants who were never assigned a list, so nothing about
+  // this strip changes for them. Its remaining-steps badge is what draws a new builder
+  // over; it no longer takes the lead position to do it.
   if (setupOpen && setupOpen.total > 0) {
-    TABS.unshift({ id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
+    TABS.splice(1, 0, { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
-  // Land on whichever tab leads: setup while there are steps left, otherwise the
-  // builder's own requests. `landed` LATCHES that on the first read — recomputing it
-  // live would move the page out from under someone the moment they ticked their last
-  // step. An explicit choice (a click, or a /portal/releases/<sub> link) always wins.
-  const effTab = subtab || landed || "mine";
+  // An explicit choice — a click, or a /portal/releases/<sub> link — always wins; with
+  // none, the page lands on the leading tab.
+  const effTab = subtab || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
