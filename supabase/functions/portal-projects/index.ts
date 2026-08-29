@@ -1073,6 +1073,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ url: pub.publicUrl });
       }
 
+      // Remove one screenshot object. The bucket is public and orphans are cheap, but a
+      // capture that came out wrong (an operator screen, a stray name) should be
+      // REMOVABLE, not just unreferenced — this is the only delete path there is, since
+      // storage refuses SQL deletes and the CLI has no object rm here. Guarded to the
+      // one prefix setup_upload_image mints, so it can never reach another bucket's use.
+      case "setup_delete_image": {
+        const u = setupImageUrl(payload.imageUrl);
+        if (!u) return json({ error: "That is not a setup screenshot URL." }, 400);
+        const path = u.slice(SETUP_IMAGE_PREFIX.length - "steps/".length);
+        const { error } = await admin.storage.from("setup-screens").remove([path]);
+        if (error) throw error;
+        // Clear any rows still pointing at it — a 404 thumbnail helps nobody.
+        await admin.from("setup_template_items").update({ image_url: null }).eq("image_url", u);
+        await admin.from("tenant_setup_items").update({ image_url: null }).eq("image_url", u);
+        return json({ ok: true, removed: path });
+      }
+
       case "setup_template_delete": {
         const { error } = await admin.from("setup_template_items").delete().eq("id", str(payload.id, 40));
         if (error) throw error;
