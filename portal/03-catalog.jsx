@@ -756,7 +756,7 @@ function BillingView({ viewingLabel = null }) {
   // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
   // (in the cart) or already live, its member features are covered — shown "Included" and not
   // separately purchasable — and it satisfies the required base in place of Simple Layout.
-  const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"];
+  const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"];
   const suiteChosen = !!sel["full_suite"] || !!liveFeatures["full_suite"];
   const memberCovered = (feat) => SUITE_MEMBERS.includes(feat) && suiteChosen;
 
@@ -789,7 +789,24 @@ function BillingView({ viewingLabel = null }) {
   // Charged at checkout: first period of every cart item plus setup fees. Registering a
   // recurring never charges anything by itself — the server runs this as an immediate sale
   // and schedules the subscription's own first charge at the renewal. All cents.
-  const dueTodayCents = cartPlans.reduce((s, p) => s + (chargeOf(p) || 0), 0) + setupTotal;
+  const grossDueCents = cartPlans.reduce((s, p) => s + (chargeOf(p) || 0), 0) + setupTotal;
+  // UPGRADE CREDIT (migration 160). Moving to a bundle throws away prepaid time on the
+  // features it replaces; the server credits that unused time against today's charge only —
+  // the Suite still RENEWS at full price. `upgradeCredits` is keyed by bundle feature and
+  // only contains bundles this tenant can actually claim against, so an empty object (a new
+  // signup, or an older portal-billing) simply leaves the arithmetic where it was.
+  //
+  // This must be applied HERE rather than shown as a footnote: dueTodayCents is what the
+  // confirm dialog quotes, what getPaymentToken tokenizes, and what the server re-checks as
+  // confirmChargeCents. A credit the browser knew about but did not subtract would fail that
+  // handshake on every upgrade.
+  const upgradeCredits = (data && data.upgradeCredits) || {};
+  const cartCredit = cart.reduce((s, [f]) => s + ((upgradeCredits[f] && upgradeCredits[f].cents) || 0), 0);
+  // Capped at the charge: the server caps it the same way and turns the remainder into a
+  // later renewal date, so a negative total here would just disagree with the server.
+  const creditCents = Math.min(cartCredit, grossDueCents);
+  const dueTodayCents = grossDueCents - creditCents;
+  const creditSources = cart.flatMap(([f]) => (upgradeCredits[f] && upgradeCredits[f].sources) || []);
   const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
@@ -895,11 +912,19 @@ function BillingView({ viewingLabel = null }) {
       const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents };
       if (viewingLabel) {
         // Real money against THEIR card: confirm with the client named and the amount out loud.
-        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and charge ${fmt$(dueTodayCents)} today?
+        // A fully-credited upgrade charges nothing, and the dialog has to say THAT rather
+        // than "charge $0 today", which reads like a bug about to bill someone.
+        const what = dueTodayCents === 0 && creditCents > 0
+          ? `charge nothing today (${fmt$(creditCents)} credit covers it)`
+          : `charge ${fmt$(dueTodayCents)} today`;
+        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and ${what}?
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       } else if (!data.hasCard) {
-        body.paymentToken = await getPaymentToken(dueTodayCents);
+        // The card is still required when nothing is due — it is what the RENEWAL bills.
+        // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
+        // button, which invites "then why do you want my card?".
+        body.paymentToken = await getPaymentToken(dueTodayCents || null);
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -1231,9 +1256,30 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 {/* The first period is charged at checkout — the recurring only takes over
                     at renewal — so the number the card sees today is stated in bold before
                     the button, not discovered on a statement. */}
+                {/* The credit for prepaid time on the features this upgrade replaces. Named
+                    plan by plan: "a credit" is a number to be argued with, "your 3D View
+                    through 27 Aug 2027" is an explanation. */}
+                {creditCents > 0 && (
+                  <div style={{ marginTop: 6, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "8px 12px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>
+                      Credit for what you've already paid: −{fmt$(creditCents)}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#3F6212", marginTop: 2 }}>
+                      The unused part of {creditSources.map((x) => x.name).join(", ") || "your current features"} — they're
+                      replaced by this plan and cancelled, so you're not charged twice for the same months.
+                    </div>
+                  </div>
+                )}
                 <div style={{ marginTop: 4, fontSize: 14.5, color: "#1E293B" }}>
-                  Due today: <b style={{ color: "#3D3672" }}>{fmt$(dueTodayCents)}</b>
-                  <span style={{ fontSize: 12, color: "#64748B" }}> — first {yrTotal > 0 && moTotal > 0 ? "period" : yrTotal > 0 ? "year" : "month"}{setupTotal > 0 ? " + setup" : ""}. Renews automatically.</span>
+                  {/* A fully-credited upgrade charges NOTHING today. Saying "$0.00" reads as
+                      a broken cart; saying so in words reads as the deliberate outcome it is. */}
+                  {dueTodayCents === 0 && creditCents > 0 ? (<>
+                    Due today: <b style={{ color: "#3D3672" }}>Nothing</b>
+                    <span style={{ fontSize: 12, color: "#64748B" }}> — your credit covers this period in full. Renews automatically after it runs out.</span>
+                  </>) : (<>
+                    Due today: <b style={{ color: "#3D3672" }}>{fmt$(dueTodayCents)}</b>
+                    <span style={{ fontSize: 12, color: "#64748B" }}> — first {yrTotal > 0 && moTotal > 0 ? "period" : yrTotal > 0 ? "year" : "month"}{setupTotal > 0 ? " + setup" : ""}. Renews automatically.</span>
+                  </>)}
                 </div>
               </div>
               {/* An operator must never be the one entering a card: a Collect.js token is

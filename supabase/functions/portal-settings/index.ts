@@ -1212,6 +1212,41 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: "Real-Time Pricing is not part of your subscription — add it under Settings → Billing." }, 403);
     }
   }
+  // ENTITLEMENT, server-side, for the built-in CRM. Same posture as the RTP gate above and
+  // the same reason: featureOn() in the browser is presentation, not enforcement, so a direct
+  // POST must 403 here. crm is PAY-ONLY (portal-billing PAID_ONLY_FEATURES) and the Suite
+  // confers it (BUNDLE_FEATURES) — hasPaidFeature resolves both, so a Suite subscriber passes
+  // without this list knowing anything about bundles.
+  //
+  // WHY ONE GUARD RATHER THAN TWELVE: every crm_* action below reads or writes crm_contacts,
+  // crm_notes, crm_activities or the message threads hanging off them, and none of that is
+  // reachable any other way — the browser never does sb.from("crm_contacts") directly (see
+  // portal/02-sales.jsx, "NEVER a direct sb.from(...).update()"). So this one choke point is
+  // the whole paid surface, and a new crm_* action added later is gated by NAME PREFIX
+  // without anyone remembering to come back here. That is deliberate: the alternative, a
+  // hand-maintained Set like RTP_ACTIONS, is exactly the list that gets forgotten.
+  //
+  // NOT gated: `contact_activity`. It reads designs/design_versions by short_code — design
+  // history the free Pipeline list already shows — and is not CRM data. Gating it would take
+  // away something that was never part of this sale.
+  //
+  // ⚠️ NOR is `crm_record` when kind === "design", and that exception is load-bearing. The
+  // crm_ prefix is a lie about that one action: CrmRecord serves BOTH a contact record and a
+  // DESIGN record, and the design record is what opens when someone clicks a row in the free
+  // Pipeline list (11-shell.jsx routes it to d-<code>). Its branch reads `designs` only —
+  // no crm_contacts, no notes, no threads — so it is the design data a Simple Layout
+  // subscriber already pays for, wearing a CRM-shaped action name. Gating it would have
+  // locked the free list's own rows behind the CRM, which is neither what was sold nor what
+  // Carolyn asked for ("they only get the list view" — the list still has to WORK).
+  const crmGated = action.startsWith("crm_") &&
+    !(action === "crm_record" && payload?.kind === "design");
+  if (crmGated && !operator) {
+    let paid = false;
+    try { paid = await hasPaidFeature(admin, clientId, "crm"); }
+    catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
+    if (!paid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+  }
+
   // Re-apply after any RTP mutation: the SQL function no-ops unless the toggle is ON, and
   // recompute over a tenant's sizes is trivial, so the choke point that already gates the
   // write is also where prices stay current. Fails soft — the edit succeeded; a re-price

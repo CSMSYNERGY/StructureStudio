@@ -43,3 +43,52 @@ export const paidThroughOf = (
   for (let i = 0; i < 240 && end <= chargedUntil; i++) end = addInterval(end, interval);
   return end;
 };
+
+// The mirror of addInterval, going backwards, with the same end-of-month clamping. Used to
+// find where the CURRENT paid period began, given where it ends.
+export const subInterval = (ms: number, interval: string): number => {
+  const d = new Date(ms);
+  const yearly = /^(year|annual)/.test(String(interval).toLowerCase());
+  const day = d.getUTCDate();
+  const target = new Date(Date.UTC(
+    d.getUTCFullYear() - (yearly ? 1 : 0),
+    d.getUTCMonth() - (yearly ? 0 : 1),
+    1, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds(),
+  ));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return target.getTime();
+};
+
+// What a subscription's UNUSED prepaid time is worth, for crediting an upgrade (migration
+// 160). Checkout charges each period up front, so a builder who bought Simple Layout in July
+// and moves to the Suite in August has eleven months of paid-for time they have not consumed;
+// this is that money.
+//
+// Anchored on paidThroughOf, NOT on current_period_end — a subscription that has renewed at
+// the gateway still carries period 1's boundary in that column, and prorating against a date
+// in the past would credit nothing. The period START is one interval back from the true end,
+// so the denominator is the real length of the period being interrupted (365 or ~30 days),
+// never a nominal constant.
+//
+// Rounds HALF UP, the same direction chargeCentsFor rounds a discount: on the customer's side
+// of the deal. A cent of generosity per upgrade is the correct sign for this error.
+//
+// Returns 0 — never negative, never NaN — for anything with no prepaid time left: a legacy
+// bill-in-arrears row, a period that has already ended, a subscription that was never paid.
+export const unusedCreditOf = (
+  s: { price_cents?: number | null; current_period_end?: string | null; canceled_at?: string | null } | null | undefined,
+  interval: string,
+  now: number,
+): number => {
+  const end = paidThroughOf(s, interval);
+  if (!Number.isFinite(end) || end <= now) return 0;
+  const start = subInterval(end, interval);
+  const span = end - start;
+  if (!(span > 0)) return 0;
+  const paid = Number(s?.price_cents) || 0;
+  if (!(paid > 0)) return 0;
+  // Clamped: a period that somehow starts in the future credits the whole amount, not more.
+  const unusedFraction = Math.min(end - now, span) / span;
+  return Math.max(0, Math.round(paid * unusedFraction));
+};

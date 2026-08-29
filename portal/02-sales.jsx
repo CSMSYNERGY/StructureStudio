@@ -97,7 +97,7 @@ function RowMenu({ items, label = "More actions" }) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null }) {
   // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
   // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
   // pipelines ... this may become the pipeline view."
@@ -106,7 +106,15 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // exactly why it is cheap and why it lives here rather than in its own tab. The same
   // search, the same facets and the same status chips narrow both renderings, so a filter a
   // builder sets in the list is still set when they flip to the board.
+  // The BOARD is part of the built-in CRM ($400/mo, migration 160); the LIST is not, and
+  // never becomes so — Carolyn 2026-08-29: "they only get the list view". crmUnlocked
+  // defaults TRUE so that any caller that has not been taught about the prop (or an operator
+  // path) behaves exactly as before rather than silently locking a tab.
   const [view, setView] = useState("list");
+  // A locked tenant can hold no view but "list". Enforced here rather than only at the
+  // toggle: `view` also survives in this component across a refresh of the entitlement, and
+  // a builder who was mid-board when their subscription lapsed must not keep the board.
+  const shownView = crmUnlocked ? view : "list";
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -324,7 +332,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // silently holds back its tail would be read as an empty stage.
   const [pageSize, setPageSize] = usePageSize("designs");
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, view]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, shownView]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
@@ -337,13 +345,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         right={(
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
-              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => (
-                <button key={k} onClick={() => setView(k)}
-                  style={{
-                    background: view === k ? ACCENT : "#FFF", color: view === k ? "#FFF" : "#334155",
-                    border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
-                  }}>{label}</button>
-              ))}
+              {/* The Pipeline button stays VISIBLE when locked, with a padlock, and routes to
+                  Billing instead of switching view. Hiding it would make the thing being sold
+                  invisible to the only people who might buy it. */}
+              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => {
+                const locked = k === "pipeline" && !crmUnlocked;
+                return (
+                  <button key={k}
+                    title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
+                    onClick={() => { if (!locked) { setView(k); } else if (onSeeBilling) { onSeeBilling(); } }}
+                    style={{
+                      background: shownView === k ? ACCENT : "#FFF",
+                      color: shownView === k ? "#FFF" : (locked ? "#94A3B8" : "#334155"),
+                      border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700,
+                      cursor: locked && !onSeeBilling ? "default" : "pointer", fontFamily: "inherit",
+                    }}>{locked ? `🔒 ${label}` : label}</button>
+                );
+              })}
             </div>
             <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
           </div>
@@ -397,7 +415,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           read-only projection that sync-design-status overwrites on every list load, so a
           dragged card would snap back and look broken. Moving a deal by hand needs the
           local crm_stages table, which is the next increment, not this one. */}
-      {rows && filtered.length > 0 && view === "pipeline" && (
+      {rows && filtered.length > 0 && shownView === "pipeline" && (
         <div style={{ overflowX: "auto", paddingBottom: 4 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
             {CRM_STAGES.map((st) => {
@@ -434,7 +452,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </div>
         </div>
       )}
-      {rows && filtered.length > 0 && view === "list" && (
+      {rows && filtered.length > 0 && shownView === "list" && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>

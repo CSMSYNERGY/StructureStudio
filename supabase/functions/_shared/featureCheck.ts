@@ -24,9 +24,11 @@ import { paidThroughOf } from "./billingPeriods.ts";
 const GRACE_DAYS = 7;
 
 // One subscription that confers several features. full_suite unlocks everything except
-// Self Serve Displays — the same map portal-billing holds.
+// Self Serve Displays — the same map portal-billing holds. `crm` joined 2026-08-29 when the
+// Suite repriced to $11,950/yr to include it (migration 160); it is PAY-ONLY, and a bundle
+// conferring a pay-only feature is fine — a Suite subscription IS a real subscription.
 export const BUNDLE_FEATURES: Record<string, string[]> = {
-  full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"],
+  full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"],
 };
 
 // Plan features that confer `feature`: the feature itself plus every bundle containing it.

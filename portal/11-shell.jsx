@@ -786,6 +786,16 @@ function Dashboard({ session }) {
   // block inside Settings → Structures; the server re-checks the entitlement on every
   // rtp_* action regardless (_shared/featureCheck.ts).
   const rtpUnlocked = featureOn("on_demand_pricing");
+  // Built-in CRM ($400/mo, migration 160): the Contacts tab and the Pipeline BOARD. The
+  // pipeline LIST stays free for everyone — Carolyn 2026-08-29, "they only get the list
+  // view" — so this gates a view, not a data set, and DesignsTable takes it as a prop.
+  //
+  // Unlike scheduling and QuickBooks, this feature was already built, shipped and in daily
+  // use before it had a price, so turning this on TAKES something away from tenants who
+  // have it today. That was the explicit decision, not an oversight. Server side, every
+  // crm_* action in portal-settings re-checks the entitlement, so this is presentation
+  // over a real gate rather than the only gate.
+  const crmUnlocked = featureOn("crm");
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -1151,7 +1161,24 @@ function Dashboard({ session }) {
                 email address on file") in front of a contact whose address is rendered
                 directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
                 admin or owner always holds it, otherwise read the area out of the map. */}
-            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+            {/* A CONTACT record (c-) is CRM and needs the subscription; a DESIGN record (d-)
+                is not — it is what opens from the free Pipeline list, and its server branch
+                reads `designs` only. Same split the portal-settings gate makes, and the two
+                must agree or one of them produces a 403 the other never predicted. */}
+            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^c-/.test(sub) && !crmUnlocked ? (
+              <ComingSoon
+                title="Contacts"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+                blurb="Customer records are part of the built-in CRM — their designs and quotes, your notes, the texts and emails you've traded, and what needs doing next."
+                bullets={[
+                  "One record per customer: designs, quotes, notes and files",
+                  "Text and email them from inside the record — the thread stays",
+                  "Follow-up activities so nobody quietly goes cold",
+                ]}
+                cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                available
+              />
+            ) : !gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
@@ -1192,17 +1219,36 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin}
+                isAdmin={canAdmin} crmUnlocked={crmUnlocked}
+                onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
                 onOpenDesign={openInDesigner} />
             )}
-            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads. */}
+            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads.
+                Behind the built-in CRM subscription since migration 160; the nav item stays
+                visible (like Build Schedule) so the locked card can do the selling. */}
             {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
-              <LeadsTable key={"t-" + effClientId} clientId={effClientId}
-                fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
-                onOpenDesign={openInDesigner} />
+              crmUnlocked ? (
+                <LeadsTable key={"t-" + effClientId} clientId={effClientId}
+                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                  onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
+                  onOpenDesign={openInDesigner} />
+              ) : (
+                <ComingSoon
+                  title="Contacts"
+                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+                  blurb="Every buyer in one place, with the whole story attached — their designs and quotes, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline board comes with it, so you can see who's where at a glance."
+                  bullets={[
+                    "One record per customer: designs, quotes, notes and files",
+                    "Text and email them from inside the record — the thread stays",
+                    "Follow-up activities so nobody quietly goes cold",
+                    "The pipeline board view, alongside your list",
+                  ]}
+                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                  available
+                />
+              )
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount}
