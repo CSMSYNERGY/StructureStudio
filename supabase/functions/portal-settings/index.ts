@@ -17,12 +17,14 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // The change-order baseline, shared with submit-estimate so the two design_edit writers
 // cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
 // line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
 // this module — deploy both.
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { addressFrom } from "../_shared/contactAddress.ts";
+import { resolveRate, taxOn } from "../_shared/salesTax.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import {
@@ -5083,6 +5085,40 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // line the way submit-estimate would have (only when a type is actually chosen now).
     if (!sawRoof && next.roofType) {
       newSnap.lines.push({ kind: "roof", itemKey: "", name: "Roof", desc: roof.desc, qty: 1, amount: roof.amount, nonTaxable: false });
+    }
+
+    // ── Re-price the tax on the NEW lines (migration 158) ──────────────────────────────
+    //
+    // newSnap is a deep CLONE of the signed snapshot, so without this it carries that
+    // snapshot's `tax` object verbatim while its lines have just changed — and totalAfter is
+    // the number the customer is asked to approve. A change order that adds a taxable roof
+    // upcharge would be presented at the OLD tax, understating what they will owe.
+    //
+    // FRESH LOOKUP, per Carolyn 2026-08-27: the rate is re-resolved here rather than carried
+    // over, so a change order is priced at today's rate for the delivery address. Only when
+    // the snapshot already carried tax — a pre-tax design stays pre-tax, and no CRM-mode
+    // design ever enters this branch.
+    if (newSnap.tax) {
+      const { data: taxCs } = await admin.from("client_settings")
+        .select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle();
+      const resolvedCo = await resolveRate(addressFrom(d.contact), Number(taxCs?.ss_tax_rate) || 0);
+      const poolsCo = subtotalsFromSnapshot(newSnap);
+      if (poolsCo) {
+        newSnap.tax = {
+          rate: resolvedCo.rate,
+          amount: taxOn(poolsCo.taxableBase, resolvedCo.rate),
+          label: String(taxCs?.ss_tax_label || "Sales tax"),
+          taxableSubtotal: poolsCo.taxable,
+          nonTaxableSubtotal: poolsCo.nonTaxable,
+          taxableBase: poolsCo.taxableBase,
+          nonTaxableNet: poolsCo.nonTaxableNet,
+          source: resolvedCo.source,
+          jurisdiction: resolvedCo.jurisdiction,
+          address: { state: addressFrom(d.contact).state, zip: addressFrom(d.contact).zip },
+          resolvedAt: new Date().toISOString(),
+          ...(resolvedCo.reason ? { reason: resolvedCo.reason } : {}),
+        };
+      }
     }
 
     // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption

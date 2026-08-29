@@ -255,6 +255,15 @@ export async function pushQboInvoice(admin: any, clientId: string, args: PushArg
 
     // Total check is INFORMATION, not failure: automated sales tax can legitimately
     // differ from GHL's, and the invoice exists either way. >1¢ gets a note, keeps the id.
+    //
+    // WHAT IT COMPARES CHANGED with migration 158, and the comparison got MORE meaningful.
+    // `ghlTotal` is whatever the caller passed, and for an SS-mode invoice that is now
+    // totalFromSnapshot — tax-INCLUSIVE. QBO computes its own tax from the customer's address
+    // via Automated Sales Tax, so this is now Avalara's answer against Intuit's for the same
+    // sale, rather than a taxed figure against an untaxed one. A mismatch here is worth
+    // reading: it means the two engines disagree about the jurisdiction or the taxability of
+    // a line, which is exactly the kind of thing that surfaces in an audit and nowhere else.
+    // Still never a failure — the builder's own document is the one the customer signed.
     let note: string | null = null;
     const ghlTotal = Number(args.ghlTotal);
     if (Number.isFinite(ghlTotal) && ghlTotal > 0 && created.TotalAmt != null) {

@@ -11749,6 +11749,47 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 }}>{taxable ? "TAX" : "NO"}</button>
             );
 
+
+            // ── Which lines will NOT be taxed (migration 159) ───────────────────────────
+            // The flags ride in on get_config / get_fixtures, which emit `taxable` ONLY when
+            // it is false — so ABSENT means taxed, here and everywhere else this was wired.
+            // Read-only: nothing here changes a number. submit-estimate computes the tax
+            // server-side from the catalog tables; this exists so a rep can see an exemption
+            // BEFORE sending, instead of discovering it on the issued PDF.
+            const sameLabel = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+            const colorRow = (lbl) => (Array.isArray(C.colors) ? C.colors : []).find((c) => c && sameLabel(c.label, lbl));
+            // A paint or roof LINE collapses one or more colours, so it can only be exempt
+            // when every charged colour on it is — the same conservative rule submit-estimate
+            // applies, and erring the other way would under-state what gets taxed.
+            const coloursExempt = (labels) => {
+              const rows = labels.map(colorRow).filter(Boolean);
+              return rows.length > 0 && rows.every((c) => c.taxable === false);
+            };
+            const rowExempt = (r) => {
+              const k = String(r.key || "");
+              if (k === "building") {
+                const st = ((C && C.buildingStyles) || []).find((s) => s && s.value === sel.style);
+                return !!st && st.taxable === false;
+              }
+              if (k === "paint") return coloursExempt([sel.paintBodyColor, sel.paintTrimColor]);
+              if (k === "roof") return coloursExempt([sel.roofColor]);
+              if (k.indexOf("fx:") === 0 || k.indexOf("win:") === 0) {
+                const id = k.slice(k.indexOf(":") + 1);
+                const f = (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && String(x.id) === id);
+                return !!f && f.taxable === false;
+              }
+              const li = ((C && C.layoutItems) || {})[k];
+              return !!li && li.taxable === false;
+            };
+            // Only on lines that carry money: a $0 or "included" line is taxed at nothing
+            // either way, and marking it is noise. Hidden-pricing tenants see nothing.
+            const noTaxPill = (r) => (C.showPricing && Number(r.total) > 0 && rowExempt(r)) ? (
+              <span title="Not taxed — this line sits under the non-taxable subtotal on the quote and invoice."
+                style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase",
+                         background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A",
+                         borderRadius: 5, padding: "1px 5px", whiteSpace: "nowrap", verticalAlign: "middle" }}>no tax</span>
+            ) : null;
+
             const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
           <div style={{ marginTop: 8 }}>
@@ -11757,7 +11798,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {selRows.map((r) => (
                 <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
                     <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail}</div>
                   </div>
                   {r.total != null && (<>
@@ -11773,7 +11814,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {priceRows.map((r) => (
                   <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
                       <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
                     </div>
                     <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
