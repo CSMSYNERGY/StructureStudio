@@ -991,7 +991,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         <span style={{ fontSize: 20, lineHeight: 1 }}>⭐</span>
         <div>
           <div style={{ fontSize: 14.5, fontWeight: 800, letterSpacing: "-0.01em" }}>Founding Price</div>
-          <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 25 builders — lock in this rate now.</div>
+          <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 15 builders — lock in this rate on the features you select while founding pricing is open.</div>
         </div>
       </div>
 
