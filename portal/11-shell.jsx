@@ -1514,6 +1514,12 @@ function Dashboard({ session }) {
         />
       )}
 
+      {/* Operator quick-add: file an item onto a Projects board from anywhere in the
+          portal (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a
+          bug while inside a builder's account is exactly when you want it, and unlike
+          the Feedback bubble above there is no tenant attribution to get wrong. */}
+      {isOperator && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
+
       {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
           verified session's user id — the browser never says whose row to update. */}
       {profileOpen && (

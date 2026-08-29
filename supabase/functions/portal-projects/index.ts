@@ -708,11 +708,22 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       // ── Items ─────────────────────────────────────────────────────────────
       case "create_item": {
         const boardId = str(payload.boardId, 40);
-        const groupId = str(payload.groupId, 40);
+        let groupId = str(payload.groupId, 40);
         const name = str(payload.name, 200);
         if (!name) return json({ error: "Item name is required." }, 400);
-        const { data: group } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
-        if (!group || group.board_id !== boardId) return json({ error: "Group is not on this board." }, 400);
+        if (groupId) {
+          const { data: group } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
+          if (!group || group.board_id !== boardId) return json({ error: "Group is not on this board." }, 400);
+        } else {
+          // No group named — the quick-add path (filed from anywhere in the portal, where
+          // the caller can't see the board). Land it where a new arrival belongs: the
+          // board's INTAKE group (migration 152, radio semantics), else the first group.
+          const { data: gs } = await admin.from("pm_groups").select("id, intake, position")
+            .eq("board_id", boardId).order("position");
+          const g = (gs || []).find((x) => x.intake) || (gs || [])[0];
+          if (!g) return json({ error: "That board has no groups." }, 400);
+          groupId = g.id;
+        }
         const [columns, opIds] = await Promise.all([boardColumns(boardId), personIdSet()]);
         const values = sanitizeValues(columns, payload.values, opIds);
         const { data: maxRow } = await admin.from("pm_items").select("position")
@@ -723,7 +734,16 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           created_by: user.id, created_by_email: actorEmail,
         }).select().single();
         if (error) throw error;
-        await act(boardId, item.id, "create_item", { name });
+        // Quick-add can carry a first note (what was seen, where) — an ordinary INTERNAL
+        // update, so the thread starts with the context instead of a bare title.
+        const note = str(payload.note, 4000);
+        if (note) {
+          await admin.from("pm_updates").insert({
+            item_id: item.id, author_email: actorEmail, body: note,
+            client_visible: false, attachments: [],
+          });
+        }
+        await act(boardId, item.id, "create_item", note ? { name, via: "quick_add" } : { name });
         await propagateStatus(item, columns, values, {});
         return json({ item });
       }

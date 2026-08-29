@@ -1434,3 +1434,118 @@ function ProjectsTab({ sub, onSub }) {
     </div>
   );
 }
+
+
+// ── Quick-add: file a board item from ANYWHERE in the portal ─────────────────
+// Carolyn 2026-08-29: "I need a way to add items to the boards from inside SS."
+// The board's own ＋ Add item only exists on the Projects tab; the moment you actually
+// NOTICE something is while using the rest of the product — often while viewing a
+// builder's account. This is a floating operator-only button (it deliberately stays
+// visible in view-as, unlike the tenant Feedback bubble, because internal items carry
+// no tenant attribution to get wrong). The item lands in the chosen board's INTAKE
+// group server-side, and the note — pre-filled with where you were standing — becomes
+// the thread's first internal update.
+function PMQuickAdd({ viewingClientId }) {
+  const [open, setOpen] = useState(false);
+  const [boards, setBoards] = useState(null);
+  const [boardId, setBoardId] = useState("");
+  const [title, setTitle] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(null);   // created item name, for the flash
+
+  const openIt = () => {
+    setOpen(true); setDone(null); setErr("");
+    // Where the operator was standing when they hit ＋ — half of most bug reports.
+    const where = window.location.pathname.replace(/^\/portal(\.html)?\/?/, "/") || "/";
+    setNote("Filed from " + where + (viewingClientId ? " while viewing " + viewingClientId : "") + " — ");
+    if (!boards) {
+      pmCall({ action: "list_boards" }).then((d) => {
+        setBoards(d.boards || []);
+        // Bugs is where a spotted problem goes 9 times in 10 — preselect it.
+        const bugs = (d.boards || []).find((b) => b.slug === "bugs");
+        setBoardId((cur) => cur || (bugs ? bugs.id : ((d.boards || [])[0] || {}).id || ""));
+      }).catch((e) => setErr(e.message));
+    }
+  };
+
+  const file = async () => {
+    const name = title.trim();
+    if (!name || !boardId || busy) return;
+    setBusy(true); setErr("");
+    try {
+      // No groupId on purpose: the server lands it in the board's intake group. A note
+      // that is ONLY the prefill (ends with the em-dash) is dropped — nothing was said.
+      const body = { action: "create_item", boardId, name };
+      const n = note.trim();
+      if (n && !/—\s*$/.test(n)) body.note = n;
+      await pmCall(body);
+      setDone(name); setTitle("");
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  if (!open) {
+    return (
+      <button onClick={openIt} aria-label="Add a board item" title="Add an item to a Projects board"
+        style={{
+          position: "fixed", right: 20, bottom: 72, zIndex: 900,
+          background: "#1E293B", color: "#FFF", border: "none", borderRadius: 999,
+          padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+          boxShadow: "0 4px 14px rgba(0,0,0,0.25)", fontFamily: "inherit",
+        }}>
+        ＋ Board item
+      </button>
+    );
+  }
+
+  return (
+    <div style={{
+      position: "fixed", right: 20, bottom: 72, zIndex: 950, width: 360, maxWidth: "calc(100vw - 40px)",
+      background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 14, padding: 16,
+      boxShadow: "0 10px 34px rgba(15,23,42,0.28)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>Add a board item</span>
+        <button type="button" onClick={() => setOpen(false)} aria-label="Close"
+          style={{ marginLeft: "auto", background: "none", border: "none", fontSize: 16, color: "#94A3B8", cursor: "pointer", padding: 2, lineHeight: 1 }}>✕</button>
+      </div>
+
+      {done ? (
+        <div>
+          <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>
+            "{done}" is on the board, in its incoming group.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={() => setDone(null)}
+              style={{ ...S.btn(ACCENT, "#FFF"), padding: "7px 14px", fontSize: 12.5 }}>Add another</button>
+            <button type="button" onClick={() => setOpen(false)}
+              style={{ ...S.btn("#F1F5F9", "#334155"), padding: "7px 14px", fontSize: 12.5 }}>Done</button>
+          </div>
+        </div>
+      ) : (
+        <div>
+          {err && <div style={{ ...S.err, marginBottom: 8 }}>{err}</div>}
+          <span style={S.lbl}>Board</span>
+          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => setBoardId(e.target.value)}>
+            {boards === null && <option value="">Loading boards…</option>}
+            {(boards || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+          <span style={S.lbl}>What is it?</span>
+          <input autoFocus style={{ ...S.input, marginBottom: 8 }} value={title} maxLength={200}
+            placeholder="Short title — like a board item name"
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") file(); if (e.key === "Escape") setOpen(false); }} />
+          <span style={S.lbl}>Details (optional — becomes the first note)</span>
+          <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 10 }}
+            value={note} onChange={(e) => setNote(e.target.value)} />
+          <button type="button" onClick={file} disabled={busy || !title.trim() || !boardId}
+            style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy || !title.trim() || !boardId ? 0.6 : 1 }}>
+            {busy ? "Adding…" : "Add to board"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
