@@ -2395,6 +2395,24 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                     Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
                     {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
                   </div>
+                  {/* THE BUILDING SERIAL (163). Carolyn, 2026-08-28 @59:25: "it'll be a serial
+                      number. It's considered a serial number. They will literally write this
+                      in the building. They can make tabs or something for the building."
+                      Monospace and selectable because the whole job of this string is to be
+                      copied onto a physical tag without a transcription error.
+
+                      Before the building is built there is deliberately NO fake serial here.
+                      The date block IS the build date, so a preview would print a number that
+                      later changes -- and a serial that changes after someone has written it
+                      on a building is worse than one that arrives late. The absent state says
+                      when it will appear instead. */}
+                  <div style={{ fontSize: 12, marginTop: 5 }}>
+                    {o.building_serial ? (
+                      <span title="This building's serial number — write this on the tag" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
+                    ) : (
+                      <span style={{ color: "#94A3B8" }}>Serial number is assigned when the building is marked built.</span>
+                    )}
+                  </div>
                 </div>
                 <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
               </div>
