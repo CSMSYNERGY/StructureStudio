@@ -768,6 +768,34 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, fullName, phone });
   }
 
+// ── WHAT A COLOUR SAVE ACTUALLY FAILED ON ────────────────────────────────────────────
+// Carolyn read a Postgres error out loud on the 2026-08-28 call (@55:00): "the color is
+// skipped, black is a duplicate key, it violates the unique constraint of colors, client and
+// ID label key." She then proposed working around it by renaming the colours BLM and BLS.
+//
+// TWO SEPARATE FAILURES WERE HAPPENING THERE. The constraint itself was wrong -- fixed in
+// 161, a colour name is unique within a SECTION now -- and, underneath that, `save_colors`
+// was pasting the driver's raw text into the response, so the one person who could not act
+// on a constraint name was the only person who ever saw it.
+//
+// This translates the constraints we own into a sentence naming what to do. Anything
+// unrecognised still falls through to the raw message: inventing a friendly wrapper for an
+// error nobody has seen yet just hides the next surprise.
+function colorSaveReason(err: { message?: string; code?: string }, label: string, section: string): string {
+  const raw = String(err?.message ?? "");
+  const where = section === "shingle" ? "shingle colours" : section === "metal" ? "metal colours" : "paint colours";
+  if (err?.code === "23505" || /duplicate key|unique constraint/i.test(raw)) {
+    if (/_code_uniq/.test(raw)) {
+      return `another colour in your ${where} already uses that code. Codes have to be unique inside a section because they become part of a building's serial number.`;
+    }
+    if (/_label_uniq|client_id_label_key/.test(raw)) {
+      return `you already have a colour called "${label}" in your ${where}. The same name in a DIFFERENT section is fine — a shingle Black and a metal Black can both exist.`;
+    }
+    return `something with those details already exists in your ${where}.`;
+  }
+  return raw;
+}
+
   if (action === "status") {
     // The caller's own preferences row. Best-effort: a failure here must never stop the
     // bootstrap call that every role depends on to learn its access map.
@@ -2677,7 +2705,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const res = isExisting
         ? await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid)
         : await admin.from("colors").insert(rec);
-      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      if (res.error) {
+        // Section derived from the row's OWN flags, using the same predicate as 161's
+        // indexes -- so the sentence names the palette the collision actually happened in.
+        const sect = rec.shingle ? "shingle" : rec.metal ? "metal" : "paint";
+        skipped.push(`${label}: ${colorSaveReason(res.error, label, sect)}`);
+        i++; continue;
+      }
       saved++; i++;
     }
     const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
