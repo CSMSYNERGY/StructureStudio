@@ -353,3 +353,58 @@ Deno.test("orderCentsFromSnapshot returns null with no snapshot", () => {
   assertEquals(orderCentsFromSnapshot(null), null);
   assertEquals(orderCentsFromSnapshot({}), null);
 });
+
+// ── The invoice reconciliation, once tax exists (migration 158) ──────────────────────────
+// amendedInvoiceDocument reconciles the printed lines against the ORDER in subtotal space —
+// sum(qty x amount) - discount, the PDF's own arithmetic — and since 158 the PDF adds a tax
+// row ON TOP of that sum. orders.total_cents is tax-INCLUSIVE now, so handing it the total
+// would leave the two disagreeing by exactly the tax and it would invent a balancing
+// "Change order" line worth the sales tax on EVERY invoice. portal-settings' loadAmendments
+// therefore passes pretax_subtotal_cents. These pin both halves: the fix works, and the bug
+// it replaced is genuinely detectable rather than merely asserted away.
+
+const TAXED = {
+  version: 1, discount: 0,
+  lines: [
+    { kind: "building", itemKey: "", name: "Utility (12x24)", desc: "", qty: 1, amount: 9400 },
+    { kind: "custom_option", itemKey: "", name: "Setup", desc: "", qty: 1, amount: 500 },
+    { kind: "layout_item", itemKey: "workbench", name: "Workbench", desc: "", qty: 8, amount: 25, nonTaxable: true },
+  ],
+  // The live SST-5012 figures: taxable 9,900 / non-taxable 200 / 7.25% => 717.75.
+  tax: { rate: 0.0725, amount: 717.75, label: "Sales tax", taxableSubtotal: 9900,
+         nonTaxableSubtotal: 200, taxableBase: 9900, nonTaxableNet: 200, source: "fallback" },
+};
+
+Deno.test("a taxed invoice given the PRETAX order total invents no change-order line", () => {
+  // 10,100 pre-tax; the order row carries 1,010,000 pretax cents beside 1,081,775 total.
+  const doc = amendedInvoiceDocument(TAXED, [], 1010000);
+  assertEquals(doc.lines.length, TAXED.lines.length, "no synthetic line was added");
+  assertEquals(round2(doc.total), 10100, "the document foots to the PRE-tax figure");
+  // The PDF then adds the tax row on top, landing on what the customer actually owes.
+  assertEquals(round2(doc.total + 717.75), 10817.75, "pretax + tax = the order total");
+});
+
+Deno.test("THE BUG: the same call given the TAX-INCLUSIVE total fabricates a line worth the tax", () => {
+  // This is what shipping without the loadAmendments fix would have produced — on every
+  // single SS invoice, itemised and plausible.
+  const doc = amendedInvoiceDocument(TAXED, [], 1081775);
+  const invented = doc.lines.length - TAXED.lines.length;
+  assertEquals(invented > 0, true, "a phantom line appears — which is why the fix exists");
+  assertEquals(round2(doc.total), 10817.75, "and it foots to a tax-inclusive figure the PDF would then tax again");
+});
+
+Deno.test("an acknowledged change order still reaches a taxed bill", () => {
+  // The CO adds $300; the order's pretax subtotal moves to 10,400. The CO line must appear
+  // AND the document must foot to the pretax figure, both at once.
+  const co = [{ co_no: 1, description: "Added ridge vent", total_before_cents: 1010000, total_after_cents: 1040000 }];
+  const doc = amendedInvoiceDocument(TAXED, co as any, 1040000);
+  assertEquals(round2(doc.total), 10400, "foots to the amended PRE-tax figure");
+  assertEquals(doc.lines.length > TAXED.lines.length, true, "the change order is a real line on the bill");
+});
+
+Deno.test("an untaxed order is unaffected — pretax and total are the same number", () => {
+  const plain = { version: 1, discount: 0, lines: TAXED.lines };
+  const doc = amendedInvoiceDocument(plain, [], 1010000);
+  assertEquals(doc.lines.length, plain.lines.length);
+  assertEquals(round2(doc.total), 10100);
+});

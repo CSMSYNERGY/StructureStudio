@@ -11,7 +11,7 @@ Deno.env.set("AVALARA_ACCOUNT_ID", "test-account");
 Deno.env.set("AVALARA_LICENSE_KEY", "test-key");
 Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
 
-const { resolveRate, taxOn, taxable, isConfigured } = await import("./salesTax.ts");
+const { resolveRate, taxOn, taxable, isConfigured, stateCode } = await import("./salesTax.ts");
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -175,4 +175,41 @@ Deno.test("taxOn is 0 for a zero base or a zero rate, never NaN", () => {
   for (const [base, rate] of [[0, 0.07], [12450, 0], [-5, 0.07], [NaN, 0.07], [12450, NaN]]) {
     assertEquals(taxOn(base as number, rate as number), 0, `${base} @ ${rate}`);
   }
+});
+
+// ── The region code Avalara actually wants ───────────────────────────────────────────────
+// The designer's state field is a full-name dropdown, so real contacts carry "Missouri", not
+// "MO". Avalara's `region` wants the code. This was found against live contact rows on
+// 2026-08-29, BEFORE Avalara was switched on — the failure mode is the nasty kind: the lookup
+// quietly answers wrong or not at all, the fallback rate covers it, and everything looks fine.
+
+Deno.test("a full state name becomes the code Avalara expects", () => {
+  assertEquals(stateCode("Missouri"), "MO");
+  assertEquals(stateCode("new york"), "NY");
+  assertEquals(stateCode("  Tennessee  "), "TN");
+  assertEquals(stateCode("District of Columbia"), "DC");
+});
+
+Deno.test("an already-correct code passes straight through", () => {
+  assertEquals(stateCode("MO"), "MO");
+  assertEquals(stateCode("mo"), "MO");
+});
+
+Deno.test("an unmappable state is empty, and that makes the address untaxable", () => {
+  // Better to fall back on the tenant's own rate than to ask Avalara about a place it cannot
+  // parse and bill the customer whatever comes back.
+  assertEquals(stateCode("Freedonia"), "");
+  assertEquals(stateCode(""), "");
+  assertEquals(stateCode(null), "");
+  assertEquals(taxable({ street: null, city: null, state: "Freedonia", zip: "63090" }), false);
+  assertEquals(taxable({ street: null, city: null, state: "Missouri", zip: "63090" }), true);
+});
+
+Deno.test("the request carries the CODE, not the name — the whole point", async () => {
+  let seen = "";
+  await withFetch(
+    (url) => { seen = url; return ok({ totalRate: 0.0725, rates: [] }); },
+    async () => { await resolveRate({ street: null, city: "Washington", state: "Missouri", zip: "63090" }, FALLBACK); },
+  );
+  assertEquals(new URL(seen).searchParams.get("region"), "MO");
 });

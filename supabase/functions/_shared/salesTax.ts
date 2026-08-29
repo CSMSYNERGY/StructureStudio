@@ -68,11 +68,49 @@ function sane(rate: unknown): number | null {
   return Math.round(n * 100000) / 100000; // numeric(7,5), the column it is stored in
 }
 
+/**
+ * US state NAME -> two-letter code.
+ *
+ * The designer's state field is a full-name dropdown ("Missouri"), not a code — see the
+ * contact rows in production, and the commit that replaced the 2-letter input. Avalara's
+ * `region` parameter wants the CODE. Passing "Missouri" is not a hard error, it is worse:
+ * the lookup quietly fails or answers for the wrong place, and because a failed lookup falls
+ * back to the tenant's own rate the whole thing looks like it is working. Found while testing
+ * against real contacts on 2026-08-29, before Avalara was ever switched on.
+ *
+ * An already-correct 2-letter code passes through untouched, so both shapes are accepted for
+ * as long as both exist in the data.
+ */
+const STATE_CODES: Record<string, string> = {
+  alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA",
+  colorado: "CO", connecticut: "CT", delaware: "DE", "district of columbia": "DC",
+  florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN",
+  iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD",
+  massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS", missouri: "MO",
+  montana: "MT", nebraska: "NE", nevada: "NV", "new hampshire": "NH", "new jersey": "NJ",
+  "new mexico": "NM", "new york": "NY", "north carolina": "NC", "north dakota": "ND",
+  ohio: "OH", oklahoma: "OK", oregon: "OR", pennsylvania: "PA", "rhode island": "RI",
+  "south carolina": "SC", "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT",
+  vermont: "VT", virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI",
+  wyoming: "WY", "puerto rico": "PR",
+};
+
+/** The two-letter region Avalara expects, from whatever shape the contact holds. */
+export function stateCode(state: unknown): string {
+  const raw = String(state ?? "").trim();
+  if (!raw) return "";
+  if (/^[A-Za-z]{2}$/.test(raw)) return raw.toUpperCase();
+  return STATE_CODES[raw.toLowerCase()] ?? "";
+}
+
 /** Is there enough address to ask about? A rate lookup needs the jurisdiction, and postcode +
  *  region is the least that identifies one. `hasDestination` in contactAddress.ts is a LOOSER
  *  test (city OR zip) because a delivery stop can be placed from a town name; tax cannot. */
 export function taxable(addr: TaxAddress): boolean {
-  return !!(addr?.zip && addr?.state);
+  // The state must be one we can turn into a REGION CODE. A name Avalara would not
+  // understand is not a jurisdiction we can ask about, and asking anyway buys a wrong
+  // answer dressed as a right one.
+  return !!(addr?.zip && stateCode(addr?.state));
 }
 
 export function isConfigured(): boolean {
@@ -111,7 +149,7 @@ async function avalaraRate(addr: TaxAddress): Promise<{ rate: number; jurisdicti
   const qs = new URLSearchParams({
     line1: addr.street || "",
     city: addr.city || "",
-    region: addr.state || "",
+    region: stateCode(addr.state),
     postalCode: addr.zip || "",
     country: "US",
   });
