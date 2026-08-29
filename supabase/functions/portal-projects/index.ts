@@ -735,17 +735,22 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         }).select().single();
         if (error) throw error;
         // Quick-add can carry a first note (what was seen, where) — an ordinary INTERNAL
-        // update, so the thread starts with the context instead of a bare title.
+        // update, so the thread starts with the context instead of a bare title. Returned
+        // to the caller because screenshots attach to an UPDATE (the pm-attachments
+        // model), and the quick-add uploads its staged files onto this one right after.
         const note = str(payload.note, 4000);
+        let update = null;
         if (note) {
-          await admin.from("pm_updates").insert({
+          const ins = await admin.from("pm_updates").insert({
             item_id: item.id, author_email: actorEmail, body: note,
             client_visible: false, attachments: [],
-          });
+          }).select().single();
+          if (ins.error) throw ins.error;
+          update = ins.data;
         }
         await act(boardId, item.id, "create_item", note ? { name, via: "quick_add" } : { name });
         await propagateStatus(item, columns, values, {});
-        return json({ item });
+        return json({ item, update });
       }
 
       case "update_item": {

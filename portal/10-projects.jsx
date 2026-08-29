@@ -1451,9 +1451,21 @@ function PMQuickAdd({ viewingClientId }) {
   const [boardId, setBoardId] = useState("");
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
+  const [files, setFiles] = useState([]);   // staged; uploaded AFTER the item exists
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [done, setDone] = useState(null);   // created item name, for the flash
+  const [done, setDone] = useState(null);   // { name, attached } for the flash
+
+  // Screenshots live in the clipboard (Win+Shift+S), so pasting anywhere on the card
+  // stages the image — same as picking it with the button.
+  const stage = (list) => {
+    const add = [...(list || [])].filter((f) => f && f.size);
+    if (add.length) setFiles((cur) => [...cur, ...add].slice(0, 10));
+  };
+  const onPaste = (e) => {
+    const imgs = [...(e.clipboardData?.files || [])];
+    if (imgs.length) { e.preventDefault(); stage(imgs); }
+  };
 
   const openIt = () => {
     setOpen(true); setDone(null); setErr("");
@@ -1476,12 +1488,21 @@ function PMQuickAdd({ viewingClientId }) {
     setBusy(true); setErr("");
     try {
       // No groupId on purpose: the server lands it in the board's intake group. A note
-      // that is ONLY the prefill (ends with the em-dash) is dropped — nothing was said.
+      // that is ONLY the prefill (ends with the em-dash) is dropped — nothing was said —
+      // UNLESS files are staged: attachments hang off an update, so one is created
+      // anyway, and the where-you-were prefill is worth keeping alongside a screenshot.
       const body = { action: "create_item", boardId, name };
       const n = note.trim();
-      if (n && !/—\s*$/.test(n)) body.note = n;
-      await pmCall(body);
-      setDone(name); setTitle("");
+      if ((n && !/—\s*$/.test(n)) || files.length) body.note = n || "Screenshot attached.";
+      const d = await pmCall(body);
+      // The item + note stand even if an upload fails — the PMItemPanel contract: a bad
+      // file loses only itself, and the error names it.
+      let attached = 0;
+      for (const f of files) {
+        try { await pmUploadTo(d.item.id, d.update.id, f); attached++; }
+        catch (e) { setErr(e.message); }
+      }
+      setDone({ name, attached }); setTitle(""); setFiles([]);
     } catch (e) { setErr(e.message); }
     setBusy(false);
   };
@@ -1501,7 +1522,7 @@ function PMQuickAdd({ viewingClientId }) {
   }
 
   return (
-    <div style={{
+    <div onPaste={onPaste} style={{
       position: "fixed", right: 20, bottom: 72, zIndex: 950, width: 360, maxWidth: "calc(100vw - 40px)",
       background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 14, padding: 16,
       boxShadow: "0 10px 34px rgba(15,23,42,0.28)",
@@ -1515,7 +1536,7 @@ function PMQuickAdd({ viewingClientId }) {
       {done ? (
         <div>
           <div style={{ background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#047857", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}>
-            "{done}" is on the board, in its incoming group.
+            "{done.name}" is on the board, in its incoming group{done.attached ? ` — ${done.attached} screenshot${done.attached === 1 ? "" : "s"} attached` : ""}.
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={() => setDone(null)}
@@ -1538,8 +1559,26 @@ function PMQuickAdd({ viewingClientId }) {
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") file(); if (e.key === "Escape") setOpen(false); }} />
           <span style={S.lbl}>Details (optional — becomes the first note)</span>
-          <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 10 }}
+          <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 8 }}
             value={note} onChange={(e) => setNote(e.target.value)} />
+          {/* Staged screenshots — uploaded once the item exists. Paste works anywhere on
+              this card (Win+Shift+S → Ctrl+V), the button is the fallback. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            {files.map((f, i) => (
+              <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 700, color: "#334155", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "3px 9px", maxWidth: 200 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🖼 {f.name}</span>
+                <button type="button" aria-label={"Remove " + f.name}
+                  onClick={() => setFiles((cur) => cur.filter((_, j) => j !== i))}
+                  style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", padding: 0, fontSize: 12, lineHeight: 1 }}>✕</button>
+              </span>
+            ))}
+            <label style={{ fontSize: 12, fontWeight: 700, color: "#1B7895", cursor: "pointer" }}>
+              📎 Attach screenshot
+              <input type="file" multiple accept="image/*,video/*,.pdf" style={{ display: "none" }}
+                onChange={(e) => { stage(e.target.files); e.target.value = ""; }} />
+            </label>
+            <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste one here</span>
+          </div>
           <button type="button" onClick={file} disabled={busy || !title.trim() || !boardId}
             style={{ ...S.btn(ACCENT, "#FFF"), width: "100%", opacity: busy || !title.trim() || !boardId ? 0.6 : 1 }}>
             {busy ? "Adding…" : "Add to board"}
