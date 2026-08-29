@@ -2578,6 +2578,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
     ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
     ["billing", "Billing", "Your StructureStudio subscription"],
@@ -2655,6 +2656,12 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         ? <QuickBooksView clientId={clientId} viewingLabel={viewingLabel} />
         : <QuickBooksLocked canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />)}
       {sub === "email" && <EmailSendingView clientId={clientId} viewingLabel={viewingLabel} />}
+      {/* Self-serve carrier registration. canEdit mirrors the server's own split: reading the
+          status is contacts-level, but every action that submits or spends is
+          settings_billing:'edit'. The component still renders read-only for everyone else
+          rather than vanishing — a rep should be able to see that texting is coming. */}
+      {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
+        canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
           schedule tabs (operator, or the tenant's schedule_builds subscription). */}

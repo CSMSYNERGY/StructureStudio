@@ -1022,7 +1022,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
   const [subState, setSubState] = useState("clients");
   const setSub = onSub || setSubState;
   // The LAST REAL sub-tab, not ADM_TABS[0], is the fallback when the prop is null — and the
-  // prop goes null constantly: 11-shell passes `sub={activeTab === "admin" ? sub : null}` and
+  // prop goes null constantly: 12-shell passes `sub={activeTab === "admin" ? sub : null}` and
   // its navigate() nulls `sub` on every plain nav click. Collapsing to "clients" there flips
   // `needsClient` false, which unmounts AdminClientPanes and bins exactly the staged work the
   // console is kept mounted to protect — 12 ticked items under a "12 unsaved changes" banner,

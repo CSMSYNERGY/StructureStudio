@@ -72,7 +72,7 @@ const SS_ERR_SOURCE = "portal";
 // portal-settings reports it resolved — the one tenant id this page is handed as fact rather
 // than as a request — EXCEPT during operator view-as, where the tenant on screen is the
 // armed view-as target and no status call is made to echo anything (see the latch in the
-// invoke wrapper and the stamp in 11-shell.jsx). Declared above ssLogError because the boot
+// invoke wrapper and the stamp in 12-shell.jsx). Declared above ssLogError because the boot
 // guard below calls it during module evaluation, and a TDZ throw there would swallow the
 // row entirely. (Same reason ssLogError does NOT read ssTargetClientId directly: that one is
 // declared below the boot-guard call, so a read here would TDZ-throw and lose the row.)
@@ -143,7 +143,7 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // would inject targetClientId and hand operators exactly that. The function itself refuses
 // a targetClientId with a 403, so adding it here would break every operator call rather
 // than quietly widening access — that pairing is intentional, not an oversight to fix.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -301,7 +301,7 @@ __ssFunctions.invoke = async (name, opts) => {
   //
   // ⛔ THE ECHO DOES NOT FOLLOW VIEW-AS ON ITS OWN — an earlier version of this comment said
   // it did ("the next status call restamps it") and that was false in both directions.
-  // 11-shell.jsx SKIPS its portal-settings `status` call for the whole duration of a view-as
+  // 12-shell.jsx SKIPS its portal-settings `status` call for the whole duration of a view-as
   // session, deliberately (see its own comment), so there is no next status call; and three
   // of the five tenant-scoped functions — portal-billing, sync-design-status,
   // portal-schedule — echo no clientId at all, so most responses inside a viewed portal
@@ -314,12 +314,12 @@ __ssFunctions.invoke = async (name, opts) => {
   //
   // So the armed view-as target wins outright, and it is read HERE rather than with
   // `injected` at the top on purpose: attribution must describe the portal on screen when
-  // the row is written, not the tenant the call was issued for. 11-shell.jsx stamps the
+  // the row is written, not the tenant the call was issued for. 12-shell.jsx stamps the
   // same value the moment `viewing` changes (in the tick, beside the ssTargetClientId
   // lockstep), which covers the gap before the first response of a view-as session lands
   // and the reverse gap on the way out; this keeps it right for anything still in flight.
   //
-  // ⛔ AND THE ECHO IS REFUSED OUTRIGHT WHEN THE VIEW-AS SESSION MOVED UNDER IT. 11-shell.jsx
+  // ⛔ AND THE ECHO IS REFUSED OUTRIGHT WHEN THE VIEW-AS SESSION MOVED UNDER IT. 12-shell.jsx
   // stamping the operator's own tenant on exit does NOT close the way out on its own, because
   // a call issued while builder B was on screen can still be in flight when the operator
   // leaves. Its response echoes B — correctly, the server did resolve B — and the second
@@ -485,6 +485,11 @@ const SETTINGS_TAB_AREA = {
   connection: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
+  // Texting registers the BUSINESS's legal identity with the carriers and spends real money,
+  // so it is held to the billing bar — by default an owner, and an admin only where an owner
+  // has granted it. Reading the resulting status is contacts-level; that split lives in
+  // portal-sms's GATES table, and this map only decides whether the sub-tab is worth showing.
+  sms: "settings_billing",
   commissions: "commissions",
   team: "settings_team",
   billing: "settings_billing",
@@ -499,6 +504,13 @@ const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_bra
 function ssCanRead(access, area) {
   const v = access && access[area];
   return v === "view" || v === "edit" || v === "own";
+}
+// The write half. 'own' is NOT write: it means "your own commission rows", a read scope, and
+// treating it as edit would let a rep act on an area they can only look at. Mirrored from
+// canWrite in _shared/access.ts for the same reason ssCanRead is — the server enforces, this
+// only decides what is worth rendering.
+function ssCanWrite(access, area) {
+  return !!access && access[area] === "edit";
 }
 function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
@@ -1266,7 +1278,7 @@ function SkelBar({ w = "100%", h = 11, style = {} }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tab payload cache — stale-while-revalidate for the slow tabs.
 //
-// 11-shell renders tabs as {activeTab === "x" && <Component/>}, so leaving a tab UNMOUNTS
+// 12-shell renders tabs as {activeTab === "x" && <Component/>}, so leaving a tab UNMOUNTS
 // it and its state is gone. Coming back re-ran the whole fetch and put the user in front of
 // a skeleton again, every time, even for data seconds old. Each slow tab now seeds its
 // state from here on mount (synchronously, via a useState initializer, so the first render
