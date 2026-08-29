@@ -1491,6 +1491,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
+    // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
+    // here, but everything that is contact related should be in here." These columns have
+    // existed since 130 and were filled in from submitted designs -- the record SHOWED them
+    // and only the editor could not touch them, which is why she asked "did you just specify
+    // just these?" about name/phone/email.
+    street: (data.contact && data.contact.street) || "",
+    city: (data.contact && data.contact.city) || "",
+    state: (data.contact && data.contact.state) || "",
+    zip: (data.contact && data.contact.zip) || "",
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -1502,6 +1511,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
         name: edit.name, phone: edit.phone, email: edit.email,
+        street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
       },
     });
     setBusy(false);
@@ -1674,6 +1684,26 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             <span style={S.lbl}>Phone</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+            <span style={S.lbl}>Street</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
+              onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
+            <div style={{ display: "flex", gap: 7 }}>
+              <div style={{ flex: "2 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>City</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
+                  onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
+              </div>
+              <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>State</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
+                  onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
+              </div>
+              <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>ZIP</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
+                  onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
+              </div>
+            </div>
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -1905,6 +1935,26 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <span style={S.lbl}>Phone</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+                  <span style={S.lbl}>Street</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
+                    onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
+                  <div style={{ display: "flex", gap: 7 }}>
+                    <div style={{ flex: "2 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>City</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
+                        onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
+                    </div>
+                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>State</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
+                        onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
+                    </div>
+                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>ZIP</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
+                        onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
+                    </div>
+                  </div>
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}

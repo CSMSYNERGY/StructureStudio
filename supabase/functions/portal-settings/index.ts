@@ -4168,7 +4168,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const name = fld(payload.name, 200);
     const phone = fld(payload.phone, 40);
     const email = fld(payload.email, 320);
-    if (name === null && phone === null && email === null) {
+    // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
+    // here, but everything that is contact related should be in here." The columns have
+    // existed since 130 and were populated from submitted designs -- only the editor was
+    // missing. Same undefined/""/value contract as the three above.
+    const street = fld(payload.street, 200);
+    const city = fld(payload.city, 120);
+    const state = fld(payload.state, 60);
+    const zip = fld(payload.zip, 20);
+    if (name === null && phone === null && email === null
+        && street === null && city === null && state === null && zip === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -4180,6 +4189,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       p_client_id: clientId, p_id: id,
       p_name: name, p_phone: phone, p_email: email,
       p_actor: userId ?? null,
+      p_street: street, p_city: city, p_state: state, p_zip: zip,
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
