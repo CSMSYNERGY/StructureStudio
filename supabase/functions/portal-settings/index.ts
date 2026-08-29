@@ -56,6 +56,11 @@ const GATES: GateTable = {
   // card, so it stays open and the CRM/QuickBooks fields inside it are filtered per-area at
   // the branch instead (search: STATUS FIELD FILTER).
   status: "open",
+  // "self": a write, but only ever to the caller's OWN client_users row. The handler keys
+  // strictly off ctx.userId and never off anything in the body -- this gate cannot enforce
+  // that, as its own definition in access.ts says. Someone's default view is not tenant
+  // data, so a sales rep sets their own.
+  save_prefs: "self",
 
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
@@ -764,6 +769,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   }
 
   if (action === "status") {
+    // The caller's own preferences row. Best-effort: a failure here must never stop the
+    // bootstrap call that every role depends on to learn its access map.
+    let myPrefs: Record<string, unknown> | null = null;
+    if (userId) {
+      const { data: pr } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
+      myPrefs = (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
+        ? pr.prefs as Record<string, unknown> : null;
+    }
     const { data, error } = await admin
       .from("client_settings")
       .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
@@ -825,6 +839,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       role,
       operatorMode: Boolean(operator),
       access,
+      // ── THE CALLER'S OWN PORTAL PREFERENCES (165) ────────────────────────────────
+      // Rides `status` because the shell already awaits it at boot for `access`, and a
+      // default view that arrives a round trip late shows the wrong tab first and then
+      // jumps -- which is worse than not having the setting.
+      //
+      // ⚠️ Keyed on userId, never on clientId: this is PER PERSON. Two people at the same
+      // builder legitimately want different defaults, which is the whole reason 165 put
+      // the column on client_users rather than on client_settings.
+      //
+      // In operator view-as this is still the OPERATOR's own row -- they are the one
+      // looking at the screen, and borrowing the viewed tenant's owner's layout would be
+      // both wrong and a small information leak.
+      prefs: myPrefs,
       ...crm,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
@@ -843,6 +870,44 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         headerBg: cfg?.header_bg ?? null,
       },
     });
+  }
+
+  // ── SAVING THEM ──────────────────────────────────────────────────────────────────
+  // Ahsan, 2026-08-28 @42:28: "all of these settings for contact cards, the pipeline cards,
+  // and the default one, I think should add, in settings, add another tab ... for structure
+  // studio settings."
+  //
+  // WHITELIST-REBUILT, like every other save in this file. An open jsonb column written
+  // straight from the browser is a place for anything to end up, and this one is read back
+  // into the shell on every boot. Only the keys below survive.
+  //
+  // No gate entry beyond being signed in, deliberately: these are one person's own view
+  // preferences, not tenant data. A sales rep may set their own default view.
+  if (action === "save_prefs") {
+    if (!userId) return json({ error: "Sign in again to save your preferences." }, 401);
+    const raw = (payload.prefs && typeof payload.prefs === "object" && !Array.isArray(payload.prefs))
+      ? payload.prefs as Record<string, any> : {};
+    const clean: Record<string, unknown> = {};
+    if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // Card order is a list of section keys. Unknown keys are kept rather than dropped here
+    // and filtered at RENDER time instead -- the server would otherwise silently delete a
+    // card belonging to a newer frontend than itself, and the user would watch their layout
+    // revert every time they saved from a tab that had not reloaded yet.
+    const order = (raw.cardOrder && typeof raw.cardOrder === "object" && !Array.isArray(raw.cardOrder)) ? raw.cardOrder : null;
+    if (order) {
+      const co: Record<string, string[]> = {};
+      for (const k of ["contact", "design"]) {
+        if (Array.isArray(order[k])) {
+          co[k] = order[k].filter((s: unknown) => typeof s === "string").slice(0, 40).map((s: string) => s.slice(0, 40));
+        }
+      }
+      if (Object.keys(co).length) clean.cardOrder = co;
+    }
+    const { error } = await admin.from("client_users")
+      .update({ prefs: Object.keys(clean).length ? clean : null })
+      .eq("user_id", userId);
+    if (error) return dbFail(req, clientId, "save your preferences", error);
+    return json({ ok: true, prefs: Object.keys(clean).length ? clean : null });
   }
 
   if (action === "save") {

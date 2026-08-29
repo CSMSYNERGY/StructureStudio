@@ -417,6 +417,7 @@ function Dashboard({ session }) {
       // blip can never lock a crew out of their own portal — which is exactly why the
       // server-side hole above has to be closed rather than compensated for here.
       let access = null;
+      let prefs = null;
       try {
         // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
         // have armed the injection by now — and this call scoped to the viewed tenant is
@@ -425,6 +426,10 @@ function Dashboard({ session }) {
         if (!ssTargetClientId) {
           const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
           if (st && st.access) access = st.access;
+          // Rides the same bootstrap call as `access` on purpose: a default view that lands
+          // a round trip late renders the wrong tab and then jumps, which reads worse than
+          // having no setting at all.
+          if (st && st.prefs) prefs = st.prefs;
           // No map back is a FAILED call, never "this tenant has none": `status` is the open
           // bootstrap action and resolveTenant fills every area for every title. The invoke
           // wrapper RETURNS `{data:null}` rather than throwing — the no-session guard does so
@@ -439,11 +444,12 @@ function Dashboard({ session }) {
             if (accSess && accSess.session && !ssTargetClientId) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
+              if (again.data && again.data.prefs) prefs = again.data.prefs;
             }
           }
         }
       } catch (_e) { /* keep the fallback */ }
-      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access });
+      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access, prefs });
     })();
   }, [session.access_token, viewing]);
 
@@ -1229,6 +1235,12 @@ function Dashboard({ session }) {
                 onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
+                /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
+                   deliberately carries no view of its own so the saved preference can fill
+                   it -- pinning it to "list" here would quietly outrank the setting. */
+                urlView={sub === "pipeline" || sub === "list" ? sub : null}
+                defaultView={(tenant && tenant !== "none" && tenant.prefs && tenant.prefs.designsView) || null}
+                onViewChange={(v) => navigate("designs", v)}
                 onOpenDesign={openInDesigner} />
             )}
             {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads.
@@ -1339,6 +1351,12 @@ function Dashboard({ session }) {
                 isOwner={!viewing && tenant.role === "owner"}
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
                 access={viewing ? null : myAccess}
+                /* MY VIEW settings are the OPERATOR's own even in view-as: they are the
+                   person looking at the screen, and borrowing the viewed builder's owner's
+                   layout would be both wrong and a small information leak. So this is NOT
+                   nulled under `viewing`, unlike `access` above. */
+                prefs={tenant && tenant !== "none" ? tenant.prefs : null}
+                onPrefsSaved={(p) => setTenant((t) => (t && t !== "none" ? { ...t, prefs: p } : t))}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}

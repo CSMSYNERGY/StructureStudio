@@ -97,7 +97,7 @@ function RowMenu({ items, label = "More actions" }) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, onViewChange = null }) {
   // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
   // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
   // pipelines ... this may become the pipeline view."
@@ -110,7 +110,26 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // never becomes so — Carolyn 2026-08-29: "they only get the list view". crmUnlocked
   // defaults TRUE so that any caller that has not been taught about the prop (or an operator
   // path) behaves exactly as before rather than silently locking a tab.
-  const [view, setView] = useState("list");
+  // ── WHICH VIEW, AND WHO DECIDES ───────────────────────────────────────────────────
+  // Two separate asks, and they compose. Carolyn, 2026-08-28 @42:00: "I'm trying to think
+  // which I want to have the default. I want them to be able to decide if they want the
+  // default. I don't want it to always be list. They can decide to set their default to be
+  // pipeline or list, whichever one that they want." And @41:03, on the back button: "if
+  // you hit the back button, you lost everything on that screen ... I just don't want it to
+  // be like, oh no, you can't click that back button."
+  //
+  // So: the URL wins when it names a view, the SAVED PREFERENCE fills a bare URL, and list
+  // is the fallback for someone who has never set one. Flipping the toggle navigates, which
+  // is what makes Back walk between the two instead of leaving the tab.
+  //
+  // Local state stays as the fallback for any host that does not supply a router, so this
+  // component still works mounted anywhere -- the same shape OrdersView uses for openId.
+  const [viewLocal, setViewLocal] = useState(null);
+  const routed = !!onViewChange;
+  const view = routed
+    ? (urlView === "pipeline" || urlView === "list" ? urlView : (defaultView === "pipeline" ? "pipeline" : "list"))
+    : (viewLocal || (defaultView === "pipeline" ? "pipeline" : "list"));
+  const setView = (v) => { if (routed) onViewChange(v); else setViewLocal(v); };
   // A locked tenant can hold no view but "list". Enforced here rather than only at the
   // toggle: `view` also survives in this component across a refresh of the entitlement, and
   // a builder who was mid-board when their subscription lapsed must not keep the board.

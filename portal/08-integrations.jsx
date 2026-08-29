@@ -2566,7 +2566,57 @@ function CommissionsReport({ clientId }) {
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null }) {
+// ── MY VIEW — the one settings card that configures the PERSON, not the business ────
+// Carolyn, 2026-08-28 @42:00: "I'm trying to think which I want to have the default. I want
+// them to be able to decide if they want the default. I don't want it to always be list.
+// They can decide to set their default to be pipeline or list, whichever one that they want."
+//
+// Saves to client_users.prefs (migration 165) through save_prefs, which is gated "self" --
+// the handler keys strictly off the caller's own user id and never off anything in the body.
+//
+// ⚠️ CARD ORDERING IS NOT HERE, and that is her call rather than an omission. On the same
+// call, right after describing it: "and then, OBVIOUSLY LATER, I'm just like giving like the
+// big scope is allowing them to organize their cards in the way that they want them to be."
+// The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
+// waiting; the UI is not built because she scoped it out.
+function MyViewSettings({ prefs, onSaved }) {
+  const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const save = async (next) => {
+    setVal(next); setBusy(true); setMsg(null);
+    try {
+      const body = { action: "save_prefs", prefs: { ...(prefs || {}), designsView: next } };
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      // Hand the saved map back so the shell stops serving the stale one -- otherwise the
+      // setting only takes effect on the next full reload, which reads as not having saved.
+      if (onSaved) onSaved(data && data.prefs);
+      setMsg({ ok: "Saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>How the Pipeline tab opens</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+        Your own default, not the business's — everyone on your team picks their own. Opening a
+        direct link to a list or a board still shows whichever the link names.
+      </p>
+      <div style={{ display: "flex", gap: 8 }}>
+        {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
+          <button key={k} disabled={busy} onClick={() => save(k)}
+            style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+    </div>
+  );
+}
+
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = [
@@ -2582,6 +2632,15 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
     ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
     ["billing", "Billing", "Your StructureStudio subscription"],
+    // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
+    // "all of these settings for contact cards, the pipeline cards, and the default one, I
+    // think should add, in settings, add another tab ... for structure studio settings."
+    //
+    // Everything above configures the BUSINESS; this configures the person looking at the
+    // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
+    // sensibly withhold someone's own default view from them, and a sales rep who cannot see
+    // Structures still gets to choose how their own Pipeline tab opens.
+    ["myview", "My View", "How the portal opens for you — your settings, not the business's"],
   ]
   // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
   // an owner shut out of their own Settings by a permission bug is the failure this feature
@@ -2667,6 +2726,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           schedule tabs (operator, or the tenant's schedule_builds subscription). */}
       {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam viewingLabel={viewingLabel} /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
+      {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
     </div>
   );
 }
