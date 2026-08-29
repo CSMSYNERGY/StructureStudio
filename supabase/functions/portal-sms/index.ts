@@ -155,7 +155,48 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   try {
     switch (action) {
       case "status": {
-        const reg = await load();
+        let reg = await load();
+
+        // ── LAZY SWEEP ───────────────────────────────────────────────────────────────
+        // There is no pg_cron on this project and no scheduler that reliably runs against
+        // this branch, so a registration that is waiting on a carrier is moved forward by
+        // somebody LOOKING at it. The builder's page polls once a minute while pending, so
+        // in practice this runs itself.
+        //
+        // ⚠️ ONLY THE STATES WHOSE ADVANCE IS A PURE READ. brand_pending and
+        // campaign_pending just fetch a status from Twilio. `profile_pending` is excluded
+        // deliberately and must stay excluded: its advance REGISTERS A BRAND, which is
+        // billed per call — and `status` is gated contacts:'view', so anyone who can see
+        // the Contacts tab could otherwise spend the tenant's money by refreshing a page.
+        // Submitting stays an explicit act by someone with settings_billing:'edit'.
+        const sweepable = reg && ["brand_pending", "campaign_pending"].includes(reg.status);
+        const due = reg?.next_poll_at && new Date(reg.next_poll_at).getTime() <= Date.now();
+        if (sweepable && due && trustHubConfigured()) {
+          const nowIso = new Date().toISOString();
+          const { data: locked } = await admin.from("sms_registrations")
+            .update({ advance_lock_until: new Date(Date.now() + 5 * 60_000).toISOString() })
+            .eq("client_id", clientId)
+            .or(`advance_lock_until.is.null,advance_lock_until.lt.${nowIso}`)
+            .select("*").maybeSingle();
+          if (locked) {
+            try {
+              reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note);
+            } catch (e) {
+              // A sweep failure must never break the page it was riding on. The builder
+              // still gets their status; the next look tries again.
+              await logEdgeError({
+                fn: "portal-sms", clientId, code: "sms_sweep_failed",
+                message: `lazy sweep failed: ${(e as Error).message}`,
+                severity: "info",
+              }).catch(() => {});
+              reg = await load();
+            } finally {
+              await admin.from("sms_registrations")
+                .update({ advance_lock_until: null }).eq("client_id", clientId);
+            }
+          }
+        }
+
         return json({ ok: true, ...view(reg, await numbersOf()) });
       }
 
