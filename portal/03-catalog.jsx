@@ -757,6 +757,12 @@ async function readXlsxWorkbook(file, ExcelJS) {
 // it. Don't reuse this for a purchasable feature — the whole job it does is being the exception.
 const SYNERGY_TEAL = "#1B7895";
 
+// Wallet top-up presets, in cents. Round numbers a builder recognises rather than multiples
+// of the $20 meter price -- "$100" is a decision, "$140 (7 generations)" is arithmetic
+// homework. The floor and cap are NOT here: the server sends them (wallet.minTopupCents /
+// maxTopupCents) so there is exactly one definition and the UI cannot drift from it.
+const TOPUP_PRESETS = [10000, 25000, 50000];
+
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
 // subscription, chosen monthly or yearly independently. Simple Layout is the
@@ -772,6 +778,15 @@ function BillingView({ viewingLabel = null }) {
   const [msg, setMsg] = useState(null);      // { ok } | { err }
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
   const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
+  // Wallet top-up (migration 164). `topupSel` is a preset in cents; `topupCustom` is the raw
+  // DOLLARS string from the Other field. Exactly one is ever set -- picking a preset clears
+  // the field and typing clears the preset -- so there is never an ambiguous "which did they
+  // mean" state to resolve at charge time.
+  const [topupSel, setTopupSel] = useState(null);
+  const [topupCustom, setTopupCustom] = useState("");
+  const [autoOn, setAutoOn] = useState(false);
+  const [autoThreshold, setAutoThreshold] = useState("");
+  const [autoAmount, setAutoAmount] = useState("");
 
   const load = useCallback(async () => {
     setError(null);
@@ -849,6 +864,83 @@ function BillingView({ viewingLabel = null }) {
   const dueTodayCents = grossDueCents - creditCents;
   const creditSources = cart.flatMap(([f]) => (upgradeCredits[f] && upgradeCredits[f].sources) || []);
   const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
+
+  // ── Wallet top-up (migration 164) ──────────────────────────────────────────────────
+  // Bounds come from the server so the floor and cap live in one place
+  // (_shared/walletTopup.ts); the fallbacks only matter against an older portal-billing.
+  const wallet = data && data.wallet;
+  const minTopup = (wallet && wallet.minTopupCents) || 2000;
+  const maxTopup = (wallet && wallet.maxTopupCents) || 500000;
+  // Dollars -> cents via Math.round, not parseInt: "12.5" is $12.50, and truncating a
+  // half-cent is the kind of rounding that shows up as a penny off in the ledger.
+  const customCents = topupCustom.trim() === "" ? null : Math.round(Number(topupCustom) * 100);
+  const topupCents = topupSel != null ? topupSel : (Number.isFinite(customCents) ? customCents : null);
+  const topupValid = Number.isInteger(topupCents) && topupCents >= minTopup && topupCents <= maxTopup;
+
+  // Mirror the saved auto-recharge config into the form whenever the server's answer
+  // changes. Depends on `data` (the whole payload) rather than the nested fields so it
+  // re-syncs after every load(), including the one that follows a successful save.
+  useEffect(() => {
+    const a = (data && data.wallet && data.wallet.autoTopup) || null;
+    if (!a) return;
+    setAutoOn(!!a.enabled);
+    setAutoThreshold(a.thresholdCents != null ? String(a.thresholdCents / 100) : "");
+    setAutoAmount(a.amountCents != null ? String(a.amountCents / 100) : "");
+  }, [data]);
+
+  const addFunds = async () => {
+    if (!topupValid) return;
+    setMsg(null); setBusy(true);
+    try {
+      // Same handshake as subscribe: the amount on screen is the amount tokenized and the
+      // amount charged, and the server refuses if they disagree.
+      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents };
+      if (viewingLabel) {
+        if (!window.confirm(`Add ${fmt$(topupCents)} to ${viewingLabel}'s wallet?
+
+This charges the card they have on file.`)) { setBusy(false); return; }
+      } else if (!data.hasCard) {
+        body.paymentToken = await getPaymentToken(topupCents);
+      }
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      if (e) {
+        // The real story is in the BODY -- a decline reason, or a "do NOT try again" with a
+        // reference. e.message alone is the generic non-2xx and would hide all of it.
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: r && r.alreadyCredited
+        ? "That top-up was already applied — your balance is up to date."
+        : `Added ${fmt$(topupCents)} to the wallet.` });
+      setTopupSel(null); setTopupCustom("");
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const saveAutoTopup = async () => {
+    setMsg(null); setBusy(true);
+    try {
+      const body = {
+        action: "topup_settings",
+        enabled: autoOn,
+        thresholdCents: autoOn ? Math.round(Number(autoThreshold) * 100) : null,
+        amountCents: autoOn ? Math.round(Number(autoAmount) * 100) : null,
+      };
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: autoOn ? "Automatic top-ups are on." : "Automatic top-ups are off." });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
   // open its hosted card lightbox; the callback hands us a one-time payment token.
@@ -1126,14 +1218,95 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
               </p>
             )}
-            {/* ADD FUNDS is deliberately not a button yet. Carolyn, 2026-08-24: "I will
-                connect the wallet to Deposyt AFTER — just set the infrastructure up right
-                now." Stubbing a checkout that pretends to charge would be worse than
-                saying so; if someone clicks this at the expo, the honest sentence IS the
-                demo. Same voice as the "online checkout isn't switched on yet" notice. */}
-            <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
-              Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
-            </div>
+            {/* ADD FUNDS — real since migration 164. The note that used to sit here read
+                "not switched on yet ... contact CSM Synergy"; this is the AFTER Carolyn meant
+                on 2026-08-24. An unconfigured deployment still gets that sentence, because
+                the server would refuse the charge anyway (portal-billing's `configured` 503). */}
+            {!data.configured ? (
+              <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
+                Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 8 }}>Add funds</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {TOPUP_PRESETS.map((c) => (
+                    <button key={c} type="button" onClick={() => { setTopupSel(c); setTopupCustom(""); }}
+                      style={{
+                        background: topupCents === c ? ACCENT : "#FFF",
+                        color: topupCents === c ? "#FFF" : "#334155",
+                        border: "1px solid " + (topupCents === c ? ACCENT : "#E2E8F0"),
+                        borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      }}>{fmt$(c)}</button>
+                  ))}
+                  {/* Custom amount, typed in DOLLARS because that is what a person means by
+                      "250". Asking for cents is how someone sends $2.50 meaning $250. */}
+                  <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid " + (topupCustom ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "0 10px" }}>
+                    <span style={{ fontSize: 13, color: "#64748B", fontWeight: 700 }}>$</span>
+                    <input type="number" inputMode="decimal" min={minTopup / 100} max={maxTopup / 100} placeholder="Other"
+                      value={topupCustom} onChange={(e) => { setTopupCustom(e.target.value); setTopupSel(null); }}
+                      style={{ border: "none", outline: "none", padding: "7px 4px", fontSize: 13, fontWeight: 700, width: 82, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                  </div>
+                  <button type="button" onClick={addFunds} disabled={busy || !topupValid}
+                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: busy || !topupValid ? 0.5 : 1, cursor: busy || !topupValid ? "default" : "pointer" }}>
+                    {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
+                  </button>
+                </div>
+                {/* Only complain once something has actually been typed — an empty field is
+                    the starting state, not a mistake. */}
+                {topupCustom && !topupValid && (
+                  <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>
+                    Enter an amount between {fmt$(minTopup)} and {fmt$(maxTopup)}.
+                  </div>
+                )}
+                <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
+                  {data.hasCard
+                    ? "Charged to the card on file. Funds are added straight away."
+                    : "You'll enter your card in a secure form served by the payment gateway — it never passes through StructureStudio."}
+                </div>
+
+                {/* AUTO-RECHARGE. Requires a vaulted card: enabling it without one arms
+                    something that can only fail, and its first failure would report a
+                    declined card that never existed. */}
+                <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                  {w.autoTopup && w.autoTopup.disabledReason && (
+                    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+                      Automatic top-ups were switched off — {w.autoTopup.disabledReason} Update the card, then switch them back on.
+                    </div>
+                  )}
+                  {!data.hasCard ? (
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      Add funds once and your card is kept on file — then you can turn on automatic top-ups.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 13, color: "#334155" }}>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 7, fontWeight: 700, cursor: "pointer" }}>
+                        <input type="checkbox" checked={autoOn} onChange={(e) => setAutoOn(e.target.checked)} />
+                        Top up automatically
+                      </label>
+                      {autoOn && (<>
+                        <span style={{ color: "#64748B" }}>when my balance drops below</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 8, padding: "0 8px" }}>
+                          <span style={{ fontSize: 12.5, color: "#64748B", fontWeight: 700 }}>$</span>
+                          <input type="number" inputMode="decimal" value={autoThreshold} onChange={(e) => setAutoThreshold(e.target.value)}
+                            style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                        </span>
+                        <span style={{ color: "#64748B" }}>add</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 8, padding: "0 8px" }}>
+                          <span style={{ fontSize: 12.5, color: "#64748B", fontWeight: 700 }}>$</span>
+                          <input type="number" inputMode="decimal" value={autoAmount} onChange={(e) => setAutoAmount(e.target.value)}
+                            style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                        </span>
+                      </>)}
+                      <button type="button" onClick={saveAutoTopup} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+                        Save
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {(w.transactions || []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>

@@ -38,6 +38,7 @@ import {
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
+import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -2358,6 +2359,72 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // with active = false so this function can be deployed and proven a no-op before one
       // boolean turns the charge on. holdId stays null and the generation runs free.
       if (!err) holdId = hold?.hold_id ?? null;
+
+      // ── AUTO-RECHARGE (migration 164) ────────────────────────────────────────────────
+      // The balance just dropped, which is the ONLY moment it can newly fall below the
+      // tenant's threshold — so the check lives here rather than in a cron. The point is to
+      // top up BEFORE they run dry, not to rescue a refusal.
+      //
+      // FAIL-SOFT, absolutely. This runs after the hold has succeeded and the generation is
+      // authorised; a declined card, an unreachable gateway or a bad config must not fail a
+      // generation the builder has already paid for out of existing balance. Everything in
+      // here is swallowed.
+      //
+      // KNOWN GAP, deliberate: this does NOT fire on `insufficient_funds` above. A builder
+      // who is already at zero when they press Generate still gets the refusal, and their
+      // recharge happens on the next successful hold. Recharging inside a refusal path would
+      // mean charging a card as part of an error response, then retrying the hold — a second
+      // money path guarded by nothing, to save one retry. Not worth it.
+      //
+      // Awaited rather than backgrounded: EdgeRuntime.waitUntil is unused anywhere in this
+      // codebase, and a money path is the wrong place to prove a new primitive — a task
+      // dropped on shutdown mid-sale leaves a closed_unknown that blocks ALL future top-ups.
+      // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
+      // and the cooldown caps it at once an hour.
+      try {
+        const [{ data: acct }, { data: cust }] = await Promise.all([
+          admin.from("wallet_accounts")
+            .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at")
+            .eq("client_id", clientId).maybeSingle(),
+          admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
+        ]);
+        // Bind the vault id BEFORE the decision so its presence is provable rather than
+        // implied: autoTopupDecision refuses without a card, but the type checker cannot know
+        // that, and a non-null assertion on a money path is a comment pretending to be code.
+        const vaultId = cust?.vault_id ? String(cust.vault_id) : "";
+        const decision = autoTopupDecision(acct, Boolean(vaultId), Date.now());
+        if (decision.fire && vaultId) {
+          // Stamp the cooldown BEFORE charging, not after. A burst of generations can cross
+          // the threshold several times in seconds; the failure to design against is five
+          // recharges, not a late one. If the charge then fails, the stamp costs at most an
+          // hour's delay before the next attempt.
+          await admin.from("wallet_accounts")
+            .update({ auto_topup_last_at: new Date().toISOString() }).eq("client_id", clientId);
+          const r = await chargeTopup(admin, {
+            clientId, vaultId, amountCents: decision.amountCents,
+            actorUserId: null, auto: true,
+          });
+          if (!r.ok && !r.blocking) {
+            // A DECLINE switches auto-recharge off rather than retrying hourly forever. An
+            // expired card declines identically every time, and a loop against it earns real
+            // declines on the merchant account. The Billing tab shows this reason; turning it
+            // back on is a human act.
+            await admin.from("wallet_accounts")
+              .update({ auto_topup_enabled: false, auto_topup_disabled_reason: String(r.error).slice(0, 300) })
+              .eq("client_id", clientId);
+            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_declined", message: `Auto top-up declined, switched off: ${r.error}` });
+          } else if (!r.ok) {
+            // Blocking (gateway-unknown, or charged-but-not-credited). Leave it ENABLED:
+            // the closed_unknown attempt row already blocks every further top-up, and
+            // support's reconciliation is what should restore normal service — switching it
+            // off here would make a resolved incident look like a card problem.
+            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_unresolved", message: `Auto top-up needs a human: ${r.error}` });
+          }
+        }
+      } catch (e) {
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_crashed", message: `Auto top-up check failed (generation unaffected): ${(e as Error).message}` })
+          .catch(() => undefined);
+      }
     }
 
     // From here on, every exit path must either capture or release the hold. A generation

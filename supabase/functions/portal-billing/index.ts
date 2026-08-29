@@ -4,6 +4,8 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 import type { GateTable } from "../_shared/access.ts";
 import { withErrorLog } from "../_shared/logError.ts";
 import { paidThroughOf, unusedCreditOf } from "../_shared/billingPeriods.ts";
+import { GATEWAY, TOKENIZATION_KEY, nmiConfigured, nmiPost, isGatewayUnknown } from "../_shared/nmi.ts";
+import { chargeTopup, MIN_TOPUP_CENTS, MAX_TOPUP_CENTS } from "../_shared/walletTopup.ts";
 
 // Only `status` is a read here; subscribe/cancel move real money.
 // WHAT EACH ACTION REQUIRES (migration 100) — see _shared/access.ts.
@@ -25,6 +27,11 @@ const GATES: GateTable = {
   status:    "open",
   subscribe: { area: "settings_billing", level: "edit" },
   cancel:    { area: "settings_billing", level: "edit" },
+  // Wallet funding (migration 164). Same audience as subscribe, and for the same reason:
+  // both move money off this tenant's card. topup_settings is a config write rather than a
+  // charge, but it AUTHORISES unattended charges, so it is not a lesser permission.
+  topup:          { area: "settings_billing", level: "edit" },
+  topup_settings: { area: "settings_billing", level: "edit" },
 };
 
 // Platform billing endpoint for the portal's Billing tab — CSM Synergy charging
@@ -66,46 +73,10 @@ function json(body: unknown, status = 200) {
   });
 }
 
-const GATEWAY = (Deno.env.get("NMI_GATEWAY_URL") || "https://deposyt.transactiongateway.com").replace(/\/+$/, "");
-const SECURITY_KEY = Deno.env.get("NMI_SECURITY_KEY") || "";
-const TOKENIZATION_KEY = Deno.env.get("NMI_TOKENIZATION_KEY") || "";
-
-// POST to the gateway's Payment API. Form-urlencoded in/out; response=1 approved.
-//
-// TWO distinct failure kinds, and money-path callers must not conflate them:
-//   - a DECLINE: the gateway answered and said no. The outcome is KNOWN — nothing charged.
-//   - TRANSPORT failure (timeout, reset, 5xx before a parseable body): the outcome is
-//     UNKNOWN. The gateway may have processed the request — including charging the card —
-//     and we simply never heard. Callers must treat this as "possibly happened", never as
-//     "didn't happen"; treating it as a decline is how a customer gets charged twice.
-// isGatewayUnknown() tells them apart. The 30s timeout turns an indefinite hang into an
-// explicit unknown instead of letting the whole function die mid-loop with no catch.
-const GATEWAY_UNKNOWN = "GATEWAY_UNKNOWN:";
-export function isGatewayUnknown(e: unknown): boolean {
-  return String((e as Error)?.message ?? "").startsWith(GATEWAY_UNKNOWN);
-}
-async function nmiPost(params: Record<string, string>) {
-  const body = new URLSearchParams({ security_key: SECURITY_KEY, ...params });
-  let text: string;
-  try {
-    const res = await fetch(`${GATEWAY}/api/transact.php`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-      signal: AbortSignal.timeout(30000),
-    });
-    if (res.status >= 500) throw new Error(`${GATEWAY_UNKNOWN} gateway returned HTTP ${res.status}`);
-    text = await res.text();
-  } catch (e) {
-    if (isGatewayUnknown(e)) throw e;
-    throw new Error(`${GATEWAY_UNKNOWN} ${(e as Error).message}`);
-  }
-  const parsed = Object.fromEntries(new URLSearchParams(text));
-  if (parsed.response !== "1") {
-    throw new Error(parsed.responsetext || "transaction declined");
-  }
-  return parsed as Record<string, string>;
-}
+// The gateway client lives in _shared/nmi.ts since 2026-08-29 — portal-settings needs it too
+// (wallet auto-recharge charges a card at debit time), and two copies of isGatewayUnknown is
+// how a customer gets charged twice. Behaviour is identical to the version that used to sit
+// here; see that file's header for the money-path contract.
 
 Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -125,9 +96,9 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     requireBilling: true,
   });
   if (!r.ok) return json(r.body, r.status);
-  const { clientId, operator, payload, action, userEmail, audit, auditStrict, canRead } = r.ctx;
+  const { clientId, operator, payload, action, userEmail, userId, audit, auditStrict, canRead } = r.ctx;
   if (operator) audit(`operator_billing_${action}`).catch(() => {});
-  const configured = Boolean(SECURITY_KEY && TOKENIZATION_KEY);
+  const configured = nmiConfigured;
 
   // Plan rows. Two DIFFERENT questions are asked of this table and conflating them locked out
   // paying customers:
@@ -509,7 +480,7 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     if (mine) {
       try {
         const [acct, price, txs] = await Promise.all([
-          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt").eq("client_id", clientId).maybeSingle(),
+          admin.from("wallet_accounts").select("balance_cents, held_cents, metered_exempt, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at, auto_topup_disabled_reason").eq("client_id", clientId).maybeSingle(),
           admin.from("usage_prices").select("kind, label, unit_label, price_cents, active, visible").eq("active", true).order("sort_order"),
           admin.from("wallet_transactions").select("id, kind, amount_cents, meter_kind, state, memo, created_at")
             .eq("client_id", clientId).in("state", ["posted", "held"]).order("created_at", { ascending: false }).limit(10),
@@ -530,6 +501,20 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           balanceCents: Number(acct.data?.balance_cents ?? 0),
           heldCents: Number(acct.data?.held_cents ?? 0),
           exempt: Boolean(acct.data?.metered_exempt),
+          // The bounds are SENT rather than hardcoded in the browser, so the floor and cap
+          // live in exactly one place (_shared/walletTopup.ts) and a change to them cannot
+          // leave a stale limit in the UI silently disagreeing with the server.
+          minTopupCents: MIN_TOPUP_CENTS,
+          maxTopupCents: MAX_TOPUP_CENTS,
+          autoTopup: {
+            enabled: Boolean(acct.data?.auto_topup_enabled),
+            thresholdCents: acct.data?.auto_topup_threshold_cents ?? null,
+            amountCents: acct.data?.auto_topup_amount_cents ?? null,
+            lastAt: acct.data?.auto_topup_last_at ?? null,
+            // Why it switched itself off, if it did. This is the ONLY surface that tells a
+            // builder their card was declined on an unattended charge — there is no email.
+            disabledReason: acct.data?.auto_topup_disabled_reason ?? null,
+          },
           meters,
           transactions: (txs.data ?? []).map((t: any) => ({
             id: t.id, label: label(t), amountCents: Number(t.amount_cents),
@@ -1035,6 +1020,115 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // the response now would only mislead the operator about what occurred.
     if (operator) audit("operator_billing_subscribe_result", created.length, `created=${created.map((c: any) => c?.plan_id).join(",")} failed=${failed.length}`);
     return json({ ok: true, created, failed });
+  }
+
+  // ── WALLET TOP-UP (migration 164) ───────────────────────────────────────────────────
+  // Funding the prepaid usage wallet. Sits after the `configured` 503 above, so an
+  // unconfigured deployment refuses this for free, exactly like subscribe.
+  //
+  // Differs from subscribe in one way worth stating: the AMOUNT IS THE CUSTOMER'S CHOICE,
+  // not a price we look up. So confirmChargeCents cannot re-derive anything — it degenerates
+  // to an echo. It is still required, because it keeps three numbers provably identical: the
+  // figure on screen, the figure Collect.js minted its token against, and the figure charged.
+  if (action === "topup") {
+    const amountCents = Number(payload?.amountCents);
+    if (!Number.isInteger(amountCents) || amountCents < MIN_TOPUP_CENTS || amountCents > MAX_TOPUP_CENTS) {
+      return json({
+        error: `Choose an amount between $${(MIN_TOPUP_CENTS / 100).toFixed(0)} and $${(MAX_TOPUP_CENTS / 100).toLocaleString("en-US")}.`,
+      }, 400);
+    }
+    if (Number(payload?.confirmChargeCents) !== amountCents) {
+      return json({ error: "Confirm the amount and try again.", dueTodayCents: amountCents }, 400);
+    }
+
+    const paymentToken = String(payload?.paymentToken || "").trim();
+    // Operator refusals, identical to subscribe's and for the identical reason: a Collect.js
+    // token is minted in the CARDHOLDER's browser, so an operator-supplied one means someone
+    // at CSM Synergy typed a customer's card number.
+    if (operator) {
+      if (paymentToken) {
+        return json({ error: "An operator cannot enter a card on a tenant's behalf. Ask the owner to add their card first." }, 400);
+      }
+      if (!vaultId) {
+        return json({ error: "This tenant has no card on file. The owner must add one themselves before an operator can top up their wallet." }, 409);
+      }
+    }
+
+    // Card: reuse the vault, or create one from a fresh Collect.js token.
+    let vault = vaultId;
+    if (!vault) {
+      if (!paymentToken) return json({ error: "paymentToken is required (no card on file)." }, 400);
+      let cust: Record<string, string>;
+      try {
+        cust = await nmiPost({
+          customer_vault: "add_customer",
+          payment_token: paymentToken,
+          first_name: String(payload?.firstName || ""),
+          last_name: String(payload?.lastName || ""),
+          email: String(payload?.email || userEmail || ""),
+          merchant_defined_field_1: clientId,
+        });
+      } catch (e) {
+        return json({ error: `Payment gateway error: ${(e as Error).message}` }, 402);
+      }
+      vault = cust.customer_vault_id;
+      if (!vault) return json({ error: "Gateway did not return a customer vault id." }, 502);
+      const { error: vErr } = await admin.from("billing_customers")
+        .upsert({ client_id: clientId, vault_id: vault, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+      if (vErr) return json({ error: vErr.message }, 500);
+    }
+
+    // Durable audit BEFORE the first gateway call, and refuse if it cannot be written: if we
+    // cannot record who charged a client's card, we do not charge it.
+    if (operator) {
+      try { await auditStrict("operator_wallet_topup_attempt", amountCents, `vault=${vault}`); }
+      catch (e) { return json({ error: (e as Error).message }, 503); }
+    }
+
+    const r = await chargeTopup(admin, { clientId, vaultId: vault, amountCents, actorUserId: userId, auto: false });
+    if (operator) audit("operator_wallet_topup_result", amountCents, r.ok ? "ok" : `failed: ${r.error}`);
+    if (!r.ok) return json({ error: r.error }, r.blocking ? 409 : 402);
+    return json({ ok: true, balanceCents: r.balanceCents, alreadyCredited: r.alreadyCredited });
+  }
+
+  // Configure unattended recharging. Not a charge, but it AUTHORISES charges, so it carries
+  // the same gate and the same operator audit as one.
+  if (action === "topup_settings") {
+    const enabled = Boolean(payload?.enabled);
+    const thresholdCents = payload?.thresholdCents == null ? null : Number(payload.thresholdCents);
+    const amountCents = payload?.amountCents == null ? null : Number(payload.amountCents);
+
+    if (enabled) {
+      // A card must already be vaulted. Enabling auto-recharge with no card would arm
+      // something that can only ever fail, and its first failure would switch it back off
+      // and show a decline message for a card that never existed.
+      if (!vaultId) {
+        return json({ error: "Add a card first — make a one-off top-up, then switch on automatic top-ups." }, 409);
+      }
+      const ok = (n: number | null) => Number.isInteger(n) && (n as number) >= MIN_TOPUP_CENTS && (n as number) <= MAX_TOPUP_CENTS;
+      if (!ok(thresholdCents) || !ok(amountCents)) {
+        return json({
+          error: `Both amounts must be between $${(MIN_TOPUP_CENTS / 100).toFixed(0)} and $${(MAX_TOPUP_CENTS / 100).toLocaleString("en-US")}.`,
+        }, 400);
+      }
+    }
+    if (operator) {
+      try { await auditStrict("operator_wallet_autotopup_set", amountCents, `enabled=${enabled} threshold=${thresholdCents}`); }
+      catch (e) { return json({ error: (e as Error).message }, 503); }
+    }
+
+    const { error: upErr } = await admin.from("wallet_accounts").upsert({
+      client_id: clientId,
+      auto_topup_enabled: enabled,
+      auto_topup_threshold_cents: enabled ? thresholdCents : null,
+      auto_topup_amount_cents: enabled ? amountCents : null,
+      // Turning it back on clears the decline note — it is a record of why it stopped, not a
+      // permanent mark, and leaving it would make a working setup look broken.
+      auto_topup_disabled_reason: null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (upErr) return json({ error: upErr.message }, 500);
+    return json({ ok: true });
   }
 
   if (action === "cancel") {
