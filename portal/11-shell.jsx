@@ -1205,6 +1205,12 @@ function Dashboard({ session }) {
                   navigate(dest, (k === "contact" ? "c-" : "d-") + id);
                 }}
                 onOpenDesign={(code) => openInDesigner(code)}
+                /* The Orders card can link out now that the order detail has a URL.
+                   ssClampTab first, because a crew leader may hold the record and not
+                   Orders -- and dumping them on a list they cannot read is the same trap
+                   the onNavigate comment above documents. */
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                  ? (id) => navigate("orders", "o-" + id) : null}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -1273,7 +1279,13 @@ function Dashboard({ session }) {
                     /* IN-PORTAL designer, same as every other Open in this app — the public
                        ?id= page silently captures leads/drafts, so staff must never browse
                        a customer's design there. */
-                    onOpenDesign={openInDesigner} />
+                    onOpenDesign={openInDesigner}
+                    /* /portal/orders/o-<id>, on the same `<letter>-` sub shape the record
+                       pages already use. Opening pushes, closing pops -- so Back closes the
+                       order instead of leaving Orders, and an order can finally be linked
+                       to. `replace` is deliberately NOT used: the open IS the navigation. */
+                    urlOpenId={sub && /^o-/.test(sub) ? sub.slice(2) : null}
+                    onOpenChange={(id) => navigate("orders", id ? "o-" + id : null)} />
                 : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).

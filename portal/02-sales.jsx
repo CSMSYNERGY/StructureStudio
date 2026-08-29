@@ -1371,7 +1371,7 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign }) {
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
@@ -1797,17 +1797,21 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
           {os.map((o) => {
             const d = (data.designs || []).find((x) => x.short_code === o.short_code);
             const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
+            // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
+            // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
+            // to" -- which was true until the order detail got its own URL in this change.
+            const Tag = onOpenOrder ? "button" : "div";
             return (
-              <div key={o.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+              <Tag key={o.id} onClick={onOpenOrder ? () => onOpenOrder(o.id) : undefined}
+                style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: onOpenOrder ? "pointer" : "default" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: onOpenOrder ? ACCENT : "#1E293B" }}>
                   #{o.order_no}{what ? ` · ${what}` : ""}
                 </div>
                 <div style={{ fontSize: 11, color: "#64748B" }}>
                   {fmtDate(o.ordered_at)}
                   {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
-                  {o.status ? ` · ${o.status}` : ""}
                 </div>
-              </div>
+              </Tag>
             );
           })}
           {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}

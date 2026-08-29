@@ -968,7 +968,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -978,7 +978,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
   const [schedBusy, setSchedBusy] = useState(null);
   const [schedMsg, setSchedMsg] = useState(null);       // { ok } | { err }
-  const [openId, setOpenId] = useState(null);
+  // ── THE ORDER DETAIL HAS A URL NOW ───────────────────────────────────────────────
+  // It was pure component state, so the browser Back button walked out of Orders entirely
+  // instead of closing the order, and an order could not be linked to at all. The CRM code
+  // names this gap in its own comment -- "there is no /portal/orders/<id> route to
+  // deep-link to" -- which is why its Orders card could not link out.
+  //
+  // Carolyn, 2026-08-28 @41:03, on why this matters more than it looks: "One of my biggest
+  // frustrating parts of ShedSuite, which we use for many years, is you could never hit the
+  // back button. If you hit the back button, you lost everything on that screen ... I just
+  // don't want it to be like, oh no, you can't click that back button."
+  //
+  // The URL is the source of truth when the shell supplies one; the local state is the
+  // fallback for any host that does not. Keeping BOTH means this component still works
+  // unchanged if it is ever mounted somewhere without a router.
+  const [openIdLocal, setOpenIdLocal] = useState(null);
+  const openId = onOpenChange ? urlOpenId : openIdLocal;
+  const setOpenId = (id) => { if (onOpenChange) onOpenChange(id); else setOpenIdLocal(id); };
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   // Facet filters: ordered date-range + amount min/max (dollars, against the order total).
