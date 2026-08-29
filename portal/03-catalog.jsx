@@ -34,6 +34,7 @@ function SettingsView({ section }) {
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
+    ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -121,6 +122,12 @@ function SettingsView({ section }) {
         ssQuotePrefix: data.ssQuotePrefix || "",
         ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
         ssInvoicePrefix: data.ssInvoicePrefix || "",
+        // Sales tax (migration 158). The status call surfaces the stored fraction as a
+        // PERCENT; blank means "never answered", which the server refuses to let SS-issued
+        // mode start with — 0 is a legitimate explicit answer, silence is not.
+        ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
+        ssTaxLabel: data.ssTaxLabel || "",
+        ssTaxDelivery: Boolean(data.ssTaxDelivery),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -174,6 +181,9 @@ function SettingsView({ section }) {
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
       ssInvoicePrefix: form.ssInvoicePrefix,
+      ssTaxRate: form.ssTaxRate,
+      ssTaxLabel: form.ssTaxLabel,
+      ssTaxDelivery: form.ssTaxDelivery,
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
@@ -390,10 +400,34 @@ function SettingsView({ section }) {
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
           </div>
         )}
-        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim()) && (
+        {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
+            own documents. The rate here is the FALLBACK — each quote's tax is looked up
+            from its delivery address (Avalara), and this is what gets charged when that
+            lookup can't resolve, which is why the server refuses to flip SS mode on
+            while it is blank: 0 is a real answer, "unanswered" is not. */}
+        {!form.invoiceInGhl && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+            <div><span style={S.lbl}>Sales tax rate (%)</span>
+              <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Tax is figured from each quote's delivery address — this rate is charged when that lookup can't resolve. Enter 0 if you don't collect sales tax.</div></div>
+            <div><span style={S.lbl}>Tax label on documents</span>
+              <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
+                <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
+                Charge tax on delivery
+              </label></div>
+          </div>
+        )}
+        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Set {!String(form.ssQuoteNext).trim() && !String(form.ssInvoiceNext).trim() ? "starting quote and invoice numbers" : (!String(form.ssQuoteNext).trim() ? "a starting quote number" : "a starting invoice number")} before
-            saving. Without one, your first StructureStudio document would be numbered 1 and clash with the paperwork you already have out.
+            Before saving, set{" "}
+            {[
+              !String(form.ssQuoteNext).trim() && "a starting quote number",
+              !String(form.ssInvoiceNext).trim() && "a starting invoice number",
+              !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
+            ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
+            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
           </div>
         )}
         {!form.invoiceInGhl && status && status.emailReady === false && (

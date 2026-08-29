@@ -60,7 +60,7 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
   switch (action) {
     case "list": {
       const { data, error } = await admin.from("tenant_setup_items")
-        .select("id, title, detail, link_page, position, completed_at, completed_by_kind, completed_by_name")
+        .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
         .eq("client_id", clientId).order("position");
       if (error) throw error;
       return json({ items: data || [], canEdit: true });

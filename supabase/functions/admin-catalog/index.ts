@@ -739,11 +739,12 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         let setupAssigned = 0;
         try {
           const tpl = await sb.from("setup_template_items")
-            .select("id, title, detail, link_page").eq("active", true).order("position");
+            .select("id, title, detail, link_page, section, image_url").eq("active", true).order("position");
           if (tpl.error) throw new Error(tpl.error.message);
           const rows = (tpl.data ?? []).map((t: any, i: number) => ({
             client_id: clientId, template_item_id: t.id, title: t.title,
-            detail: t.detail, link_page: t.link_page, position: (i + 1) * 1024,
+            detail: t.detail, link_page: t.link_page, section: t.section,
+            image_url: t.image_url, position: (i + 1) * 1024,
           }));
           if (rows.length) {
             const ins = await sb.from("tenant_setup_items").insert(rows);

@@ -710,7 +710,7 @@ function PMSetupAdmin({ canWrite }) {
   const [clientItems, setClientItems] = useState(null);
   const [busy, setBusy] = useState(false);
   // One "add a step" draft, shared by both cards — only one is ever open at a time.
-  const [draft, setDraft] = useState({ title: "", detail: "", linkPage: "" });
+  const [draft, setDraft] = useState({ title: "", detail: "", linkPage: "", section: "", imageUrl: "" });
   const [adding, setAdding] = useState(null);           // null | "template" | clientId
 
   const loadTpl = useCallback(() => pmCall({ action: "setup_template" })
@@ -740,13 +740,34 @@ function PMSetupAdmin({ canWrite }) {
   const saveDraft = (target) => {
     const title = draft.title.trim();
     if (!title) return;
+    const extra = { detail: draft.detail.trim(), linkPage: draft.linkPage.trim(), section: draft.section.trim(), imageUrl: draft.imageUrl };
     const body = target === "template"
-      ? { action: "setup_template_save", title, detail: draft.detail.trim(), linkPage: draft.linkPage.trim() }
-      : { action: "setup_client_save", clientId: target, title, detail: draft.detail.trim(), linkPage: draft.linkPage.trim() };
+      ? { action: "setup_template_save", title, ...extra }
+      : { action: "setup_client_save", clientId: target, title, ...extra };
     run(body, async () => {
-      setDraft({ title: "", detail: "", linkPage: "" }); setAdding(null);
+      setDraft({ title: "", detail: "", linkPage: "", section: "", imageUrl: "" }); setAdding(null);
       if (target === "template") await loadTpl(); else { await reloadList(); await loadClients(); }
     });
+  };
+
+  // Screenshot upload: read the file as a data-URI, hand the base64 to portal-projects
+  // (which mints the path in the public setup-screens bucket), keep the returned URL.
+  const [uploading, setUploading] = useState(false);
+  const [viewing, setViewing] = useState(null);   // { url, title } for the popup viewer
+  const uploadShot = (file, onDone) => {
+    if (!file || uploading) return;
+    if (file.size > 3_000_000) { setErr("That image is over 3MB — crop or resize it first."); return; }
+    setUploading(true); setErr("");
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const d = await pmCall({ action: "setup_upload_image", imageBase64: String(reader.result), contentType: file.type || "image/png" });
+        onDone(d.url);
+      } catch (e) { setErr(e.message); }
+      setUploading(false);
+    };
+    reader.onerror = () => { setErr("Could not read that file."); setUploading(false); };
+    reader.readAsDataURL(file);
   };
 
   // ▲/▼ reorder, the stage-editor idiom: move locally, then send the whole order.
@@ -772,12 +793,36 @@ function PMSetupAdmin({ canWrite }) {
         onKeyDown={(e) => { if (e.key === "Enter") saveDraft(target); if (e.key === "Escape") setAdding(null); }} />
       <input placeholder="Detail (optional) — one sentence on how" style={{ ...S.input, marginBottom: 6 }}
         value={draft.detail} onChange={(e) => setDraft({ ...draft, detail: e.target.value })} />
-      <input placeholder="Portal page it opens (optional), e.g. settings/branding" style={{ ...S.input, marginBottom: 8 }}
+      <input placeholder="Portal page it opens (optional), e.g. settings/branding" style={{ ...S.input, marginBottom: 6 }}
         value={draft.linkPage} onChange={(e) => setDraft({ ...draft, linkPage: e.target.value })} />
+      <input placeholder='Section heading (optional), e.g. "The basics"' style={{ ...S.input, marginBottom: 6 }}
+        list="pm-setup-sections"
+        value={draft.section} onChange={(e) => setDraft({ ...draft, section: e.target.value })} />
+      <datalist id="pm-setup-sections">
+        {[...new Set([...(tpl || []), ...(clientItems || [])].map((x) => x.section).filter(Boolean))].map((sec) => <option key={sec} value={sec} />)}
+      </datalist>
+      {/* Screenshot: picked locally, uploaded immediately (the upload_logo idiom — the
+          returned public URL sits in the draft and is persisted by the normal save). */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        {draft.imageUrl ? (
+          <>
+            <img src={draft.imageUrl} alt="" style={{ height: 44, borderRadius: 6, border: "1px solid #E2E8F0" }} />
+            <button type="button" onClick={() => setDraft({ ...draft, imageUrl: "" })}
+              style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: 0, fontFamily: "inherit" }}>Remove screenshot</button>
+          </>
+        ) : (
+          <label style={{ fontSize: 12, fontWeight: 700, color: "#1B7895", cursor: "pointer" }}>
+            ＋ Add a screenshot
+            <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }}
+              onChange={(e) => uploadShot(e.target.files && e.target.files[0], (url) => setDraft((d) => ({ ...d, imageUrl: url })))} />
+          </label>
+        )}
+        {uploading && <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Uploading…</span>}
+      </div>
       <div style={{ display: "flex", gap: 8 }}>
         <button type="button" onClick={() => saveDraft(target)} disabled={busy || !draft.title.trim()}
           style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 14px", fontSize: 12, opacity: draft.title.trim() ? 1 : 0.6 }}>Add step</button>
-        <button type="button" onClick={() => { setAdding(null); setDraft({ title: "", detail: "", linkPage: "" }); }}
+        <button type="button" onClick={() => { setAdding(null); setDraft({ title: "", detail: "", linkPage: "", section: "", imageUrl: "" }); }}
           style={{ ...S.btn("#F1F5F9", "#334155"), padding: "6px 14px", fontSize: 12 }}>Cancel</button>
       </div>
     </div>
@@ -793,7 +838,7 @@ function PMSetupAdmin({ canWrite }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 2 }}>
           <span style={{ ...S.h2, marginBottom: 0 }}>Setup template</span>
           {canWrite && adding !== "template" && (
-            <button type="button" onClick={() => { setAdding("template"); setDraft({ title: "", detail: "", linkPage: "" }); }}
+            <button type="button" onClick={() => { setAdding("template"); setDraft({ title: "", detail: "", linkPage: "", section: "", imageUrl: "" }); }}
               style={{ ...S.btn("#EEF2FF", ACCENT), marginLeft: "auto", padding: "6px 13px", fontSize: 12 }}>＋ Add step</button>
           )}
         </div>
@@ -805,19 +850,38 @@ function PMSetupAdmin({ canWrite }) {
         {tpl === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
         {tpl && tpl.length === 0 && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No steps yet.</div>}
         {(tpl || []).map((t, i) => (
-          <div key={t.id} style={{ ...rowBox, opacity: t.active === false ? 0.55 : 1 }}>
+          <React.Fragment key={t.id}>
+            {/* Section header whenever it changes walking the position order — sections
+                are labels on the ONE ordering, never a second one. */}
+            {t.section && t.section !== ((tpl[i - 1] || {}).section || null) && (
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.5, margin: "12px 0 6px" }}>{t.section}</div>
+            )}
+            <div style={{ ...rowBox, opacity: t.active === false ? 0.55 : 1 }}>
             <span style={{ fontSize: 12, fontWeight: 800, color: "#94A3B8", minWidth: 18, paddingTop: 2 }}>{i + 1}.</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{t.title}</div>
               {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
               {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
+              {t.image_url && (
+                <img src={t.image_url} alt="" onClick={() => setViewing({ url: t.image_url, title: t.title })}
+                  style={{ display: "block", height: 56, borderRadius: 6, border: "1px solid #E2E8F0", marginTop: 6, cursor: "zoom-in" }} />
+              )}
             </div>
             {canWrite && (
               <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                {canWrite && (
+                  <label title={t.image_url ? "Replace screenshot" : "Add screenshot"}
+                    style={{ fontSize: 12, color: "#94A3B8", cursor: "pointer", padding: "0 4px" }}>
+                    📷
+                    <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" style={{ display: "none" }}
+                      onChange={(e) => uploadShot(e.target.files && e.target.files[0], (url) =>
+                        run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: url }, loadTpl))} />
+                  </label>
+                )}
                 {arrow("▲", () => move(tpl, i, -1, "setup_template_reorder"), i === 0)}
                 {arrow("▼", () => move(tpl, i, 1, "setup_template_reorder"), i === tpl.length - 1)}
                 <button type="button" disabled={busy}
-                  onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", active: t.active === false }, loadTpl)}
+                  onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", active: t.active === false }, loadTpl)}
                   style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit" }}>
                   {t.active === false ? "Enable" : "Disable"}
                 </button>
@@ -826,7 +890,8 @@ function PMSetupAdmin({ canWrite }) {
                   style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 4px", fontFamily: "inherit" }}>Delete</button>
               </div>
             )}
-          </div>
+            </div>
+          </React.Fragment>
         ))}
         {adding === "template" && addForm("template")}
       </div>
@@ -868,7 +933,11 @@ function PMSetupAdmin({ canWrite }) {
                 <div style={{ padding: "2px 2px 14px 12px" }}>
                   {clientItems === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
                   {(clientItems || []).map((it, i) => (
-                    <div key={it.id} style={{ ...rowBox, background: it.completed_at ? "#F7FEF9" : "#FFF", borderColor: it.completed_at ? "#DCFCE7" : "#E2E8F0" }}>
+                    <React.Fragment key={it.id}>
+                    {it.section && it.section !== ((clientItems[i - 1] || {}).section || null) && (
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.5, margin: "10px 0 5px" }}>{it.section}</div>
+                    )}
+                    <div style={{ ...rowBox, background: it.completed_at ? "#F7FEF9" : "#FFF", borderColor: it.completed_at ? "#DCFCE7" : "#E2E8F0" }}>
                       <input type="checkbox" checked={!!it.completed_at} disabled={!canWrite || busy}
                         onChange={() => run({ action: "setup_client_toggle", id: it.id, done: !it.completed_at }, async () => { await reloadList(); await loadClients(); })}
                         style={{ marginTop: 3, width: 15, height: 15, flexShrink: 0, cursor: canWrite ? "pointer" : "default" }} />
@@ -877,6 +946,10 @@ function PMSetupAdmin({ canWrite }) {
                           {i + 1}. {it.title}
                         </div>
                         {it.detail && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{it.detail}</div>}
+                        {it.image_url && (
+                          <img src={it.image_url} alt="" onClick={() => setViewing({ url: it.image_url, title: it.title })}
+                            style={{ display: "block", height: 44, borderRadius: 6, border: "1px solid #E2E8F0", marginTop: 5, cursor: "zoom-in" }} />
+                        )}
                         {it.completed_at && (
                           <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 3 }}>
                             {it.completed_by_kind === "team" ? "Ticked by us" : "Done by the builder"}
@@ -894,11 +967,12 @@ function PMSetupAdmin({ canWrite }) {
                         </div>
                       )}
                     </div>
+                    </React.Fragment>
                   ))}
                   {canWrite && (adding === c.clientId
                     ? addForm(c.clientId)
                     : (
-                      <button type="button" onClick={() => { setAdding(c.clientId); setDraft({ title: "", detail: "", linkPage: "" }); }}
+                      <button type="button" onClick={() => { setAdding(c.clientId); setDraft({ title: "", detail: "", linkPage: "", section: "", imageUrl: "" }); }}
                         style={{ ...S.btn("#F1F5F9", "#334155"), padding: "5px 12px", fontSize: 12, marginTop: 2 }}>＋ Add a step just for {c.clientId}</button>
                     ))}
                 </div>
@@ -907,6 +981,10 @@ function PMSetupAdmin({ canWrite }) {
           );
         })}
       </div>
+
+      {viewing && (
+        <PdfModal url={viewing.url} title={viewing.title} image onClose={() => setViewing(null)} />
+      )}
     </div>
   );
 }

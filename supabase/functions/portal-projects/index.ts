@@ -68,6 +68,18 @@ function slugId(prefix: string): string {
   return prefix + "_" + crypto.randomUUID().slice(0, 8);
 }
 
+// The one shape a setup-step screenshot URL may take: our own project's public
+// setup-screens bucket, whose paths only setup_upload_image mints. The column lands in an
+// <img src> in every tenant's browser, so anything else — another host, another bucket, a
+// javascript: scheme — is refused (undefined), never stored. Empty string clears.
+const SETUP_IMAGE_PREFIX =
+  `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/setup-screens/steps/`;
+function setupImageUrl(v: unknown): string | null | undefined {
+  const s = str(v, 500);
+  if (!s) return null;
+  return s.startsWith(SETUP_IMAGE_PREFIX) && /^[\w:/.-]+$/.test(s) ? s : undefined;
+}
+
 // Rebuild a column's settings for its type. Existing stable ids are preserved when the
 // caller sends them back; entries without an id get one minted here (ids are what item
 // values store, so they must never be caller-invented free text).
@@ -1014,8 +1026,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           // button. Kept as a plain slug pair: it is fed to the portal's own navigate(),
           // never to an <a href>, so it can never become an off-site link.
           link_page: str(payload.linkPage, 60).replace(/[^a-z0-9/_-]/gi, "") || null,
+          section: str(payload.section, 60) || null,
+          image_url: setupImageUrl(payload.imageUrl),
           updated_at: new Date().toISOString(),
         };
+        if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
         if (payload.active !== undefined) row.active = payload.active === true;
         if (id) {
           const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
@@ -1028,6 +1043,34 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .insert({ ...row, position: (maxRow?.position || 0) + 1024 }).select().single();
         if (error) throw error;
         return json({ item: created });
+      }
+
+      // Store a step screenshot in the PUBLIC setup-screens bucket and return its URL.
+      // The upload_logo shape (portal-settings): base64 through the function, type
+      // whitelist, byte cap, server-minted uuid path. Public is correct here — these are
+      // operator-authored screenshots of the product's own screens, shown identically to
+      // every tenant; a signed-URL scheme would cost a signature per step per page load
+      // and defeat browser caching. Deleting a step deliberately does NOT delete its
+      // object: images get reused across steps and re-uploads, and an orphan in a
+      // 5MB-capped image bucket is cheaper than refcounting.
+      case "setup_upload_image": {
+        if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) {
+          return json({ error: "No image data." }, 400);
+        }
+        const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+        const ct = String(payload.contentType || "image/png");
+        const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+        const ext = EXT_BY_CT[ct];
+        if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
+        let bytes: Uint8Array;
+        try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
+        catch { return json({ error: "Invalid image data." }, 400); }
+        if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+        const path = `steps/${crypto.randomUUID()}.${ext}`;
+        const up = await admin.storage.from("setup-screens").upload(path, bytes, { contentType: ct, upsert: false });
+        if (up.error) throw up.error;
+        const { data: pub } = admin.storage.from("setup-screens").getPublicUrl(path);
+        return json({ url: pub.publicUrl });
       }
 
       case "setup_template_delete": {
@@ -1096,7 +1139,8 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { error } = await admin.from("tenant_setup_items").insert(
           tpl.map((t, i) => ({
             client_id: cid, template_item_id: t.id, title: t.title, detail: t.detail,
-            link_page: t.link_page, position: (i + 1) * 1024,
+            link_page: t.link_page, section: t.section, image_url: t.image_url,
+            position: (i + 1) * 1024,
           })),
         );
         if (error) throw error;
@@ -1115,7 +1159,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           title,
           detail: str(payload.detail, 2000) || null,
           link_page: str(payload.linkPage, 60).replace(/[^a-z0-9/_-]/gi, "") || null,
+          section: str(payload.section, 60) || null,
+          image_url: setupImageUrl(payload.imageUrl),
         };
+        if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
         if (id) {
           const { error } = await admin.from("tenant_setup_items").update(row).eq("id", id);
           if (error) throw error;

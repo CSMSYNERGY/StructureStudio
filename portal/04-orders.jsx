@@ -461,11 +461,12 @@ function SetupChecklist({ onNavigate, onCount }) {
   const [items, setItems] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
+  const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
   const load = useCallback(async () => {
     const { data, error: err } = await sb
       .from("tenant_setup_items")
-      .select("id, title, detail, link_page, position, completed_at, completed_by_kind, completed_by_name")
+      .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
       .order("position", { ascending: true });
     if (err) { setError(err.message); setItems([]); return; }
     setItems(data || []);
@@ -522,7 +523,14 @@ function SetupChecklist({ onNavigate, onCount }) {
         {items.map((it, i) => {
           const isDone = !!it.completed_at;
           return (
-            <div key={it.id} style={{
+            <React.Fragment key={it.id}>
+            {/* Section header whenever it changes walking the list in order — the copy
+                carries its sections from the template, so a builder reads "The basics",
+                works down it, and can see the paid-features arc is a later chapter. */}
+            {it.section && it.section !== ((items[i - 1] || {}).section || null) && (
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.6, margin: i === 0 ? "2px 0 0" : "14px 0 0" }}>{it.section}</div>
+            )}
+            <div style={{
               display: "flex", gap: 11, alignItems: "flex-start",
               border: "1px solid " + (isDone ? "#DCFCE7" : "#E2E8F0"),
               background: isDone ? "#F7FEF9" : "#FFF",
@@ -537,6 +545,11 @@ function SetupChecklist({ onNavigate, onCount }) {
                   {it.title}
                 </div>
                 {it.detail && <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 3 }}>{it.detail}</div>}
+                {it.image_url && (
+                  <img src={it.image_url} alt={"Where to find: " + it.title} loading="lazy"
+                    onClick={() => setViewing({ url: it.image_url, title: it.title })}
+                    style={{ display: "block", maxHeight: 120, maxWidth: "100%", borderRadius: 8, border: "1px solid #E2E8F0", marginTop: 7, cursor: "zoom-in" }} />
+                )}
                 {isDone && (
                   <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 4 }}>
                     Done{it.completed_by_name ? ` · ${it.completed_by_kind === "team" ? "by " + it.completed_by_name + " (Structure Studio)" : it.completed_by_name}` : ""} · {fmtDate(it.completed_at)}
@@ -553,9 +566,14 @@ function SetupChecklist({ onNavigate, onCount }) {
                 </button>
               )}
             </div>
+            </React.Fragment>
           );
         })}
       </div>
+
+      {viewing && (
+        <PdfModal url={viewing.url} title={viewing.title} image onClose={() => setViewing(null)} />
+      )}
     </div>
   );
 }
