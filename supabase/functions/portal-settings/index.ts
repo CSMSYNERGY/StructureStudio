@@ -3612,6 +3612,89 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // exactly what defeated it.
       orders = oe ? undefined : (os ?? []);
     }
+    // ── BUILD, DELIVERY AND REPAIRS ON THE RECORD ──────────────────────────────────────
+    // Carolyn, 2026-08-28 @37:48: "whether you're in a contact or whether you're in a deal,
+    // it doesn't matter, you want to be able to see the contact details, the deals, the
+    // orders, the build schedule, the delivery schedule ... Repairs also."
+    //
+    // ⚠️ READ-ONLY, AND THEY STAY THEIR OWN SYSTEMS. She was explicit at @23:40 that build
+    // and delivery must NOT become pipelines: "I don't really want to change this and make
+    // it a pipeline because I've got a lot of work in both of these." So this reads
+    // schedule_stages / delivery_loads where they live; it does not mirror or re-model them.
+    //
+    // Gated per area, not on the CRM gate: a sales rep can hold contacts:view and no
+    // build_schedule:view at all, and the card must then be ABSENT rather than empty --
+    // undefined here means "not yours to see", [] means "nothing scheduled". The frontend
+    // renders those two differently, which is the same absent-vs-empty distinction the
+    // orders block above exists to protect.
+    //
+    // Rides this fetch rather than adding round-trips: the record page makes exactly one
+    // call on purpose, because a direct browser read returns nothing in operator view-as.
+    let build: any[] | undefined;
+    let stages: any[] | undefined;
+    if (canRead("build_schedule")) {
+      const [jobsRes, stRes] = await Promise.all([
+        codes.length
+          ? admin.from("build_jobs")
+              .select("id, design_short_code, stage_id, due_date, completed_at, serial, source, crew_id")
+              .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+          : Promise.resolve({ data: [], error: null }),
+        // The ladder itself, because stage names are TENANT-EDITABLE. The dot bar has to
+        // draw the stages this builder actually uses, and automation keys on `kind`, never
+        // on the name -- the Monday label-rename lesson, which this table already carries.
+        admin.from("schedule_stages")
+          .select("id, name, kind, sort_order, color")
+          .eq("client_id", clientId).eq("archived", false).order("sort_order"),
+      ]);
+      build = jobsRes.error ? undefined : (jobsRes.data ?? []);
+      stages = stRes.error ? undefined : (stRes.data ?? []);
+    }
+
+    let delivery: any[] | undefined;
+    if (canRead("delivery_schedule")) {
+      // Stops carry the building; the LOAD carries the status. There is no delivery stages
+      // table -- it is a fixed planned|out|delivered CHECK on delivery_loads -- so the dot
+      // bar's delivery row is that ladder, not a configurable one.
+      //
+      // Two reads and a join in JS rather than a PostgREST embed: an embed silently returns
+      // nothing when the FK it needs is not where the resolver expects, and a delivery card
+      // that is quietly always empty is the exact failure this endpoint just had with
+      // orders.status. Two explicit reads cannot fail that way.
+      const stopsRes = codes.length
+        ? await admin.from("delivery_stops")
+            .select("id, design_short_code, delivered_at, load_id, stop_order")
+            .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+        : { data: [], error: null };
+      if (stopsRes.error) {
+        delivery = undefined;
+      } else {
+        const stops = stopsRes.data ?? [];
+        const loadIds = [...new Set(stops.map((s: any) => s.load_id).filter(Boolean))];
+        const loadsRes = loadIds.length
+          ? await admin.from("delivery_loads")
+              .select("id, load_no, status, load_date, departed_at, completed_at")
+              .eq("client_id", clientId).in("id", loadIds)
+          : { data: [], error: null };
+        const byId = new Map((loadsRes.data ?? []).map((l: any) => [l.id, l]));
+        delivery = stops.map((s: any) => ({ ...s, load: byId.get(s.load_id) ?? null }));
+      }
+    }
+
+    let repairs: any[] | undefined;
+    if (canRead("repairs")) {
+      // ⚠️ REPAIRS DO NOT LINK TO crm_contacts. There is no contact_id on the table -- they
+      // key on design_short_code (plus a denormalised name/phone/email captured at intake),
+      // which is why this joins on `codes` like every other section here rather than on the
+      // contact. Checked against live before writing it; the obvious .eq("contact_id", ...)
+      // would have returned nothing forever and rendered as "no repairs".
+      const rr = codes.length
+        ? await admin.from("repairs")
+            .select("id, repair_no, status, description, design_short_code, requested_at, completed_at, quote_cents")
+            .eq("client_id", clientId).in("design_short_code", codes)
+            .order("requested_at", { ascending: false }).limit(50)
+        : { data: [], error: null };
+      repairs = rr.error ? undefined : (rr.data ?? []);
+    }
 
     // Whether this tenant can text at all, so the SMS tab can give the RIGHT reason when
     // it is disabled. Three different things stop a text going out — no permission, no
@@ -3633,7 +3716,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs });
   }
 
   if (action === "crm_feed") {
