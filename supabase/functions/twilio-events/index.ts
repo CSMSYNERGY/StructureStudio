@@ -18,12 +18,31 @@ import { normalizeBrandStatus, normalizeCampaignStatus } from "../_shared/twilio
 // mode, which was invisible from inside the database for weeks. Auth is the shared URL
 // secret, compared in constant time.
 //
-// ⚠️ ANSWER FAST. The webhook sink response timeout is FIVE SECONDS, and a cold Supabase
-// isolate spends ~2.5s before its first query. So: no Twilio round trips here, ever. Record
-// the event, project it onto the row, return. Anything slower belongs in the poller.
+// ⚠️ ANSWER FIRST, WORK AFTER — and this is not a precaution, it is a fix. The sink timeout
+// is FIVE SECONDS and a cold Supabase isolate spends ~2.5s before its first query. The first
+// version did the database work inline and Twilio's own test event came back **504 Timed out
+// waiting for a response** — while the event itself had been received and stored perfectly.
+// The work was never the problem; being still busy when Twilio gave up was.
+//
+// So the handler now authenticates, parses, and RETURNS 200 immediately, handing the
+// processing to EdgeRuntime.waitUntil() so the isolate stays alive to finish it.
+//
+// ⚠️ The trade this makes, deliberately: a failure after the response cannot be reported to
+// Twilio. That costs nothing here, because Event Streams has no documented redelivery — a
+// non-2xx would not have earned a retry anyway, and could get the subscription disabled. The
+// real safety nets for the signal that matters (per-number registration) are the poller and
+// the probe send, both of which exist for exactly this reason.
+//
+// Still true: NO Twilio round trips in here, ever. Anything that needs one belongs in the poller.
 //
 // ⚠️ ALWAYS 200 ONCE AUTHENTICATED, like sms-inbound. Event Streams has no documented
 // redelivery; a non-2xx buys nothing and can get the subscription disabled.
+
+// Supabase's runtime provides this; the type is not in the edge-runtime .d.ts, so declare the
+// one member used. Guarded at the call site — if it is ever absent the work is awaited inline,
+// which is the pre-fix behaviour rather than silently dropping the event.
+// deno-lint-ignore no-explicit-any
+declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
 
 function ok(body: unknown = { ok: true }) {
   return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -67,6 +86,27 @@ Deno.serve(withErrorLog("twilio-events", async (req: Request) => {
     { auth: { persistSession: false } },
   );
 
+  // ── Respond NOW, process after ───────────────────────────────────────────────────────
+  // Everything above is cheap and synchronous: a constant-time secret compare and a JSON
+  // parse. Everything below touches the database, and that is what blew the five-second
+  // budget. Twilio gets its 200 while the work runs on.
+  const work = processEvents(admin, events);
+  try {
+    if (typeof EdgeRuntime !== "undefined" && EdgeRuntime && typeof EdgeRuntime.waitUntil === "function") {
+      EdgeRuntime.waitUntil(work);
+    } else {
+      // No waitUntil in this runtime — finishing the work matters more than the deadline,
+      // because a dropped event has no redelivery to save it.
+      await work;
+    }
+  } catch {
+    await work.catch(() => {});
+  }
+  return ok({ ok: true, received: events.length });
+}));
+
+// deno-lint-ignore no-explicit-any
+async function processEvents(admin: any, events: any[]): Promise<void> {
   let handled = 0;
   for (const ev of events) {
     const eventId = String(ev?.id ?? "");
@@ -185,7 +225,12 @@ Deno.serve(withErrorLog("twilio-events", async (req: Request) => {
     }
   }
 
-  if (!handled && events.length) {
+  // ⚠️ Twilio's OWN connectivity test carries no A2P fields by design, and someone will press
+  // that button many times while wiring a sink. Logging it as "unhandled" would turn a
+  // healthy setup step into a repeating info row — and a repeating info row is the signal this
+  // project uses to find real bugs, so polluting it has a cost beyond noise.
+  const onlyTestEvents = events.every((e) => String(e?.type ?? "").endsWith(".test-event"));
+  if (!handled && events.length && !onlyTestEvents) {
     // Not an error — Twilio adds event types, and an unrecognised one is recorded above and
     // deliberately ignored. Logged as info so a flood of them is still visible.
     await logEdgeError({
@@ -196,6 +241,4 @@ Deno.serve(withErrorLog("twilio-events", async (req: Request) => {
       context: { types: events.map((e) => String(e?.type ?? "")).slice(0, 5) },
     }).catch(() => {});
   }
-
-  return ok({ ok: true, received: events.length, handled });
-}));
+}
