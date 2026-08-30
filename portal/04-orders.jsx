@@ -63,6 +63,16 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
+  // The screenshot is usually sitting in the clipboard (Win+Shift+S / Cmd+Shift+4), so
+  // pasting anywhere on the form attaches it — the picker below is the fallback. ONE
+  // file by design: the whole pipeline (feedback_submissions.attachment_path, the
+  // Projects mirror, the old Monday leg) carries a single attachment, and a paste
+  // replaces the staged one rather than growing a list the server would ignore.
+  const onPaste = (e) => {
+    const img = [...(e.clipboardData?.files || [])].find((f) => f && f.size);
+    if (img) { e.preventDefault(); setFile(img); }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (!title.trim()) { setErr("Please give this a short title."); return; }
@@ -92,7 +102,7 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   };
 
   return (
-    <form onSubmit={submit} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+    <form onSubmit={submit} onPaste={onPaste} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
       {err && <div style={S.err}>{err}</div>}
       <div>
         <label style={S.lbl}>{cfg.titleHint}</label>
@@ -111,9 +121,23 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
       </div>
       <div>
         <label style={S.lbl}>Screenshot or video (optional)</label>
-        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
-          onChange={(e) => setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-          style={{ ...S.input, padding: "7px 10px", fontWeight: 500 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {file ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#334155", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "5px 11px", maxWidth: 240 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🖼 {file.name}</span>
+              <button type="button" aria-label={"Remove " + file.name} onClick={() => setFile(null)}
+                style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", padding: 0, fontSize: 13, lineHeight: 1 }}>✕</button>
+            </span>
+          ) : (
+            <label style={{ fontSize: 12.5, fontWeight: 700, color: "#1B7895", cursor: "pointer" }}>
+              📎 Attach a screenshot
+              <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
+                style={{ display: "none" }}
+                onChange={(e) => { setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null); e.target.value = ""; }} />
+            </label>
+          )}
+          <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{file ? "Pasting or picking again replaces it." : "or just paste one here"}</span>
+        </div>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A picture of the problem helps us fix it much faster. Max 25 MB.</div>
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
