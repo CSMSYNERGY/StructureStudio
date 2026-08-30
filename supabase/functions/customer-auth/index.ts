@@ -9,6 +9,11 @@ import {
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import { mintSession, revokeSession } from "../_shared/customerSession.ts";
+import { sendTenantEmail } from "../_shared/emailSend.ts";
+import {
+  isPlausibleEmail, normalizeEmail, issueEmailOtp, verifyEmailOtp, emailOtpBody,
+  EmailOtpNotConfigured,
+} from "../_shared/emailOtp.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 
 // customer-auth: phone-OTP sign-in for the customer quote portal — the "proper phone
@@ -58,8 +63,29 @@ const MAX_SENDS_PER_IP = 10; // sends one caller may trigger per window, across 
 const MAX_SENDS_PER_TENANT = 30; // ALL sends for one tenant per window — the XFF-proof backstop
 const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are refused
 
+// ── The EMAIL channel (2026-08-30) ────────────────────────────────────────────────────
+// A second way in, because this function was SMS-ONLY and customer login therefore died on
+// ANY Twilio unavailability — an outage, a billing lapse, a mistyped token, or a messaging
+// suspension on the shared ISV account. The code is delivered by Resend FROM THE BUILDER'S
+// OWN DOMAIN, so it arrives from the same sender that sent the quote.
+//
+// ⚠️ THE SESSION IS STILL KEYED ON THE PHONE. customer_sessions.phone_digits is NOT NULL and
+// the whole quote lookup is phone-based, so a verified email is RESOLVED to the phone on that
+// customer's most recent design. Proving control of the address the quote was sent to is the
+// same claim as proving control of the number it was sent to — but if no design carries that
+// address there is no identity to mint, and the honest answer is that we have no quotes for
+// it. That answer is only ever given AFTER the code is proven, which is what keeps the
+// NO ENUMERATION rule intact: the send path behaves identically for every address.
+//
+// ⚠️ Unlike the SMS path, WE hold this code — Twilio Verify holds its own. See
+// _shared/emailOtp.ts for why it is stored as a keyed hash and never a bare digest.
 const MSG_TOO_MANY_CODES = "Too many codes requested. Try again in about 15 minutes.";
 const MSG_NOT_CONFIGURED = "Sign-in by text isn't available yet.";
+const MSG_EMAIL_NOT_CONFIGURED = "Sign-in by email isn't available yet.";
+// Said for a wrong code, an expired one, a consumed one and a never-issued one alike. The
+// distinctions are real but telling them apart is a probing oracle, and none of them change
+// what the customer should do next: ask for another code.
+const MSG_EMAIL_CODE_BAD = "That code didn't match or has expired — request a new one.";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -171,6 +197,11 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     return json({ error: "Unknown action" }, 400);
   }
 
+  // Which channel this request is for. Absent/anything-else means SMS, so every existing
+  // caller keeps working untouched — the portal only sends `channel` when the customer picks
+  // the email route.
+  const channel = body?.channel === "email" ? "email" : "sms";
+
   // ── Shared validation for the two OTP actions ────────────────────────────────────────
   // Tenant: slug shape + existence in client_configs (the same guard the public RPCs
   // and capture-lead use). One message for both failures — a probe can't tell "bad
@@ -180,6 +211,14 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   const { data: cfg } = await sb.from("client_configs")
     .select("client_id").eq("client_id", clientId).maybeSingle();
   if (!cfg) return json({ error: "Unknown builder link." }, 404);
+
+  // ── EMAIL CHANNEL: handled entirely below, then returns ─────────────────────────────
+  // Kept as its own branch rather than threaded through the phone path because almost
+  // nothing is shared: a different identity, a different transport, a different code store.
+  // Interleaving them would make both harder to read and each other's failure modes.
+  if (channel === "email") {
+    return await handleEmailChannel(sb, req, action, body, clientId);
+  }
 
   const phoneRaw = typeof body?.phone === "string" ? body.phone.trim().slice(0, 40) : "";
   const e164 = toE164US(phoneRaw.replace(/\D/g, ""));
@@ -361,3 +400,206 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   const token = await mintSession(sb, clientId, digits, name);
   return json({ ok: true, token, name });
 }));
+
+/**
+ * The email sign-in channel.
+ *
+ * Mirrors the phone path's guarantees deliberately, one for one:
+ *   * the SAME throttle buckets and caps — a caller must not get a fresh budget by switching
+ *     channel, which would make the email route a way around the SMS limits
+ *   * NO ENUMERATION on request_code — always {ok:true}, whether or not the address has quotes
+ *   * the address never reaches app_errors, exactly as phone digits never do
+ */
+async function handleEmailChannel(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  req: Request,
+  action: string,
+  // deno-lint-ignore no-explicit-any
+  body: any,
+  clientId: string,
+): Promise<Response> {
+  const emailRaw = typeof body?.email === "string" ? body.email.slice(0, 254) : "";
+  const email = normalizeEmail(emailRaw);
+  if (!isPlausibleEmail(email)) return json({ error: "Enter a valid email address." }, 400);
+
+  const name = typeof body?.name === "string" ? (body.name.trim().slice(0, 80) || null) : null;
+  // ⚠️ The bucket key is namespaced 'email:' so it cannot collide with a phone bucket
+  // ('<clientId>:<10 digits>') — but the IP and TENANT buckets are SHARED with the SMS path
+  // on purpose. Separate ones would hand an attacker a second full budget for free.
+  const emailBucketKey = `email:${clientId}:${email}`;
+
+  if (action === "request_code") {
+    const ip = clientIp(req);
+    const emailBucket = await readBucket(sb, emailBucketKey);
+    const ipBucket = await readBucket(sb, `ip:${ip}`);
+    const tenantBucket = await readBucket(sb, `sends:tenant:${clientId}`);
+
+    const now = Date.now();
+    if ((emailBucket?.lockedUntilMs ?? 0) > now || (ipBucket?.lockedUntilMs ?? 0) > now) {
+      return json({ error: MSG_TOO_MANY_CODES }, 429);
+    }
+    const emailOver = emailBucket !== null && emailBucket.sendCount >= MAX_SENDS_PER_PHONE;
+    const ipOver = ipBucket !== null && ipBucket.sendCount >= MAX_SENDS_PER_IP;
+    const tenantOver = tenantBucket !== null && tenantBucket.sendCount >= MAX_SENDS_PER_TENANT;
+    if (emailOver || ipOver || tenantOver) {
+      if (emailOver && emailBucket) await saveBucket(sb, emailBucket, { lockMs: LOCKOUT_MS });
+      if (ipOver && ipBucket) await saveBucket(sb, ipBucket, { lockMs: LOCKOUT_MS });
+      return json({ error: MSG_TOO_MANY_CODES }, 429);
+    }
+
+    let brand = "";
+    {
+      const [bsRes, cfgRes] = await Promise.all([
+        sb.from("client_settings").select("business_name").eq("client_id", clientId).maybeSingle(),
+        sb.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+      ]);
+      const n = bsRes.data?.business_name || cfgRes.data?.company_name;
+      brand = typeof n === "string" ? n : "";
+    }
+
+    let issued;
+    try {
+      issued = await issueEmailOtp(clientId, email);
+    } catch (e) {
+      if (e instanceof EmailOtpNotConfigured) return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
+      throw e;
+    }
+
+    // ⚠️ STORE BEFORE SENDING. A code in someone's inbox that this table never recorded can
+    // never be verified, and the customer would be typing a valid-looking code at a wall.
+    // The reverse order is recoverable: a stored code that failed to send is simply unused.
+    // Upsert replaces any live code for this address — asking for a new one kills the old.
+    const { error: upErr } = await sb.from("customer_email_otps").upsert({
+      client_id: clientId,
+      email_lower: email,
+      code_hash: issued.codeHash,
+      expires_at: issued.expiresAt.toISOString(),
+      attempts: 0,
+      consumed_at: null,
+      created_at: new Date().toISOString(),
+    }, { onConflict: "client_id,email_lower" });
+    if (upErr) {
+      await logEdgeError({
+        fn: "customer-auth", req, clientId, code: "email_otp_store",
+        message: `could not store the email sign-in code: ${upErr.message}`,
+      });
+      return json({ error: "Something went wrong sending the code — try again." }, 502);
+    }
+
+    const mail = emailOtpBody(brand, issued.code);
+    const out = await sendTenantEmail(sb, clientId, {
+      kind: "login_code",
+      to: email,
+      subject: mail.subject,
+      html: mail.html,
+      text: mail.text,
+    });
+    if (!out.sent) {
+      if (out.reason === "not_active") return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
+      // sendTenantEmail's error text is ledger-safe by its own contract — it never carries
+      // the provider message, which can echo the recipient's address.
+      await logEdgeError({
+        fn: "customer-auth", req, clientId, code: "email_otp_send",
+        message: `email sign-in code failed to send: ${out.error ?? "unknown"}`,
+      });
+      return json({ error: "Something went wrong sending the code — try again." }, 502);
+    }
+
+    if (emailBucket) await saveBucket(sb, emailBucket, { send: emailBucket.sendCount + 1 });
+    if (ipBucket) await saveBucket(sb, ipBucket, { send: ipBucket.sendCount + 1 });
+    if (tenantBucket) await saveBucket(sb, tenantBucket, { send: tenantBucket.sendCount + 1 });
+
+    // {ok:true} regardless — see NO ENUMERATION in the header.
+    return json({ ok: true });
+  }
+
+  // ── verify_code ────────────────────────────────────────────────────────────────────
+  const code = typeof body?.code === "string" ? body.code.trim() : "";
+  if (!/^\d{4,8}$/.test(code)) {
+    return json({ error: "Enter the code from the email we sent." }, 400);
+  }
+
+  const emailBucket = await readBucket(sb, emailBucketKey);
+  if (emailBucket !== null && emailBucket.failCount >= MAX_FAILS_PER_PHONE) {
+    return json({ error: "Too many attempts. Try again in about 15 minutes." }, 429);
+  }
+
+  const { data: row } = await sb.from("customer_email_otps")
+    .select("code_hash, expires_at, attempts, consumed_at")
+    .eq("client_id", clientId).eq("email_lower", email).maybeSingle();
+
+  let verdict;
+  try {
+    verdict = await verifyEmailOtp(clientId, email, code, row ?? null);
+  } catch (e) {
+    if (e instanceof EmailOtpNotConfigured) return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
+    throw e;
+  }
+
+  if (!verdict.ok) {
+    // ⚠️ Only a genuine MISMATCH costs an attempt. Charging an expired or already-consumed
+    // code would let a stale tab burn the budget for the code the customer is about to
+    // request, locking them out of a login they are doing correctly.
+    if (verdict.reason === "mismatch") {
+      if (emailBucket) await saveBucket(sb, emailBucket, { fail: emailBucket.failCount + 1 });
+      await sb.from("customer_email_otps")
+        .update({ attempts: (row?.attempts ?? 0) + 1 })
+        .eq("client_id", clientId).eq("email_lower", email);
+    }
+    return json({ error: MSG_EMAIL_CODE_BAD }, 401);
+  }
+
+  // Proven. Burn the code FIRST — a session minted against a code still marked live is a
+  // replayable login, and this write failing is not a reason to hand out a second one.
+  const { error: consumeErr } = await sb.from("customer_email_otps")
+    .update({ consumed_at: new Date().toISOString() })
+    .eq("client_id", clientId).eq("email_lower", email).is("consumed_at", null);
+  if (consumeErr) {
+    await logEdgeError({
+      fn: "customer-auth", req, clientId, code: "email_otp_consume",
+      message: `could not mark the email sign-in code used: ${consumeErr.message}`,
+    });
+    return json({ error: "Something went wrong signing you in — try again." }, 502);
+  }
+  if (emailBucket) await saveBucket(sb, emailBucket, { fail: 0 });
+
+  // ── Resolve the address to the phone identity the portal is built on ────────────────
+  // designs.contact->>'email' is the address the quote was sent to. Newest first, because a
+  // customer who changed number should land on the one they use now.
+  const { data: matches } = await sb.from("designs")
+    .select("contact, created_at")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  let digits = "";
+  let foundName: string | null = null;
+  for (const d of (matches ?? [])) {
+    const c = (d?.contact ?? {}) as Record<string, unknown>;
+    if (normalizeEmail(String(c.email ?? "")) !== email) continue;
+    const raw = String(c.phone ?? "").replace(/\D/g, "");
+    const ten = raw.length === 11 && raw.startsWith("1") ? raw.slice(1) : raw;
+    if (ten.length === 10) {
+      digits = ten;
+      foundName = typeof c.name === "string" && c.name.trim() ? c.name.trim().slice(0, 80) : null;
+      break;
+    }
+  }
+
+  if (!digits) {
+    // They proved the address; there is simply nothing filed under it. Saying so is safe HERE
+    // — the enumeration rule governs the send path, and they have already proven control.
+    // No session is minted: customer_sessions.phone_digits is NOT NULL, and inventing an
+    // identity to satisfy a column would be a login as nobody.
+    return json({
+      ok: true,
+      noQuotes: true,
+      error: "That email is confirmed, but we don't have any quotes filed under it. " +
+             "Try signing in with the phone number on your quote instead.",
+    });
+  }
+
+  const token = await mintSession(sb, clientId, digits, name ?? foundName);
+  return json({ ok: true, token, name: name ?? foundName });
+}
+
