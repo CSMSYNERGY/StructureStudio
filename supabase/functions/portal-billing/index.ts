@@ -158,9 +158,20 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // CANCELLATION is deliberate and locks immediately.
   const GRACE_DAYS = 7;
   const { data: csRow } = await admin
-    .from("client_settings").select("billing_exempt, billing_exempt_until, discount_percent, discount_features")
+    .from("client_settings").select("billing_exempt, billing_exempt_until, discount_percent, discount_features, internal_account")
     .eq("client_id", clientId).maybeSingle();
   const exempt = Boolean(csRow?.billing_exempt);
+  // INTERNAL ACCOUNT (migration 169): this tenant is CSM Synergy, not a customer. It gets
+  // every feature including the pay-only ones, because there is no revenue to protect from
+  // ourselves and a demo has to be able to show the product.
+  //
+  // This exists because `operator` is only true when a TARGET is supplied — signing into
+  // your own portal takes the ordinary tenant path, so "operators are never gated" was only
+  // ever true of view-as. See migration 169's header for the full diagnosis.
+  //
+  // DELIBERATELY SEPARATE FROM `exempt`. Widening billing_exempt to cover pay-only would
+  // have unlocked every paid feature for every grandfathered builder on the platform.
+  const internal = Boolean(csRow?.internal_account);
   // A DATED free period (migration 059) — an existing customer moving from free to paid gets
   // a warned window instead of a wall. Unlike billing_exempt this is visible (countdown
   // banner) and self-expiring, and it is deliberately checked AFTER the normal entitlement
@@ -350,7 +361,10 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
 
   const features: Record<string, boolean> = {};
   for (const p of plans) {
-    features[p.feature] = PAID_ONLY_FEATURES.has(p.feature)
+    features[p.feature] = internal
+      // Our own account: everything, unconditionally, ahead of every other rule.
+      ? true
+      : PAID_ONLY_FEATURES.has(p.feature)
       // Pay-only: a real subscription is the ONLY way in, for everyone.
       ? Boolean(featureState.get(p.feature)?.usable)
       : grantable.has(p.feature)
@@ -366,7 +380,8 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   let entState = "active";
   let reason = "active";
   let graceEndsAt: string | null = null;
-  if (exempt) { entState = "exempt"; reason = "exempt"; }
+  if (internal) { entState = "exempt"; reason = "internal"; }
+  else if (exempt) { entState = "exempt"; reason = "exempt"; }
   else if (requiredFeatures.length > 0) {
     // The gate turns on the REQUIRED feature(s) — today that's Simple Layout, which is
     // the product itself; without it there is nothing to let them into.

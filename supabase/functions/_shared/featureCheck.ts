@@ -51,6 +51,19 @@ export async function hasPaidFeature(
   clientId: string,
   feature: string,
 ): Promise<boolean> {
+  // INTERNAL ACCOUNT (migration 169) short-circuits before anything else. This is the server
+  // mirror of portal-billing's `internal` branch, and the two must agree: a UI that shows the
+  // tab while every action 403s is worse than no access at all. Read first and cheaply — one
+  // indexed lookup on a table this function would not otherwise touch, paid only on the paths
+  // that are gated anyway.
+  //
+  // Fails CLOSED like the rest of this module: a read error throws to the caller's 5xx rather
+  // than being swallowed into "not internal, carry on", because silently downgrading our own
+  // account to a customer is how this bug happened the first time.
+  const csRes = await admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle();
+  if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
+  if (csRes.data?.internal_account) return true;
+
   const confer = conferringFeatures(feature);
   const plansRes = await admin.from("billing_plans")
     .select("id, feature, billing_interval")
