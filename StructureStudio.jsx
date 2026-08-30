@@ -6073,16 +6073,43 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  // ⚠️ UNCHECKED BY DEFAULT, AND IT MUST STAY THAT WAY. A pre-ticked box is not consent under
+  // the TCPA — the customer has to act. Do not "help conversion" by defaulting it on.
+  const [smsConsent, setSmsConsent] = useState(false);
   const digits = ssPhone10(phone); // a "+1" preserved by formatPhoneDisplay still counts as 10
   const valid = name.trim().length > 0 && digits.length === 10;
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
+  // ⚠️ CONSENT IS NOT REQUIRED TO CONTINUE, and that is deliberate. This gate is the builder's
+  // lead-gen funnel; blocking the designer on a texting opt-in would cost them leads to buy a
+  // permission most visitors do not need to give. What the carriers actually require is that
+  // the disclosure be PUBLICLY VISIBLE where the number is collected — TCR screenshots this
+  // page — and that anyone we text has agreed. So: always shown, never mandatory, recorded
+  // only when ticked.
+  const consentCo = brand.companyName || "this builder";
+  // ⚠️ THE SENTENCE IS BUILT ONCE AND SENT VERBATIM to capture-lead, because what is stored as
+  // evidence must be the exact text that was on screen — not a template id that will be edited
+  // later. "Message and data rates may apply." is a literal carrier requirement; do not reword
+  // it, and do not drop the STOP instruction.
+  const consentText =
+    "By checking this box, you agree that " + consentCo + " may send you text messages about " +
+    "your quote and your building. Message frequency varies. Message and data rates may apply. " +
+    "Reply STOP to opt out at any time.";
 
   const start = () => {
     if (!valid || busy) return;
     setBusy(true);
     // Best-effort lead capture to the tenant's GHL — never block entry on it.
-    try { supabase.functions.invoke("capture-lead", { body: { clientId: config.clientId, name: name.trim(), phone } }); } catch (_e) {}
+    // smsConsent + the verbatim sentence ride along: capture-lead writes the consent record,
+    // and it is the only moment this page can prove WHAT was shown and WHERE.
+    try {
+      supabase.functions.invoke("capture-lead", { body: {
+        clientId: config.clientId, name: name.trim(), phone,
+        smsConsent: smsConsent,
+        consentText: smsConsent ? consentText : null,
+        consentUrl: typeof location !== "undefined" ? String(location.href).slice(0, 500) : null,
+      } });
+    } catch (_e) {}
     onPass({ name: name.trim(), phone });
   };
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
@@ -6106,6 +6133,11 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
         <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Phone</label>
         <input type="tel" inputMode="tel" value={formatPhoneDisplay(phone)} onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
           onKeyDown={(e) => e.key === "Enter" && start()} placeholder="(555) 555-5555" style={{ ...inp, margin: "4px 0 16px" }} />
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
+          <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
+            style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
+          <span style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>{consentText}</span>
+        </label>
         <button onClick={start} disabled={!valid || busy}
           style={{ width: "100%", background: valid && !busy ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: valid && !busy ? "pointer" : "default" }}>
           {busy ? "Starting…" : "Start Designing →"}
