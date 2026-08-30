@@ -2005,6 +2005,29 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             {invoice && invoice.invoice_number ? ` · Invoice ${invoice.invoice_number}` : " · not yet invoiced"}
           </div>
           <span style={{ display: "inline-block", marginTop: 6, background: st.bg, color: st.fg, borderRadius: 20, padding: "3px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+          {/* THE BUILDING SERIAL (163). Carolyn, 2026-08-28 @59:25: "it'll be a serial
+              number. It's considered a serial number. They will literally write this in the
+              building. They can make tabs or something for the building."
+
+              ⚠️ IT HAS TO LIVE HERE, not on the thin header card below. That card is the
+              `ssMode` FALSE branch and its own comment says this component "replaces the old
+              thin header card for SS orders" -- so on every StructureStudio-native order,
+              which is all of them, the other one never renders. Putting it there first and
+              only finding out by opening the page is exactly why this got looked at.
+
+              Monospace and select-all because the whole job of this string is to be copied
+              onto a physical tag without a transcription error. Before the building is built
+              there is deliberately no preview: the first block IS the build date, so a
+              preview would print a number that later changes, and a serial that changes after
+              someone has written it on a building is worse than one that arrives late. */}
+          <div style={{ fontSize: 11.5, marginTop: 6 }}>
+            {o.building_serial ? (
+              <span title="This building's serial number — write this on the tag"
+                style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
+            ) : (
+              <span style={{ color: "#94A3B8" }}>Serial assigned when the building is marked built</span>
+            )}
+          </div>
         </div>
       </div>
 
