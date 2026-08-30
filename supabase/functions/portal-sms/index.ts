@@ -72,6 +72,9 @@ const GATES: GateTable = {
   // Consent management — the people who talk to customers.
   opt_outs:        { area: "contacts", level: "view" },
   set_opt_out:     { area: "contacts", level: "edit" },
+  // Diagnostic: is TWILIO_AUTH_TOKEN the real account auth token? See the branch below for
+  // why this cannot be answered any other way.
+  check_auth_token: { area: "settings_billing", level: "edit" },
 };
 
 const AUP_TEXT =
@@ -377,6 +380,69 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           });
         }
         return json({ ok: true });
+      }
+
+      case "check_auth_token": {
+        // ── Is TWILIO_AUTH_TOKEN the REAL account auth token? ─────────────────────────
+        //
+        // This exists because the question is otherwise unanswerable until it is too late.
+        // The auth token is the ONLY credential that can validate X-Twilio-Signature, and
+        // sms-inbound's behaviour flips on merely whether it is SET:
+        //   unset → skip validation, run on the URL secret (logs sms_signature_skipped)
+        //   set   → validate, and REFUSE anything that does not match
+        // So a WRONG token is worse than no token: every real customer reply starts getting
+        // 401'd, silently, and the only symptom is texts that never arrive. Nothing else in
+        // the codebase exercises the token either — basicAuthPair() prefers the API-key pair
+        // everywhere — so it can sit wrong indefinitely.
+        //
+        // The test is conclusive rather than circular: signing something ourselves and
+        // checking our own signature would pass with ANY value. Instead we ask TWILIO
+        // whether AccountSid:AuthToken authenticates. Only the account's real token does.
+        //
+        // ⚠️ The token itself never leaves the runtime. Only a verdict, a length and a
+        // Twilio error code travel — no prefix, no suffix, no hash.
+        const acct = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
+        const tok = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
+        if (!acct) return json({ ok: false, verdict: "no_account_sid" });
+        if (!tok) {
+          return json({
+            ok: false, verdict: "empty",
+            detail: "TWILIO_AUTH_TOKEN is not set, so inbound webhook signatures are not being validated.",
+          });
+        }
+        let res: Response;
+        try {
+          res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${acct}.json`, {
+            headers: { Accept: "application/json", Authorization: `Basic ${btoa(`${acct}:${tok}`)}` },
+          });
+        } catch (e) {
+          return json({ ok: false, verdict: "unreachable", detail: (e as Error).message });
+        }
+        const text = await res.text();
+        let body: any = {};
+        try { body = text ? JSON.parse(text) : {}; } catch { /* ignore */ }
+        if (res.ok) {
+          return json({
+            ok: true, verdict: "valid",
+            tokenLength: tok.length,
+            // Proves it authenticated against the account we think we are, not some other one.
+            accountSid: String(body?.sid ?? ""),
+            friendlyName: String(body?.friendly_name ?? ""),
+            detail: "Twilio accepted this token for this account, so inbound webhook signature validation will work.",
+          });
+        }
+        // 20003 is Twilio's authentication failure. Anything else is a different problem.
+        const code = typeof body?.code === "number" ? body.code : 0;
+        return json({
+          ok: false,
+          verdict: code === 20003 ? "wrong_token" : "error",
+          status: res.status,
+          code,
+          tokenLength: tok.length,
+          detail: code === 20003
+            ? "Twilio rejected this token. Inbound customer replies will be refused until it is corrected."
+            : `Twilio answered HTTP ${res.status}.`,
+        });
       }
 
       default:
