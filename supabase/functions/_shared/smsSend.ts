@@ -23,7 +23,7 @@ export type SmsOutcome = {
   /** not_active: the feature is off for this deployment or this tenant — the caller should
    *  say "not switched on", never "failed". opted_out / bad_number / failed are real
    *  refusals with something to tell the user. */
-  reason?: "not_active" | "opted_out" | "bad_number" | "damaged_number" | "quiet_hours" | "failed";
+  reason?: "not_active" | "opted_out" | "no_consent" | "bad_number" | "damaged_number" | "quiet_hours" | "failed";
   error?: string;
   id?: string;
 };
@@ -122,6 +122,50 @@ export async function sendTenantSms(
         sent: false,
         reason: "opted_out",
         error: "This customer asked not to be texted. They can reply START to that same number to opt back in.",
+      };
+    }
+
+    // ── Consent, REQUIRED ────────────────────────────────────────────
+    // ⚠️ THIS REFUSES ANYONE WITHOUT A POSITIVE CONSENT RECORD, including every contact
+    // captured before consent existed. That is the point and it was Ahsan's explicit call:
+    // the TCPA needs prior express consent, and "we have their number" is not consent.
+    //
+    // Consent comes from sms_consent_log. Three ways to get it:
+    //   web_form    the designer gate's checkbox
+    //   sms_inbound they texted this builder first, which is consent to that conversation
+    //   operator    a human recorded it (portal-sms set_opt_out with optedOut:false)
+    //
+    // ⚠️ THIS ASKS "IS THERE A GRANT?", NOT "IS THE NEWEST ROW A GRANT?" — and that is a
+    // correctness fix, not a shortcut. `created_at` defaults to now(), which in Postgres is
+    // TRANSACTION time, so two rows written together carry the SAME timestamp and
+    // `order by created_at desc limit 1` picks between them arbitrarily. Ordering on it made
+    // revocation depend on a coin flip, and the losing side of that flip is texting someone
+    // who said STOP.
+    //
+    // REVOCATION IS OWNED BY sms_opt_outs, checked above, which holds current state: a STOP
+    // writes the row, a START deletes it. That check has already returned by the time we get
+    // here, so this one only has to establish that permission was ever given. One fact per
+    // table, no ordering, nothing to tie.
+    //
+    // ⚠️ NOT keyed on the contact row — on the PHONE, for the same reason the opt-out is:
+    // consent belongs to the person and must survive a merge, a rename or a re-creation.
+    const { data: consentRow } = await admin.from("sms_consent_log")
+      .select("action")
+      .eq("client_id", clientId).eq("phone_digits", key).eq("action", "granted")
+      .limit(1).maybeSingle();
+    if (!consentRow) {
+      return {
+        sent: false,
+        reason: "no_consent",
+        // The builder can act on this, which a bare "not permitted" cannot be. Naming the two
+        // routes matters: most of the back catalogue has no record, and the fix is usually
+        // that the customer texts them first, not paperwork.
+        // ⚠️ Do NOT add "or record it yourself" here. portal-sms CAN write an operator grant,
+        // but no screen exposes it, and an error that names a control the reader cannot find
+        // is worse than one that names only what they can actually do.
+        // Reaching here means no grant has EVER been recorded — a revocation would have been
+        // refused by the opt-out check above, with its own sentence.
+        error: "We don't have this customer's permission to text them yet. They can tick the texting box on your design link, or text you first — either one switches it on.",
       };
     }
 

@@ -190,6 +190,34 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
     }
   }
 
+  // ── An inbound message is CONSENT TO REPLY ───────────────────────────────────────────
+  // ⚠️ THIS IS WHAT MAKES ENFORCING CONSENT SURVIVABLE. smsSend now refuses any number with no
+  // 'granted' record; without this, a customer could text the builder and the builder would be
+  // told they lack permission to answer — absurd, and not what the law says either: a person
+  // who starts a conversation has consented to that conversation.
+  //
+  // Recorded only when they did NOT say STOP (the branch above owns that case), and only when
+  // there is no live grant already, so a chatty customer does not write a row per message.
+  // 'sms_inbound' is a distinct source from 'sms_start' on purpose: START is an explicit
+  // keyword, this is implied by the act of writing to us, and an auditor should see which.
+  if (digits && !isStop) {
+    const { data: latest } = await admin.from("sms_consent_log")
+      .select("action").eq("client_id", clientId).eq("phone_digits", digits)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (!latest || latest.action !== "granted") {
+      await admin.from("sms_consent_log").insert({
+        client_id: clientId, phone_digits: digits, contact_id: contactId,
+        action: "granted", source: "sms_inbound",
+        // The evidence IS the message: what they sent, to which number, and when.
+        disclosure_text: `Customer sent an inbound text to ${toNum}, which is consent to reply to that conversation.`,
+        detail: { messageSid: sid || null, from: fromNum, body: body.slice(0, 200) },
+      }).then(() => {}, () => {});
+      // ⚠️ The opt-out row is NOT cleared here. A prior STOP is only lifted by START, which the
+      // branch above handles. Someone who said stop and later sends "why did you text me?"
+      // must not be silently re-subscribed by the act of complaining.
+    }
+  }
+
   // ── Store ────────────────────────────────────────────────────────────────────────────
   // ⚠️ AN UNMATCHED MESSAGE IS STILL STORED, with a null contact_id. That is the
   // load-bearing decision, inherited verbatim from email-inbound: a customer's words are
