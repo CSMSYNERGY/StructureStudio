@@ -9,7 +9,7 @@ import {
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import { mintSession, revokeSession } from "../_shared/customerSession.ts";
-import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import {
   isPlausibleEmail, normalizeEmail, issueEmailOtp, verifyEmailOtp, emailOtpBody,
   EmailOtpNotConfigured,
@@ -81,6 +81,11 @@ const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are r
 // _shared/emailOtp.ts for why it is stored as a keyed hash and never a bare digest.
 const MSG_TOO_MANY_CODES = "Too many codes requested. Try again in about 15 minutes.";
 const MSG_NOT_CONFIGURED = "Sign-in by text isn't available yet.";
+// Mirrors PLATFORM_FROM in emailSend.ts, on the domain whose Resend records are published
+// (send.mail… MX + SPF, resend._domainkey.mail… DKIM; DMARC inherits the apex's p=none).
+// Deliberately a separate constant rather than an import: emailSend.ts does not export it,
+// and this path must not acquire a dependency on the tenant mail module it exists to avoid.
+const PLATFORM_LOGIN_FROM = "StructureStudio <no-reply@mail.structurestudiosuite.com>";
 const MSG_EMAIL_NOT_CONFIGURED = "Sign-in by email isn't available yet.";
 // Said for a wrong code, an expired one, a consumed one and a never-issued one alike. The
 // distinctions are real but telling them apart is a probing oracle, and none of them change
@@ -487,21 +492,45 @@ async function handleEmailChannel(
       return json({ error: "Something went wrong sending the code — try again." }, 502);
     }
 
+    // ── Sent by the PLATFORM, not by the tenant — and that is the whole point ──────────
+    // This deliberately does NOT go through sendTenantEmail. That function gates on the
+    // tenant's own `email_provider` and verified domain, which would make CUSTOMER LOGIN
+    // depend on each builder configuring email — exactly the fragility this fallback exists
+    // to remove. Today every tenant is still on 'ghl', so routing login codes through it made
+    // the fallback inert for all six of them.
+    //
+    // A login code is an AUTHENTICATION function of the platform, not the builder's business
+    // mail: it says "prove you own this address", carries nothing of the builder's, and needs
+    // to work on the worst day rather than the best one. So it sends from the platform domain
+    // on the platform's Resend key, gated on nothing per-tenant. The builder's name still
+    // appears in the BODY, which is where a customer actually looks.
+    //
+    // ⚠️ Not ledgered in email_sends. That table is the tenant's business-mail record, keyed
+    // to their sends; a platform auth code is not their correspondence, and writing the
+    // recipient there would put an address in a tenant-visible ledger for a message they did
+    // not send. (migration 167 still adds the 'login_code' kind — harmless, and it keeps the
+    // constraint honest if this is ever revisited.)
+    if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
+      return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
+    }
     const mail = emailOtpBody(brand, issued.code);
-    const out = await sendTenantEmail(sb, clientId, {
-      kind: "login_code",
-      to: email,
-      subject: mail.subject,
-      html: mail.html,
-      text: mail.text,
-    });
-    if (!out.sent) {
-      if (out.reason === "not_active") return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
-      // sendTenantEmail's error text is ledger-safe by its own contract — it never carries
-      // the provider message, which can echo the recipient's address.
+    try {
+      await rsSendEmail({
+        from: PLATFORM_LOGIN_FROM,
+        to: email,
+        subject: mail.subject,
+        html: mail.html,
+        text: mail.text,
+        tags: [{ name: "kind", value: "login_code" }, { name: "client_id", value: clientId }],
+      });
+    } catch (e) {
+      // ⚠️ Resend's message can echo the recipient (its testing-mode 403 names the address you
+      // may send to), so only the enum-ish status/name travels — the same rule emailSend's
+      // errText follows.
+      const detail = e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : "send failed";
       await logEdgeError({
         fn: "customer-auth", req, clientId, code: "email_otp_send",
-        message: `email sign-in code failed to send: ${out.error ?? "unknown"}`,
+        message: `email sign-in code failed to send: ${detail}`,
       });
       return json({ error: "Something went wrong sending the code — try again." }, 502);
     }
