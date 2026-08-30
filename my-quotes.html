@@ -80,23 +80,34 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     </div>
   </section>
 
-  <!-- Step 1: phone number -->
+  <!-- Step 1: how to sign in.
+       TEXT is the default and stays first: the quote arrived by text, the phone is the
+       identity the whole portal is built on, and it is the route that works without the
+       customer having to remember which address the builder used. EMAIL is the way back in
+       when texting is unavailable — see the email channel note in customer-auth. -->
   <section id="screen-phone" hidden>
     <h1>View your quotes</h1>
-    <p class="sub">Enter the mobile number you gave your builder and we'll text you a sign-in code.</p>
+    <p class="sub" id="signin-sub">Enter the mobile number you gave your builder and we'll text you a sign-in code.</p>
     <div class="card">
       <div class="field">
         <label class="label" for="name-input">Your name</label>
         <input id="name-input" type="text" autocomplete="name" maxlength="80" placeholder="Optional"/>
       </div>
-      <div class="field">
+      <div class="field" id="field-phone">
         <label class="label" for="phone-input">Mobile number</label>
         <input id="phone-input" type="tel" inputmode="numeric" autocomplete="tel" placeholder="(555) 123-4567"/>
+      </div>
+      <div class="field" id="field-email" hidden>
+        <label class="label" for="email-input">Email address</label>
+        <input id="email-input" type="email" inputmode="email" autocomplete="email" maxlength="254" placeholder="you@example.com"/>
       </div>
       <button id="send-btn" class="btn btn-primary" type="button">Text me a code</button>
       <div id="phone-error" class="error" role="alert" hidden></div>
     </div>
-    <p class="hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
+    <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
+    <p class="hint">
+      <button id="use-email-btn" class="linkish" type="button">Use my email instead</button>
+    </p>
   </section>
 
   <!-- Step 2: the 6-digit code -->
@@ -267,13 +278,69 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   // consistent shape either way.
   function phoneE164() { return "+1" + phoneDigits; }
 
+  // ── Sign-in channel ──────────────────────────────────────────────────────────────
+  // "sms" (default) or "email". The server treats an absent/unknown channel as sms, so this
+  // page can only ever ADD a route, never break the existing one.
+  //
+  // ⚠️ The email route resolves to the SAME phone identity server-side: it looks up the phone
+  // on the quote that carries the address. So proving the email is proving the same customer,
+  // and an address with no quote against it cannot mint a session — the server says so, and
+  // this page relays that sentence rather than inventing one.
+  var channel = "sms";
+  var custEmail = "";
+
+  function isEmailish(v) {
+    // A shape check only — deliverability is proven by the code arriving. Mirrors
+    // isPlausibleEmail in _shared/emailOtp.ts; both sides refuse the same nonsense so the
+    // customer is told here rather than after a round trip.
+    var e = String(v || "").trim().toLowerCase();
+    if (e.length < 5 || e.length > 254) return false;
+    if (/[\s<>,;"\\]/.test(e)) return false;
+    return /^[^@]+@[^@.]+(\.[^@.]+)+$/.test(e);
+  }
+
+  function setChannel(next) {
+    channel = next === "email" ? "email" : "sms";
+    var email = channel === "email";
+    $("field-phone").hidden = email;
+    $("field-email").hidden = !email;
+    $("signin-sub").textContent = email
+      ? "Enter the email address your quote was sent to and we'll email you a sign-in code."
+      : "Enter the mobile number you gave your builder and we'll text you a sign-in code.";
+    $("signin-hint").textContent = email
+      ? "We only use your email to show you your quotes."
+      : "Standard message rates may apply. We only use your number to show you your quotes.";
+    $("send-btn").textContent = email ? "Email me a code" : "Text me a code";
+    $("use-email-btn").textContent = email ? "Use my phone number instead" : "Use my email instead";
+    // The step-2 back link too — it read "Use a different number" on the email route, which is
+    // the kind of small wrongness that makes a customer wonder whether they are in the right
+    // flow at the exact moment they are waiting on a code.
+    $("change-number-btn").textContent = email ? "Use a different email" : "Use a different number";
+    setError($("phone-error"), "");
+    (email ? $("email-input") : $("phone-input")).focus();
+  }
+  $("use-email-btn").addEventListener("click", function () {
+    setChannel(channel === "email" ? "sms" : "email");
+  });
+  $("email-input").addEventListener("input", function () { custEmail = this.value.trim(); });
+  $("email-input").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") requestCode(false);
+  });
+
   // ── Step 1 → request a code ──
   function requestCode(isResend) {
     if (busy) return;
     if (isResend && Date.now() < resendReadyAt) return;
     var errEl = isResend ? $("code-error") : $("phone-error");
     setError(errEl, "");
-    if (phoneDigits.length !== 10) {
+    if (channel === "email") {
+      if (!isEmailish(custEmail)) {
+        setError($("phone-error"), "Enter the email address your quote was sent to.");
+        show("phone");
+        $("email-input").focus();
+        return;
+      }
+    } else if (phoneDigits.length !== 10) {
       setError($("phone-error"), "Enter your 10-digit mobile number.");
       show("phone");
       return;
@@ -285,10 +352,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     sendBtn.disabled = true;
     sendBtn.textContent = "Sending…";
     resendBtn.disabled = true;
-    callFn("customer-auth", { action: "request_code", clientId: clientId, phone: phoneE164(), name: custName || undefined })
+    var payload = { action: "request_code", clientId: clientId, name: custName || undefined };
+    if (channel === "email") { payload.channel = "email"; payload.email = custEmail; }
+    else { payload.phone = phoneE164(); }
+    callFn("customer-auth", payload)
       .then(function (r) {
         if (r.ok && r.data && !r.data.error) {
-          $("code-sub").textContent = "We texted a 6-digit code to " + fmtPhone(phoneDigits) + ".";
+          $("code-sub").textContent = channel === "email"
+            ? "We emailed a 6-digit code to " + custEmail + "."
+            : "We texted a 6-digit code to " + fmtPhone(phoneDigits) + ".";
           $("code-input").value = "";
           setError($("code-error"), "");
           show("code");
@@ -305,7 +377,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       .then(function () {
         busy = false;
         sendBtn.disabled = false;
-        sendBtn.textContent = "Text me a code";
+        sendBtn.textContent = channel === "email" ? "Email me a code" : "Text me a code";
         updateResendUi();
       });
   }
@@ -337,7 +409,7 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     setError($("code-error"), "");
     setError($("phone-error"), "");
     show("phone");
-    $("phone-input").focus();
+    (channel === "email" ? $("email-input") : $("phone-input")).focus();
   });
 
   // ── Step 2 → verify the code ──
@@ -352,7 +424,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     if (busy) return;
     var code = $("code-input").value.replace(/\D/g, "");
     if (code.length !== 6) {
-      setError($("code-error"), "Enter the 6-digit code from the text message.");
+      setError($("code-error"), channel === "email"
+        ? "Enter the 6-digit code from the email."
+        : "Enter the 6-digit code from the text message.");
       return;
     }
     setError($("code-error"), "");
@@ -360,13 +434,25 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     var btn = $("verify-btn");
     btn.disabled = true;
     btn.textContent = "Checking…";
-    callFn("customer-auth", { action: "verify_code", clientId: clientId, phone: phoneE164(), code: code })
+    var vPayload = { action: "verify_code", clientId: clientId, code: code };
+    if (channel === "email") { vPayload.channel = "email"; vPayload.email = custEmail; }
+    else { vPayload.phone = phoneE164(); }
+    callFn("customer-auth", vPayload)
       .then(function (r) {
         if (r.ok && r.data && r.data.token) {
           token = r.data.token;
           lsSet(tokenKey, token);
           if (r.data.name) { custName = String(r.data.name); lsSet(nameKey, custName); }
           loadQuotes();
+        } else if (r.ok && r.data && r.data.noQuotes) {
+          // The code was RIGHT — they proved the address — but no quote carries it, so there
+          // is no identity to sign in as. Saying so is safe here and only here: the send path
+          // answers identically for every address, so this cannot be used to probe. Offer the
+          // phone route, which is the one that will work for them.
+          setError($("code-error"), r.data.error ||
+            "That email is confirmed, but we don't have any quotes filed under it.");
+          setChannel("sms");
+          show("phone");
         } else {
           setError($("code-error"), errText(r, "That code didn't work. Check it and try again."));
         }
