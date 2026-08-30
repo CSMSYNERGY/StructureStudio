@@ -4215,6 +4215,12 @@ function ColorsView({ viewingLabel = null }) {
       door_rate: (c.door_rate != null ? String(c.door_rate) : "0"),
       // Sales tax (migration 148): absent reads as taxable, matching the column default.
       taxable: c.taxable !== false,
+      // ⚠️ THIS MAP IS A WHITELIST AND FORGETTING A FIELD LOOKS LIKE A BROKEN SAVE.
+      // Caught in the browser, not by reading: the code saved to the database correctly and
+      // the server returned it correctly, and it still came back blank on screen, because
+      // every column added to `colors` has to be added in FOUR places -- the migration, the
+      // server's SELECT, the server's write, and here. Three of the four were done.
+      code: c.code || "",
     })));
   };
   useEffect(() => { load(); }, []);
@@ -4226,7 +4232,7 @@ function ColorsView({ viewingLabel = null }) {
     siding: category === "paint", trim: category === "paint",
     shingle: category === "shingle", metal: category === "metal", door: false,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
-    pricing_method: "each", rate: "0", door_rate: "0", taxable: true,
+    pricing_method: "each", rate: "0", door_rate: "0", taxable: true, code: "",
   }]);
   const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
