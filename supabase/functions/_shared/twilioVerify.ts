@@ -44,18 +44,36 @@
 const API_BASE = "https://verify.twilio.com/v2";
 
 /** Read at REQUEST time, never at module top: a module-top read needs a redeploy to pick
- *  up a rotated secret, which cost us a debugging session on Deposyt. */
+ *  up a rotated secret, which cost us a debugging session on Deposyt.
+ *
+ *  ⚠️ VERIFY MAY LIVE ON A DIFFERENT TWILIO ACCOUNT FROM MESSAGING, and each reader below
+ *  prefers a `TWILIO_VERIFY_*` override before falling back to the shared platform value.
+ *
+ *  Why the seam exists: since 2026-08-30 each builder registers their own A2P brand on the
+ *  shared parent account (ISV architecture #4). Twilio can suspend that parent account over
+ *  ONE builder's non-compliant messaging — and Verify is what sends the login code for
+ *  `my-quotes`, so a messaging suspension would lock every customer out of their own quotes.
+ *  Moving Verify to its own account removes it from that blast radius.
+ *
+ *  ⛔ THE OVERRIDES ARE ALL-OR-NOTHING IN PRACTICE. A Verify Service SID belongs to exactly
+ *  one account, so pointing TWILIO_VERIFY_SERVICE_SID at a service in another account while
+ *  leaving the credentials shared authenticates against the WRONG account and fails. If you
+ *  set one override, set the matching key pair too. With none set, this behaves exactly as it
+ *  did before the seam existed. */
+function verifyEnv(suffix: string): string | null {
+  return Deno.env.get(`TWILIO_VERIFY_${suffix}`) || Deno.env.get(`TWILIO_${suffix}`) || null;
+}
 function accountSid(): string | null {
-  return Deno.env.get("TWILIO_ACCOUNT_SID") || null;
+  return verifyEnv("ACCOUNT_SID");
 }
 function authToken(): string | null {
-  return Deno.env.get("TWILIO_AUTH_TOKEN") || null;
+  return verifyEnv("AUTH_TOKEN");
 }
 function apiKey(): string | null {
-  return Deno.env.get("TWILIO_API_KEY") || null;
+  return verifyEnv("API_KEY");
 }
 function apiSecret(): string | null {
-  return Deno.env.get("TWILIO_API_SECRET") || null;
+  return verifyEnv("API_SECRET");
 }
 function verifyServiceSid(): string | null {
   return Deno.env.get("TWILIO_VERIFY_SERVICE_SID") || null;

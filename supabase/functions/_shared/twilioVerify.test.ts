@@ -482,3 +482,54 @@ Deno.test("twSanitizeBrand: nothing usable returns empty, so the caller omits th
   assertEquals(twSanitizeBrand(undefined), "");
   assertEquals(twSanitizeBrand(12345), "");
 });
+
+// ── Verify may live on its own Twilio account (the seam added 2026-08-30) ────────────────
+// Each credential reader prefers TWILIO_VERIFY_* and falls back to the shared TWILIO_*.
+// Getting the fallback wrong is SILENT: Verify would authenticate against the messaging
+// account and the login-code path would 401 with a message blaming the Verify service rather
+// than the credentials.
+
+function withEnv(vars: Record<string, string | null>, fn: () => void) {
+  const keep: Record<string, string | undefined> = {};
+  for (const k of Object.keys(vars)) keep[k] = Deno.env.get(k);
+  try {
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === null) Deno.env.delete(k); else Deno.env.set(k, v);
+    }
+    fn();
+  } finally {
+    for (const [k, v] of Object.entries(keep)) {
+      if (v === undefined) Deno.env.delete(k); else Deno.env.set(k, v);
+    }
+  }
+}
+
+Deno.test("Verify falls back to the shared platform credentials when no override is set", () => {
+  withEnv({
+    TWILIO_VERIFY_ACCOUNT_SID: null, TWILIO_VERIFY_API_KEY: null, TWILIO_VERIFY_API_SECRET: null,
+    TWILIO_ACCOUNT_SID: "ACshared", TWILIO_API_KEY: "SKshared", TWILIO_API_SECRET: "sharedsecret",
+    TWILIO_VERIFY_SERVICE_SID: "VAshared",
+  }, () => {
+    assert(twilioConfigured(), "shared credentials alone must still satisfy the config check");
+  });
+});
+
+Deno.test("Verify runs on its OWN account credentials once the overrides are set", () => {
+  withEnv({
+    TWILIO_ACCOUNT_SID: "ACmessaging", TWILIO_API_KEY: "SKmessaging", TWILIO_API_SECRET: "msgsecret",
+    TWILIO_VERIFY_ACCOUNT_SID: "ACverify", TWILIO_VERIFY_API_KEY: "SKverify",
+    TWILIO_VERIFY_API_SECRET: "verifysecret", TWILIO_VERIFY_SERVICE_SID: "VAverify",
+  }, () => {
+    assert(twilioConfigured(), "the override pair must satisfy the config check on its own");
+  });
+});
+
+Deno.test("Verify is NOT configured when neither the overrides nor the shared pair exist", () => {
+  withEnv({
+    TWILIO_ACCOUNT_SID: null, TWILIO_API_KEY: null, TWILIO_API_SECRET: null, TWILIO_AUTH_TOKEN: null,
+    TWILIO_VERIFY_ACCOUNT_SID: null, TWILIO_VERIFY_API_KEY: null, TWILIO_VERIFY_API_SECRET: null,
+    TWILIO_VERIFY_SERVICE_SID: "VAxxx",
+  }, () => {
+    assert(!twilioConfigured(), "with no credentials at all this must report NOT configured");
+  });
+});
