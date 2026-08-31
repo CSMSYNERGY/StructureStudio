@@ -306,6 +306,53 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
     return (seeded ?? []).sort((a, b) => a.sort_order - b.sort_order);
   };
 
+  // ── THE BUILDING SERIAL IS MINTED WHEN THE BUILDING IS BUILT ────────────────────────
+  // Carolyn, 2026-08-28 @57:00-61:28. The first block of the serial is the build date
+  // ("the first number is the day that the building gets built") and the purpose is a
+  // building sitting on a lot nobody can date: "they build inventory and have it sitting
+  // out on display, and they're like, I don't know when this building was built."
+  //
+  // ⚠️ She also said "there is no serial number until the ORDER is created", and those two
+  // cannot both be the call site — the build date does not exist at order time. Minting
+  // here is the reading that satisfies the stated purpose and matches when the physical tag
+  // is actually made. CONFIRM WITH HER; if she wants order date, this helper moves to
+  // customer-accept and nothing else changes.
+  //
+  // Called from ALL THREE paths that put a job into a done stage — move_job (dragged to the
+  // done column), complete_job (the Mark built button) and the delivery override's
+  // alsoCompleteBuilds. Wiring only one of them is how you get buildings that are built and
+  // have no serial, which is worse than the feature not existing.
+  const mintBuildingSerial = async (job: Record<string, any>, whenIso: string) => {
+    try {
+      const code = job?.design_short_code;
+      if (!code) return;   // inventory and manual jobs have no design to describe
+      const { data: order } = await admin.from("orders")
+        .select("id, order_no, building_serial")
+        .eq("client_id", clientId).eq("short_code", code).maybeSingle();
+      // No order yet is not an error: a spec build reaches the lot before anyone buys it.
+      if (!order || order.building_serial) return;
+      const { data: serial } = await admin.rpc("ss_build_serial", {
+        p_client_id: clientId,
+        p_short_code: code,
+        p_order_no: order.order_no,
+        p_built_on: whenIso.slice(0, 10),
+      });
+      if (!serial) return;
+      // `.is(building_serial, null)` makes this idempotent: two people marking the same job
+      // built at once, or a re-drag through the done column, cannot overwrite a serial that
+      // is already printed on a tag.
+      await admin.from("orders")
+        .update({ building_serial: serial, updated_at: new Date().toISOString() })
+        .eq("id", order.id).eq("client_id", clientId).is("building_serial", null);
+    } catch (_e) {
+      // ⚠️ SWALLOWED ON PURPOSE, and this is the one place in this file where that is right.
+      // Marking a building built is the shop's workflow; a serial is a label on top of it.
+      // If the serial cannot be produced -- a missing style code, a unique collision, the
+      // RPC not deployed yet -- the build must still complete. The order simply keeps a null
+      // serial, which the order card renders as "not yet", and a later re-run fills it.
+    }
+  };
+
   // Team names for rendering (assignees, drivers, activity). Names live on
   // client_users.full_name — there is NO user_profiles table (migration 060 put the
   // columns on client_users); the old lookup here silently returned nothing, which is
@@ -932,6 +979,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .eq("id", job.id).eq("client_id", clientId);
       if (error) throw error;
       await act("build_job", job.id, "moved", { from: job.stage_id, to: stage.id });
+      if (completedAt) await mintBuildingSerial(job, completedAt);
       return json({ ok: true });
     }
 
@@ -1161,6 +1209,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         .eq("id", job.id).eq("client_id", clientId);
       if (error) throw error;
       await act("build_job", job.id, "completed", { from: job.stage_id, to: done.id });
+      await mintBuildingSerial(job, now);
       // Finishing the last shop job for a repair PROMPTS closing the repair — it does not
       // close it (SCHEDULING_SCOPE.md: "prompts, not forces"). The repair's own status is
       // the customer-facing truth and may still be waiting on a part or a payment.
@@ -1701,10 +1750,12 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
           if (done) {
             for (const u of unbuilt) {
               if (!u.buildJobId) continue;
-              await admin.from("build_jobs")
+              const { data: ovrJob } = await admin.from("build_jobs")
                 .update({ stage_id: done.id, completed_at: now, updated_at: now })
-                .eq("id", u.buildJobId).eq("client_id", clientId);
+                .eq("id", u.buildJobId).eq("client_id", clientId)
+                .select("id, design_short_code").maybeSingle();
               await act("build_job", u.buildJobId, "completed", { to: done.id, detail: "completed via delivery override" });
+              if (ovrJob) await mintBuildingSerial(ovrJob, now);
             }
           }
         }

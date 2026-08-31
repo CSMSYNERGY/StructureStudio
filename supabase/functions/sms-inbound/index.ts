@@ -111,8 +111,18 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   if (!fromNum || !toNum) return twiml();
 
   // ── STAGE A: the tenant, from the number Twilio delivered to ─────────────────────────
-  const { data: tenant } = await admin.from("client_settings")
-    .select("client_id").eq("sms_number", toNum).maybeSingle();
+  // sms_numbers is the authority now that each builder owns their own number: it carries the
+  // live/released distinction, and its partial unique index on (phone_number) where
+  // released_at is null is what guarantees ONE tenant per live number. client_settings is
+  // still consulted as a fallback for any tenant configured before migration 165.
+  const { data: owned } = await admin.from("sms_numbers")
+    .select("client_id").eq("phone_number", toNum).is("released_at", null).maybeSingle();
+  let tenant = owned;
+  if (!tenant?.client_id) {
+    const { data: legacy } = await admin.from("client_settings")
+      .select("client_id").eq("sms_number", toNum).maybeSingle();
+    tenant = legacy;
+  }
   if (!tenant?.client_id) {
     // A number pointed at us that belongs to no tenant. Worth seeing — it means a number
     // was bought and wired before its client_settings row was set, and the customer's text
@@ -148,10 +158,64 @@ Deno.serve(withErrorLog("sms-inbound", async (req: Request) => {
   const word = body.trim().toLowerCase().replace(/[^a-z]/g, "");
   const isStop = optOutType === "STOP" || STOP_WORDS.has(word);
   const isStart = optOutType === "START" || START_WORDS.has(word);
-  if (contactId && (isStop || isStart)) {
-    await admin.from("crm_contacts")
-      .update({ sms_opt_out_at: isStop ? new Date().toISOString() : null })
-      .eq("client_id", clientId).eq("id", contactId);
+  if (isStop || isStart) {
+    // ⚠️ RECORDED AGAINST THE PHONE, not only the contact. A STOP from someone with no
+    // contact row still has to be honoured — that is exactly the person most likely to be
+    // texted again by mistake — and consent must survive the contact being merged, renamed
+    // or re-created. sms_opt_outs is what smsSend actually checks before every send.
+    if (digits) {
+      if (isStop) {
+        await admin.from("sms_opt_outs").upsert({
+          client_id: clientId, phone_digits: digits, reason: "sms_stop",
+          requested_at: new Date().toISOString(), effective_at: new Date().toISOString(),
+        }, { onConflict: "client_id,phone_digits" });
+      } else {
+        await admin.from("sms_opt_outs").delete()
+          .eq("client_id", clientId).eq("phone_digits", digits);
+      }
+      // Append-only evidence, separate from the derived block above. The body is stored
+      // verbatim because what they actually typed is the record of what they asked for.
+      await admin.from("sms_consent_log").insert({
+        client_id: clientId, phone_digits: digits, contact_id: contactId,
+        action: isStop ? "revoked" : "granted",
+        source: isStop ? "sms_stop" : "sms_start",
+        disclosure_text: body.slice(0, 500),
+        detail: { messageSid: sid || null, optOutType: optOutType || null, from: fromNum },
+      }).then(() => {}, () => {});
+    }
+    if (contactId) {
+      await admin.from("crm_contacts")
+        .update({ sms_opt_out_at: isStop ? new Date().toISOString() : null })
+        .eq("client_id", clientId).eq("id", contactId);
+    }
+  }
+
+  // ── An inbound message is CONSENT TO REPLY ───────────────────────────────────────────
+  // ⚠️ THIS IS WHAT MAKES ENFORCING CONSENT SURVIVABLE. smsSend now refuses any number with no
+  // 'granted' record; without this, a customer could text the builder and the builder would be
+  // told they lack permission to answer — absurd, and not what the law says either: a person
+  // who starts a conversation has consented to that conversation.
+  //
+  // Recorded only when they did NOT say STOP (the branch above owns that case), and only when
+  // there is no live grant already, so a chatty customer does not write a row per message.
+  // 'sms_inbound' is a distinct source from 'sms_start' on purpose: START is an explicit
+  // keyword, this is implied by the act of writing to us, and an auditor should see which.
+  if (digits && !isStop) {
+    const { data: latest } = await admin.from("sms_consent_log")
+      .select("action").eq("client_id", clientId).eq("phone_digits", digits)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (!latest || latest.action !== "granted") {
+      await admin.from("sms_consent_log").insert({
+        client_id: clientId, phone_digits: digits, contact_id: contactId,
+        action: "granted", source: "sms_inbound",
+        // The evidence IS the message: what they sent, to which number, and when.
+        disclosure_text: `Customer sent an inbound text to ${toNum}, which is consent to reply to that conversation.`,
+        detail: { messageSid: sid || null, from: fromNum, body: body.slice(0, 200) },
+      }).then(() => {}, () => {});
+      // ⚠️ The opt-out row is NOT cleared here. A prior STOP is only lifted by START, which the
+      // branch above handles. Someone who said stop and later sends "why did you text me?"
+      // must not be silently re-subscribed by the act of complaining.
+    }
   }
 
   // ── Store ────────────────────────────────────────────────────────────────────────────

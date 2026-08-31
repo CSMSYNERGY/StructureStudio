@@ -63,6 +63,16 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
+  // The screenshot is usually sitting in the clipboard (Win+Shift+S / Cmd+Shift+4), so
+  // pasting anywhere on the form attaches it — the picker below is the fallback. ONE
+  // file by design: the whole pipeline (feedback_submissions.attachment_path, the
+  // Projects mirror, the old Monday leg) carries a single attachment, and a paste
+  // replaces the staged one rather than growing a list the server would ignore.
+  const onPaste = (e) => {
+    const img = [...(e.clipboardData?.files || [])].find((f) => f && f.size);
+    if (img) { e.preventDefault(); setFile(img); }
+  };
+
   const submit = async (e) => {
     e.preventDefault();
     if (!title.trim()) { setErr("Please give this a short title."); return; }
@@ -92,7 +102,7 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
   };
 
   return (
-    <form onSubmit={submit} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+    <form onSubmit={submit} onPaste={onPaste} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
       {err && <div style={S.err}>{err}</div>}
       <div>
         <label style={S.lbl}>{cfg.titleHint}</label>
@@ -111,9 +121,23 @@ function FeedbackForm({ kind, clientId, onSubmitted, onBack }) {
       </div>
       <div>
         <label style={S.lbl}>Screenshot or video (optional)</label>
-        <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
-          onChange={(e) => setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
-          style={{ ...S.input, padding: "7px 10px", fontWeight: 500 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          {file ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "#334155", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 999, padding: "5px 11px", maxWidth: 240 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🖼 {file.name}</span>
+              <button type="button" aria-label={"Remove " + file.name} onClick={() => setFile(null)}
+                style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", padding: 0, fontSize: 13, lineHeight: 1 }}>✕</button>
+            </span>
+          ) : (
+            <label style={{ fontSize: 12.5, fontWeight: 700, color: "#1B7895", cursor: "pointer" }}>
+              📎 Attach a screenshot
+              <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm"
+                style={{ display: "none" }}
+                onChange={(e) => { setFile(e.target.files && e.target.files[0] ? e.target.files[0] : null); e.target.value = ""; }} />
+            </label>
+          )}
+          <span style={{ fontSize: 11.5, color: "#94A3B8" }}>{file ? "Pasting or picking again replaces it." : "or just paste one here"}</span>
+        </div>
         <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>A picture of the problem helps us fix it much faster. Max 25 MB.</div>
       </div>
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
@@ -182,7 +206,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
               </button>
             ))}
             <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
-              Everything you send shows up under <b>What's New → My Submissions</b>, so you can track where it got to.
+              Everything you send shows up under <b>What's New → My Requests</b>, so you can track where it got to.
             </div>
           </div>
         )}
@@ -194,8 +218,8 @@ function FeedbackWidget({ clientId, onSubmitted }) {
 
         {view === "done" && (
           <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
-            Your submission is logged and on our board. You can follow it under{" "}
-            <b>What's New → My Submissions</b> — the status updates there as we work on it,
+            Your request is logged and on our board. You can follow it under{" "}
+            <b>What's New → My Requests</b> — the status updates there as we work on it,
             and any reply we post shows up alongside it.
             {!pushed && (
               <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
@@ -210,7 +234,9 @@ function FeedbackWidget({ clientId, onSubmitted }) {
   );
 }
 
-// ─── My Submissions: this tenant's bugs + feature requests, with our replies ───
+// ─── "My Requests": this tenant's bugs + feature requests, with our replies ───
+// The component and the `mine` route slug keep the older "submissions" naming — the rows
+// are still feedback_submissions, and renaming the slug would break existing links.
 function MySubmissions({ refreshKey }) {
   const [rows, setRows] = useState(null);       // null = loading
   const [comments, setComments] = useState({}); // submission_id -> [comment]
@@ -219,6 +245,9 @@ function MySubmissions({ refreshKey }) {
   const [filter, setFilter] = useState("all");  // all | bug | feature
   const [syncing, setSyncing] = useState(false);
   const [tick, setTick] = useState(0);
+  const [draft, setDraft] = useState("");       // reply text for the open submission
+  const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState("");
   // Column sort, same convention as DesignsTable/LeadsTable (SortTh + sortRows).
   // Default = newest first, matching the created_at DESC load order.
   const [sortKey, setSortKey] = useState("date");
@@ -241,7 +270,7 @@ function MySubmissions({ refreshKey }) {
       if (!ids.length) { setComments({}); return; }
       const { data: cs } = await sb
         .from("feedback_comments")
-        .select("id, submission_id, author_name, body, created_at")
+        .select("id, submission_id, author_name, author_kind, body, created_at")
         .in("submission_id", ids)
         .order("created_at", { ascending: true });
       if (cancelled) return;
@@ -260,6 +289,27 @@ function MySubmissions({ refreshKey }) {
     try { await sb.functions.invoke("portal-feedback", { body: { action: "refresh" } }); } catch (_) {}
     setSyncing(false);
     setTick((t) => t + 1);
+  };
+
+  // A builder replying on their own submission. The server decides who they are and
+  // records the comment as client-authored; it also copies the reply into the linked
+  // Projects item so the team reads it where they work.
+  const sendReply = async (submissionId) => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true); setSendErr("");
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-feedback", {
+        body: { action: "comment", submissionId, body: text },
+      });
+      if (err) throw new Error(err.message || "Could not send that.");
+      if (data && data.error) throw new Error(data.error);
+      setDraft("");
+      setTick((t) => t + 1);           // re-read so the thread shows it
+    } catch (e) {
+      setSendErr(e.message || "Could not send that.");
+    }
+    setSending(false);
   };
 
   const openAttachment = async (path) => {
@@ -293,7 +343,7 @@ function MySubmissions({ refreshKey }) {
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        <span style={{ ...S.h2, marginBottom: 0 }}>My Submissions</span>
+        <span style={{ ...S.h2, marginBottom: 0 }}>My Requests</span>
         <span style={{ fontSize: 12, color: "#94A3B8" }}>({rows.length})</span>
         <div style={{ display: "flex", gap: 6, marginLeft: "auto", flexWrap: "wrap" }}>
           {[["all", "All"], ["bug", "🐛 Issues"], ["feature", "✨ Features"]].map(([k, lbl]) => (
@@ -320,7 +370,7 @@ function MySubmissions({ refreshKey }) {
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
-              <SortTh label="Submission" col="name"   sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+              <SortTh label="Request"    col="name"   sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Submitted by" col="user" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Status" col="status"     sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
               <SortTh label="Date" col="date"         sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -329,7 +379,7 @@ function MySubmissions({ refreshKey }) {
               {sorted.map((r) => {
                 const isOpen = open === r.id;
                 const cs = comments[r.id] || [];
-                const toggle = () => setOpen(isOpen ? null : r.id);
+                const toggle = () => (setOpen(isOpen ? null : r.id), setDraft(""), setSendErr(""));
                 return (
                   <React.Fragment key={r.id}>
                   <tr onClick={toggle} tabIndex={0} aria-expanded={isOpen}
@@ -368,18 +418,50 @@ function MySubmissions({ refreshKey }) {
                             </button>
                           )}
                         </div>
+                        {/* The conversation, oldest first — your request, then everything
+                            either side has said since. A reply from us is teal; your own
+                            words are indigo and labelled "You", so a thread reads at a
+                            glance without anyone having to parse names. */}
                         {cs.length > 0 && (
-                          <div style={{ marginTop: 12, borderLeft: "3px solid #E2E8F0", paddingLeft: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                            {cs.map((c) => (
-                              <div key={c.id}>
-                                <div style={{ fontSize: 11, fontWeight: 800, color: "#64748B" }}>
-                                  {c.author_name || "Structure Studio"} <span style={{ fontWeight: 600, color: "#94A3B8" }}>· {fmtDT(c.created_at)}</span>
+                          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                            {cs.map((c) => {
+                              const mine = c.author_kind === "client";
+                              return (
+                                <div key={c.id} style={{
+                                  borderLeft: `3px solid ${mine ? "#6366F1" : "#8ED8CF"}`,
+                                  background: mine ? "#FFF" : "#F2FBFA",
+                                  borderRadius: 6, padding: "8px 12px",
+                                }}>
+                                  <div style={{ fontSize: 11, fontWeight: 800, color: "#64748B" }}>
+                                    {mine ? "You" : (c.author_name || "Structure Studio")}
+                                    {mine && c.author_name ? <span style={{ fontWeight: 600 }}> · {c.author_name}</span> : null}
+                                    <span style={{ fontWeight: 600, color: "#94A3B8" }}> · {fmtDT(c.created_at)}</span>
+                                  </div>
+                                  <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, whiteSpace: "pre-wrap", marginTop: 2 }}>{c.body}</div>
                                 </div>
-                                <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, whiteSpace: "pre-wrap", marginTop: 2 }}>{c.body}</div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
+
+                        {/* Reply. Clicking inside must not collapse the row — the whole
+                            <tr> above toggles `open`, so every control here stops the click. */}
+                        <div style={{ marginTop: 10 }} onClick={(e) => e.stopPropagation()}>
+                          {sendErr && <div style={{ ...S.err, marginBottom: 6 }}>{sendErr}</div>}
+                          <textarea rows={2} placeholder="Reply to us about this…"
+                            style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
+                            value={draft} onChange={(e) => setDraft(e.target.value)} />
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+                            <span style={{ fontSize: 11.5, color: "#94A3B8" }}>
+                              Goes straight to the Structure Studio team, on this request.
+                            </span>
+                            <button type="button" disabled={sending || !draft.trim()}
+                              onClick={() => sendReply(r.id)}
+                              style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: sending || !draft.trim() ? 0.6 : 1 }}>
+                              {sending ? "Sending…" : "Send"}
+                            </button>
+                          </div>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -394,11 +476,141 @@ function MySubmissions({ refreshKey }) {
   );
 }
 
+// ─── The builder's setup checklist ("Getting set up") ───────────────────────
+// Carolyn 2026-08-28: new builders get an ordered list of what to do, in the order to do
+// it, assigned from the template operators keep in Projects. Reads are RLS-scoped direct
+// (tenant_setup_items is readable to its own tenant); the tick goes through portal-setup
+// so that WHO completed it — the builder, or us on a call — is decided server-side.
+function SetupChecklist({ onNavigate, onCount }) {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null);      // id being toggled
+  const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
+
+  const load = useCallback(async () => {
+    const { data, error: err } = await sb
+      .from("tenant_setup_items")
+      .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
+      .order("position", { ascending: true });
+    if (err) { setError(err.message); setItems([]); return; }
+    setItems(data || []);
+    // Hand the tally back up so the tab badge above cannot sit stale at the number it
+    // had on page load while the list underneath it says something else.
+    if (onCount) onCount({ total: (data || []).length, open: (data || []).filter((r) => !r.completed_at).length });
+  }, [onCount]);
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = async (it) => {
+    const done = !it.completed_at;
+    setBusy(it.id); setError(null);
+    // Optimistic: ticking a box that then sits there doing nothing feels broken.
+    setItems((cur) => cur.map((x) => x.id === it.id
+      ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
+      : x));
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "toggle", id: it.id, done } });
+      if (err) throw new Error(err.message || "Could not save that.");
+      if (data && data.error) throw new Error(data.error);
+      load();                       // re-read so the real name/time replace the guess
+    } catch (e) {
+      setError(e.message || "Could not save that.");
+      load();                       // and never leave a tick the server did not accept
+    }
+    setBusy(null);
+  };
+
+  if (items === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
+  if (!items.length) return null;   // nothing assigned — the tab is hidden anyway
+
+  const done = items.filter((i) => i.completed_at).length;
+  const allDone = done === items.length;
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
+        <span style={{ ...S.h2, marginBottom: 0 }}>Getting set up</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: allDone ? "#0E9F6E" : "#64748B" }}>
+          {done} of {items.length} done
+        </span>
+        <div style={{ flex: "1 1 120px", minWidth: 80, height: 6, borderRadius: 999, background: "#EEF2F7", overflow: "hidden" }}>
+          <div style={{ width: `${Math.round((done / items.length) * 100)}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
+        {allDone
+          ? "That's everything — your account is ready to share with customers."
+          : "Work down the list in order. Each step takes you straight to the screen that does it."}
+      </div>
+      {error && <div style={S.err}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((it, i) => {
+          const isDone = !!it.completed_at;
+          return (
+            <React.Fragment key={it.id}>
+            {/* Section header whenever it changes walking the list in order — the copy
+                carries its sections from the template, so a builder reads "The basics",
+                works down it, and can see the paid-features arc is a later chapter. */}
+            {it.section && it.section !== ((items[i - 1] || {}).section || null) && (
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.6, margin: i === 0 ? "2px 0 0" : "14px 0 0" }}>{it.section}</div>
+            )}
+            <div style={{
+              display: "flex", gap: 11, alignItems: "flex-start",
+              border: "1px solid " + (isDone ? "#DCFCE7" : "#E2E8F0"),
+              background: isDone ? "#F7FEF9" : "#FFF",
+              borderRadius: 10, padding: "10px 13px",
+            }}>
+              <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                onChange={() => toggle(it)} aria-label={it.title}
+                style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: isDone ? "#64748B" : "#1E293B", textDecoration: isDone ? "line-through" : "none" }}>
+                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{i + 1}.</span>
+                  {it.title}
+                </div>
+                {it.detail && <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 3 }}>{it.detail}</div>}
+                {it.image_url && (
+                  <img src={it.image_url} alt={"Where to find: " + it.title} loading="lazy"
+                    onClick={() => setViewing({ url: it.image_url, title: it.title })}
+                    style={{ display: "block", maxHeight: 120, maxWidth: "100%", borderRadius: 8, border: "1px solid #E2E8F0", marginTop: 7, cursor: "zoom-in" }} />
+                )}
+                {isDone && (
+                  <div style={{ fontSize: 11.5, color: "#0E9F6E", fontWeight: 700, marginTop: 4 }}>
+                    Done{it.completed_by_name ? ` · ${it.completed_by_kind === "team" ? "by " + it.completed_by_name + " (Structure Studio)" : it.completed_by_name}` : ""} · {fmtDate(it.completed_at)}
+                  </div>
+                )}
+              </div>
+              {it.link_page && !isDone && (
+                <button type="button" onClick={() => {
+                  const [page, sub] = String(it.link_page).split("/");
+                  if (onNavigate) onNavigate(page, sub || null);
+                }}
+                  style={{ ...S.btn("#EEF2FF", ACCENT), padding: "6px 12px", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>
+                  Take me there →
+                </button>
+              )}
+            </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+
+      {viewing && (
+        <PdfModal url={viewing.url} title={viewing.title} image onClose={() => setViewing(null)} />
+      )}
+    </div>
+  );
+}
+
 // ─── What's New: global product changelog (read-only; team-populated) ───
-function ReleasesView({ submissionsKey }) {
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
-  const [subtab, setSubtab] = useState("features"); // features | fixes | roadmap | mine
+  // The sub-tab lives in the URL (/portal/releases/setup), so a "Take me there" link or a
+  // bookmark lands on the right one. `null` = the visitor has not chosen; see the default
+  // below, which only then decides for them.
+  const subtab = sub || null;
+  const setSubtab = (x) => { if (onSub) onSub(x); };
   const [mineCount, setMineCount] = useState(0);
 
   useEffect(() => {
@@ -410,6 +622,24 @@ function ReleasesView({ submissionsKey }) {
         .order("sort_order", { ascending: false });
       if (err) { setError(err.message); setRows([]); return; }
       setRows(data || []);
+    })();
+  }, []);
+
+  // How many setup steps are still open. Drives both the badge and whether the tab
+  // exists at all: a builder who was never assigned a list should see no change here.
+  const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  // Which tab leads the strip and gets landed on. LATCHED on the first read and never
+  // recomputed: ticking the last setup step would otherwise reorder the tabs and switch
+  // the page out from under the person who just ticked it. They graduate to My Requests
+  // leading on their next visit, which is the right moment for the strip to change.
+  const [lead, setLead] = useState(null);
+  useEffect(() => {
+    (async () => {
+      const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
+      if (!data) { setLead("mine"); return; }
+      const open = data.filter((r) => !r.completed_at).length;
+      setSetupOpen({ total: data.length, open });
+      setLead(open > 0 ? "setup" : "mine");
     })();
   }, []);
 
@@ -490,14 +720,27 @@ function ReleasesView({ submissionsKey }) {
 
   // Section definitions — one per sub-tab. `empty` shows when that tab has no rows.
   // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
-  // entries, so it carries its own count instead of a `list`.
+  // entries, so it carries its own count instead of a `list`. It LEADS the strip
+  // (Carolyn 2026-08-28) — a builder's own open requests matter more to them than our
+  // changelog does. Its id stays "mine" so /portal/releases/mine keeps working.
   const TABS = [
+    { id: "mine",     label: "My Requests",  dot: "#7E22CE", count: mineCount },
     { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
     { id: "fixes",    label: "Bug Fixes",    dot: "#F59E0B", list: fixes,    empty: "No bug fixes to report right now." },
     { id: "roadmap",  label: "Roadmap",      dot: "#6366F1", list: requested, empty: "Nothing on the roadmap yet — check back soon." },
-    { id: "mine",     label: "My Submissions", dot: "#7E22CE", count: mineCount },
   ];
-  const active = TABS.find((t) => t.id === subtab) || TABS[0];
+  // Setup LEADS while there are steps left — finishing the account is what a new builder
+  // is here to do — and drops to second once it is done, where it stays as a record of
+  // what was set up. Hidden entirely for tenants who were never assigned a list, so
+  // nothing about this strip changes for them.
+  if (setupOpen && setupOpen.total > 0) {
+    TABS.splice(lead === "setup" ? 0 : 1, 0,
+      { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
+  }
+  // An explicit choice — a click, or a /portal/releases/<sub> link — always wins; with
+  // none, the page lands on whichever tab leads.
+  const effTab = subtab || lead || "mine";
+  const active = TABS.find((t) => t.id === effTab) || TABS[0];
   const tabCount = (t) => (t.count != null ? t.count : t.list.length);
 
   return (
@@ -510,7 +753,7 @@ function ReleasesView({ submissionsKey }) {
       {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}
       <div role="tablist" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         {TABS.map((t) => {
-          const on = t.id === subtab;
+          const on = t.id === effTab;
           return (
             <button key={t.id} type="button" role="tab" aria-selected={on} onClick={() => setSubtab(t.id)}
               style={{
@@ -527,7 +770,8 @@ function ReleasesView({ submissionsKey }) {
         })}
       </div>
 
-      {subtab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
+      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} onCount={setSetupOpen} />
+        : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
         : rows.length === 0
@@ -748,7 +992,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -758,7 +1002,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   const [schedLinks, setSchedLinks] = useState(null);   // { byDesign, saleDesigns, … }
   const [schedBusy, setSchedBusy] = useState(null);
   const [schedMsg, setSchedMsg] = useState(null);       // { ok } | { err }
-  const [openId, setOpenId] = useState(null);
+  // ── THE ORDER DETAIL HAS A URL NOW ───────────────────────────────────────────────
+  // It was pure component state, so the browser Back button walked out of Orders entirely
+  // instead of closing the order, and an order could not be linked to at all. The CRM code
+  // names this gap in its own comment -- "there is no /portal/orders/<id> route to
+  // deep-link to" -- which is why its Orders card could not link out.
+  //
+  // Carolyn, 2026-08-28 @41:03, on why this matters more than it looks: "One of my biggest
+  // frustrating parts of ShedSuite, which we use for many years, is you could never hit the
+  // back button. If you hit the back button, you lost everything on that screen ... I just
+  // don't want it to be like, oh no, you can't click that back button."
+  //
+  // The URL is the source of truth when the shell supplies one; the local state is the
+  // fallback for any host that does not. Keeping BOTH means this component still works
+  // unchanged if it is ever mounted somewhere without a router.
+  const [openIdLocal, setOpenIdLocal] = useState(null);
+  const openId = onOpenChange ? urlOpenId : openIdLocal;
+  const setOpenId = (id) => { if (onOpenChange) onOpenChange(id); else setOpenIdLocal(id); };
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   // Facet filters: ordered date-range + amount min/max (dollars, against the order total).
@@ -1745,6 +2005,29 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             {invoice && invoice.invoice_number ? ` · Invoice ${invoice.invoice_number}` : " · not yet invoiced"}
           </div>
           <span style={{ display: "inline-block", marginTop: 6, background: st.bg, color: st.fg, borderRadius: 20, padding: "3px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
+          {/* THE BUILDING SERIAL (163). Carolyn, 2026-08-28 @59:25: "it'll be a serial
+              number. It's considered a serial number. They will literally write this in the
+              building. They can make tabs or something for the building."
+
+              ⚠️ IT HAS TO LIVE HERE, not on the thin header card below. That card is the
+              `ssMode` FALSE branch and its own comment says this component "replaces the old
+              thin header card for SS orders" -- so on every StructureStudio-native order,
+              which is all of them, the other one never renders. Putting it there first and
+              only finding out by opening the page is exactly why this got looked at.
+
+              Monospace and select-all because the whole job of this string is to be copied
+              onto a physical tag without a transcription error. Before the building is built
+              there is deliberately no preview: the first block IS the build date, so a
+              preview would print a number that later changes, and a serial that changes after
+              someone has written it on a building is worse than one that arrives late. */}
+          <div style={{ fontSize: 11.5, marginTop: 6 }}>
+            {o.building_serial ? (
+              <span title="This building's serial number — write this on the tag"
+                style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
+            ) : (
+              <span style={{ color: "#94A3B8" }}>Serial assigned when the building is marked built</span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -2174,6 +2457,24 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <div style={{ fontSize: 12, color: "#64748B", marginTop: 3 }}>
                     Ordered {fmtDate(o.ordered_at)} · {bldgOf(row)}
                     {d && d.ghl_estimate_number ? ` · EST-${d.ghl_estimate_number}` : ""}
+                  </div>
+                  {/* THE BUILDING SERIAL (163). Carolyn, 2026-08-28 @59:25: "it'll be a serial
+                      number. It's considered a serial number. They will literally write this
+                      in the building. They can make tabs or something for the building."
+                      Monospace and selectable because the whole job of this string is to be
+                      copied onto a physical tag without a transcription error.
+
+                      Before the building is built there is deliberately NO fake serial here.
+                      The date block IS the build date, so a preview would print a number that
+                      later changes -- and a serial that changes after someone has written it
+                      on a building is worse than one that arrives late. The absent state says
+                      when it will appear instead. */}
+                  <div style={{ fontSize: 12, marginTop: 5 }}>
+                    {o.building_serial ? (
+                      <span title="This building's serial number — write this on the tag" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontWeight: 700, letterSpacing: 0.5, color: "#0F172A", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 6, padding: "3px 8px", userSelect: "all" }}>{o.building_serial}</span>
+                    ) : (
+                      <span style={{ color: "#94A3B8" }}>Serial number is assigned when the building is marked built.</span>
+                    )}
                   </div>
                 </div>
                 <span style={{ marginLeft: "auto", background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>

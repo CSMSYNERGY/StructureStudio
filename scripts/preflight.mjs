@@ -55,6 +55,12 @@
 //      validation, which guards where the client secret gets sent), and the pre-existing
 //      `_shared/_test_stubs/*_test.ts`, which needs its own import map. Same skip-with-a-warning
 //      policy as step 6.
+//   8. my-quotes.html's sales-tax breakdown, executed against a DOM shim. That page is a
+//      standalone HTML file, so the eslint pass never reads its inline script and the deno
+//      steps do not know it exists — yet it is the only place a CUSTOMER sees the tax they
+//      are charged, and it carries the figure their consent sentence quotes. The check LIFTS
+//      the shipped block out of the file rather than re-implementing it, so a copy cannot
+//      drift into passing while the page is broken.
 //
 // Steps are numbered in the order they RUN.
 //
@@ -147,6 +153,27 @@ function run(files) {
   // linted but never compiled, so it is not a TARGET.
   for (const f of [...TARGETS.map((t) => targetName(t)), "StructureStudio.jsx"]) {
     errors.push(...lint(f, files[f]));
+  }
+
+  // ── Git conflict markers ─────────────────────────────────────────────────
+  // 2026-08-28: portal.html was pushed mid-rebase with a conflict hunk still in it — the
+  // markers replaced the two compiled-artifact <script> tags, so every visitor got the
+  // "Couldn't load the portal" screen (and the raw `<<<<<<< HEAD` text) until the next
+  // push. Nothing here caught it: the pages are checked structurally, not parsed, so
+  // markers sail through where a .jsx source would at least fail the lint. This rule
+  // closes that class for EVERY file in the map. A file is flagged only when it carries
+  // BOTH an opening `<<<<<<< ` line and a closing `>>>>>>> ` line — git always writes the
+  // pair, and requiring both keeps a lone `=======` (markdown underlines, comment rules)
+  // or a `<<<<<<<` inside a string from tripping it.
+  for (const [f, text] of Object.entries(files)) {
+    const open = text.match(/^<{7} .+$/m);
+    const close = text.match(/^>{7} .+$/m);
+    if (open && close) {
+      const line = text.slice(0, text.indexOf(open[0])).split("\n").length;
+      errors.push(`${f}:${line}  git conflict markers — this file still contains an unresolved `
+        + `merge/rebase hunk ("${open[0].slice(0, 30)}…"). Resolve the conflict, run `
+        + "`npm run compile` if a page or source changed, and commit the clean file.");
+    }
   }
 
   // No going back to in-browser compilation. A text/babel tag on a page would
@@ -551,6 +578,108 @@ async function artifactCheck() {
   return checkArtifacts();
 }
 
+// ── my-quotes.html: the customer's sales-tax breakdown ───────────────────────────────────
+//
+// This page has NO other automated coverage — it is a standalone HTML file, so the eslint pass
+// above never reads its inline script and the deno steps below do not know it exists. It is
+// also the only place a CUSTOMER sees what they are being charged, and the figure it renders is
+// the one their consent sentence quotes. Untested money in front of a customer is the wrong
+// thing to leave uncovered.
+//
+// Rather than re-implement the block here — a copy would drift from the page and start passing
+// while the page was broken — the SHIPPED source is lifted out of the file and executed against
+// a DOM shim. Extraction is brace-balanced, so it survives edits above and below it.
+//
+// Takes the html as an argument (rather than reading the file) so --self-test can hand it a
+// deliberately broken variant and prove this check actually fails.
+function checkMyQuotesTaxBreakdown(html) {
+  const errors = [];
+  const lines = html.split("\n");
+  const takeBlock = (needle) => {
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+
+  const fmtSrc = takeBlock("function fmtMoney(");
+  const blkSrc = takeBlock("if (hasTax) {");
+  if (!fmtSrc || !blkSrc) {
+    errors.push("my-quotes.html: the sales-tax breakdown block (`if (hasTax) {`) or fmtMoney() is gone — "
+      + "the customer's card is the only place they see the tax they are being charged, and it carries "
+      + "the figure their consent sentence quotes. If it was removed on purpose, remove this check too.");
+    return errors;
+  }
+
+  const mk = () => ({ className: "", textContent: "", children: [], appendChild(c) { this.children.push(c); return c; } });
+  let render;
+  try {
+    render = new Function("q", "document", "mk", [
+      fmtSrc,
+      "const card = mk();",
+      "const hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;",
+      blkSrc,
+      "return card;",
+    ].join("\n"));
+  } catch (e) {
+    errors.push("my-quotes.html: the tax-breakdown block does not parse in isolation — " + e.message);
+    return errors;
+  }
+
+  const flat = (n, out = []) => {
+    if (n.className.startsWith("qc-tax-row") || n.className === "qc-tax-total") {
+      out.push(n.children[0].textContent + " | " + n.children[1].textContent
+        + (n.className.includes("is-credit") ? " | credit" : ""));
+    }
+    n.children.forEach((c) => flat(c, out));
+    return out;
+  };
+  const doc = { createElement: () => mk() };
+
+  // The plan's mock-up figures, so the customer's screen and the PDF are demonstrably the same
+  // arithmetic rather than two implementations that happen to agree today.
+  const cases = [
+    ["with discounts",
+      { taxable: 11950, nonTaxable: 500, discount: 600, tax: 866.38, taxRate: 0.0725, taxLabel: "Sales tax", total: 13316.38 },
+      ["Taxable | $11,950.00", "Non-taxable | $500.00", "Discount | -$600.00 | credit", "Sales tax (7.25%) | $866.38", "Total | $13,316.38"]],
+    ["no discount",
+      { taxable: 12450, nonTaxable: 600, tax: 902.63, taxRate: 0.0725, taxLabel: "Sales tax", total: 13952.63 },
+      ["Taxable | $12,450.00", "Non-taxable | $600.00", "Sales tax (7.25%) | $902.63", "Total | $13,952.63"]],
+    // 0% must be STATED. A silently absent tax row is indistinguishable from the pre-tax bug
+    // this whole feature exists to fix.
+    ["0% stated, not hidden",
+      { taxable: 13050, nonTaxable: 0, tax: 0, taxRate: 0, taxLabel: "Sales tax", total: 13050 },
+      ["Taxable | $13,050.00", "Non-taxable | $0.00", "Sales tax | $0.00", "Total | $13,050.00"]],
+    ["whole-number rate drops the decimals",
+      { taxable: 1000, nonTaxable: 0, tax: 70, taxRate: 0.07, taxLabel: "Sales tax", total: 1070 },
+      ["Taxable | $1,000.00", "Non-taxable | $0.00", "Sales tax (7%) | $70.00", "Total | $1,070.00"]],
+    ["the builder's own label is honoured",
+      { taxable: 1000, nonTaxable: 0, tax: 50, taxRate: 0.05, taxLabel: "GST", total: 1050 },
+      ["Taxable | $1,000.00", "Non-taxable | $0.00", "GST (5%) | $50.00", "Total | $1,050.00"]],
+    // The regression that protects every pre-tax quote and every CRM tenant.
+    ["a snapshot with no tax renders no breakdown", { total: 5000 }, []],
+    ["a partial payload is not half-rendered", { taxable: 100, total: 100 }, []],
+  ];
+
+  for (const [name, q, expect] of cases) {
+    let got;
+    try { got = flat(render(q, doc, mk)); } catch (e) {
+      errors.push('my-quotes.html: tax breakdown threw on "' + name + '" — ' + e.message);
+      continue;
+    }
+    if (JSON.stringify(got) !== JSON.stringify(expect)) {
+      errors.push('my-quotes.html: tax breakdown wrong for "' + name + '"'
+        + "\n      got:      " + JSON.stringify(got)
+        + "\n      expected: " + JSON.stringify(expect));
+    }
+  }
+  return errors;
+}
+
 // ── Edge functions: deno check ───────────────────────────────────────────────────────────
 // Deliberately NOT part of run(files): everything above works on an in-memory copy so the
 // self-test can mutate it, whereas this shells out to a real type-checker over real paths.
@@ -733,6 +862,29 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: Intuit API hosts are refused in browser files, help links are not");
+
+  // ── The conflict-marker rule ───────────────────────────────────────────────
+  // Fixture = the 2026-08-28 incident itself: portal.html pushed mid-rebase with the hunk
+  // around its two <script> tags, visitors served "<<<<<<< HEAD" as page text. Prove it
+  // fires on that exact shape, and prove the two lookalikes that must NOT fire don't: a
+  // lone `=======` (comment rules, markdown underlines) and an unpaired `<<<<<<<` inside
+  // a string — half a marker never comes out of git, and a rule that cries wolf on
+  // legitimate text gets deleted by the next person it annoys.
+  const withConflict = load();
+  withConflict["portal.html"] = withConflict["portal.html"].replace("</body>",
+    '<<<<<<< HEAD\n<script defer src="/a.js?v=1"></script>\n=======\n<script defer src="/a.js?v=2"></script>\n>>>>>>> 4389eec (Projects: name the intake group)\n</body>');
+  if (!run(withConflict).some((e) => e.includes("git conflict markers"))) {
+    console.error("self-test FAILED: an unresolved conflict hunk in portal.html was not caught");
+    process.exit(1);
+  }
+  const withLookalikes = load();
+  withLookalikes["portal.html"] = withLookalikes["portal.html"].replace("</body>",
+    "<!--\n=======\na heading underline, and a stray <<<<<<< inside prose\n-->\n</body>");
+  if (run(withLookalikes).some((e) => e.includes("git conflict markers"))) {
+    console.error("self-test FAILED: a lone ======= / unpaired <<<<<<< tripped the conflict-marker rule");
+    process.exit(1);
+  }
+  console.log("self-test passed: unresolved conflict hunks are refused, marker lookalikes are not");
 
   // ── The boot-guard lock ────────────────────────────────────────────────────
   // Two regexes that never match are indistinguishable from three healthy pages, and this rule
@@ -1092,6 +1244,35 @@ if (process.argv.includes("--self-test")) {
     rmSync(tmpT, { recursive: true, force: true });
   }
   console.log(`self-test passed: deno test fails on a failing test, and ${found.length} test file(s) are covered`);
+
+  // ── The my-quotes tax-breakdown step ───────────────────────────────────────
+  // Same silent-pass hazard as the two above, and a sharper one: this check EXTRACTS its
+  // subject from a file by pattern, so a rename could leave it quietly asserting nothing.
+  // Prove three things — it passes on the real file, it FAILS on a broken breakdown, and it
+  // fails when the block has been extracted away to nothing.
+  const mqHtml = readFileSync(join(root, "my-quotes.html"), "utf8");
+  if (checkMyQuotesTaxBreakdown(mqHtml).length) {
+    console.error("self-test FAILED: the my-quotes tax breakdown does not pass against the real file");
+    process.exit(1);
+  }
+  // Break the arithmetic the way a careless edit would: charge tax on the gross taxable pool
+  // instead of the net, which is exactly the discount bug this check exists to catch.
+  const brokenMath = mqHtml.replace("addRow(\"Taxable\", fmtMoney(q.taxable));",
+    "addRow(\"Taxable\", fmtMoney(q.taxable + (q.discount || 0)));");
+  if (brokenMath === mqHtml) {
+    console.error("self-test FAILED: could not find the Taxable row to break — the check's subject moved");
+    process.exit(1);
+  }
+  if (!checkMyQuotesTaxBreakdown(brokenMath).length) {
+    console.error("self-test FAILED: a wrong Taxable figure passed the my-quotes breakdown check");
+    process.exit(1);
+  }
+  if (!checkMyQuotesTaxBreakdown("<html><body>nothing here</body></html>").length) {
+    console.error("self-test FAILED: a my-quotes.html with no breakdown block at all passed the check");
+    process.exit(1);
+  }
+  console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
+
   process.exit(0);
 }
 
@@ -1113,6 +1294,8 @@ errors.push(...tests.errors);
 if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
+
+errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

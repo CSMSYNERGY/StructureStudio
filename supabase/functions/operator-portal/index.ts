@@ -107,6 +107,50 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
 
   try {
     switch (action) {
+      // ── SMS registrations across every tenant ────────────────────────────────────────
+      // The operator console for self-serve texting. Two things it exists to answer, both of
+      // which cost real money if nobody is watching:
+      //   1. who is STUCK — a carrier review that failed, or a campaign rejection that can
+      //      only be fixed by a human in the Twilio Console (there is no update API for one)
+      //   2. who is LEAKING — a builder who cancelled their subscription but still owns a
+      //      number, which bills every month, forever, in silence
+      // Read-only on purpose. Every fix is either in the Console or in the tenant's own
+      // portal, and an operator button that half-fixes a registration is worse than a list
+      // that says plainly where to go.
+      case "sms_overview": {
+        const { data: regs, error: rErr } = await admin.from("sms_registrations")
+          .select("client_id, status, brand_tier, brand_status, campaign_status, needs_attention, attention_note, last_errors, brand_update_count, updated_at")
+          .order("updated_at", { ascending: false });
+        if (rErr) throw rErr;
+        const { data: nums, error: nErr } = await admin.from("sms_numbers")
+          .select("client_id, phone_number, registration_status, purchased_at")
+          .is("released_at", null);
+        if (nErr) throw nErr;
+        // The churn check. A cancelled subscription with a live number is the silent leak;
+        // reporting it is deliberate, and releasing it automatically is deliberately NOT —
+        // a builder who paused and came back would lose their customers' texts with it.
+        const { data: subs } = await admin.from("billing_subscriptions")
+          .select("client_id, status");
+        const cancelled = new Set((subs ?? [])
+          .filter((x: { status?: string }) => x.status === "cancelled")
+          .map((x: { client_id: string }) => x.client_id));
+        const numsBy: Record<string, unknown[]> = {};
+        for (const n of nums ?? []) (numsBy[n.client_id] = numsBy[n.client_id] || []).push(n);
+        return json({
+          ok: true,
+          registrations: (regs ?? []).map((r) => ({
+            ...r,
+            numbers: numsBy[r.client_id] ?? [],
+            billingCancelled: cancelled.has(r.client_id),
+            // Surfaced as its own flag so the console can sort by it: a builder who has been
+            // waiting three weeks is not "pending", they are stuck and nobody noticed.
+            stalledDays: r.updated_at
+              ? Math.floor((Date.now() - new Date(r.updated_at).getTime()) / 86400000)
+              : null,
+          })),
+        });
+      }
+
       case "list_clients": {
         const { data, error } = await admin
           .from("client_configs")

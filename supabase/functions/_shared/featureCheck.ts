@@ -24,9 +24,11 @@ import { paidThroughOf } from "./billingPeriods.ts";
 const GRACE_DAYS = 7;
 
 // One subscription that confers several features. full_suite unlocks everything except
-// Self Serve Displays — the same map portal-billing holds.
+// Self Serve Displays — the same map portal-billing holds. `crm` joined 2026-08-29 when the
+// Suite repriced to $11,950/yr to include it (migration 160); it is PAY-ONLY, and a bundle
+// conferring a pay-only feature is fine — a Suite subscription IS a real subscription.
 export const BUNDLE_FEATURES: Record<string, string[]> = {
-  full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"],
+  full_suite: ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"],
 };
 
 // Plan features that confer `feature`: the feature itself plus every bundle containing it.
@@ -49,6 +51,19 @@ export async function hasPaidFeature(
   clientId: string,
   feature: string,
 ): Promise<boolean> {
+  // INTERNAL ACCOUNT (migration 169) short-circuits before anything else. This is the server
+  // mirror of portal-billing's `internal` branch, and the two must agree: a UI that shows the
+  // tab while every action 403s is worse than no access at all. Read first and cheaply — one
+  // indexed lookup on a table this function would not otherwise touch, paid only on the paths
+  // that are gated anyway.
+  //
+  // Fails CLOSED like the rest of this module: a read error throws to the caller's 5xx rather
+  // than being swallowed into "not internal, carry on", because silently downgrading our own
+  // account to a customer is how this bug happened the first time.
+  const csRes = await admin.from("client_settings").select("internal_account").eq("client_id", clientId).maybeSingle();
+  if (csRes.error) throw new Error(`client_settings read failed: ${csRes.error.message}`);
+  if (csRes.data?.internal_account) return true;
+
   const confer = conferringFeatures(feature);
   const plansRes = await admin.from("billing_plans")
     .select("id, feature, billing_interval")

@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { amountOwed, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -92,6 +92,34 @@ export function consentSentenceClick(quoteNumber: string, totalDisplay: string |
  *  the quote's used to. Same "as binding as handwritten" language, pointed at the invoice. */
 export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: string | null): string {
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
+}
+
+/**
+ * The tax columns for a design_acceptances row, read off the snapshot the customer was looking
+ * at (migration 148). Returns {} when the snapshot carries no tax — every GHL-mode design, and
+ * every SS design issued before tax shipped — so the columns stay NULL rather than 0, keeping
+ * "was not taxed" distinguishable from "was taxed at nothing".
+ */
+// deno-lint-ignore no-explicit-any
+function taxFreeze(snap: any): Record<string, unknown> {
+  const t = snap?.tax;
+  if (!t || t.amount == null) return {};
+  return {
+    tax_rate: Number(t.rate) || 0,
+    tax_amount: Number(t.amount) || 0,
+    tax_jurisdiction: t.jurisdiction ?? null,
+    tax_source: t.source === "avalara" || t.source === "fallback" ? t.source : null,
+  };
+}
+
+/** The three money columns an SS order carries, written TOGETHER so pretax + tax = total by
+ *  construction. Falls back to the plain total for a snapshot with no tax, which is every
+ *  GHL-mode order and every SS order issued before tax shipped. */
+// deno-lint-ignore no-explicit-any
+function orderMoney(snap: any): Record<string, unknown> {
+  const m = orderCentsFromSnapshot(snap);
+  if (!m) return {};
+  return { total_cents: m.totalCents, pretax_subtotal_cents: m.pretaxCents, tax_cents: m.taxCents };
 }
 
 const fmtMoney = (n: number): string => {
@@ -398,6 +426,11 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       quote_number: invNumber,
       design_version: designVersion,
       total,
+      // The tax evidence (migration 148). Copied out of the snapshot rather than referenced,
+      // because a resubmit OVERWRITES designs.estimate_lines — without its own copy the rate
+      // and jurisdiction the customer committed under are destroyed by the next revision.
+      // Same reason `total` above is a column and not a join.
+      ...taxFreeze(d.estimate_lines),
       method,
       signer_name: signerName,
       typed_signature: typedSignature,
@@ -447,7 +480,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       // Same NULL-only fill as the quote path: a rep-set total is never clobbered.
       if (total != null) {
         await admin.from("orders")
-          .update({ total_cents: Math.round(total * 100), total_source: "manual", updated_at: signedAtIso })
+          .update({ ...orderMoney(d.estimate_lines), total_source: "manual", updated_at: signedAtIso })
           .eq("client_id", identity.clientId).eq("short_code", code).is("total_cents", null);
       }
     }
@@ -595,6 +628,10 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     quote_number: design.ss_quote_number,
     design_version: designVersion,
     total,
+    // What the customer was SHOWN when they accepted. Not the commitment — the invoice
+    // signature is (migration 136) — but it is the answer to "what did they say yes to",
+    // which is the question a disputed change order actually turns on.
+    ...taxFreeze(design.estimate_lines),
     method,
     signer_name: signerName,
     typed_signature: typedSignature,
@@ -672,7 +709,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     // respect: only a NULL total is filled, a rep-set number is never clobbered.
     if (total != null) {
       const { error: totErr } = await admin.from("orders")
-        .update({ total_cents: Math.round(total * 100), total_source: "manual", updated_at: acceptedAtIso })
+        .update({ ...orderMoney(design.estimate_lines), total_source: "manual", updated_at: acceptedAtIso })
         .eq("client_id", identity.clientId).eq("short_code", quoteRef).is("total_cents", null);
       if (totErr) {
         logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `order total fill failed: ${totErr.message}`, context: { quoteRef } }).catch(() => {});

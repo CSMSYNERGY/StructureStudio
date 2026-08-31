@@ -98,6 +98,13 @@ verify_jwt = true
 [functions.operator-portal]
 verify_jwt = true
 
+[functions.portal-setup]
+# The builder-facing SETUP checklist (What's New -> "Getting set up"). resolveTenant:
+# auth.getUser() -> client_users; clientId never from the body. IS tenant-scoped, so it
+# belongs in portal.html's SS_TENANT_SCOPED_FNS - that injection is how an operator in
+# view-as ticks an item for a builder, with can_write checked server-side.
+verify_jwt = true
+
 [functions.portal-projects]
 # Internal "Projects" module (Monday.com replacement) — operators only. Same auth shape
 # as operator-portal: auth.getUser() + service-role app_operators lookup; writes need
@@ -173,3 +180,12 @@ verify_jwt = false
 # no directory in this repo, so they are deliberately absent here — a [functions] block for
 # a function the CLI cannot find is not something to invent. `github-monday-bug` runs with
 # verify_jwt = false; leave it alone unless it is brought into the repo.
+
+[functions.portal-sms]
+verify_jwt = true
+
+# Twilio Event Streams cannot send a Supabase JWT. With verification ON the gateway
+# 401s every delivery BEFORE the function runs — the billing-webhook failure mode,
+# invisible from inside the database. Auth is the shared URL secret.
+[functions.twilio-events]
+verify_jwt = false

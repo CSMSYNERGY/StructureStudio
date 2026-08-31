@@ -417,6 +417,7 @@ function Dashboard({ session }) {
       // blip can never lock a crew out of their own portal — which is exactly why the
       // server-side hole above has to be closed rather than compensated for here.
       let access = null;
+      let prefs = null;
       try {
         // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
         // have armed the injection by now — and this call scoped to the viewed tenant is
@@ -425,6 +426,10 @@ function Dashboard({ session }) {
         if (!ssTargetClientId) {
           const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
           if (st && st.access) access = st.access;
+          // Rides the same bootstrap call as `access` on purpose: a default view that lands
+          // a round trip late renders the wrong tab and then jumps, which reads worse than
+          // having no setting at all.
+          if (st && st.prefs) prefs = st.prefs;
           // No map back is a FAILED call, never "this tenant has none": `status` is the open
           // bootstrap action and resolveTenant fills every area for every title. The invoke
           // wrapper RETURNS `{data:null}` rather than throwing — the no-session guard does so
@@ -439,11 +444,12 @@ function Dashboard({ session }) {
             if (accSess && accSess.session && !ssTargetClientId) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
+              if (again.data && again.data.prefs) prefs = again.data.prefs;
             }
           }
         }
       } catch (_e) { /* keep the fallback */ }
-      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access });
+      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access, prefs });
     })();
   }, [session.access_token, viewing]);
 
@@ -786,6 +792,16 @@ function Dashboard({ session }) {
   // block inside Settings → Structures; the server re-checks the entitlement on every
   // rtp_* action regardless (_shared/featureCheck.ts).
   const rtpUnlocked = featureOn("on_demand_pricing");
+  // Built-in CRM ($400/mo, migration 160): the Contacts tab and the Pipeline BOARD. The
+  // pipeline LIST stays free for everyone — Carolyn 2026-08-29, "they only get the list
+  // view" — so this gates a view, not a data set, and DesignsTable takes it as a prop.
+  //
+  // Unlike scheduling and QuickBooks, this feature was already built, shipped and in daily
+  // use before it had a price, so turning this on TAKES something away from tenants who
+  // have it today. That was the explicit decision, not an oversight. Server side, every
+  // crm_* action in portal-settings re-checks the entitlement, so this is presentation
+  // over a real gate rather than the only gate.
+  const crmUnlocked = featureOn("crm");
   // May THIS person write to each board (migration 100)? Separate from schedUnlocked, which
   // is only whether the tenant has bought the feature. Both must be true before Designs and
   // Inventory offer their schedule entry points.
@@ -1151,7 +1167,24 @@ function Dashboard({ session }) {
                 email address on file") in front of a contact whose address is rendered
                 directly above it. Shape copied from schedCanEdit/deliverCanEdit above: an
                 admin or owner always holds it, otherwise read the area out of the map. */}
-            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+            {/* A CONTACT record (c-) is CRM and needs the subscription; a DESIGN record (d-)
+                is not — it is what opens from the free Pipeline list, and its server branch
+                reads `designs` only. Same split the portal-settings gate makes, and the two
+                must agree or one of them produces a 403 the other never predicted. */}
+            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^c-/.test(sub) && !crmUnlocked ? (
+              <ComingSoon
+                title="Contacts"
+                icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+                blurb="Customer records are part of the built-in CRM — their designs and quotes, your notes, the texts and emails you've traded, and what needs doing next."
+                bullets={[
+                  "One record per customer: designs, quotes, notes and files",
+                  "Text and email them from inside the record — the thread stays",
+                  "Follow-up activities so nobody quietly goes cold",
+                ]}
+                cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                available
+              />
+            ) : !gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
@@ -1178,6 +1211,12 @@ function Dashboard({ session }) {
                   navigate(dest, (k === "contact" ? "c-" : "d-") + id);
                 }}
                 onOpenDesign={(code) => openInDesigner(code)}
+                /* The Orders card can link out now that the order detail has a URL.
+                   ssClampTab first, because a crew leader may hold the record and not
+                   Orders -- and dumping them on a list they cannot read is the same trap
+                   the onNavigate comment above documents. */
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                  ? (id) => navigate("orders", "o-" + id) : null}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
@@ -1192,17 +1231,42 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin}
+                isAdmin={canAdmin} crmUnlocked={crmUnlocked}
+                onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 onOpenRecord={(code) => navigate("designs", "d-" + code)}
+                /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
+                   deliberately carries no view of its own so the saved preference can fill
+                   it -- pinning it to "list" here would quietly outrank the setting. */
+                urlView={sub === "pipeline" || sub === "list" ? sub : null}
+                defaultView={(tenant && tenant !== "none" && tenant.prefs && tenant.prefs.designsView) || null}
+                onViewChange={(v) => navigate("designs", v)}
                 onOpenDesign={openInDesigner} />
             )}
-            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads. */}
+            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads.
+                Behind the built-in CRM subscription since migration 160; the nav item stays
+                visible (like Build Schedule) so the locked card can do the selling. */}
             {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
-              <LeadsTable key={"t-" + effClientId} clientId={effClientId}
-                fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
-                onOpenDesign={openInDesigner} />
+              crmUnlocked ? (
+                <LeadsTable key={"t-" + effClientId} clientId={effClientId}
+                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                  onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
+                  onOpenDesign={openInDesigner} />
+              ) : (
+                <ComingSoon
+                  title="Contacts"
+                  icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
+                  blurb="Every buyer in one place, with the whole story attached — their designs and quotes, your notes, the calls and texts and emails you've traded, and what needs doing next. The pipeline board comes with it, so you can see who's where at a glance."
+                  bullets={[
+                    "One record per customer: designs, quotes, notes and files",
+                    "Text and email them from inside the record — the thread stays",
+                    "Follow-up activities so nobody quietly goes cold",
+                    "The pipeline board view, alongside your list",
+                  ]}
+                  cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
+                  available
+                />
+              )
             )}
             {!gateLocked && activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount}
@@ -1227,7 +1291,13 @@ function Dashboard({ session }) {
                     /* IN-PORTAL designer, same as every other Open in this app — the public
                        ?id= page silently captures leads/drafts, so staff must never browse
                        a customer's design there. */
-                    onOpenDesign={openInDesigner} />
+                    onOpenDesign={openInDesigner}
+                    /* /portal/orders/o-<id>, on the same `<letter>-` sub shape the record
+                       pages already use. Opening pushes, closing pops -- so Back closes the
+                       order instead of leaving Orders, and an order can finally be linked
+                       to. `replace` is deliberately NOT used: the open IS the navigation. */
+                    urlOpenId={sub && /^o-/.test(sub) ? sub.slice(2) : null}
+                    onOpenChange={(id) => navigate("orders", id ? "o-" + id : null)} />
                 : <OrdersPreview />
             )}
             {/* Operator console, native since 2026-07-30 (was an iframe onto admin.html).
@@ -1252,7 +1322,11 @@ function Dashboard({ session }) {
             {activeTab === "projects" && isOperator && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
-            {!gateLocked && activeTab === "releases" && <ReleasesView submissionsKey={feedbackKey} />}
+            {!gateLocked && activeTab === "releases" && (
+              <ReleasesView submissionsKey={feedbackKey}
+                sub={activeTab === "releases" ? sub : null} onSub={(x) => navigate("releases", x)}
+                onNavigate={navigate} />
+            )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
                 the clamp on that same area — so a settings_quickbooks holder deep-linking
@@ -1277,6 +1351,12 @@ function Dashboard({ session }) {
                 isOwner={!viewing && tenant.role === "owner"}
                 isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
                 access={viewing ? null : myAccess}
+                /* MY VIEW settings are the OPERATOR's own even in view-as: they are the
+                   person looking at the screen, and borrowing the viewed builder's owner's
+                   layout would be both wrong and a small information leak. So this is NOT
+                   nulled under `viewing`, unlike `access` above. */
+                prefs={tenant && tenant !== "none" ? tenant.prefs : null}
+                onPrefsSaved={(p) => setTenant((t) => (t && t !== "none" ? { ...t, prefs: p } : t))}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
@@ -1463,6 +1543,12 @@ function Dashboard({ session }) {
           onSubmitted={() => setFeedbackKey((k) => k + 1)}
         />
       )}
+
+      {/* Operator quick-add: file an item onto a Projects board from anywhere in the
+          portal (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a
+          bug while inside a builder's account is exactly when you want it, and unlike
+          the Feedback bubble above there is no tenant attribution to get wrong. */}
+      {isOperator && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
 
       {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
           verified session's user id — the browser never says whose row to update. */}

@@ -578,7 +578,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const customDays: number | null = settings.custom_days;
 
         const { data: orders } = await admin.from("orders")
-          .select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId);
+          .select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId);
         const ords = orders || [];
         if (ords.length === 0) return json({ ok: true, orders: 0, computed: 0, updated: 0 });
         const codes = ords.map((o: any) => o.short_code).filter(Boolean);
@@ -892,7 +892,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       case "split_order": {
         if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
         const orderId = String(p.orderId || "");
-        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
         const clean: { userId: string; share: number }[] = [];
         let sum = 0;
@@ -938,7 +938,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       case "reset_order": {
         if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
         const orderId = String(p.orderId || "");
-        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
+        const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
         const { data: exRows } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
         if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — it can't be reset." }, 409);
@@ -955,7 +955,14 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           const { data: m } = await admin.from("commission_members").select("commission_percent").eq("client_id", clientId).eq("user_id", earner).maybeSingle();
           rate = m?.commission_percent == null ? null : Number(m.commission_percent);
         }
-        const baseCents: number | null = ord.pretax_subtotal_cents ?? ord.total_cents ?? null;
+        // total_cents is NOT a safe stand-in for a pre-tax base any more (migration 148): in SS
+        // mode it now INCLUDES sales tax, so this fallback would pay commission on tax the
+        // builder merely collects on the state's behalf. The base_type is literally called
+        // 'pretax_subtotal'. Fall back only when the order carries no tax; otherwise leave the
+        // base null, which renders as "needs a subtotal" rather than silently over-paying.
+        const taxedOrder = (Number(ord.tax_cents) || 0) > 0;
+        const baseCents: number | null = ord.pretax_subtotal_cents
+          ?? (taxedOrder ? null : (ord.total_cents ?? null));
         let earnedDate: string | null = ord.ordered_at ? String(ord.ordered_at).slice(0, 10) : null;
         if (settings.earned_on === "collected") {
           const { data: pays } = await admin.from("payments").select("amount_cents, received_at, voided_at").eq("client_id", clientId).eq("order_id", ord.id);

@@ -23,6 +23,8 @@ import { withErrorLog } from "../_shared/logError.ts";
 //     row; labels without one are pure-internal and touch nothing tenant-side.
 //   * Saved views (pm_views) are per BOARD and shared by the whole operator team.
 //   * The Roadmap board MIRRORS unshipped release_notes (one-way, create-only).
+//   * The SETUP CHECKLIST lives here too (setup_* actions): one operator-owned
+//     template, copied per builder into tenant_setup_items (migration 157).
 //   * ASSIGNABLE PEOPLE (pm_people) and OPERATOR ACCESS (app_operators) are two
 //     different things since migration 148, joined by pm_people.user_id so one profile
 //     can hold both. Assigning work grants nothing; operator access grants everything.
@@ -64,6 +66,18 @@ function cssColor(v: unknown): string | undefined {
 }
 function slugId(prefix: string): string {
   return prefix + "_" + crypto.randomUUID().slice(0, 8);
+}
+
+// The one shape a setup-step screenshot URL may take: our own project's public
+// setup-screens bucket, whose paths only setup_upload_image mints. The column lands in an
+// <img src> in every tenant's browser, so anything else — another host, another bucket, a
+// javascript: scheme — is refused (undefined), never stored. Empty string clears.
+const SETUP_IMAGE_PREFIX =
+  `${Deno.env.get("SUPABASE_URL")}/storage/v1/object/public/setup-screens/steps/`;
+function setupImageUrl(v: unknown): string | null | undefined {
+  const s = str(v, 500);
+  if (!s) return null;
+  return s.startsWith(SETUP_IMAGE_PREFIX) && /^[\w:/.-]+$/.test(s) ? s : undefined;
 }
 
 // Rebuild a column's settings for its type. Existing stable ids are preserved when the
@@ -232,7 +246,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
-    .select("user_id, email, can_write")
+    .select("user_id, email, can_write, display_name")
     .eq("user_id", user.id)
     .maybeSingle();
   if (opErr) return json({ error: opErr.message }, 500);
@@ -244,7 +258,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = String(payload?.action || "");
 
-  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment"]);
+  const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
   if (!READ_ACTIONS.has(action) && !op.can_write) {
     return json({ error: "This operator account is read-only." }, 403);
   }
@@ -477,8 +491,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const name = str(payload.name, 80);
         if (!name) return json({ error: "Board name is required." }, 400);
         let slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "board";
+        // "setup" is the Client Setup surface's slug in /portal/projects/<sub>. A board
+        // holding it would be unreachable — the tab strip would show it and the route
+        // would render the checklist instead — so it is suffixed like any other clash.
+        const RESERVED_SLUGS = new Set(["setup"]);
         const { data: clash } = await admin.from("pm_boards").select("id").eq("slug", slug).maybeSingle();
-        if (clash) slug = `${slug}-${crypto.randomUUID().slice(0, 4)}`;
+        if (clash || RESERVED_SLUGS.has(slug)) slug = `${slug}-${crypto.randomUUID().slice(0, 4)}`;
         const { data: maxRow } = await admin.from("pm_boards").select("position").order("position", { ascending: false }).limit(1).maybeSingle();
         const { data: board, error } = await admin.from("pm_boards")
           .insert({ slug, name, position: (maxRow?.position || 0) + 1024 }).select().single();
@@ -690,11 +708,22 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       // ── Items ─────────────────────────────────────────────────────────────
       case "create_item": {
         const boardId = str(payload.boardId, 40);
-        const groupId = str(payload.groupId, 40);
+        let groupId = str(payload.groupId, 40);
         const name = str(payload.name, 200);
         if (!name) return json({ error: "Item name is required." }, 400);
-        const { data: group } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
-        if (!group || group.board_id !== boardId) return json({ error: "Group is not on this board." }, 400);
+        if (groupId) {
+          const { data: group } = await admin.from("pm_groups").select("id, board_id").eq("id", groupId).maybeSingle();
+          if (!group || group.board_id !== boardId) return json({ error: "Group is not on this board." }, 400);
+        } else {
+          // No group named — the quick-add path (filed from anywhere in the portal, where
+          // the caller can't see the board). Land it where a new arrival belongs: the
+          // board's INTAKE group (migration 152, radio semantics), else the first group.
+          const { data: gs } = await admin.from("pm_groups").select("id, intake, position")
+            .eq("board_id", boardId).order("position");
+          const g = (gs || []).find((x) => x.intake) || (gs || [])[0];
+          if (!g) return json({ error: "That board has no groups." }, 400);
+          groupId = g.id;
+        }
         const [columns, opIds] = await Promise.all([boardColumns(boardId), personIdSet()]);
         const values = sanitizeValues(columns, payload.values, opIds);
         const { data: maxRow } = await admin.from("pm_items").select("position")
@@ -705,9 +734,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           created_by: user.id, created_by_email: actorEmail,
         }).select().single();
         if (error) throw error;
-        await act(boardId, item.id, "create_item", { name });
+        // Quick-add can carry a first note (what was seen, where) — an ordinary INTERNAL
+        // update, so the thread starts with the context instead of a bare title. Returned
+        // to the caller because screenshots attach to an UPDATE (the pm-attachments
+        // model), and the quick-add uploads its staged files onto this one right after.
+        const note = str(payload.note, 4000);
+        let update = null;
+        if (note) {
+          const ins = await admin.from("pm_updates").insert({
+            item_id: item.id, author_email: actorEmail, body: note,
+            client_visible: false, attachments: [],
+          }).select().single();
+          if (ins.error) throw ins.error;
+          update = ins.data;
+        }
+        await act(boardId, item.id, "create_item", note ? { name, via: "quick_add" } : { name });
         await propagateStatus(item, columns, values, {});
-        return json({ item });
+        return json({ item, update });
       }
 
       case "update_item": {
@@ -985,6 +1028,229 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
+      // ── Setup checklist: the template, and each builder's copy ────────────
+      // The TEMPLATE (setup_template_items) is one global ordered list, operator-only.
+      // A builder never reads it — on client creation admin-catalog COPIES the active
+      // rows into tenant_setup_items, so editing the template later never rewrites what
+      // someone is already working through.
+      case "setup_template": {
+        const { data, error } = await admin.from("setup_template_items")
+          .select("*").order("position");
+        if (error) throw error;
+        return json({ items: data || [] });
+      }
+
+      case "setup_template_save": {
+        const id = str(payload.id, 40);
+        const title = str(payload.title, 200);
+        if (!title) return json({ error: "Give this step a title." }, 400);
+        const row: Record<string, unknown> = {
+          title,
+          detail: str(payload.detail, 2000) || null,
+          // A portal path like "settings/branding" — the checklist's "Take me there"
+          // button. Kept as a plain slug pair: it is fed to the portal's own navigate(),
+          // never to an <a href>, so it can never become an off-site link.
+          link_page: str(payload.linkPage, 60).replace(/[^a-z0-9/_-]/gi, "") || null,
+          section: str(payload.section, 60) || null,
+          image_url: setupImageUrl(payload.imageUrl),
+          updated_at: new Date().toISOString(),
+        };
+        if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
+        if (payload.active !== undefined) row.active = payload.active === true;
+        if (id) {
+          const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
+          if (error) throw error;
+          return json({ ok: true });
+        }
+        const { data: maxRow } = await admin.from("setup_template_items")
+          .select("position").order("position", { ascending: false }).limit(1).maybeSingle();
+        const { data: created, error } = await admin.from("setup_template_items")
+          .insert({ ...row, position: (maxRow?.position || 0) + 1024 }).select().single();
+        if (error) throw error;
+        return json({ item: created });
+      }
+
+      // Store a step screenshot in the PUBLIC setup-screens bucket and return its URL.
+      // The upload_logo shape (portal-settings): base64 through the function, type
+      // whitelist, byte cap, server-minted uuid path. Public is correct here — these are
+      // operator-authored screenshots of the product's own screens, shown identically to
+      // every tenant; a signed-URL scheme would cost a signature per step per page load
+      // and defeat browser caching. Deleting a step deliberately does NOT delete its
+      // object: images get reused across steps and re-uploads, and an orphan in a
+      // 5MB-capped image bucket is cheaper than refcounting.
+      case "setup_upload_image": {
+        if (typeof payload.imageBase64 !== "string" || !payload.imageBase64.trim()) {
+          return json({ error: "No image data." }, 400);
+        }
+        const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
+        const ct = String(payload.contentType || "image/png");
+        const EXT_BY_CT: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+        const ext = EXT_BY_CT[ct];
+        if (!ext) return json({ error: "Unsupported image type (use PNG, JPG, WEBP or GIF)." }, 400);
+        let bytes: Uint8Array;
+        try { bytes = Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)); }
+        catch { return json({ error: "Invalid image data." }, 400); }
+        if (bytes.length > 3_000_000) return json({ error: "Image too large (max 3MB)." }, 400);
+        const path = `steps/${crypto.randomUUID()}.${ext}`;
+        const up = await admin.storage.from("setup-screens").upload(path, bytes, { contentType: ct, upsert: false });
+        if (up.error) throw up.error;
+        const { data: pub } = admin.storage.from("setup-screens").getPublicUrl(path);
+        return json({ url: pub.publicUrl });
+      }
+
+      // Remove one screenshot object. The bucket is public and orphans are cheap, but a
+      // capture that came out wrong (an operator screen, a stray name) should be
+      // REMOVABLE, not just unreferenced — this is the only delete path there is, since
+      // storage refuses SQL deletes and the CLI has no object rm here. Guarded to the
+      // one prefix setup_upload_image mints, so it can never reach another bucket's use.
+      case "setup_delete_image": {
+        const u = setupImageUrl(payload.imageUrl);
+        if (!u) return json({ error: "That is not a setup screenshot URL." }, 400);
+        const path = u.slice(SETUP_IMAGE_PREFIX.length - "steps/".length);
+        const { error } = await admin.storage.from("setup-screens").remove([path]);
+        if (error) throw error;
+        // Clear any rows still pointing at it — a 404 thumbnail helps nobody.
+        await admin.from("setup_template_items").update({ image_url: null }).eq("image_url", u);
+        await admin.from("tenant_setup_items").update({ image_url: null }).eq("image_url", u);
+        return json({ ok: true, removed: path });
+      }
+
+      case "setup_template_delete": {
+        const { error } = await admin.from("setup_template_items").delete().eq("id", str(payload.id, 40));
+        if (error) throw error;
+        return json({ ok: true });
+      }
+
+      case "setup_template_reorder": {
+        const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
+        let pos = 1024;
+        for (const id of ids) {
+          const { error } = await admin.from("setup_template_items").update({ position: pos }).eq("id", id);
+          if (error) throw error;
+          pos += 1024;
+        }
+        return json({ ok: true });
+      }
+
+      // Who is set up, and who is stuck — every tenant with a list, plus the ones with none.
+      case "setup_overview": {
+        const { data: rows, error } = await admin.from("tenant_setup_items")
+          .select("client_id, completed_at");
+        if (error) throw error;
+        const { data: clients, error: cErr } = await admin.from("client_configs").select("client_id");
+        if (cErr) throw cErr;
+        const byClient = new Map<string, { clientId: string; total: number; done: number; lastAt: string | null }>();
+        for (const c of clients || []) {
+          byClient.set(c.client_id, { clientId: c.client_id, total: 0, done: 0, lastAt: null });
+        }
+        for (const r of rows || []) {
+          const e = byClient.get(r.client_id) || { clientId: r.client_id, total: 0, done: 0, lastAt: null };
+          e.total++;
+          if (r.completed_at) {
+            e.done++;
+            if (!e.lastAt || r.completed_at > e.lastAt) e.lastAt = r.completed_at;
+          }
+          byClient.set(r.client_id, e);
+        }
+        return json({ clients: [...byClient.values()].sort((a, b) => a.clientId.localeCompare(b.clientId)) });
+      }
+
+      case "setup_client_items": {
+        const cid = str(payload.clientId, 60);
+        const { data, error } = await admin.from("tenant_setup_items")
+          .select("*").eq("client_id", cid).order("position");
+        if (error) throw error;
+        return json({ items: data || [] });
+      }
+
+      // Copy the template to a builder who has none. Deliberately refuses when a list
+      // already exists: re-running it would double every step rather than "refresh" it,
+      // and which of the two the operator meant is not something to guess.
+      case "setup_assign_template": {
+        const cid = str(payload.clientId, 60);
+        if (!cid) return json({ error: "Pick a builder." }, 400);
+        const { count } = await admin.from("tenant_setup_items")
+          .select("id", { count: "exact", head: true }).eq("client_id", cid);
+        if ((count || 0) > 0) {
+          return json({ error: "That builder already has a setup list. Add or remove steps on it instead." }, 409);
+        }
+        const { data: tpl, error: tErr } = await admin.from("setup_template_items")
+          .select("*").eq("active", true).order("position");
+        if (tErr) throw tErr;
+        if (!tpl || !tpl.length) return json({ error: "The template is empty." }, 400);
+        const { error } = await admin.from("tenant_setup_items").insert(
+          tpl.map((t, i) => ({
+            client_id: cid, template_item_id: t.id, title: t.title, detail: t.detail,
+            link_page: t.link_page, section: t.section, image_url: t.image_url,
+            position: (i + 1) * 1024,
+          })),
+        );
+        if (error) throw error;
+        await act(null, null, "setup_assigned", { clientId: cid, count: tpl.length });
+        return json({ ok: true, added: tpl.length });
+      }
+
+      // One builder's own list: add a step just for them, retitle one, drop one that does
+      // not apply, or tick one on their behalf.
+      case "setup_client_save": {
+        const id = str(payload.id, 40);
+        const cid = str(payload.clientId, 60);
+        const title = str(payload.title, 200);
+        if (!title) return json({ error: "Give this step a title." }, 400);
+        const row: Record<string, unknown> = {
+          title,
+          detail: str(payload.detail, 2000) || null,
+          link_page: str(payload.linkPage, 60).replace(/[^a-z0-9/_-]/gi, "") || null,
+          section: str(payload.section, 60) || null,
+          image_url: setupImageUrl(payload.imageUrl),
+        };
+        if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
+        if (id) {
+          const { error } = await admin.from("tenant_setup_items").update(row).eq("id", id);
+          if (error) throw error;
+          return json({ ok: true });
+        }
+        if (!cid) return json({ error: "Pick a builder." }, 400);
+        const { data: maxRow } = await admin.from("tenant_setup_items")
+          .select("position").eq("client_id", cid).order("position", { ascending: false }).limit(1).maybeSingle();
+        const { data: created, error } = await admin.from("tenant_setup_items")
+          .insert({ ...row, client_id: cid, position: (maxRow?.position || 0) + 1024 }).select().single();
+        if (error) throw error;
+        return json({ item: created });
+      }
+
+      case "setup_client_delete": {
+        const { error } = await admin.from("tenant_setup_items").delete().eq("id", str(payload.id, 40));
+        if (error) throw error;
+        return json({ ok: true });
+      }
+
+      case "setup_client_toggle": {
+        const id = str(payload.id, 40);
+        const done = payload.done === true;
+        const patch = done
+          ? {
+            completed_at: new Date().toISOString(),
+            completed_by_kind: "team",
+            completed_by_name: (str(op.display_name, 120) || String(actorEmail).split("@")[0]),
+          }
+          : { completed_at: null, completed_by_kind: null, completed_by_name: null };
+        const { error } = await admin.from("tenant_setup_items").update(patch).eq("id", id);
+        if (error) throw error;
+        return json({ ok: true });
+      }
+
+      case "setup_client_reorder": {
+        const ids = Array.isArray(payload.orderedIds) ? payload.orderedIds.map((x: unknown) => str(x, 40)) : [];
+        let pos = 1024;
+        for (const id of ids) {
+          const { error } = await admin.from("tenant_setup_items").update({ position: pos }).eq("id", id);
+          if (error) throw error;
+          pos += 1024;
+        }
+        return json({ ok: true });
+      }
+
       // ── Feedback linkage ──────────────────────────────────────────────────
       case "link_feedback": {
         const item = await getItem(payload.itemId);
@@ -1070,6 +1336,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (!body) return json({ error: "Write something first." }, 400);
         const { data: u } = await admin.from("pm_updates").select("*").eq("id", id).maybeSingle();
         if (!u) return json({ error: "Update not found." }, 404);
+        // Same reasoning as delete_update: a client's reply is theirs. Rewriting it here
+        // would also rewrite what they see in their own thread.
+        if (u.author_kind === "client") {
+          return json({ error: "That is the builder's own reply — it cannot be edited here." }, 400);
+        }
         const { error } = await admin.from("pm_updates")
           .update({ body, edited_at: new Date().toISOString() }).eq("id", id);
         if (error) throw error;
@@ -1096,7 +1367,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           // to delete, and an orphan file is recoverable where a stuck note is confusing.
           if (sErr) console.error("attachment cleanup failed for update", id, sErr.message);
         }
-        if (u.feedback_comment_id) {
+        // ⚠️ Direction matters. For an OPERATOR update the pm_update is the original and
+        // the feedback_comments row is the copy we published, so deleting both is right.
+        // For a CLIENT reply it is the other way round: the tenant's comment is the
+        // original and this row is the copy — deleting it would erase the customer's own
+        // words from their thread, silently, from a screen they cannot see.
+        if (u.feedback_comment_id && u.author_kind !== "client") {
           const { error: cErr } = await admin.from("feedback_comments").delete().eq("id", u.feedback_comment_id);
           if (cErr) throw cErr;
         }

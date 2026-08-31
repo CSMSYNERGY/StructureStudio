@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { clientIp } from "../_shared/adminGate.ts";
 import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
@@ -17,12 +18,14 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // The change-order baseline, shared with submit-estimate so the two design_edit writers
 // cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
 // line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
 // this module — deploy both.
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { addressFrom } from "../_shared/contactAddress.ts";
+import { resolveRate, taxOn } from "../_shared/salesTax.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import {
@@ -36,6 +39,7 @@ import {
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
+import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 
 import type { GateTable } from "../_shared/access.ts";
 
@@ -53,6 +57,11 @@ const GATES: GateTable = {
   // card, so it stays open and the CRM/QuickBooks fields inside it are filtered per-area at
   // the branch instead (search: STATUS FIELD FILTER).
   status: "open",
+  // "self": a write, but only ever to the caller's OWN client_users row. The handler keys
+  // strictly off ctx.userId and never off anything in the body -- this gate cannot enforce
+  // that, as its own definition in access.ts says. Someone's default view is not tenant
+  // data, so a sales rep sets their own.
+  save_prefs: "self",
 
   // ── Your own account ─────────────────────────────────────────────────────
   get_profile: "self",
@@ -85,6 +94,7 @@ const GATES: GateTable = {
   reorder_styles:            { area: "settings_structures", level: "edit" },
   set_style_active:          { area: "settings_structures", level: "edit" },
   set_style_estimate_image:  { area: "settings_structures", level: "edit" },
+  set_style_taxable:         { area: "settings_structures", level: "edit" },
 
   // ── Per-style 3D appearance (the `d3` spec, photos and phone-scan model) ──
   // Grafted from beta-2.0 in the 3D merge. These write `building_styles.d3` /
@@ -112,6 +122,7 @@ const GATES: GateTable = {
   import_fixtures:                { area: "settings_options", level: "edit" },
   set_layout_item_archived:       { area: "settings_options", level: "edit" },
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
+  set_layout_item_taxable:        { area: "settings_options", level: "edit" },
   save_ramp_settings:             { area: "settings_options", level: "edit" },
   // (save_doors / save_ramps / save_windows were here until 2026-08-07. They were legacy
   // full-replace writers with no caller anywhere, each of which DELETED every fixture_items
@@ -185,6 +196,9 @@ const GATES: GateTable = {
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
+  // Recording that a customer gave permission is a claim about them, so it sits at the
+  // same level as texting them — the people who talk to customers, not everyone.
+  crm_record_consent:    { area: "contacts", level: "edit" },
   // Customer Uploads (migration 151). Signing an upload and deleting a file are writes;
   // the READ rides crm_record, which is already gated above.
   crm_file_sign:         { area: "contacts", level: "edit" },
@@ -387,6 +401,17 @@ const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 // certificate every time it is rebuilt. Best-effort by contract (quotePdf.ts): a PDF
 // problem logs and returns null; it never blocks the change that triggered it.
 // deno-lint-ignore no-explicit-any
+/** The three order money columns from a snapshot (migration 148), written TOGETHER so
+ *  pretax + tax = total by construction. `fallbackTotal` covers a snapshot too old to price —
+ *  it keeps today's behaviour of writing the total on its own. Column names are spelled out
+ *  here rather than spread from orderCentsFromSnapshot, whose keys are camelCase. */
+// deno-lint-ignore no-explicit-any
+function orderMoneyCols(snap: any, fallbackTotal: number | null): Record<string, unknown> {
+  const m = orderCentsFromSnapshot(snap);
+  if (!m) return fallbackTotal == null ? {} : { total_cents: Math.round(fallbackTotal * 100) };
+  return { total_cents: m.totalCents, pretax_subtotal_cents: m.pretaxCents, tax_cents: m.taxCents };
+}
+
 async function regenerateQuotePdf(
   admin: any,
   req: Request,
@@ -414,6 +439,11 @@ async function regenerateQuotePdf(
       // deno-lint-ignore no-explicit-any
       lines: lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
       discount: Number(input.snap?.discount) || 0,
+      // The tax the snapshot was STAMPED with, not a fresh lookup (migration 148). A re-render
+      // must reproduce the document the customer already has; re-resolving here would let a
+      // regenerate silently restate what they were quoted.
+      tax: input.snap?.tax ?? null,
+      discountRows: input.snap?.discounts?.rows ?? null,
       quoteTerms: cs?.quote_terms ?? null,
       planPdfUrl: planUrl,
     });
@@ -742,10 +772,47 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, fullName, phone });
   }
 
+// ── WHAT A COLOUR SAVE ACTUALLY FAILED ON ────────────────────────────────────────────
+// Carolyn read a Postgres error out loud on the 2026-08-28 call (@55:00): "the color is
+// skipped, black is a duplicate key, it violates the unique constraint of colors, client and
+// ID label key." She then proposed working around it by renaming the colours BLM and BLS.
+//
+// TWO SEPARATE FAILURES WERE HAPPENING THERE. The constraint itself was wrong -- fixed in
+// 161, a colour name is unique within a SECTION now -- and, underneath that, `save_colors`
+// was pasting the driver's raw text into the response, so the one person who could not act
+// on a constraint name was the only person who ever saw it.
+//
+// This translates the constraints we own into a sentence naming what to do. Anything
+// unrecognised still falls through to the raw message: inventing a friendly wrapper for an
+// error nobody has seen yet just hides the next surprise.
+function colorSaveReason(err: { message?: string; code?: string }, label: string, section: string): string {
+  const raw = String(err?.message ?? "");
+  const where = section === "shingle" ? "shingle colours" : section === "metal" ? "metal colours" : "paint colours";
+  if (err?.code === "23505" || /duplicate key|unique constraint/i.test(raw)) {
+    if (/_code_uniq/.test(raw)) {
+      return `another colour in your ${where} already uses that code. Codes have to be unique inside a section because they become part of a building's serial number.`;
+    }
+    if (/_label_uniq|client_id_label_key/.test(raw)) {
+      return `you already have a colour called "${label}" in your ${where}. The same name in a DIFFERENT section is fine — a shingle Black and a metal Black can both exist.`;
+    }
+    return `something with those details already exists in your ${where}.`;
+  }
+  return raw;
+}
+
   if (action === "status") {
+    // The caller's own preferences row. Best-effort: a failure here must never stop the
+    // bootstrap call that every role depends on to learn its access map.
+    let myPrefs: Record<string, unknown> | null = null;
+    if (userId) {
+      const { data: pr } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId).limit(1).maybeSingle();
+      myPrefs = (pr && pr.prefs && typeof pr.prefs === "object" && !Array.isArray(pr.prefs))
+        ? pr.prefs as Record<string, unknown> : null;
+    }
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, email_provider, email_domain_status, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -782,6 +849,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
         ssInvoicePrefix: data?.ss_invoice_prefix ?? "",
+        // Sales tax (migration 148). The rate is surfaced as a PERCENT — it is stored as a
+        // fraction, and a settings card that round-trips 0.0725 into a box labelled "%" is how
+        // a tenant ends up quoting at 0.07%.
+        ssTaxRate: data?.ss_tax_rate == null ? null : Math.round(Number(data.ss_tax_rate) * 1000000) / 10000,
+        ssTaxLabel: data?.ss_tax_label ?? "Sales tax",
+        ssTaxDelivery: data?.ss_tax_delivery === true,
         // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
         // in SS mode there is no GHL fallback, so a tenant without live sending can't
         // email quotes/invoices at all — the card says so, loudly, without blocking.
@@ -798,6 +871,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       role,
       operatorMode: Boolean(operator),
       access,
+      // ── THE CALLER'S OWN PORTAL PREFERENCES (165) ────────────────────────────────
+      // Rides `status` because the shell already awaits it at boot for `access`, and a
+      // default view that arrives a round trip late shows the wrong tab first and then
+      // jumps -- which is worse than not having the setting.
+      //
+      // ⚠️ Keyed on userId, never on clientId: this is PER PERSON. Two people at the same
+      // builder legitimately want different defaults, which is the whole reason 165 put
+      // the column on client_users rather than on client_settings.
+      //
+      // In operator view-as this is still the OPERATOR's own row -- they are the one
+      // looking at the screen, and borrowing the viewed tenant's owner's layout would be
+      // both wrong and a small information leak.
+      prefs: myPrefs,
       ...crm,
       businessName: data?.business_name ?? null,
       businessPhone: data?.business_phone ?? null,
@@ -816,6 +902,44 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         headerBg: cfg?.header_bg ?? null,
       },
     });
+  }
+
+  // ── SAVING THEM ──────────────────────────────────────────────────────────────────
+  // Ahsan, 2026-08-28 @42:28: "all of these settings for contact cards, the pipeline cards,
+  // and the default one, I think should add, in settings, add another tab ... for structure
+  // studio settings."
+  //
+  // WHITELIST-REBUILT, like every other save in this file. An open jsonb column written
+  // straight from the browser is a place for anything to end up, and this one is read back
+  // into the shell on every boot. Only the keys below survive.
+  //
+  // No gate entry beyond being signed in, deliberately: these are one person's own view
+  // preferences, not tenant data. A sales rep may set their own default view.
+  if (action === "save_prefs") {
+    if (!userId) return json({ error: "Sign in again to save your preferences." }, 401);
+    const raw = (payload.prefs && typeof payload.prefs === "object" && !Array.isArray(payload.prefs))
+      ? payload.prefs as Record<string, any> : {};
+    const clean: Record<string, unknown> = {};
+    if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // Card order is a list of section keys. Unknown keys are kept rather than dropped here
+    // and filtered at RENDER time instead -- the server would otherwise silently delete a
+    // card belonging to a newer frontend than itself, and the user would watch their layout
+    // revert every time they saved from a tab that had not reloaded yet.
+    const order = (raw.cardOrder && typeof raw.cardOrder === "object" && !Array.isArray(raw.cardOrder)) ? raw.cardOrder : null;
+    if (order) {
+      const co: Record<string, string[]> = {};
+      for (const k of ["contact", "design"]) {
+        if (Array.isArray(order[k])) {
+          co[k] = order[k].filter((s: unknown) => typeof s === "string").slice(0, 40).map((s: string) => s.slice(0, 40));
+        }
+      }
+      if (Object.keys(co).length) clean.cardOrder = co;
+    }
+    const { error } = await admin.from("client_users")
+      .update({ prefs: Object.keys(clean).length ? clean : null })
+      .eq("user_id", userId);
+    if (error) return dbFail(req, clientId, "save your preferences", error);
+    return json({ ok: true, prefs: Object.keys(clean).length ? clean : null });
   }
 
   if (action === "save") {
@@ -883,6 +1007,29 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         updates.ss_invoice_next = n;
       }
     }
+    // The sales tax rate, entered as a PERCENT and stored as a FRACTION. Blank clears it back
+    // to "not set", which the guard below then refuses to leave SS mode with. An explicit 0 is
+    // a real answer and must survive — hence the blank/zero distinction rather than falsiness.
+    if ("ssTaxRate" in payload) {
+      const raw = String(payload.ssTaxRate ?? "").trim();
+      if (!raw) updates.ss_tax_rate = null;
+      else {
+        const pct = Number(raw);
+        if (!Number.isFinite(pct) || pct < 0 || pct > 25) {
+          return json({ error: "The sales tax rate must be a percentage between 0 and 25 — for example 7.25." }, 400);
+        }
+        // 5dp, matching numeric(7,5): 7.25% -> 0.0725. Rounded here so the stored value is the
+        // one the card will read back, rather than a float that redisplays as 7.249999.
+        updates.ss_tax_rate = Math.round((pct / 100) * 100000) / 100000;
+      }
+    }
+    if ("ssTaxLabel" in payload) {
+      // Printed on the customer's document, so bounded like the numbering prefixes are.
+      const l = String(payload.ssTaxLabel ?? "").trim().slice(0, 40);
+      updates.ss_tax_label = l || "Sales tax";
+    }
+    if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+
     if ("ssInvoicePrefix" in payload) {
       const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);
       if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
@@ -896,12 +1043,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // otherwise the first SS document would begin at 1 and collide with the tenant's
     // existing paperwork. Checked against the MERGED state (the controls can arrive in
     // separate saves), the same way the beta pair below is.
-    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload) {
+    if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
       const { data: curInv } = await admin
-        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next").eq("client_id", clientId).maybeSingle();
+        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next, ss_tax_rate").eq("client_id", clientId).maybeSingle();
       const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
+      const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
       if (!nextInGhl && nextQuoteStart == null) {
         return json({
           error: "StructureStudio needs a starting quote number before it can issue your quotes — set one so your numbering continues where your CRM left off.",
@@ -910,6 +1058,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       if (!nextInGhl && nextInvoiceStart == null) {
         return json({
           error: "StructureStudio needs a starting invoice number too — invoices number separately from quotes, so set where they should begin.",
+        }, 400);
+      }
+      // A rate is as mandatory as a number, and for the same reason: refuse rather than invent.
+      // Rates come from each quote's delivery address, but this one is what gets charged when
+      // that lookup is unavailable — so without it there is no defensible figure to fall back
+      // to, and an untaxed invoice goes out that nobody was ever asked about. 0 is accepted;
+      // "unanswered" is not (Carolyn 2026-08-26).
+      if (!nextInGhl && nextTaxRate == null) {
+        return json({
+          error: "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.",
         }, 400);
       }
     }
@@ -1063,17 +1221,17 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order").eq("client_id", clientId).order("sort_order"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("layout_item_types").select("item_key, label"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
-      admin.from("colors").select("id, label, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -1088,7 +1246,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const labelByKey: Record<string, string> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only }));
+      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false }));
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
@@ -1152,6 +1310,41 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       return json({ error: "Real-Time Pricing is not part of your subscription — add it under Settings → Billing." }, 403);
     }
   }
+  // ENTITLEMENT, server-side, for the built-in CRM. Same posture as the RTP gate above and
+  // the same reason: featureOn() in the browser is presentation, not enforcement, so a direct
+  // POST must 403 here. crm is PAY-ONLY (portal-billing PAID_ONLY_FEATURES) and the Suite
+  // confers it (BUNDLE_FEATURES) — hasPaidFeature resolves both, so a Suite subscriber passes
+  // without this list knowing anything about bundles.
+  //
+  // WHY ONE GUARD RATHER THAN TWELVE: every crm_* action below reads or writes crm_contacts,
+  // crm_notes, crm_activities or the message threads hanging off them, and none of that is
+  // reachable any other way — the browser never does sb.from("crm_contacts") directly (see
+  // portal/02-sales.jsx, "NEVER a direct sb.from(...).update()"). So this one choke point is
+  // the whole paid surface, and a new crm_* action added later is gated by NAME PREFIX
+  // without anyone remembering to come back here. That is deliberate: the alternative, a
+  // hand-maintained Set like RTP_ACTIONS, is exactly the list that gets forgotten.
+  //
+  // NOT gated: `contact_activity`. It reads designs/design_versions by short_code — design
+  // history the free Pipeline list already shows — and is not CRM data. Gating it would take
+  // away something that was never part of this sale.
+  //
+  // ⚠️ NOR is `crm_record` when kind === "design", and that exception is load-bearing. The
+  // crm_ prefix is a lie about that one action: CrmRecord serves BOTH a contact record and a
+  // DESIGN record, and the design record is what opens when someone clicks a row in the free
+  // Pipeline list (11-shell.jsx routes it to d-<code>). Its branch reads `designs` only —
+  // no crm_contacts, no notes, no threads — so it is the design data a Simple Layout
+  // subscriber already pays for, wearing a CRM-shaped action name. Gating it would have
+  // locked the free list's own rows behind the CRM, which is neither what was sold nor what
+  // Carolyn asked for ("they only get the list view" — the list still has to WORK).
+  const crmGated = action.startsWith("crm_") &&
+    !(action === "crm_record" && payload?.kind === "design");
+  if (crmGated && !operator) {
+    let paid = false;
+    try { paid = await hasPaidFeature(admin, clientId, "crm"); }
+    catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
+    if (!paid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+  }
+
   // Re-apply after any RTP mutation: the SQL function no-ops unless the toggle is ON, and
   // recompute over a tenant's sizes is trivial, so the choke point that already gates the
   // write is also where prices stay current. Fails soft — the edit succeeded; a re-price
@@ -1665,6 +1858,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true });
   }
 
+  // Whether this style's BUILDING line carries sales tax (migration 148). On the style, not
+  // the size: taxability is a property of the product, not of how big it is.
+  if (action === "set_style_taxable") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId is required." }, 400);
+    const { error } = await admin.from("building_styles")
+      .update({ taxable: payload.taxable !== false })
+      .eq("client_id", clientId).eq("id", styleId);
+    if (error) return dbFail(req, clientId, "update that style's tax setting", error);
+    return json({ ok: true });
+  }
+
   // Upload-only: store a layout-item image in the 'branding' bucket and return its public
   // URL (no DB write). The portal places the URL on the row and persists it via
   // save_layout_pricing → layout_item_pricing.image_url, which submit-estimate then attaches
@@ -1947,6 +2152,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const label = String(payload.label ?? "").trim();
       if (!label) return json({ error: "Building style name can't be empty." }, 400);
       updates.label = label;
+    }
+    // Serial-number code (163). Carolyn, 2026-08-28 @57:20: "all of their buildings have
+    // codes. They come up with them. LBA. Okay. Stands for Lofted Barn." It is the second
+    // segment of every serial this style produces, so it is upper-cased and capped at 4 --
+    // 0826LBA1016REBLDWS5000. Presence-guarded like `label`, so a caller sending only an
+    // image cannot blank it. An empty string stores NULL rather than '', which is what makes
+    // the partial unique index treat un-coded styles as un-set instead of as duplicates.
+    if ("code" in payload) {
+      updates.code = String(payload.code ?? "").trim().toUpperCase().slice(0, 4) || null;
     }
     if (typeof payload.imageBase64 === "string" && payload.imageBase64.trim()) {
       const raw = payload.imageBase64.replace(/^data:[^;]+;base64,/, "");
@@ -2242,6 +2456,72 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // with active = false so this function can be deployed and proven a no-op before one
       // boolean turns the charge on. holdId stays null and the generation runs free.
       if (!err) holdId = hold?.hold_id ?? null;
+
+      // ── AUTO-RECHARGE (migration 164) ────────────────────────────────────────────────
+      // The balance just dropped, which is the ONLY moment it can newly fall below the
+      // tenant's threshold — so the check lives here rather than in a cron. The point is to
+      // top up BEFORE they run dry, not to rescue a refusal.
+      //
+      // FAIL-SOFT, absolutely. This runs after the hold has succeeded and the generation is
+      // authorised; a declined card, an unreachable gateway or a bad config must not fail a
+      // generation the builder has already paid for out of existing balance. Everything in
+      // here is swallowed.
+      //
+      // KNOWN GAP, deliberate: this does NOT fire on `insufficient_funds` above. A builder
+      // who is already at zero when they press Generate still gets the refusal, and their
+      // recharge happens on the next successful hold. Recharging inside a refusal path would
+      // mean charging a card as part of an error response, then retrying the hold — a second
+      // money path guarded by nothing, to save one retry. Not worth it.
+      //
+      // Awaited rather than backgrounded: EdgeRuntime.waitUntil is unused anywhere in this
+      // codebase, and a money path is the wrong place to prove a new primitive — a task
+      // dropped on shutdown mid-sale leaves a closed_unknown that blocks ALL future top-ups.
+      // Cost is up to nmiPost's 30s on a request that is already running an AI 3D generation,
+      // and the cooldown caps it at once an hour.
+      try {
+        const [{ data: acct }, { data: cust }] = await Promise.all([
+          admin.from("wallet_accounts")
+            .select("balance_cents, held_cents, auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, auto_topup_last_at")
+            .eq("client_id", clientId).maybeSingle(),
+          admin.from("billing_customers").select("vault_id").eq("client_id", clientId).maybeSingle(),
+        ]);
+        // Bind the vault id BEFORE the decision so its presence is provable rather than
+        // implied: autoTopupDecision refuses without a card, but the type checker cannot know
+        // that, and a non-null assertion on a money path is a comment pretending to be code.
+        const vaultId = cust?.vault_id ? String(cust.vault_id) : "";
+        const decision = autoTopupDecision(acct, Boolean(vaultId), Date.now());
+        if (decision.fire && vaultId) {
+          // Stamp the cooldown BEFORE charging, not after. A burst of generations can cross
+          // the threshold several times in seconds; the failure to design against is five
+          // recharges, not a late one. If the charge then fails, the stamp costs at most an
+          // hour's delay before the next attempt.
+          await admin.from("wallet_accounts")
+            .update({ auto_topup_last_at: new Date().toISOString() }).eq("client_id", clientId);
+          const r = await chargeTopup(admin, {
+            clientId, vaultId, amountCents: decision.amountCents,
+            actorUserId: null, auto: true,
+          });
+          if (!r.ok && !r.blocking) {
+            // A DECLINE switches auto-recharge off rather than retrying hourly forever. An
+            // expired card declines identically every time, and a loop against it earns real
+            // declines on the merchant account. The Billing tab shows this reason; turning it
+            // back on is a human act.
+            await admin.from("wallet_accounts")
+              .update({ auto_topup_enabled: false, auto_topup_disabled_reason: String(r.error).slice(0, 300) })
+              .eq("client_id", clientId);
+            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_declined", message: `Auto top-up declined, switched off: ${r.error}` });
+          } else if (!r.ok) {
+            // Blocking (gateway-unknown, or charged-but-not-credited). Leave it ENABLED:
+            // the closed_unknown attempt row already blocks every further top-up, and
+            // support's reconciliation is what should restore normal service — switching it
+            // off here would make a resolved incident look like a card problem.
+            await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_unresolved", message: `Auto top-up needs a human: ${r.error}` });
+          }
+        }
+      } catch (e) {
+        await logEdgeError({ fn: "portal-settings", req, clientId, code: "auto_topup_crashed", message: `Auto top-up check failed (generation unaffected): ${(e as Error).message}` })
+          .catch(() => undefined);
+      }
     }
 
     // From here on, every exit path must either capture or release the hold. A generation
@@ -2403,6 +2683,22 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // Door category (116) rides the same presence-guard: `door` = usable on doors,
       // `doorRate` = FLAT $ per door painted this color (distinct from the paint rate).
       if (Object.prototype.hasOwnProperty.call(row, "door")) rec.door = row.door === true;
+      // Sales tax (migration 148) — same presence guard, same reason: an older client that
+      // does not know this key must not silently make an exempted colour taxable again.
+      if (Object.prototype.hasOwnProperty.call(row, "taxable")) rec.taxable = row.taxable !== false;
+      // Serial-number code (163). Carolyn, 2026-08-28 @58:32: "I want them to be able to put
+      // their codes in for the colors ... we probably need to put the color code in here so
+      // that they can change it, because they might have other color codes that they want."
+      // Same presence guard as every optional column above: an older client that does not
+      // send this key must not blank a code the builder has already set.
+      //
+      // Upper-cased and capped at 4 because it is a fixed-width segment of a serial someone
+      // reads off a tag in front of a customer (0826LBA1016REBLDWS5000). Blank stores NULL
+      // rather than '', so the partial unique indexes in 163 treat "not set yet" as one
+      // builder's many un-coded rows instead of a pile of duplicates.
+      if (Object.prototype.hasOwnProperty.call(row, "code")) {
+        rec.code = String(row.code ?? "").trim().toUpperCase().slice(0, 4) || null;
+      }
       if (Object.prototype.hasOwnProperty.call(row, "doorRate")) {
         const dr = Number(row.doorRate);
         rec.door_rate = Number.isFinite(dr) && dr >= 0 ? dr : 0;
@@ -2413,7 +2709,13 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       const res = isExisting
         ? await admin.from("colors").update(rec).eq("client_id", clientId).eq("id", rid)
         : await admin.from("colors").insert(rec);
-      if (res.error) { skipped.push(`${label}: ${res.error.message}`); i++; continue; }
+      if (res.error) {
+        // Section derived from the row's OWN flags, using the same predicate as 161's
+        // indexes -- so the sentence names the palette the collision actually happened in.
+        const sect = rec.shingle ? "shingle" : rec.metal ? "metal" : "paint";
+        skipped.push(`${label}: ${colorSaveReason(res.error, label, sect)}`);
+        i++; continue;
+      }
       saved++; i++;
     }
     const toDelete = [...existingIds].filter((id) => !keptIds.has(id));
@@ -2518,6 +2820,11 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (has("active")) rec.active = row?.active !== false;
     if (has("archived")) rec.archived = row?.archived === true;
     if (has("internalOnly")) rec.internal_only = row?.internalOnly === true;
+    // Sales tax (migration 148). Presence-gated like its neighbours: a trimmed import sheet
+    // with the column deleted must not silently make every fixture taxable again — that is
+    // the same class of bug the 2026-08-20 audit fixed for archived/internal-only, and here
+    // it would put tax on a bill the builder deliberately exempted.
+    if (has("taxable")) rec.taxable = row?.taxable !== false;
     const isDoor = category === "door";
     // Swing/op travel as a GROUP: the exclusivity normalization is only sound when the whole
     // group is known, so one present swing/op key means the absent ones read "no" (the old
@@ -2591,6 +2898,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     if (!("active" in rec)) rec.active = true;
     if (!("archived" in rec)) rec.archived = false;
     if (!("internal_only" in rec)) rec.internal_only = false;
+    if (!("taxable" in rec)) rec.taxable = true;
     if (!("swing_in" in rec)) {
       rec.swing_in = false; rec.swing_out = false; rec.swing_default = null;
       rec.op_right = false; rec.op_left = false; rec.op_double = false; rec.op_slideup = false; rec.op_default = null;
@@ -2786,6 +3094,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const internalOnly = payload?.internalOnly === true;
     const { error } = await admin.from("client_layout_items")
       .update({ internal_only: internalOnly }).eq("client_id", clientId).eq("item_key", key);
+    if (error) return dbFail(req, clientId, "update that option", error);
+    return json({ ok: true });
+  }
+
+  // Whether this option's estimate line carries sales tax (migration 148). A single-flag
+  // action, mirroring set_layout_item_internal_only above rather than threading taxability
+  // through a bulk save the options list does not otherwise have. clientId is JWT-resolved.
+  if (action === "set_layout_item_taxable") {
+    const key = String(payload?.itemKey ?? "").trim();
+    if (!key) return json({ error: "itemKey required" }, 400);
+    const taxable = payload?.taxable !== false;
+    const { error } = await admin.from("client_layout_items")
+      .update({ taxable }).eq("client_id", clientId).eq("item_key", key);
     if (error) return dbFail(req, clientId, "update that option", error);
     return json({ ok: true });
   }
@@ -3440,13 +3761,109 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // It rides THIS fetch rather than adding a second round-trip from the browser: the
     // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
     // current_client_id() and a direct read returns nothing in operator view-as.
-    let orders: any[] = [];
+    // orders has NO `status` column -- verified against live 2026-08-29 (information_schema:
+    // id, client_id, short_code, order_no, total_cents, currency, total_source, ordered_at,
+    // notes, created_at, updated_at, submitter_user_id, pretax_subtotal_cents, tax_cents).
+    // Asking for it made PostgREST answer 42703 on EVERY call, for every tenant, since this
+    // block shipped -- and because only `data` was destructured, the error was dropped and
+    // `orders` fell to [], which the card renders as "No orders yet." on contacts holding
+    // real orders. There are 43 of them across three tenants. The status shown on the Orders
+    // TAB is derived from payments client-side, not stored, so nothing here needs it.
+    let orders: any[] | undefined = [];
     if (codes.length) {
-      const { data: os } = await admin.from("orders")
-        .select("id, order_no, short_code, status, total_cents, ordered_at")
+      const { data: os, error: oe } = await admin.from("orders")
+        .select("id, order_no, short_code, total_cents, ordered_at")
         .eq("client_id", clientId).in("short_code", codes)
         .order("ordered_at", { ascending: false }).limit(50);
-      orders = os ?? [];
+      // A FAILED READ IS NOT AN EMPTY ONE. Leaving it undefined makes the card say "Orders
+      // appear here once the server update lands" -- the absent state the section already
+      // has -- instead of stating that a customer who has bought two buildings bought none.
+      // That distinction is written into the card's own comment; swallowing the error is
+      // exactly what defeated it.
+      orders = oe ? undefined : (os ?? []);
+    }
+    // ── BUILD, DELIVERY AND REPAIRS ON THE RECORD ──────────────────────────────────────
+    // Carolyn, 2026-08-28 @37:48: "whether you're in a contact or whether you're in a deal,
+    // it doesn't matter, you want to be able to see the contact details, the deals, the
+    // orders, the build schedule, the delivery schedule ... Repairs also."
+    //
+    // ⚠️ READ-ONLY, AND THEY STAY THEIR OWN SYSTEMS. She was explicit at @23:40 that build
+    // and delivery must NOT become pipelines: "I don't really want to change this and make
+    // it a pipeline because I've got a lot of work in both of these." So this reads
+    // schedule_stages / delivery_loads where they live; it does not mirror or re-model them.
+    //
+    // Gated per area, not on the CRM gate: a sales rep can hold contacts:view and no
+    // build_schedule:view at all, and the card must then be ABSENT rather than empty --
+    // undefined here means "not yours to see", [] means "nothing scheduled". The frontend
+    // renders those two differently, which is the same absent-vs-empty distinction the
+    // orders block above exists to protect.
+    //
+    // Rides this fetch rather than adding round-trips: the record page makes exactly one
+    // call on purpose, because a direct browser read returns nothing in operator view-as.
+    let build: any[] | undefined;
+    let stages: any[] | undefined;
+    if (canRead("build_schedule")) {
+      const [jobsRes, stRes] = await Promise.all([
+        codes.length
+          ? admin.from("build_jobs")
+              .select("id, design_short_code, stage_id, due_date, completed_at, serial, source, crew_id")
+              .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+          : Promise.resolve({ data: [], error: null }),
+        // The ladder itself, because stage names are TENANT-EDITABLE. The dot bar has to
+        // draw the stages this builder actually uses, and automation keys on `kind`, never
+        // on the name -- the Monday label-rename lesson, which this table already carries.
+        admin.from("schedule_stages")
+          .select("id, name, kind, sort_order, color")
+          .eq("client_id", clientId).eq("archived", false).order("sort_order"),
+      ]);
+      build = jobsRes.error ? undefined : (jobsRes.data ?? []);
+      stages = stRes.error ? undefined : (stRes.data ?? []);
+    }
+
+    let delivery: any[] | undefined;
+    if (canRead("delivery_schedule")) {
+      // Stops carry the building; the LOAD carries the status. There is no delivery stages
+      // table -- it is a fixed planned|out|delivered CHECK on delivery_loads -- so the dot
+      // bar's delivery row is that ladder, not a configurable one.
+      //
+      // Two reads and a join in JS rather than a PostgREST embed: an embed silently returns
+      // nothing when the FK it needs is not where the resolver expects, and a delivery card
+      // that is quietly always empty is the exact failure this endpoint just had with
+      // orders.status. Two explicit reads cannot fail that way.
+      const stopsRes = codes.length
+        ? await admin.from("delivery_stops")
+            .select("id, design_short_code, delivered_at, load_id, stop_order")
+            .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+        : { data: [], error: null };
+      if (stopsRes.error) {
+        delivery = undefined;
+      } else {
+        const stops = stopsRes.data ?? [];
+        const loadIds = [...new Set(stops.map((s: any) => s.load_id).filter(Boolean))];
+        const loadsRes = loadIds.length
+          ? await admin.from("delivery_loads")
+              .select("id, load_no, status, load_date, departed_at, completed_at")
+              .eq("client_id", clientId).in("id", loadIds)
+          : { data: [], error: null };
+        const byId = new Map((loadsRes.data ?? []).map((l: any) => [l.id, l]));
+        delivery = stops.map((s: any) => ({ ...s, load: byId.get(s.load_id) ?? null }));
+      }
+    }
+
+    let repairs: any[] | undefined;
+    if (canRead("repairs")) {
+      // ⚠️ REPAIRS DO NOT LINK TO crm_contacts. There is no contact_id on the table -- they
+      // key on design_short_code (plus a denormalised name/phone/email captured at intake),
+      // which is why this joins on `codes` like every other section here rather than on the
+      // contact. Checked against live before writing it; the obvious .eq("contact_id", ...)
+      // would have returned nothing forever and rendered as "no repairs".
+      const rr = codes.length
+        ? await admin.from("repairs")
+            .select("id, repair_no, status, description, design_short_code, requested_at, completed_at, quote_cents")
+            .eq("client_id", clientId).in("design_short_code", codes)
+            .order("requested_at", { ascending: false }).limit(50)
+        : { data: [], error: null };
+      repairs = rr.error ? undefined : (rr.data ?? []);
     }
 
     // Whether this tenant can text at all, so the SMS tab can give the RIGHT reason when
@@ -3462,6 +3879,18 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       // customer will see. Never the platform's, and never another tenant's.
       from: (smsCfg && smsCfg.sms_status === "active") ? (smsCfg.sms_number ?? null) : null,
       optedOut: !!(contact && contact.sms_opt_out_at),
+      // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
+      // rather than let someone type a message and discover it on Send. Asked as "is there a
+      // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
+      // cannot disagree about who is textable. Revocation is the opt-out above; these are two
+      // separate facts and the UI shows the right sentence for each.
+      consented: !!(contact && contact.phone_digits) && await (async () => {
+        const { data: g } = await admin.from("sms_consent_log")
+          .select("action").eq("client_id", clientId)
+          .eq("phone_digits", contact.phone_digits).eq("action", "granted")
+          .limit(1).maybeSingle();
+        return !!g;
+      })(),
     };
 
     // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
@@ -3469,7 +3898,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs });
   }
 
   if (action === "crm_feed") {
@@ -3636,6 +4065,56 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return json({ ok: true, id: out.id });
   }
 
+  // ── Record permission a customer gave in person ───────────────────────────────────
+  // The back catalogue has no consent records — every contact captured before the gate's
+  // checkbox existed is unreachable — and the only lawful ways in are the customer ticking
+  // the box or texting first. This is the third: a human recording permission actually given.
+  //
+  // ⚠️ IT IS AN ATTESTATION, NOT A TOGGLE, and the difference is the whole design. Someone is
+  // asserting that a specific person agreed to be texted, and that assertion is what would be
+  // produced if the claim were ever challenged. So the sentence they agreed to is stored
+  // VERBATIM alongside WHO said it — the same rule the designer gate follows. A one-click
+  // "enable texting" would manufacture evidence, which is worse than having none.
+  if (action === "crm_record_consent") {
+    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : "";
+    if (!contactId) return json({ error: "Which customer?" }, 400);
+    const { data: c } = await admin.from("crm_contacts")
+      .select("id, phone_digits, sms_opt_out_at")
+      .eq("client_id", clientId).eq("id", contactId).maybeSingle();
+    if (!c) return json({ error: "That customer could not be found." }, 404);
+    if (!c.phone_digits) return json({ error: "This customer has no phone number on file." }, 400);
+
+    // ⛔ AN OPT-OUT OUTRANKS THIS, ALWAYS. Someone who replied STOP cannot be put back by a
+    // colleague ticking a box — only they can, by replying START. Refusing loudly here is the
+    // difference between a control and a loophole.
+    if (c.sms_opt_out_at) {
+      return json({
+        error: "This customer replied STOP. Only they can undo that, by replying START to that number.",
+      }, 409);
+    }
+
+    const attestation = payload.attestation ? String(payload.attestation).trim().slice(0, 1000) : "";
+    if (!attestation) return json({ error: "The permission statement is required." }, 400);
+    const note = payload.note ? String(payload.note).trim().slice(0, 500) : "";
+
+    const { error: insErr } = await admin.from("sms_consent_log").insert({
+      client_id: clientId,
+      phone_digits: c.phone_digits,
+      contact_id: c.id,
+      action: "granted",
+      source: "operator",
+      // The attestation IS the disclosure here — what the person recording it certified.
+      disclosure_text: attestation,
+      ip: clientIp(req),
+      user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
+      detail: { recordedBy: userId ?? null, note: note || null },
+    });
+    if (insErr) {
+      return dbFail(req, clientId, "record that permission", insErr);
+    }
+    return json({ ok: true });
+  }
+
   if (action === "crm_send_email") {
     const to = String(payload.to ?? "").trim().slice(0, 320);
     const subject = String(payload.subject ?? "").trim().slice(0, 200);
@@ -3789,7 +4268,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     const name = fld(payload.name, 200);
     const phone = fld(payload.phone, 40);
     const email = fld(payload.email, 320);
-    if (name === null && phone === null && email === null) {
+    // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
+    // here, but everything that is contact related should be in here." The columns have
+    // existed since 130 and were populated from submitted designs -- only the editor was
+    // missing. Same undefined/""/value contract as the three above.
+    const street = fld(payload.street, 200);
+    const city = fld(payload.city, 120);
+    const state = fld(payload.state, 60);
+    const zip = fld(payload.zip, 20);
+    if (name === null && phone === null && email === null
+        && street === null && city === null && state === null && zip === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -3801,6 +4289,7 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       p_client_id: clientId, p_id: id,
       p_name: name, p_phone: phone, p_email: email,
       p_actor: userId ?? null,
+      p_street: street, p_city: city, p_state: state, p_zip: zip,
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
@@ -4993,6 +5482,40 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
       newSnap.lines.push({ kind: "roof", itemKey: "", name: "Roof", desc: roof.desc, qty: 1, amount: roof.amount, nonTaxable: false });
     }
 
+    // ── Re-price the tax on the NEW lines (migration 158) ──────────────────────────────
+    //
+    // newSnap is a deep CLONE of the signed snapshot, so without this it carries that
+    // snapshot's `tax` object verbatim while its lines have just changed — and totalAfter is
+    // the number the customer is asked to approve. A change order that adds a taxable roof
+    // upcharge would be presented at the OLD tax, understating what they will owe.
+    //
+    // FRESH LOOKUP, per Carolyn 2026-08-27: the rate is re-resolved here rather than carried
+    // over, so a change order is priced at today's rate for the delivery address. Only when
+    // the snapshot already carried tax — a pre-tax design stays pre-tax, and no CRM-mode
+    // design ever enters this branch.
+    if (newSnap.tax) {
+      const { data: taxCs } = await admin.from("client_settings")
+        .select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle();
+      const resolvedCo = await resolveRate(addressFrom(d.contact), Number(taxCs?.ss_tax_rate) || 0);
+      const poolsCo = subtotalsFromSnapshot(newSnap);
+      if (poolsCo) {
+        newSnap.tax = {
+          rate: resolvedCo.rate,
+          amount: taxOn(poolsCo.taxableBase, resolvedCo.rate),
+          label: String(taxCs?.ss_tax_label || "Sales tax"),
+          taxableSubtotal: poolsCo.taxable,
+          nonTaxableSubtotal: poolsCo.nonTaxable,
+          taxableBase: poolsCo.taxableBase,
+          nonTaxableNet: poolsCo.nonTaxableNet,
+          source: resolvedCo.source,
+          jurisdiction: resolvedCo.jurisdiction,
+          address: { state: addressFrom(d.contact).state, zip: addressFrom(d.contact).zip },
+          resolvedAt: new Date().toISOString(),
+          ...(resolvedCo.reason ? { reason: resolvedCo.reason } : {}),
+        };
+      }
+    }
+
     // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption
     // stamp further down, never as a baseline (see the header: it is the undo point).
     const { data: existingCo } = await admin.from("change_orders")
@@ -5269,14 +5792,22 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
           const [coRes, ordRes] = await Promise.all([
             admin.from("change_orders").select("co_no, description, total_before_cents, total_after_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
-            admin.from("orders").select("total_cents")
+            admin.from("orders").select("total_cents, pretax_subtotal_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
           ]);
+          // PRE-TAX, deliberately (migration 148). amendedInvoiceDocument reconciles its lines
+          // against this in SUBTOTAL space — `sum(qty x amount) - discount`, the PDF's own
+          // arithmetic — and since 148 the PDF adds a tax row ON TOP of that sum. orders
+          // .total_cents is tax-INCLUSIVE for an SS order, so handing it over would leave the
+          // two disagreeing by exactly the tax, and the reconciler would invent a balancing
+          // "Change order" line worth the sales tax on every invoice. pretax_subtotal_cents is
+          // written beside total_cents by the same helper, so the pair cannot drift; it falls
+          // back to total_cents only for an untaxed order, where the two are equal anyway.
+          const ord = ordRes.error ? null : ordRes.data;
+          const pretax = ord?.pretax_subtotal_cents ?? ord?.total_cents ?? null;
           return {
             acked: coRes.error ? [] : (coRes.data ?? []),
-            orderTotalCents: ordRes.error || ordRes.data?.total_cents == null
-              ? null
-              : Number(ordRes.data.total_cents),
+            orderTotalCents: pretax == null ? null : Number(pretax),
           };
         };
 
@@ -5436,6 +5967,15 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
               // deno-lint-ignore no-explicit-any
               lines: snapLines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
               discount: amended.discount,
+              // The tax carried on the snapshot — the figure the customer ACCEPTED. The invoice
+              // deliberately does NOT re-resolve the rate: acceptance is a click on a stated
+              // total, and quietly billing a different one because a rate moved in between is
+              // the change-order case, not a re-render.
+              //
+              // It rides ON TOP of amendedInvoiceDocument's reconciled lines, which is why
+              // loadAmendments now hands that function the PRE-TAX order figure — see there.
+              tax: d.estimate_lines?.tax ?? null,
+              discountRows: d.estimate_lines?.discounts?.rows ?? null,
               quoteTerms: cur0?.quote_terms ?? null,
               planPdfUrl: planUrl,
             });
@@ -5512,7 +6052,12 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
         // rep-set or CO-acknowledged number is never clobbered.
         if (totalNum != null) {
           await admin.from("orders")
-            .update({ total_cents: Math.round(totalNum * 100), total_source: "manual", updated_at: nowIso() })
+            .update({
+              // pretax + tax = total, written together (migration 148): total_cents alone is no
+              // longer a safe pre-tax figure and portal-commissions reads it as one.
+              ...orderMoneyCols(d.estimate_lines, totalNum),
+              total_source: "manual", updated_at: nowIso(),
+            })
             .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
         }
         if (d.inventory_unit_id) {

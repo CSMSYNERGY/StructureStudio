@@ -67,6 +67,17 @@ const CLAMPS: Record<string, [number, number]> = {
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
 const D3_LEANTO_SIDES = ["left", "right"] as const;
+// The two dormers Carolyn named on 2026-08-28 @52:43-54:41. "What you have in here for a
+// dormer right now is a gable dormer ... the other is a transom dormer, so we have two
+// different dormers. This one runs the pitch that way, the other works like a lean-to --
+// it comes off of the roof here and comes out here and then drops down."
+//
+// ABSENT means gable, deliberately: the renderer tests `=== "transom"`, so every row that
+// predates this field keeps its exact render and styleD3.test.ts's deep-equal on `roof`
+// keeps passing. Emitting a default here would fail that test AND write the default into
+// every tenant's column the first time anyone opened and saved the calibration panel --
+// the same reasoning `eave` below is built on.
+const D3_DORMER_TYPES = ["gable", "transom"] as const;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -116,6 +127,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // regardless so toggling the width back up remembers the side.
   if ((D3_LEANTO_SIDES as readonly string[]).includes(String(rawRoof.leanToSide))) {
     roof.leanToSide = String(rawRoof.leanToSide);
+  }
+  // Which of the two dormer shapes. Like leanToSide, stored whether or not dormerWidthFt is
+  // currently above zero, so turning the width back up remembers the shape. Not in the
+  // numeric loop above: clamped() destructures CLAMPS[key] and throws on a key with no entry.
+  if ((D3_DORMER_TYPES as readonly string[]).includes(String(rawRoof.dormerType))) {
+    roof.dormerType = String(rawRoof.dormerType);
   }
   // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
   // Urban style, read off a walk-around video; "fascia" = the painted trim board the

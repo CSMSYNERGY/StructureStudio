@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+import { clientIp } from "../_shared/adminGate.ts";
 
 // capture-lead: called by the PUBLIC designer's name+phone gate. Upserts a GHL contact
 // (the lead) into the tenant's GHL location using the tenant's stored creds, so an
@@ -73,6 +74,18 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const zip = str(body?.zip, 12);
   const phoneDigits = phoneRaw.replace(/\D/g, "");
 
+  // ── SMS consent, from the public gate's checkbox ──────────────────────────
+  // ⚠️ The DISCLOSURE SENTENCE IS STORED VERBATIM, not a template id. The wording will be
+  // edited; today's copy is not evidence of what was on screen last March, and the whole
+  // value of a consent record is being able to show exactly what someone agreed to.
+  //
+  // ⚠️ Consent is OPTIONAL at the gate — it is a lead-gen funnel, and blocking the designer
+  // on a texting opt-in would cost the builder leads. So `false` here is the normal case,
+  // not a failure, and it simply records nothing.
+  const smsConsent = body?.smsConsent === true;
+  const consentText = typeof body?.consentText === "string" ? body.consentText.trim().slice(0, 1000) : "";
+  const consentUrl = typeof body?.consentUrl === "string" ? body.consentUrl.trim().slice(0, 500) : "";
+
   // Basic validation — don't spam the CRM with empty/garbage. Not fatal: skip quietly.
   if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) return json({ ok: false, skipped: "bad_client" });
   if (!name || phoneDigits.length < 10) return json({ ok: false, skipped: "incomplete" });
@@ -116,6 +129,39 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
     // though the GHL leg below may still succeed.
     await logEdgeError({ fn: "capture-lead", req, clientId, code: "local_upsert",
       message: `captured_leads upsert failed: ${leadErr.message}` });
+  }
+
+  // ── The consent record ────────────────────────────────────────────────────
+  // Keyed on the PHONE, not the lead row: consent belongs to the person and has to survive
+  // their contact being merged, renamed or re-created. Append-only — a later opt-out is a
+  // second row, never an edit of this one, so the history stays readable.
+  //
+  // ⚠️ REFUSED WITHOUT THE SENTENCE. A consent record that cannot say what was shown is not
+  // evidence, so a `true` flag with no text is dropped rather than stored as a half-record
+  // that looks like proof until someone reads it.
+  if (smsConsent && consentText && phoneDigits.length >= 10) {
+    const tenDigits = phoneDigits.length === 11 && phoneDigits.startsWith("1")
+      ? phoneDigits.slice(1) : phoneDigits.slice(-10);
+    const { error: consentErr } = await sb.from("sms_consent_log").insert({
+      client_id: clientId,
+      phone_digits: tenDigits,
+      action: "granted",
+      source: "web_form",
+      disclosure_text: consentText,
+      consent_url: consentUrl || null,
+      ip: clientIp(req),
+      user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
+      detail: { name: name || null, leadId: savedLead?.id ?? null },
+    });
+    if (consentErr) {
+      // Worth a durable row: a consent we failed to record is a text we later cannot justify
+      // sending. ⚠️ No phone digits in the message — the PII rule this function already keeps.
+      await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_insert",
+        message: `sms_consent_log insert failed: ${consentErr.message}` });
+    }
+    // The opt-out ledger is deliberately NOT touched here. Granting consent must never clear
+    // an earlier STOP — that instruction outranks a checkbox on a later visit, and quietly
+    // un-blocking someone who asked us to stop is the one mistake with a statutory penalty.
   }
 
   // ── GUARD 2: per-lead debounce (the same-phone flood) ───────────────────────

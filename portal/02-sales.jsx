@@ -97,7 +97,7 @@ function RowMenu({ items, label = "More actions" }) {
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
-function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null }) {
+function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin = false, viewingLabel = null, onOpenDesign = null, onOpenRecord = null, crmUnlocked = true, onSeeBilling = null, urlView = null, defaultView = null, onViewChange = null }) {
   // LIST or PIPELINE. Carolyn asked for this twice on 2026-08-24: "I definitely do want to
   // have pipelines, okay, I definitely do want to have pipelines, and so designs, contacts,
   // pipelines ... this may become the pipeline view."
@@ -106,7 +106,34 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // exactly why it is cheap and why it lives here rather than in its own tab. The same
   // search, the same facets and the same status chips narrow both renderings, so a filter a
   // builder sets in the list is still set when they flip to the board.
-  const [view, setView] = useState("list");
+  // The BOARD is part of the built-in CRM ($400/mo, migration 160); the LIST is not, and
+  // never becomes so — Carolyn 2026-08-29: "they only get the list view". crmUnlocked
+  // defaults TRUE so that any caller that has not been taught about the prop (or an operator
+  // path) behaves exactly as before rather than silently locking a tab.
+  // ── WHICH VIEW, AND WHO DECIDES ───────────────────────────────────────────────────
+  // Two separate asks, and they compose. Carolyn, 2026-08-28 @42:00: "I'm trying to think
+  // which I want to have the default. I want them to be able to decide if they want the
+  // default. I don't want it to always be list. They can decide to set their default to be
+  // pipeline or list, whichever one that they want." And @41:03, on the back button: "if
+  // you hit the back button, you lost everything on that screen ... I just don't want it to
+  // be like, oh no, you can't click that back button."
+  //
+  // So: the URL wins when it names a view, the SAVED PREFERENCE fills a bare URL, and list
+  // is the fallback for someone who has never set one. Flipping the toggle navigates, which
+  // is what makes Back walk between the two instead of leaving the tab.
+  //
+  // Local state stays as the fallback for any host that does not supply a router, so this
+  // component still works mounted anywhere -- the same shape OrdersView uses for openId.
+  const [viewLocal, setViewLocal] = useState(null);
+  const routed = !!onViewChange;
+  const view = routed
+    ? (urlView === "pipeline" || urlView === "list" ? urlView : (defaultView === "pipeline" ? "pipeline" : "list"))
+    : (viewLocal || (defaultView === "pipeline" ? "pipeline" : "list"));
+  const setView = (v) => { if (routed) onViewChange(v); else setViewLocal(v); };
+  // A locked tenant can hold no view but "list". Enforced here rather than only at the
+  // toggle: `view` also survives in this component across a refresh of the entitlement, and
+  // a builder who was mid-board when their subscription lapsed must not keep the board.
+  const shownView = crmUnlocked ? view : "list";
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
   const [unitSerials, setUnitSerials] = useState({});
@@ -324,7 +351,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // silently holds back its tail would be read as an empty stage.
   const [pageSize, setPageSize] = usePageSize("designs");
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, view]);
+  useEffect(() => { setPage(1); }, [query, statusFilter, fStyle, fSize, fFrom, fTo, fVersions, shownView]);
   const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
   const curPage = Math.min(page, pageCount);
   const paged = sorted.slice((curPage - 1) * pageSize, curPage * pageSize);
@@ -337,13 +364,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         right={(
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <div style={{ display: "flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
-              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => (
-                <button key={k} onClick={() => setView(k)}
-                  style={{
-                    background: view === k ? ACCENT : "#FFF", color: view === k ? "#FFF" : "#334155",
-                    border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
-                  }}>{label}</button>
-              ))}
+              {/* The Pipeline button stays VISIBLE when locked, with a padlock, and routes to
+                  Billing instead of switching view. Hiding it would make the thing being sold
+                  invisible to the only people who might buy it. */}
+              {[["list", "List"], ["pipeline", "Pipeline"]].map(([k, label]) => {
+                const locked = k === "pipeline" && !crmUnlocked;
+                return (
+                  <button key={k}
+                    title={locked ? "The pipeline board is part of the built-in CRM" : undefined}
+                    onClick={() => { if (!locked) { setView(k); } else if (onSeeBilling) { onSeeBilling(); } }}
+                    style={{
+                      background: shownView === k ? ACCENT : "#FFF",
+                      color: shownView === k ? "#FFF" : (locked ? "#94A3B8" : "#334155"),
+                      border: "none", padding: "6px 12px", fontSize: 13, fontWeight: 700,
+                      cursor: locked && !onSeeBilling ? "default" : "pointer", fontFamily: "inherit",
+                    }}>{locked ? `🔒 ${label}` : label}</button>
+                );
+              })}
             </div>
             <button onClick={load} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 12px" }}>↻ Refresh</button>
           </div>
@@ -397,7 +434,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           read-only projection that sync-design-status overwrites on every list load, so a
           dragged card would snap back and look broken. Moving a deal by hand needs the
           local crm_stages table, which is the next increment, not this one. */}
-      {rows && filtered.length > 0 && view === "pipeline" && (
+      {rows && filtered.length > 0 && shownView === "pipeline" && (
         <div style={{ overflowX: "auto", paddingBottom: 4 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
             {CRM_STAGES.map((st) => {
@@ -434,7 +471,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           </div>
         </div>
       )}
-      {rows && filtered.length > 0 && view === "list" && (
+      {rows && filtered.length > 0 && shownView === "list" && (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
@@ -1096,6 +1133,18 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 
 // Three registries. A new sidebar section, action tab or history chip is a ROW here, not a
 // rewrite — which is the whole point of building the shell rather than two pages.
+// The delivery ladder, spelled out here rather than imported from the schedule tab.
+//
+// ⚠️ 05-schedule.jsx's SCHED_LOAD_STATUS is the same three words, and reaching for it from
+// THIS file would throw at runtime: the portal parts are CONCATENATED in numeric order and
+// `const` does not hoist, so part 02 reading a part 05 binding hits the temporal dead zone
+// the moment a delivery card renders. Preflight's no-undef would not catch it either --
+// the name does exist in the bundle, just not yet. Three words are cheaper than that bug.
+//
+// These are not tenant-editable: delivery has no stages table, only a fixed
+// planned|out|delivered CHECK on delivery_loads.
+const CRM_LOAD_LABEL = { planned: "Planned", out: "Out for delivery", delivered: "Delivered" };
+
 const CRM_SECTIONS = [
   { key: "summary", title: "Summary", when: () => true },
   { key: "details", title: "Details", when: () => true },
@@ -1109,6 +1158,17 @@ const CRM_SECTIONS = [
   // order is the same one row and would just repeat the stage bar above it.
   { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
   { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
+  // whether you're in a deal, it doesn't matter, you want to be able to see the contact
+  // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
+  // also." On BOTH kinds, which is why there is no `when` narrowing here.
+  //
+  // "If there's nothing, like, because they haven't placed an order, the card just is going
+  // to be blank. It'll say build schedule. And it just is nothing." -- so an empty card
+  // RENDERS EMPTY rather than disappearing. A card that vanishes reads as "not built".
+  { key: "build", title: "Build schedule", when: () => true },
+  { key: "delivery", title: "Delivery schedule", when: () => true },
+  { key: "repairs", title: "Repairs", when: () => true },
   { key: "overview", title: "Overview", when: () => true },
 ];
 
@@ -1258,6 +1318,51 @@ const CRM_STAGE_FOR_STATUS = {
   draft: "new", sent: "quoted", accepted: "won", invoiced: "invoiced", delivered: "delivered",
 };
 
+// ── THE COMPACT MULTI-PIPELINE BAR ───────────────────────────────────────────────────
+// Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
+// three rows there" (2026-08-28 @24:48). Ahsan pushed back on the shape, not the idea:
+// "three rows, similar to these, it wouldn't look good", then proposed this at @29:25 --
+// "if we are on third stage, we can add a dot, a dot, and then the third stage is name, and
+// then a dot, a dot, a dot ... instead of using the names of which stages they are not in."
+// She took it: "I like that. Yes, I like that a lot."
+//
+// So one row per ladder: dots for what is behind, the NAME of where it is now, dots ahead.
+// Three chevron rails would be roughly 18 words of stage names; this is three.
+//
+// ⚠️ The chevron rail on a DEAL stays exactly as it was. She said plainly "I like this
+// pipeline up here", and this bar carries the ladders it does not already show rather than
+// replacing something she praised. A contact has no chevron -- it may have several deals --
+// so there it carries all three.
+function CrmStageDots({ rows }) {
+  const live = (rows || []).filter((r) => r && r.stages && r.stages.length);
+  if (!live.length) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 12 }}>
+      {live.map((r) => (
+        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11 }}>
+          <span style={{ width: 58, flexShrink: 0, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
+          {r.idx == null ? (
+            // Not started is its own state, not stage zero: a building that has never been
+            // scheduled is not "in the first stage", and colouring a dot would say it was.
+            <span style={{ color: "#CBD5E1", fontWeight: 600 }}>{r.emptyLabel || "Not started"}</span>
+          ) : (
+            <span style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+              {r.stages.map((s, i) => (
+                i === r.idx
+                  ? <span key={i} title={s.name}
+                      style={{ fontWeight: 800, color: "#FFF", background: ACCENT, borderRadius: 20, padding: "2px 9px", whiteSpace: "nowrap" }}>{s.name}</span>
+                  : <span key={i} title={s.name}
+                      style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                               background: i < r.idx ? "#C4B5FD" : "#E2E8F0" }} />
+              ))}
+            </span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CrmStageBar({ status }) {
   const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
   const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
@@ -1285,7 +1390,7 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign }) {
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
@@ -1304,6 +1409,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [upBusy, setUpBusy] = useState(false);
   const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
+  // Recording permission a customer gave in person — the third way into the consent record,
+  // alongside the designer gate's checkbox and the customer texting first. Needed because the
+  // back catalogue predates consent entirely and is otherwise unreachable.
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [consentTicked, setConsentTicked] = useState(false);
+  const [consentNote, setConsentNote] = useState("");
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
   // renders only inside the Email tab — these controls need their own slot, keyed by control
@@ -1386,6 +1497,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
+    // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
+    // here, but everything that is contact related should be in here." These columns have
+    // existed since 130 and were filled in from submitted designs -- the record SHOWED them
+    // and only the editor could not touch them, which is why she asked "did you just specify
+    // just these?" about name/phone/email.
+    street: (data.contact && data.contact.street) || "",
+    city: (data.contact && data.contact.city) || "",
+    state: (data.contact && data.contact.state) || "",
+    zip: (data.contact && data.contact.zip) || "",
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -1397,6 +1517,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
         name: edit.name, phone: edit.phone, email: edit.email,
+        street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
       },
     });
     setBusy(false);
@@ -1507,6 +1628,32 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     load();
   };
 
+  // ⚠️ THE SENTENCE IS THE EVIDENCE. It is stored verbatim as what this person certified, so
+  // it has to read as an assertion someone would stand behind — not UI chrome. Same rule the
+  // designer gate follows for the customer's own tick.
+  const CONSENT_ATTESTATION =
+    "I confirm this customer gave us permission to text them about their quote and building, " +
+    "and that I recorded it accurately.";
+
+  const recordConsent = async () => {
+    if (!consentTicked) return;
+    setBusy(true); setTextMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_record_consent",
+        contactId: (data.contact && data.contact.id) || null,
+        attestation: CONSENT_ATTESTATION,
+        note: consentNote.trim() || undefined,
+      },
+    });
+    setBusy(false);
+    const fail = (r && r.error) || (error ? await fnError(error) : null);
+    if (fail) { setTextMsg({ err: fail }); return; }
+    setConsentOpen(false); setConsentTicked(false); setConsentNote("");
+    setTextMsg({ ok: "Permission recorded." });
+    load();
+  };
+
   const sendSms = async () => {
     const body = text.trim();
     if (!body) return;
@@ -1569,6 +1716,26 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             <span style={S.lbl}>Phone</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+            <span style={S.lbl}>Street</span>
+            <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
+              onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
+            <div style={{ display: "flex", gap: 7 }}>
+              <div style={{ flex: "2 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>City</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
+                  onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
+              </div>
+              <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>State</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
+                  onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
+              </div>
+              <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                <span style={S.lbl}>ZIP</span>
+                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
+                  onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
+              </div>
+            </div>
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -1623,6 +1790,74 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         </div>
       );
     }
+    // ── THE THREE FULFILMENT CARDS ──────────────────────────────────────────────────
+    // ⚠️ ABSENT IS NOT EMPTY, three times over, and each has a different cause:
+    //   undefined  -> this person cannot see that area at all (a sales rep holds
+    //                 contacts:view and no build_schedule:view), OR the server that supplies
+    //                 the field has not been deployed yet. Either way, saying "nothing
+    //                 scheduled" would be a claim we cannot support.
+    //   []         -> they can see it and there genuinely is nothing.
+    // The orders card carries the same distinction for the same reason; this is that rule
+    // applied three more times rather than a new idea.
+    if (key === "build") {
+      if (!data.build) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
+      if (!data.build.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not on the build schedule yet.</div>;
+      const stageById = new Map((data.stages || []).map((s) => [s.id, s]));
+      return (
+        <div>
+          {data.build.map((j) => {
+            const st = stageById.get(j.stage_id);
+            return (
+              <div key={j.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+                  {st ? st.name : "Unscheduled"}{j.serial ? ` · ${j.serial}` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "#64748B" }}>
+                  {j.completed_at ? `Built ${fmtDate(j.completed_at)}` : j.due_date ? `Due ${fmtDate(j.due_date)}` : "No date set"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    if (key === "delivery") {
+      if (!data.delivery) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
+      if (!data.delivery.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not scheduled for delivery yet.</div>;
+      return (
+        <div>
+          {data.delivery.map((s) => {
+            const L = s.load || null;
+            const label = s.delivered_at ? "Delivered" : L ? (CRM_LOAD_LABEL[L.status] || L.status) : "On a load";
+            return (
+              <div key={s.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{label}{L && L.load_no ? ` · Load #${L.load_no}` : ""}</div>
+                <div style={{ fontSize: 11, color: "#64748B" }}>
+                  {s.delivered_at ? fmtDate(s.delivered_at) : L && L.load_date ? `Out ${fmtDate(L.load_date)}` : "No date set"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+    if (key === "repairs") {
+      if (!data.repairs) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
+      if (!data.repairs.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
+      return (
+        <div>
+          {data.repairs.map((r) => (
+            <div key={r.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>#{r.repair_no} · {r.status}</div>
+              <div style={{ fontSize: 11, color: "#64748B" }}>
+                {r.description ? String(r.description).slice(0, 90) : "No description"}
+                {r.requested_at ? ` · ${fmtDate(r.requested_at)}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
     if (key === "orders") {
       // ⚠️ ABSENT is not EMPTY. The frontend auto-deploys on push; the edge function that
       // supplies `orders` is deployed separately, so between those two moments the field is
@@ -1643,17 +1878,21 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
           {os.map((o) => {
             const d = (data.designs || []).find((x) => x.short_code === o.short_code);
             const what = d ? [(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") : "";
+            // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
+            // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
+            // to" -- which was true until the order detail got its own URL in this change.
+            const Tag = onOpenOrder ? "button" : "div";
             return (
-              <div key={o.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+              <Tag key={o.id} onClick={onOpenOrder ? () => onOpenOrder(o.id) : undefined}
+                style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: onOpenOrder ? "pointer" : "default" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: onOpenOrder ? ACCENT : "#1E293B" }}>
                   #{o.order_no}{what ? ` · ${what}` : ""}
                 </div>
                 <div style={{ fontSize: 11, color: "#64748B" }}>
                   {fmtDate(o.ordered_at)}
                   {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
-                  {o.status ? ` · ${o.status}` : ""}
                 </div>
-              </div>
+              </Tag>
             );
           })}
           {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
@@ -1728,6 +1967,26 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <span style={S.lbl}>Phone</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
+                  <span style={S.lbl}>Street</span>
+                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
+                    onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
+                  <div style={{ display: "flex", gap: 7 }}>
+                    <div style={{ flex: "2 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>City</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
+                        onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
+                    </div>
+                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>State</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
+                        onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
+                    </div>
+                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
+                      <span style={S.lbl}>ZIP</span>
+                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
+                        onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
+                    </div>
+                  </div>
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -1796,6 +2055,36 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         )}
       </div>
       {kind === "design" && <CrmStageBar status={record.status} />}
+      {(() => {
+        // SALES: on a contact only (the deal already has its chevron rail above). A contact
+        // can hold several deals, so the ladder shown is the one the NEWEST deal is on --
+        // designs come back newest-first from crm_record.
+        const newest = (data.designs || [])[0];
+        const salesIdx = newest
+          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(newest.status)] || "new")))
+          : null;
+        // BUILD: the tenant's OWN stages, in their own order. Names are editable, so the
+        // ladder is whatever this builder configured, never a hard-coded list.
+        const bStages = (data.stages || []).map((s) => ({ name: s.name }));
+        const firstJob = (data.build || [])[0];
+        const bIdx = firstJob
+          ? (() => { const i = (data.stages || []).findIndex((s) => s.id === firstJob.stage_id); return i < 0 ? null : i; })()
+          : null;
+        // DELIVERY: the fixed three-value ladder on delivery_loads. A stop with a
+        // delivered_at is delivered even if its load has not been closed out.
+        const stop = (data.delivery || [])[0];
+        const dIdx = !stop ? null
+          : stop.delivered_at ? 2
+          : stop.load ? Math.max(0, ["planned", "out", "delivered"].indexOf(stop.load.status))
+          : 0;
+        return (
+          <CrmStageDots rows={[
+            kind === "contact" ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
+            data.build ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
+            data.delivery ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
+          ].filter(Boolean)} />
+        );
+      })()}
 
       <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
@@ -1838,6 +2127,57 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <div style={{ ...S.err, marginBottom: 0 }}>
                     This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
                     same number to opt back in.
+                  </div>
+                ) : (data.sms && !data.sms.consented) ? (
+                  /* ⚠️ NO PERMISSION ON FILE — say so BEFORE they type, not on Send. Every
+                     contact captured before the designer gate had a consent box is in this
+                     state, so for now this is most of the back catalogue. The two routes the
+                     customer can take are named first, because they are the ones that need no
+                     claim from us; recording it by hand is offered last and deliberately
+                     framed as an assertion rather than a switch. */
+                  <div style={{ border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 8, padding: "11px 13px" }}>
+                    <div style={{ fontSize: 13, color: "#92400E", fontWeight: 700, marginBottom: 5 }}>
+                      We don&rsquo;t have permission to text this customer yet
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#78350F", lineHeight: 1.55 }}>
+                      They can switch it on themselves by ticking the texting box on your design
+                      link, or simply by texting you first — either one is recorded automatically.
+                    </div>
+                    {!consentOpen ? (
+                      <button type="button" onClick={() => setConsentOpen(true)}
+                        style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", marginTop: 9 }}>
+                        They already gave permission — record it
+                      </button>
+                    ) : (
+                      <div style={{ marginTop: 10, borderTop: "1px solid #FDE68A", paddingTop: 10 }}>
+                        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                          <input type="checkbox" checked={consentTicked}
+                            onChange={(e) => setConsentTicked(e.target.checked)}
+                            style={{ marginTop: 2, width: 15, height: 15, flex: "0 0 auto", cursor: "pointer" }} />
+                          <span style={{ fontSize: 12, color: "#78350F", lineHeight: 1.5 }}>
+                            {CONSENT_ATTESTATION}
+                          </span>
+                        </label>
+                        <input value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
+                          maxLength={200}
+                          placeholder="How they gave it — e.g. asked us at the lot on 12 Aug (optional)"
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5 }} />
+                        <div style={{ display: "flex", gap: 8, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
+                          <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !consentTicked}
+                            onClick={recordConsent}>
+                            {busy ? "Recording…" : "Record permission"}
+                          </button>
+                          <button type="button" style={S.btn("#FFF", "#64748B")}
+                            onClick={() => { setConsentOpen(false); setConsentTicked(false); setConsentNote(""); }}>
+                            Cancel
+                          </button>
+                          <span style={{ fontSize: 11, color: "#92400E" }}>
+                            Recorded against your name.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {textMsg && textMsg.err && <div style={{ ...S.err, marginTop: 8, marginBottom: 0 }}>{textMsg.err}</div>}
                   </div>
                 ) : (
                   <>

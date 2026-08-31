@@ -25,6 +25,8 @@ import { withErrorLog } from "../_shared/logError.ts";
 //   { action: "refresh" }      → pull status + /client updates from Monday for this
 //                                tenant's open items (safety net for a missed webhook)
 //   { action: "retry_push", id } → re-attempt a submission whose Monday push failed
+//   { action: "comment", submissionId, body } → the TENANT replies on their own
+//                                submission (mirrored into the linked Projects item)
 //
 // Required secret: MONDAY_API_TOKEN (already set — shared with github-monday-bug).
 
@@ -442,6 +444,78 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       await admin.from("feedback_submissions").update({ monday_error: msg }).eq("id", row.id);
       return json({ ok: false, error: msg }, 502);
     }
+  }
+
+  // ── comment ───────────────────────────────────────────────────────────────
+  // The tenant REPLIES on their own submission (Carolyn 2026-08-28: builders should see
+  // their submissions in real flow "and actually be able to comment back"). This is the
+  // first tenant-authored write into the feedback thread, so three things are load-bearing:
+  //
+  //   1. The submission is re-read scoped to the caller's OWN clientId. Identity and
+  //      tenant never come from the body, exactly as in `submit`.
+  //   2. monday_update_id stays NULL. Every Monday reconcile path (this function's
+  //      `refresh`, and sync_all in feedback-monday-webhook) deletes comments only by
+  //      `.eq("monday_update_id", …)`, so a NULL-keyed row survives them all. A reply
+  //      pushed to Monday would also boomerang back as a duplicate.
+  //   3. The reply is COPIED into the linked Projects item as a client-authored update,
+  //      so the team reads it where they work — best-effort, because a Projects failure
+  //      must never lose the customer's words.
+  if (action === "comment") {
+    const submissionId = String(body.submissionId ?? "").slice(0, 40);
+    const text = String(body.body ?? "").trim().slice(0, 4000);
+    if (!text) return json({ error: "Write something first." }, 400);
+
+    const { data: row } = await admin.from("feedback_submissions")
+      .select("id, client_id, title")
+      .eq("id", submissionId).eq("client_id", clientId).maybeSingle();
+    if (!row) return json({ error: "Submission not found." }, 404);
+
+    const meta = user.user_metadata || {};
+    const authorName = String(
+      meta.full_name || meta.name || (user.email || "").split("@")[0] || "Builder",
+    ).slice(0, 120);
+
+    const ins = await admin.from("feedback_comments").insert({
+      submission_id: row.id,
+      monday_update_id: null,
+      author_kind: "client",
+      author_name: authorName,
+      author_user_id: user.id,
+      body: text,
+    }).select().single();
+    if (ins.error) return json({ error: ins.error.message }, 500);
+
+    // Mirror into the Projects thread for whoever is triaging it.
+    try {
+      const { data: item } = await admin.from("pm_items")
+        .select("id, board_id").eq("feedback_submission_id", row.id).maybeSingle();
+      if (item) {
+        await admin.from("pm_updates").insert({
+          item_id: item.id,
+          author_kind: "client",
+          author_email: user.email ?? null,
+          body: text,
+          client_visible: true,            // it came FROM the client; they can already see it
+          feedback_comment_id: ins.data.id,
+          monday_update_id: null,
+          attachments: [],
+        });
+        await admin.from("pm_activity").insert({
+          board_id: item.board_id, item_id: item.id,
+          actor_email: user.email ?? authorName,
+          action: "client_reply", detail: { client_id: clientId },
+        });
+      }
+    } catch (e) {
+      console.error("client reply mirror failed for submission", row.id, e instanceof Error ? e.message : String(e));
+    }
+
+    // Surfaces "Last update" in My Submissions without touching status — a reply is not
+    // a state change, and only the team moves the ladder.
+    await admin.from("feedback_submissions")
+      .update({ updated_at: new Date().toISOString() }).eq("id", row.id);
+
+    return json({ ok: true, comment: ins.data });
   }
 
   // ── refresh ───────────────────────────────────────────────────────────────

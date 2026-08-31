@@ -54,8 +54,13 @@ import { buildThreadMessageId, buildReplyAddress } from "./emailInbound.ts";
 const PLATFORM_FROM = "no-reply@mail.structurestudiosuite.com";
 
 export type TenantMail = {
-  // Mirrors the email_sends.kind CHECK: 'acceptance' + 'change_order' added by migration 124.
-  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order";
+  // ⚠️ MIRRORS THE email_sends.kind CHECK CONSTRAINT — keep the two in step, in the same
+  // commit. A kind the constraint rejects fails at the ledger insert, which is AFTER the
+  // decision to send, so the drift shows up as a send that half-happened.
+  // 'acceptance' + 'change_order' came with migration 124; 'conversation' was live in the
+  // constraint but missing from this union until 167 (a silent drift, found by the compiler
+  // only because 'login_code' was added next to it); 'login_code' is migration 167.
+  kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code";
   /**
    * FALLBACK reply address — used only when the tenant has no ACTIVE inbound domain.
    *

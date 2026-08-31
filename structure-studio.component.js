@@ -2066,11 +2066,25 @@ const D3_CLADDING = {
   lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
   agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
-  // reliefTrim: the proud strip takes TRIM colour, not body. Carolyn, 2026-08-24: board and
-  // batten is "boards further apart and it has like a piece of TRIM over the top of it".
-  // It is a flag rather than a string compare on id so a future cladding can opt in.
-  // `rib` deliberately does NOT: a metal rib is the same sheet of steel, not a second board.
-  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40, reliefTrim: true },
+  // reliefTrim: the proud strip takes TRIM colour instead of body. NOTHING SETS IT TODAY --
+  // the flag stays because it is the seam a future cladding would opt in through, and
+  // because `rib` must never take it (a metal rib is the same sheet of steel, not a second
+  // board).
+  //
+  // ⚠️ BATTEN CARRIED IT UNTIL 2026-08-28 AND CAROLYN REVERSED HER OWN INSTRUCTION.
+  // She set it on 08-24 -- board and batten is "boards further apart and it has like a piece
+  // of TRIM over the top of it" -- then saw it rendered on 08-28 @48:22 and corrected
+  // herself: "Borden batten is showing white. Oh, you made that trim pieces. Got it. Because
+  // I told you Borden batten that that's a trim piece. It IS, but it is painted the same
+  // color as the Borden. It's considered part of it ... So make that change."
+  //
+  // So it is a trim piece in the lumber yard and a body-coloured surface on the finished
+  // building, and only the second one is a rendering question. Do not restore the flag from
+  // the 08-24 quote alone; the later call supersedes it.
+  //
+  // This changes NORTHWOOD and FARMLAND together -- both carry siding:"batten" -- which is
+  // the whole visible effect and is intended.
+  batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40 },
 };
 // The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
 // siding, lap siding, board and batten, and metal". `batten` joined the list that day --
@@ -3559,8 +3573,15 @@ function buildShed3DModel(THREE, p) {
   //
   // Skipped on a shed roof: a dormer on a single slope is a shed dormer, which is a
   // different massing, and drawing a gable dormer there would be wrong rather than simple.
+  // TWO SHAPES SINCE 2026-08-28. Carolyn @52:43, looking at what was here: "what you have
+  // in here for a dormer right now is a gable dormer ... the other is a transom dormer, so
+  // we have two different dormers. This one runs the pitch THAT way, the other works like a
+  // lean-to, it comes off of the roof here and comes out here and then drops down."
+  //
+  // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
-  if (dormW > 0.5 && roofCfg.type !== "shed") {
+  const dormerIsTransom = roofCfg.dormerType === "transom";
+  if (dormW > 0.5 && roofCfg.type !== "shed" && !dormerIsTransom) {
     const dRise = roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5;
     // offsetU is a fraction of the HALF-SPAN, so it reads the way kneeU does. Held off
     // the ridge and the eave so the dormer cannot overhang either edge.
@@ -3583,6 +3604,56 @@ function buildShed3DModel(THREE, p) {
       cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
       rg.add(cap);
     });
+  }
+
+  // ── TRANSOM DORMER (2026-08-28) ──────────────────────────────────────────────────
+  // Carolyn's own comparison is the spec: it "works like a lean-to". So it is built like
+  // one -- a single shallow slope running OUT toward the eave and dropping -- rather than
+  // like the gable dormer above, whose pitch runs across the ridge.
+  //
+  // Cosmetic on the same terms as the gable dormer: no CSG, so it sits ON the slope and
+  // intersects the slab rather than cutting a hole. From outside that reads correctly, and
+  // "look inside" hides the whole roofGroup, so the missing opening is never visible.
+  // Skipped on a shed roof for the same reason the gable dormer is.
+  if (dormW > 0.5 && roofCfg.type !== "shed" && dormerIsTransom) {
+    const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
+    const uTop = (S / 2) * fr;
+    const yTop = profYAt(uTop);
+    // It projects toward the eave it already sits nearest, so a dormer placed on the right
+    // half runs right. Held back from the eave so it can never overhang the edge.
+    const dirU = fr < 0 ? -1 : 1;
+    const uOut = dirU > 0 ? Math.min(uTop + 3.0, S / 2 - 0.3) : Math.max(uTop - 3.0, -S / 2 + 0.3);
+    const run = Math.abs(uOut - uTop);
+    if (run > 0.6) {
+      const mainDrop = yTop - profYAt(uOut);
+      // ⚠️ THE RISE IS CLAMPED BY THE MAIN ROOF, not by the input. The face can only be as
+      // tall as the main roof falls across the run: any taller and this dormer's own roof
+      // would slope UP on its way out, which is not a dormer, it is a ramp. Clamping here
+      // rather than at the input is deliberate -- the ceiling depends on pitch and position,
+      // so a fixed max on the number box would be wrong for most styles.
+      const rise = Math.max(0.3, Math.min(roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5, mainDrop - 0.3));
+      const yOut = profYAt(uOut) + rise;
+      const du = uOut - uTop, dy = yOut - yTop;
+      const slen = Math.sqrt(du * du + dy * dy) || 1;
+      const ang = Math.atan2(dy, du);
+      // ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
+      // dormer's single box does. Tilting it to the dormer's OWN pitch is what makes the
+      // top face meet the slab instead of leaving an air gap under it, and it buries the
+      // upslope end inside the main roof, which is where a real shed dormer's framing goes.
+      const body = box(mat(bodyColor), slen, rise, dormW);
+      body.rotation.z = ang;
+      body.position.set((uTop + uOut) / 2 + Math.sin(ang) * rise / 2,
+                        (yTop + yOut) / 2 - Math.cos(ang) * rise / 2,
+                        L / 2);
+      rg.add(body);
+      const tslab = box(roofMat, slen + OV, D3.ROOF_T, dormW + 0.5);
+      d3RoofSlabUVs(tslab);
+      tslab.rotation.z = ang;
+      tslab.position.set((uTop + uOut) / 2 + (du / slen) * OV / 2,
+                         (yTop + yOut) / 2 + (dy / slen) * OV / 2 + D3.ROOF_T / 2,
+                         L / 2);
+      rg.add(tslab);
+    }
   }
 
   // PROUD RELIEF DOES NOT STOP AT THE PLATE LINE.
@@ -6005,16 +6076,43 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [busy, setBusy] = useState(false);
+  // ⚠️ UNCHECKED BY DEFAULT, AND IT MUST STAY THAT WAY. A pre-ticked box is not consent under
+  // the TCPA — the customer has to act. Do not "help conversion" by defaulting it on.
+  const [smsConsent, setSmsConsent] = useState(false);
   const digits = ssPhone10(phone); // a "+1" preserved by formatPhoneDisplay still counts as 10
   const valid = name.trim().length > 0 && digits.length === 10;
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
+  // ⚠️ CONSENT IS NOT REQUIRED TO CONTINUE, and that is deliberate. This gate is the builder's
+  // lead-gen funnel; blocking the designer on a texting opt-in would cost them leads to buy a
+  // permission most visitors do not need to give. What the carriers actually require is that
+  // the disclosure be PUBLICLY VISIBLE where the number is collected — TCR screenshots this
+  // page — and that anyone we text has agreed. So: always shown, never mandatory, recorded
+  // only when ticked.
+  const consentCo = brand.companyName || "this builder";
+  // ⚠️ THE SENTENCE IS BUILT ONCE AND SENT VERBATIM to capture-lead, because what is stored as
+  // evidence must be the exact text that was on screen — not a template id that will be edited
+  // later. "Message and data rates may apply." is a literal carrier requirement; do not reword
+  // it, and do not drop the STOP instruction.
+  const consentText =
+    "By checking this box, you agree that " + consentCo + " may send you text messages about " +
+    "your quote and your building. Message frequency varies. Message and data rates may apply. " +
+    "Reply STOP to opt out at any time.";
 
   const start = () => {
     if (!valid || busy) return;
     setBusy(true);
     // Best-effort lead capture to the tenant's GHL — never block entry on it.
-    try { supabase.functions.invoke("capture-lead", { body: { clientId: config.clientId, name: name.trim(), phone } }); } catch (_e) {}
+    // smsConsent + the verbatim sentence ride along: capture-lead writes the consent record,
+    // and it is the only moment this page can prove WHAT was shown and WHERE.
+    try {
+      supabase.functions.invoke("capture-lead", { body: {
+        clientId: config.clientId, name: name.trim(), phone,
+        smsConsent: smsConsent,
+        consentText: smsConsent ? consentText : null,
+        consentUrl: typeof location !== "undefined" ? String(location.href).slice(0, 500) : null,
+      } });
+    } catch (_e) {}
     onPass({ name: name.trim(), phone });
   };
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
@@ -6038,6 +6136,11 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
         <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Phone</label>
         <input type="tel" inputMode="tel" value={formatPhoneDisplay(phone)} onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
           onKeyDown={(e) => e.key === "Enter" && start()} placeholder="(555) 555-5555" style={{ ...inp, margin: "4px 0 16px" }} />
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
+          <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
+            style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
+          <span style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>{consentText}</span>
+        </label>
         <button onClick={start} disabled={!valid || busy}
           style={{ width: "100%", background: valid && !busy ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: valid && !busy ? "pointer" : "default" }}>
           {busy ? "Starting…" : "Start Designing →"}
@@ -9756,10 +9859,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           name: co.name.trim(),
           qty: co.qty ? parseInt(co.qty) || 0 : 0,
           amount: co.amount ? parseFloat(co.amount) || 0 : 0,
+          taxable: co.taxable !== false,
         })),
         // Discounts → GHL invoice discount total (each shows as a $0 "Discount — <desc>" line).
         discounts: (Array.isArray(sel.discounts) ? sel.discounts : [])
-          .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0) }))
+          .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0), taxable: d.taxable !== false }))
           .filter((d) => d.amount > 0),
         roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro, idx) => ({
           name: `RO-${idx + 1}`,
@@ -10365,8 +10469,45 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="gambrel">Gambrel (barn)</option>
                   </select>
                 </label>
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise/run)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4} onChange={(e) => calSetRoof({ pitch: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                {/* ROOF MATERIAL HAD NO CONTROL AT ALL until 2026-08-28. It could only ever
+                    be photo-derived by the AI drafter or inferred from whatever the CUSTOMER
+                    later picked -- so a builder who sells metal roofs had no way to say so,
+                    and Carolyn hit exactly that at @47:40: "they need to specify if they want
+                    this to be a metal roof, right now they can't make this a metal roof if
+                    they want, and then segment the colors out to metal colors or not metal
+                    colors."
+
+                    No backend work: styleD3.ts already whitelists roofMaterial as
+                    "shingle" | "metal" and d3ResolveStyleSpec already validates it. The field
+                    round-tripped fine; nothing on screen ever wrote it.
+
+                    Blank stays meaningful -- it means the style has not said, which is every
+                    un-calibrated style today, and it leaves the customer's own roof-type pick
+                    in charge exactly as before. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Roof material
+                  <select value={adminCal.spec.roofMaterial || ""} onChange={(e) => calSet({ roofMaterial: e.target.value || null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="">Not set (customer chooses)</option>
+                    <option value="shingle">Shingle</option>
+                    <option value="metal">Metal</option>
+                  </select>
+                </label>
+                {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
+                    roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
+                    and the drawing came back "120:12" with a 76'6" peak, because this field
+                    held the rise/run RATIO while the dimension label multiplies it by 12.
+                    Her instruction: "we want to put a number in here that actually is 10:12
+                    or 6:12 or whatever ... otherwise we're messing with math that we don't
+                    want to mess with."
+
+                    ONLY THE INPUT BOUNDARY MOVES. The spec still stores the ratio, so every
+                    saved style, scanMeasure's measured pitch and the AI calibration keep
+                    writing and reading exactly what they did before -- there is no data
+                    migration here and no existing design changes shape.
+
+                    Rounded for display because 10/12 round-trips to 9.999999999999998, and
+                    a field that shows that after you typed 10 reads as broken. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise, as in 6 for 6:12)
+                  <input type="number" step="0.5" min="0" max="12" value={Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100} onChange={(e) => calSetRoof({ pitch: (parseFloat(e.target.value) || 0) / 12 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
                   <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("overhang")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -10450,6 +10591,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <input type="number" step="0.5" min="0" value={adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0} onChange={(e) => calSetRoof({ dormerWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
+                {/* Shape, not size, so it sits with the other dormer fields and only once
+                    there is a dormer to shape. Gable is what every existing style already
+                    draws, which is why it is the blank/default rather than a third option. */}
+                {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer type
+                    <select value={adminCal.spec.roof.dormerType === "transom" ? "transom" : "gable"} onChange={(e) => calSetRoof({ dormerType: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="gable">Gable (pitch runs across)</option>
+                      <option value="transom">Transom (lean-to off the roof)</option>
+                    </select>
+                  </label>
+                )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
                     <input type="number" step="0.25" min="0" value={adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5} onChange={(e) => calSetRoof({ dormerRiseFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
@@ -10486,11 +10638,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     there is no server change, no migration and no new save action. A builder
                     who wants a colour that is not in their catalog can still type one.
 
-                    Roof pulls from shingle OR metal rows because the unpainted roof colour is
-                    a roofing product, not a paint. */}
+                    Roof pulls from roofing rows rather than paint, NARROWED to the material
+                    this style sells -- see below. */}
                 {["body", "trim", "roof"].map((k) => {
+                  // ONE PICKER WAS STILL RE-MIXING THE PALETTES. Settings keeps paint,
+                  // shingle and metal in three separate tables, but this list asked for
+                  // `shingle || metal` and so offered Driftwood next to Copper Metallic with
+                  // nothing to tell them apart -- which is the list Carolyn read aloud at
+                  // @47:40 when she asked for the colours to be segmented.
+                  //
+                  // Falls back to both only when roofMaterial is unset, because then the
+                  // style genuinely has not said which it sells and narrowing would hide
+                  // rows a builder can legitimately pick.
+                  const roofMat = adminCal.spec.roofMaterial;
+                  const roofRow = (c) => roofMat === "metal" ? c.metal : roofMat === "shingle" ? c.shingle : (c.shingle || c.metal);
                   const pool = (Array.isArray(C.colors) ? C.colors : []).filter((c) =>
-                    (k === "body" ? c.siding : k === "trim" ? c.trim : (c.shingle || c.metal)) && c.hex && !c.allowCustom);
+                    (k === "body" ? c.siding : k === "trim" ? c.trim : roofRow(c)) && c.hex && !c.allowCustom);
                   return (
                   <label key={k} style={{ fontSize: 11, color: "#92400E", fontWeight: 700, textTransform: "capitalize" }}>{k} color (unpainted)
                     <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -11731,6 +11894,66 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const amtInputWrap = { display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85, flex: "0 0 auto", boxSizing: "border-box" };
             const actSpacer = { width: 28, flex: "0 0 auto" };
             const delBtn = { background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 };
+            // A compact "Tax" toggle for the discount and custom-option rows (migration 148).
+            // Deliberately a button, not a checkbox: the rows are already tight and a labelled
+            // control would not fit, so the state is carried by colour + the title text. ON is
+            // the default and reads as quiet grey; OFF is amber, because "no tax on this line"
+            // is the exceptional state a rep should be able to spot at a glance.
+            const taxBtn = (taxable, onToggle) => (
+              <button type="button" onClick={onToggle}
+                title={taxable
+                  ? "Sales tax is charged on this line. Click to make it non-taxable."
+                  : "NOT taxed — this line sits under the non-taxable subtotal on the quote and invoice. Click to tax it."}
+                style={{
+                  flex: "0 0 auto", width: 34, height: 30, borderRadius: 6, cursor: "pointer",
+                  fontSize: 10, fontWeight: 800, letterSpacing: 0.2,
+                  border: "1px solid " + (taxable ? "#CBD5E1" : "#FDE68A"),
+                  background: taxable ? "#F8FAFC" : "#FEF3C7",
+                  color: taxable ? "#64748B" : "#B45309",
+                }}>{taxable ? "TAX" : "NO"}</button>
+            );
+
+
+            // ── Which lines will NOT be taxed (migration 159) ───────────────────────────
+            // The flags ride in on get_config / get_fixtures, which emit `taxable` ONLY when
+            // it is false — so ABSENT means taxed, here and everywhere else this was wired.
+            // Read-only: nothing here changes a number. submit-estimate computes the tax
+            // server-side from the catalog tables; this exists so a rep can see an exemption
+            // BEFORE sending, instead of discovering it on the issued PDF.
+            const sameLabel = (a, b) => String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+            const colorRow = (lbl) => (Array.isArray(C.colors) ? C.colors : []).find((c) => c && sameLabel(c.label, lbl));
+            // A paint or roof LINE collapses one or more colours, so it can only be exempt
+            // when every charged colour on it is — the same conservative rule submit-estimate
+            // applies, and erring the other way would under-state what gets taxed.
+            const coloursExempt = (labels) => {
+              const rows = labels.map(colorRow).filter(Boolean);
+              return rows.length > 0 && rows.every((c) => c.taxable === false);
+            };
+            const rowExempt = (r) => {
+              const k = String(r.key || "");
+              if (k === "building") {
+                const st = ((C && C.buildingStyles) || []).find((s) => s && s.value === sel.style);
+                return !!st && st.taxable === false;
+              }
+              if (k === "paint") return coloursExempt([sel.paintBodyColor, sel.paintTrimColor]);
+              if (k === "roof") return coloursExempt([sel.roofColor]);
+              if (k.indexOf("fx:") === 0 || k.indexOf("win:") === 0) {
+                const id = k.slice(k.indexOf(":") + 1);
+                const f = (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && String(x.id) === id);
+                return !!f && f.taxable === false;
+              }
+              const li = ((C && C.layoutItems) || {})[k];
+              return !!li && li.taxable === false;
+            };
+            // Only on lines that carry money: a $0 or "included" line is taxed at nothing
+            // either way, and marking it is noise. Hidden-pricing tenants see nothing.
+            const noTaxPill = (r) => (C.showPricing && Number(r.total) > 0 && rowExempt(r)) ? (
+              <span title="Not taxed — this line sits under the non-taxable subtotal on the quote and invoice."
+                style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase",
+                         background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A",
+                         borderRadius: 5, padding: "1px 5px", whiteSpace: "nowrap", verticalAlign: "middle" }}>no tax</span>
+            ) : null;
+
             const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
           <div style={{ marginTop: 8 }}>
@@ -11739,7 +11962,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {selRows.map((r) => (
                 <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
                     <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail}</div>
                   </div>
                   {r.total != null && (<>
@@ -11755,7 +11978,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {priceRows.map((r) => (
                   <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
                       <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
                     </div>
                     <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
@@ -11836,6 +12059,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
                           style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
                       </div>
+                      {embedded && taxBtn(row.taxable !== false, () => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r)))}
                       <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))} style={delBtn}>×</button>
                     </div>
                   );
@@ -11868,6 +12092,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     ) : (
                       <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#059669", flexShrink: 0 }}>−${Number(row.amount || 0).toFixed(2)}</div>
                     )}
+                    {embedded && taxBtn(row.taxable !== false, () => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r) })))}
                     {embedded
                       ? <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
                       : <span style={{ width: 28, flexShrink: 0 }} />}
@@ -11915,15 +12140,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
             {/* Add buttons — below the subtotal, invoice-footer style. */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "" }])} style={dashBtn}>+ Add Custom Option</button>
+              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "", taxable: true }])} style={dashBtn}>+ Add Custom Option</button>
               {/* Business-only: a shopper must not be able to discount their own quote or
                   invent a delivery fee. Rows already ON a reopened design still render —
                   a rep-applied discount is part of the customer's real quote. */}
-              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "" }] }))} style={dashBtn}>+ Add Discount</button>}
+              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))} style={dashBtn}>+ Add Discount</button>}
               {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
             </div>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Custom options add charges · discounts reduce the estimate total · delivery is added as a non-taxable line.
+              Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
             </div>
           </div>
             );

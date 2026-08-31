@@ -108,7 +108,8 @@ export const PORTAL_PARTS = [
   "portal/08-integrations.jsx",  // QuickBooks, email sending, commissions, per-person access, SettingsShell
   "portal/09-table-engine.jsx",  // generic Monday-style grouped table (PMTable, PM_TYPES, cell editors)
   "portal/10-projects.jsx",      // internal Projects boards (operator-only Monday replacement)
-  "portal/11-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
+  "portal/11-sms.jsx",           // self-serve SMS onboarding (A2P registration + number purchase)
+  "portal/12-shell.jsx",         // Dashboard, ProfileDialog, PortalApp, the mount + __ssAppBooted sentinel
 ];
 
 // source → artifact. The component's artifact name is load-bearing in preflight

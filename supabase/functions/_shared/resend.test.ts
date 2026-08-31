@@ -23,6 +23,7 @@ import {
   rsDeleteDomain,
   rsDomainVerified,
   rsGetDomain,
+  rsGetReceivedEmail,
   rsInboundReady,
   rsInboundRecords,
   rsReceivingEnabled,
@@ -571,6 +572,69 @@ Deno.test("rsVerifyDomain POSTs the check then GETs the fresh full shape", async
     assertEquals(rsDomainVerified(d), true);
     assertEquals(d.records[0].verified, true);
     assertEquals(d.records[0].fqdn, "send.mail.example.com");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsGetReceivedEmail fetches the body the webhook does not send", async () => {
+  setup();
+  try {
+    // The LIVE retrieve shape, captured 2026-08-28. `headers` is a flat lowercase object and
+    // `received` arrives as an ARRAY because the header repeats — flattening it is why the
+    // caller never has to special-case one header out of twenty-four.
+    const calls = stub(() => jsonResponse({
+      object: "email",
+      id: "8e72eaf5-522d-43f2-ad3a-a700ebd56f5a",
+      from: "ahsanmasood2525@gmail.com",
+      to: ["d.ss-test123456@reply.csmsynergy.com"],
+      received_for: ["d.ss-test123456@reply.csmsynergy.com"],
+      subject: "hi",
+      text: "hi claude\n",
+      html: '<div dir="ltr">hi claude</div>\n',
+      message_id: "<CAGYnnyd@mail.gmail.com>",
+      headers: {
+        "X-SES-Spam-Verdict": "PASS",
+        "received": ["from mail-ed1-f41.google.com", "by inbound-smtp.us-east-1.amazonaws.com"],
+        "subject": "hi",
+      },
+    }));
+
+    const got = await rsGetReceivedEmail("8e72eaf5-522d-43f2-ad3a-a700ebd56f5a");
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0].method, "GET");
+    assertEquals(calls[0].url,
+      "https://api.resend.com/emails/receiving/8e72eaf5-522d-43f2-ad3a-a700ebd56f5a");
+    assertEquals(got.text, "hi claude\n", "the body is the whole point of this call");
+    assertEquals(got.to[0], "d.ss-test123456@reply.csmsynergy.com");
+    assertEquals(got.receivedFor[0], "d.ss-test123456@reply.csmsynergy.com");
+    assertEquals(got.messageId, "<CAGYnnyd@mail.gmail.com>");
+    // Lowercased on the way in, so hdr()/senderVerdict never have to guess the casing.
+    assertEquals(got.headers["x-ses-spam-verdict"], "PASS");
+    // A repeated header arrives as an array and is joined rather than dropped or stringified
+    // as "[object Object]".
+    assert(got.headers["received"].includes("inbound-smtp"), "repeated headers are joined");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("rsGetReceivedEmail survives a response missing every optional field", async () => {
+  setup();
+  try {
+    // A body-less or partial response must yield empty strings, never undefined — the
+    // webhook merges this straight onto its payload and a stray undefined would erase a
+    // value the webhook DID have.
+    const calls = stub(() => jsonResponse({ id: "abc" }));
+    const got = await rsGetReceivedEmail("abc");
+    assertEquals(calls.length, 1);
+    assertEquals(got.text, "");
+    assertEquals(got.html, "");
+    assertEquals(got.subject, "");
+    assertEquals(JSON.stringify(got.to), "[]");
+    assertEquals(JSON.stringify(got.headers), "{}");
+    // The id falls back to the one we asked for rather than going empty.
+    assertEquals(got.id, "abc");
   } finally {
     teardown();
   }

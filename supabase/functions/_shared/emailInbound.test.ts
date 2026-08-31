@@ -12,6 +12,7 @@
 import {
   timingSafeEqual, parseAddress, messageIds, stripQuoted, parseReplyToken,
   envelopeRecipients, buildThreadMessageId, parseThreadMessageId, buildReplyAddress,
+  senderVerdict,
 } from "./emailInbound.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -119,6 +120,38 @@ Deno.test("parseReplyToken refuses anything that is not our token", () => {
   ]) {
     assertEquals(parseReplyToken(bad), null, `must refuse ${JSON.stringify(bad)}`);
   }
+});
+
+Deno.test("senderVerdict reads the real verdicts off a real message", () => {
+  // The LIVE header shape, captured 2026-08-28 from a Gmail message that arrived at
+  // d.ss-test123456@reply.csmsynergy.com. Resend itself supplies no verdict fields — these
+  // are added by the SES layer underneath it, which is why they are read by header NAME
+  // rather than from any vendor-specific envelope.
+  const live = {
+    "x-ses-spam-verdict": "PASS",
+    "x-ses-virus-verdict": "PASS",
+    "received-spf": "pass (spfCheck: domain of _spf.google.com designates 209.85.208.41 as permitted sender)",
+    "authentication-results": "amazonses.com; spf=pass (spfCheck: ...) dkim=pass header.i=@gmail.com; dmarc=pass",
+    "from": '"ahsan masood" <ahsanmasood2525@gmail.com>',
+  };
+  assertEquals(senderVerdict(live), "spam=PASS virus=PASS spf=pass dkim=pass dmarc=pass");
+
+  // Header lookup is case-insensitive: providers differ on casing and Resend lowercases.
+  assertEquals(senderVerdict({ "X-SES-Spam-Verdict": "FAIL" }), "spam=FAIL");
+
+  // ⚠️ NULL MEANS "WE WERE TOLD NOTHING", NEVER "CLEAN". A caller must not read the absence
+  // of a verdict as a pass — that is exactly how a forged From gets treated as trustworthy.
+  assertEquals(senderVerdict({}), null);
+  assertEquals(senderVerdict({ subject: "hi", to: "x@y.com" }), null);
+
+  // A failing message still produces a verdict string. These are the rows worth reading,
+  // so they must be stored rather than dropped.
+  assertEquals(
+    senderVerdict({ "x-ses-spam-verdict": "FAIL", "authentication-results": "amazonses.com; spf=softfail; dmarc=fail" }),
+    "spam=FAIL spf=softfail dmarc=fail",
+  );
+  // received-spf leads with the result word and must not drag its parenthetical along.
+  assertEquals(senderVerdict({ "received-spf": "fail (bad sender)" }), "spf=fail");
 });
 
 Deno.test("buildReplyAddress round-trips with parseReplyToken", () => {

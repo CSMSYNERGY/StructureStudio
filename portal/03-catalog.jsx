@@ -34,6 +34,7 @@ function SettingsView({ section }) {
     // column has — so a status response that predates the column can't read as "SS issues it".
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
+    ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -121,6 +122,12 @@ function SettingsView({ section }) {
         ssQuotePrefix: data.ssQuotePrefix || "",
         ssInvoiceNext: data.ssInvoiceNext == null ? "" : String(data.ssInvoiceNext),
         ssInvoicePrefix: data.ssInvoicePrefix || "",
+        // Sales tax (migration 158). The status call surfaces the stored fraction as a
+        // PERCENT; blank means "never answered", which the server refuses to let SS-issued
+        // mode start with — 0 is a legitimate explicit answer, silence is not.
+        ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
+        ssTaxLabel: data.ssTaxLabel || "",
+        ssTaxDelivery: Boolean(data.ssTaxDelivery),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -174,6 +181,9 @@ function SettingsView({ section }) {
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
       ssInvoicePrefix: form.ssInvoicePrefix,
+      ssTaxRate: form.ssTaxRate,
+      ssTaxLabel: form.ssTaxLabel,
+      ssTaxDelivery: form.ssTaxDelivery,
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
@@ -390,10 +400,34 @@ function SettingsView({ section }) {
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Shows on the invoice as {(form.ssInvoicePrefix || "") + (form.ssInvoiceNext || "2001")}.</div></div>
           </div>
         )}
-        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim()) && (
+        {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
+            own documents. The rate here is the FALLBACK — each quote's tax is looked up
+            from its delivery address (Avalara), and this is what gets charged when that
+            lookup can't resolve, which is why the server refuses to flip SS mode on
+            while it is blank: 0 is a real answer, "unanswered" is not. */}
+        {!form.invoiceInGhl && (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+            <div><span style={S.lbl}>Sales tax rate (%)</span>
+              <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Tax is figured from each quote's delivery address — this rate is charged when that lookup can't resolve. Enter 0 if you don't collect sales tax.</div></div>
+            <div><span style={S.lbl}>Tax label on documents</span>
+              <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
+                <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
+                Charge tax on delivery
+              </label></div>
+          </div>
+        )}
+        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Set {!String(form.ssQuoteNext).trim() && !String(form.ssInvoiceNext).trim() ? "starting quote and invoice numbers" : (!String(form.ssQuoteNext).trim() ? "a starting quote number" : "a starting invoice number")} before
-            saving. Without one, your first StructureStudio document would be numbered 1 and clash with the paperwork you already have out.
+            Before saving, set{" "}
+            {[
+              !String(form.ssQuoteNext).trim() && "a starting quote number",
+              !String(form.ssInvoiceNext).trim() && "a starting invoice number",
+              !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
+            ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
+            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
           </div>
         )}
         {!form.invoiceInGhl && status && status.emailReady === false && (
@@ -716,6 +750,19 @@ async function readXlsxWorkbook(file, ExcelJS) {
   });
 }
 
+// The brand teal, and the ONE card on the Billing tab that wears it: Synergy CRM. Everything
+// else here is ACCENT purple, which on this tab means "buy this, now, from us". Synergy CRM is
+// a different product bought on a different site, so it gets the other half of the header
+// gradient (01-core.jsx: linear-gradient(#3D3672 → #1B7895)) rather than a colour invented for
+// it. Don't reuse this for a purchasable feature — the whole job it does is being the exception.
+const SYNERGY_TEAL = "#1B7895";
+
+// Wallet top-up presets, in cents. Round numbers a builder recognises rather than multiples
+// of the $20 meter price -- "$100" is a decision, "$140 (7 generations)" is arithmetic
+// homework. The floor and cap are NOT here: the server sends them (wallet.minTopupCents /
+// maxTopupCents) so there is exactly one definition and the UI cannot drift from it.
+const TOPUP_PRESETS = [10000, 25000, 50000];
+
 // ─── Billing (per-feature subscriptions via portal-billing; Deposyt/NMI gateway) ───
 // Each feature (Simple Layout, RealTime Pricing, …) is its own recurring
 // subscription, chosen monthly or yearly independently. Simple Layout is the
@@ -731,6 +778,15 @@ function BillingView({ viewingLabel = null }) {
   const [msg, setMsg] = useState(null);      // { ok } | { err }
   const [sel, setSel] = useState({});        // feature -> "monthly" | "annual"
   const [crmIv, setCrmIv] = useState({});    // Synergy CRM tier -> "monthly" | "annual" (display only)
+  // Wallet top-up (migration 164). `topupSel` is a preset in cents; `topupCustom` is the raw
+  // DOLLARS string from the Other field. Exactly one is ever set -- picking a preset clears
+  // the field and typing clears the preset -- so there is never an ambiguous "which did they
+  // mean" state to resolve at charge time.
+  const [topupSel, setTopupSel] = useState(null);
+  const [topupCustom, setTopupCustom] = useState("");
+  const [autoOn, setAutoOn] = useState(false);
+  const [autoThreshold, setAutoThreshold] = useState("");
+  const [autoAmount, setAutoAmount] = useState("");
 
   const load = useCallback(async () => {
     setError(null);
@@ -756,7 +812,7 @@ function BillingView({ viewingLabel = null }) {
   // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
   // (in the cart) or already live, its member features are covered — shown "Included" and not
   // separately purchasable — and it satisfies the required base in place of Simple Layout.
-  const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing"];
+  const SUITE_MEMBERS = ["simple_layout", "schedule_builds", "view_3d", "quickbooks_sync", "on_demand_pricing", "crm"];
   const suiteChosen = !!sel["full_suite"] || !!liveFeatures["full_suite"];
   const memberCovered = (feat) => SUITE_MEMBERS.includes(feat) && suiteChosen;
 
@@ -789,8 +845,102 @@ function BillingView({ viewingLabel = null }) {
   // Charged at checkout: first period of every cart item plus setup fees. Registering a
   // recurring never charges anything by itself — the server runs this as an immediate sale
   // and schedules the subscription's own first charge at the renewal. All cents.
-  const dueTodayCents = cartPlans.reduce((s, p) => s + (chargeOf(p) || 0), 0) + setupTotal;
+  const grossDueCents = cartPlans.reduce((s, p) => s + (chargeOf(p) || 0), 0) + setupTotal;
+  // UPGRADE CREDIT (migration 160). Moving to a bundle throws away prepaid time on the
+  // features it replaces; the server credits that unused time against today's charge only —
+  // the Suite still RENEWS at full price. `upgradeCredits` is keyed by bundle feature and
+  // only contains bundles this tenant can actually claim against, so an empty object (a new
+  // signup, or an older portal-billing) simply leaves the arithmetic where it was.
+  //
+  // This must be applied HERE rather than shown as a footnote: dueTodayCents is what the
+  // confirm dialog quotes, what getPaymentToken tokenizes, and what the server re-checks as
+  // confirmChargeCents. A credit the browser knew about but did not subtract would fail that
+  // handshake on every upgrade.
+  const upgradeCredits = (data && data.upgradeCredits) || {};
+  const cartCredit = cart.reduce((s, [f]) => s + ((upgradeCredits[f] && upgradeCredits[f].cents) || 0), 0);
+  // Capped at the charge: the server caps it the same way and turns the remainder into a
+  // later renewal date, so a negative total here would just disagree with the server.
+  const creditCents = Math.min(cartCredit, grossDueCents);
+  const dueTodayCents = grossDueCents - creditCents;
+  const creditSources = cart.flatMap(([f]) => (upgradeCredits[f] && upgradeCredits[f].sources) || []);
   const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
+
+  // ── Wallet top-up (migration 164) ──────────────────────────────────────────────────
+  // Bounds come from the server so the floor and cap live in one place
+  // (_shared/walletTopup.ts); the fallbacks only matter against an older portal-billing.
+  const wallet = data && data.wallet;
+  const minTopup = (wallet && wallet.minTopupCents) || 2000;
+  const maxTopup = (wallet && wallet.maxTopupCents) || 500000;
+  // Dollars -> cents via Math.round, not parseInt: "12.5" is $12.50, and truncating a
+  // half-cent is the kind of rounding that shows up as a penny off in the ledger.
+  const customCents = topupCustom.trim() === "" ? null : Math.round(Number(topupCustom) * 100);
+  const topupCents = topupSel != null ? topupSel : (Number.isFinite(customCents) ? customCents : null);
+  const topupValid = Number.isInteger(topupCents) && topupCents >= minTopup && topupCents <= maxTopup;
+
+  // Mirror the saved auto-recharge config into the form whenever the server's answer
+  // changes. Depends on `data` (the whole payload) rather than the nested fields so it
+  // re-syncs after every load(), including the one that follows a successful save.
+  useEffect(() => {
+    const a = (data && data.wallet && data.wallet.autoTopup) || null;
+    if (!a) return;
+    setAutoOn(!!a.enabled);
+    setAutoThreshold(a.thresholdCents != null ? String(a.thresholdCents / 100) : "");
+    setAutoAmount(a.amountCents != null ? String(a.amountCents / 100) : "");
+  }, [data]);
+
+  const addFunds = async () => {
+    if (!topupValid) return;
+    setMsg(null); setBusy(true);
+    try {
+      // Same handshake as subscribe: the amount on screen is the amount tokenized and the
+      // amount charged, and the server refuses if they disagree.
+      const body = { action: "topup", amountCents: topupCents, confirmChargeCents: topupCents };
+      if (viewingLabel) {
+        if (!window.confirm(`Add ${fmt$(topupCents)} to ${viewingLabel}'s wallet?
+
+This charges the card they have on file.`)) { setBusy(false); return; }
+      } else if (!data.hasCard) {
+        body.paymentToken = await getPaymentToken(topupCents);
+      }
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      if (e) {
+        // The real story is in the BODY -- a decline reason, or a "do NOT try again" with a
+        // reference. e.message alone is the generic non-2xx and would hide all of it.
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: r && r.alreadyCredited
+        ? "That top-up was already applied — your balance is up to date."
+        : `Added ${fmt$(topupCents)} to the wallet.` });
+      setTopupSel(null); setTopupCustom("");
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const saveAutoTopup = async () => {
+    setMsg(null); setBusy(true);
+    try {
+      const body = {
+        action: "topup_settings",
+        enabled: autoOn,
+        thresholdCents: autoOn ? Math.round(Number(autoThreshold) * 100) : null,
+        amountCents: autoOn ? Math.round(Number(autoAmount) * 100) : null,
+      };
+      const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
+      if (e) {
+        let m = e.message;
+        try { const ctx = await e.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_x) {}
+        throw new Error(m);
+      }
+      if (r && r.error) throw new Error(r.error);
+      setMsg({ ok: autoOn ? "Automatic top-ups are on." : "Automatic top-ups are off." });
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
 
   // Load Collect.js once (from the gateway, with the public tokenization key), then
   // open its hosted card lightbox; the callback hands us a one-time payment token.
@@ -895,11 +1045,19 @@ function BillingView({ viewingLabel = null }) {
       const body = { action: "subscribe", planIds, confirmChargeCents: dueTodayCents };
       if (viewingLabel) {
         // Real money against THEIR card: confirm with the client named and the amount out loud.
-        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and charge ${fmt$(dueTodayCents)} today?
+        // A fully-credited upgrade charges nothing, and the dialog has to say THAT rather
+        // than "charge $0 today", which reads like a bug about to bill someone.
+        const what = dueTodayCents === 0 && creditCents > 0
+          ? `charge nothing today (${fmt$(creditCents)} credit covers it)`
+          : `charge ${fmt$(dueTodayCents)} today`;
+        if (!window.confirm(`Subscribe ${viewingLabel} to ${planIds.length} feature(s) and ${what}?
 
 This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       } else if (!data.hasCard) {
-        body.paymentToken = await getPaymentToken(dueTodayCents);
+        // The card is still required when nothing is due — it is what the RENEWAL bills.
+        // Passing null rather than 0 keeps Collect.js from putting "$0.00" on its pay
+        // button, which invites "then why do you want my card?".
+        body.paymentToken = await getPaymentToken(dueTodayCents || null);
       }
       const { data: r, error: e } = await sb.functions.invoke("portal-billing", { body });
       if (e) {
@@ -991,7 +1149,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         <span style={{ fontSize: 20, lineHeight: 1 }}>⭐</span>
         <div>
           <div style={{ fontSize: 14.5, fontWeight: 800, letterSpacing: "-0.01em" }}>Founding Price</div>
-          <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 25 builders — lock in this rate now.</div>
+          <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 15 builders — lock in this rate on the features you select while founding pricing is open.</div>
         </div>
       </div>
 
@@ -1060,14 +1218,95 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
               </p>
             )}
-            {/* ADD FUNDS is deliberately not a button yet. Carolyn, 2026-08-24: "I will
-                connect the wallet to Deposyt AFTER — just set the infrastructure up right
-                now." Stubbing a checkout that pretends to charge would be worse than
-                saying so; if someone clicks this at the expo, the honest sentence IS the
-                demo. Same voice as the "online checkout isn't switched on yet" notice. */}
-            <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
-              Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
-            </div>
+            {/* ADD FUNDS — real since migration 164. The note that used to sit here read
+                "not switched on yet ... contact CSM Synergy"; this is the AFTER Carolyn meant
+                on 2026-08-24. An unconfigured deployment still gets that sentence, because
+                the server would refuse the charge anyway (portal-billing's `configured` 503). */}
+            {!data.configured ? (
+              <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600 }}>
+                Adding funds online isn't switched on yet — contact CSM Synergy to top up your wallet.
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 8 }}>Add funds</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {TOPUP_PRESETS.map((c) => (
+                    <button key={c} type="button" onClick={() => { setTopupSel(c); setTopupCustom(""); }}
+                      style={{
+                        background: topupCents === c ? ACCENT : "#FFF",
+                        color: topupCents === c ? "#FFF" : "#334155",
+                        border: "1px solid " + (topupCents === c ? ACCENT : "#E2E8F0"),
+                        borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      }}>{fmt$(c)}</button>
+                  ))}
+                  {/* Custom amount, typed in DOLLARS because that is what a person means by
+                      "250". Asking for cents is how someone sends $2.50 meaning $250. */}
+                  <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid " + (topupCustom ? ACCENT : "#E2E8F0"), borderRadius: 8, padding: "0 10px" }}>
+                    <span style={{ fontSize: 13, color: "#64748B", fontWeight: 700 }}>$</span>
+                    <input type="number" inputMode="decimal" min={minTopup / 100} max={maxTopup / 100} placeholder="Other"
+                      value={topupCustom} onChange={(e) => { setTopupCustom(e.target.value); setTopupSel(null); }}
+                      style={{ border: "none", outline: "none", padding: "7px 4px", fontSize: 13, fontWeight: 700, width: 82, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                  </div>
+                  <button type="button" onClick={addFunds} disabled={busy || !topupValid}
+                    style={{ ...S.btn(ACCENT, "#FFF"), padding: "8px 16px", opacity: busy || !topupValid ? 0.5 : 1, cursor: busy || !topupValid ? "default" : "pointer" }}>
+                    {busy ? "Working…" : (topupCents ? "Add " + fmt$(topupCents) : "Add funds")}
+                  </button>
+                </div>
+                {/* Only complain once something has actually been typed — an empty field is
+                    the starting state, not a mistake. */}
+                {topupCustom && !topupValid && (
+                  <div style={{ fontSize: 12, color: "#B45309", marginTop: 6 }}>
+                    Enter an amount between {fmt$(minTopup)} and {fmt$(maxTopup)}.
+                  </div>
+                )}
+                <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>
+                  {data.hasCard
+                    ? "Charged to the card on file. Funds are added straight away."
+                    : "You'll enter your card in a secure form served by the payment gateway — it never passes through StructureStudio."}
+                </div>
+
+                {/* AUTO-RECHARGE. Requires a vaulted card: enabling it without one arms
+                    something that can only fail, and its first failure would report a
+                    declined card that never existed. */}
+                <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
+                  {w.autoTopup && w.autoTopup.disabledReason && (
+                    <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 12px", color: "#92400E", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+                      Automatic top-ups were switched off — {w.autoTopup.disabledReason} Update the card, then switch them back on.
+                    </div>
+                  )}
+                  {!data.hasCard ? (
+                    <div style={{ fontSize: 12, color: "#94A3B8" }}>
+                      Add funds once and your card is kept on file — then you can turn on automatic top-ups.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 13, color: "#334155" }}>
+                      <label style={{ display: "inline-flex", alignItems: "center", gap: 7, fontWeight: 700, cursor: "pointer" }}>
+                        <input type="checkbox" checked={autoOn} onChange={(e) => setAutoOn(e.target.checked)} />
+                        Top up automatically
+                      </label>
+                      {autoOn && (<>
+                        <span style={{ color: "#64748B" }}>when my balance drops below</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 8, padding: "0 8px" }}>
+                          <span style={{ fontSize: 12.5, color: "#64748B", fontWeight: 700 }}>$</span>
+                          <input type="number" inputMode="decimal" value={autoThreshold} onChange={(e) => setAutoThreshold(e.target.value)}
+                            style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                        </span>
+                        <span style={{ color: "#64748B" }}>add</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", border: "1px solid #E2E8F0", borderRadius: 8, padding: "0 8px" }}>
+                          <span style={{ fontSize: 12.5, color: "#64748B", fontWeight: 700 }}>$</span>
+                          <input type="number" inputMode="decimal" value={autoAmount} onChange={(e) => setAutoAmount(e.target.value)}
+                            style={{ border: "none", outline: "none", padding: "6px 4px", fontSize: 13, fontWeight: 700, width: 66, fontFamily: "inherit", color: "#1E293B", background: "transparent" }} />
+                        </span>
+                      </>)}
+                      <button type="button" onClick={saveAutoTopup} disabled={busy}
+                        style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", padding: "6px 14px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+                        Save
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {(w.transactions || []).length > 0 && (
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>Recent activity</div>
@@ -1231,9 +1470,30 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 {/* The first period is charged at checkout — the recurring only takes over
                     at renewal — so the number the card sees today is stated in bold before
                     the button, not discovered on a statement. */}
+                {/* The credit for prepaid time on the features this upgrade replaces. Named
+                    plan by plan: "a credit" is a number to be argued with, "your 3D View
+                    through 27 Aug 2027" is an explanation. */}
+                {creditCents > 0 && (
+                  <div style={{ marginTop: 6, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "8px 12px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>
+                      Credit for what you've already paid: −{fmt$(creditCents)}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#3F6212", marginTop: 2 }}>
+                      The unused part of {creditSources.map((x) => x.name).join(", ") || "your current features"} — they're
+                      replaced by this plan and cancelled, so you're not charged twice for the same months.
+                    </div>
+                  </div>
+                )}
                 <div style={{ marginTop: 4, fontSize: 14.5, color: "#1E293B" }}>
-                  Due today: <b style={{ color: "#3D3672" }}>{fmt$(dueTodayCents)}</b>
-                  <span style={{ fontSize: 12, color: "#64748B" }}> — first {yrTotal > 0 && moTotal > 0 ? "period" : yrTotal > 0 ? "year" : "month"}{setupTotal > 0 ? " + setup" : ""}. Renews automatically.</span>
+                  {/* A fully-credited upgrade charges NOTHING today. Saying "$0.00" reads as
+                      a broken cart; saying so in words reads as the deliberate outcome it is. */}
+                  {dueTodayCents === 0 && creditCents > 0 ? (<>
+                    Due today: <b style={{ color: "#3D3672" }}>Nothing</b>
+                    <span style={{ fontSize: 12, color: "#64748B" }}> — your credit covers this period in full. Renews automatically after it runs out.</span>
+                  </>) : (<>
+                    Due today: <b style={{ color: "#3D3672" }}>{fmt$(dueTodayCents)}</b>
+                    <span style={{ fontSize: 12, color: "#64748B" }}> — first {yrTotal > 0 && moTotal > 0 ? "period" : yrTotal > 0 ? "year" : "month"}{setupTotal > 0 ? " + setup" : ""}. Renews automatically.</span>
+                  </>)}
                 </div>
               </div>
               {/* An operator must never be the one entering a card: a Collect.js token is
@@ -1266,9 +1526,18 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
 
       {/* Synergy CRM — a separate offering with tiered per-user pricing. Sign-up is EXTERNAL (its
           own enrollment page), not the in-app Deposyt checkout, so this is an informational card
-          with an outbound link rather than a purchasable billing_plans feature. */}
-      <div style={S.card}>
-        <div style={S.h2}>Synergy CRM</div>
+          with an outbound link rather than a purchasable billing_plans feature.
+          
+          TEAL, NOT PURPLE, and that is the point (Carolyn 2026-08-29). Since Built-in CRM went
+          on sale there are two cards on this tab with "CRM" in the name, and they are not
+          alternatives: one is a feature of Structure Studio bought right here, the other is a
+          separate per-user product bought somewhere else. Purple is the buy-here colour — it is
+          on every plan tile, the Suite, the toggles and the Subscribe button — so wearing it made
+          this card look like a fourth plan in the same list. The brand's teal (already half of
+          the header gradient) says "related, but not the same thing" without a word of
+          explanation, and the left edge carries it so the difference survives a glance. */}
+      <div style={{ ...S.card, borderLeft: `4px solid ${SYNERGY_TEAL}` }}>
+        <div style={{ ...S.h2, color: SYNERGY_TEAL }}>Synergy CRM</div>
         <p style={{ fontSize: 12.5, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           The CRM that runs your sales — leads, pipelines, and follow-up. Priced by number of users; enroll on the sign-up page.
         </p>
@@ -1286,18 +1555,18 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
                 <div style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 20, overflow: "hidden", marginBottom: 8 }}>
                   {["monthly", "annual"].map((k) => (
                     <button key={k} type="button" onClick={() => setCrmIv((p) => ({ ...p, [t.tier]: k }))}
-                      style={{ background: iv === k ? ACCENT : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                      style={{ background: iv === k ? SYNERGY_TEAL : "transparent", color: iv === k ? "#FFF" : "#64748B", border: "none", padding: "4px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                       {k === "annual" ? "Yearly" : "Monthly"}
                     </button>
                   ))}
                 </div>
-                <div style={{ fontSize: 19, fontWeight: 800, color: ACCENT }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
+                <div style={{ fontSize: 19, fontWeight: 800, color: SYNERGY_TEAL }}>{fmt$(cents)}{iv === "annual" ? "/yr" : "/mo"}</div>
               </div>
             );
           })}
         </div>
         <a href="https://streamlinedconstructionsystem.com/saas-enrollment" target="_blank" rel="noopener noreferrer"
-          style={{ ...S.btn(ACCENT, "#FFF"), display: "inline-block", textDecoration: "none" }}>
+          style={{ ...S.btn(SYNERGY_TEAL, "#FFF"), display: "inline-block", textDecoration: "none" }}>
           Sign up for Synergy CRM →
         </a>
       </div>
@@ -1321,6 +1590,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const [pendingDelete, setPendingDelete] = useState(null);  // style pending permanent delete (confirm modal)
   const [editStyle, setEditStyle] = useState(null);          // style being edited (name/photo modal)
   const [editName, setEditName] = useState("");
+  const [editCode, setEditCode] = useState("");
   const [editImg, setEditImg] = useState(null);              // { base64, contentType } | null
   const [editFileKey, setEditFileKey] = useState(0);
   const [dragIdx, setDragIdx] = useState(null);              // index of the style row being dragged
@@ -1401,6 +1671,17 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     } catch (e) { setMsg({ err: e.message }); }
     setStyleBusy(false);
   };
+  // Whether this style's BUILDING line carries sales tax (migration 148). On the style, not
+  // the size — taxability is a property of the product, not of how big it is.
+  const toggleStyleTaxable = async (s) => {
+    setStyleBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "set_style_taxable", styleId: s.id, taxable: s.taxable === false } });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+    } catch (e) { setMsg({ err: e.message }); }
+    setStyleBusy(false);
+  };
   // Toggle whether this style's photo is attached to the GHL estimate (default on).
   const toggleStyleImage = async (s) => {
     setStyleBusy(true); setMsg(null);
@@ -1427,7 +1708,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     } catch (e) { setMsg({ err: e.message }); await load(); }
     setStyleBusy(false);
   };
-  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
+  const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditCode(s.code || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
   const onEditImg = (file) => {
     if (!file) { setEditImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
@@ -1442,7 +1723,7 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     if (!s || !editName.trim()) return;
     setStyleBusy(true); setMsg(null);
     try {
-      const body = { action: "update_style", styleId: s.id, label: editName.trim() };
+      const body = { action: "update_style", styleId: s.id, label: editName.trim(), code: editCode.trim() };
       if (editImg) { body.imageBase64 = editImg.base64; body.imageContentType = editImg.contentType; }
       const { data, error } = await sb.functions.invoke("portal-settings", { body });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -1633,7 +1914,19 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
           <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 12, padding: 22, maxWidth: 440, width: "100%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
             <div style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Edit building style</div>
             <span style={S.lbl}>Name</span>
-            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 14 }} />
+            <input value={editName} onChange={(e) => setEditName(e.target.value)} placeholder="Building style name" style={{ ...S.input, marginBottom: 10 }} />
+            {/* Serial code (163). Carolyn @57:20: "all of their buildings have codes. They
+                come up with them. LBA. Okay. Stands for Lofted Barn." Optional -- a style
+                with no code still sells, its serials just read XXX in this position rather
+                than shifting every later segment left. */}
+            <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Serial code</label>
+            <input value={editCode} maxLength={4}
+              onChange={(e) => setEditCode(e.target.value.toUpperCase().slice(0, 4))}
+              placeholder="e.g. LBA"
+              style={{ ...S.input, marginBottom: 4, textTransform: "uppercase" }} />
+            <p style={{ fontSize: 11, color: "#94A3B8", marginTop: 0, marginBottom: 14, lineHeight: 1.5 }}>
+              Your short code for this building style. It becomes the second block of every serial number this style produces &mdash; the <b>LBA</b> in <code>0826<b>LBA</b>1016REBLDWS5000</code>.
+            </p>
             <span style={S.lbl}>Photo</span>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
               {(editImg || editStyle.image_url)
@@ -1720,7 +2013,13 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                     {s.image_url
                       ? <img src={s.image_url} alt="" loading="lazy" style={thumb} />
                       : <div style={{ ...thumb, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>🏠</div>}
-                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>{s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}</div>
+                    <div style={{ flex: 1, fontWeight: 600, fontSize: 14 }}>
+                      {s.label}{!s.active && <span style={{ color: "#94A3B8", fontWeight: 400 }}> — hidden</span>}
+                      {/* Shown on the row, not just inside Edit: the code is the thing a
+                          builder cross-checks against their paper list, and opening six
+                          dialogs to read six codes is the friction that stops them being set. */}
+                      {s.code && <span title="Serial code for this style" style={{ marginLeft: 8, fontSize: 11, fontWeight: 800, letterSpacing: 0.4, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>{s.code}</span>}
+                    </div>
                     {/* Whether this style has a 3D look of its own yet. Read-only here —
                         setting one needs the live 3D preview, so it lives in
                         Settings → Designer → 3D. */}
@@ -1731,6 +2030,10 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
                     <label title="Attach this style's photo to the CRM estimate" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
                       <input type="checkbox" checked={s.show_image_on_estimate !== false} disabled={styleBusy} onChange={() => toggleStyleImage(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
                       Image on estimate
+                    </label>
+                    <label title="Sales tax is charged on this style's building line. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: "#475569", fontWeight: 600, cursor: styleBusy ? "default" : "pointer", flexShrink: 0 }}>
+                      <input type="checkbox" checked={s.taxable !== false} disabled={styleBusy} onChange={() => toggleStyleTaxable(s)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                      Taxable
                     </label>
                     <button onClick={() => openEdit(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
                     <button onClick={() => toggleStyle(s)} disabled={styleBusy} style={S.btn("#F1F5F9", "#334155")}>{s.active ? "Hide" : "Show"}</button>
@@ -2470,7 +2773,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // no longer shown or archived here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false };
     });
   };
 
@@ -2504,6 +2807,19 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   // Internal-only = still placeable in the rep (embedded) designer and still rendered on existing
   // designs, but dropped from the customer-facing designer's palette (get_config emits internalOnly;
   // the designer filters by `embedded`). Independent of archive. Optimistic local update.
+  // Sales tax (migration 148). Same optimistic shape as toggleInternal below: flip the row,
+  // call, and put it back if the call fails — a tax flag that silently did not save is how a
+  // builder discovers the exemption never applied, on an invoice.
+  const toggleTaxable = async (itemKey, taxable) => {
+    setBusy(true); setMsg(null);
+    setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable } : r));
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "set_layout_item_taxable", itemKey, taxable }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      setMsg({ ok: taxable ? "Sales tax will be charged on this option." : "This option is no longer taxed — it appears under the non-taxable subtotal on quotes and invoices." });
+    } catch (e) { setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, taxable: !taxable } : r)); setMsg({ err: e.message }); }
+    finally { setBusy(false); }
+  };
   const toggleInternal = async (itemKey, internalOnly) => {
     setBusy(true); setMsg(null);
     setRows((rs) => rs.map((r) => r.item_key === itemKey ? { ...r, internalOnly } : r));
@@ -2638,7 +2954,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -2668,6 +2984,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     <td style={{ ...S.td, textAlign: "center" }}>
                       <label title="Internal only: reps can still place it in the designer and it stays on existing designs, but customers can't add it on the client-facing page" style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
                         <input type="checkbox" checked={!!r.internalOnly} disabled={busy} onChange={() => toggleInternal(r.item_key, !r.internalOnly)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
+                      </label>
+                    </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <label title="Taxable: sales tax is charged on this option. Untick and it sits under the non-taxable subtotal on quotes and invoices." style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: busy ? "default" : "pointer" }}>
+                        <input type="checkbox" checked={r.taxable !== false} disabled={busy} onChange={() => toggleTaxable(r.item_key, r.taxable === false)} style={{ width: 16, height: 16, cursor: busy ? "default" : "pointer", accentColor: DOOR_MINT }} />
                       </label>
                     </td>
                     <td style={{ ...S.td, textAlign: "center", whiteSpace: "nowrap" }}>
@@ -2784,6 +3105,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // floor-level window back into "use the default" on the next save), so 0 is spelled out.
     sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
+    // Sales tax (migration 148). Absent reads as TAXABLE — the column defaults true, so the
+    // only way to be untaxed is for the builder to have said so.
+    taxable: d.taxable !== false,
   });
   const load = async () => {
     // Joins the sibling catalog reads fired in this same mount tick — see
@@ -2821,6 +3145,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
+    taxable: r.taxable !== false,
   });
 
   const saveLine = async () => {
@@ -2944,8 +3269,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Archived"]
-    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Archived"];
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
   // resolves it back against the door-flagged palette.
@@ -2958,8 +3283,8 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]
-    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.archived)]);
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
     const body = exportRows();
@@ -3023,7 +3348,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         iOpR = col("opens right", "right"), iOpL = col("opens left", "left"), iOpD = col("double"), iOpS = col("slide up"), iOpDef = col("default operation"),
         iCMode = col("color mode"), iTrimC = col("trim color"), iFixedC = col("fixed color"), iWinColors = col("colors"),
         iSill = col("height off floor"), iSillMode = col("placement"),
-        iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iArch = col("archived");
+        iPhoto = col("photo on estimate", "on estimate"), iActive = col("active"), iInternal = col("internal only", "internal"), iTaxable = col("taxable", "tax"), iArch = col("archived");
       if (iName < 0 || iW < 0 || iH < 0 || iPrice < 0) throw new Error('The sheet needs "Style", "Width", "' + (sizeWord === "length" ? "Length" : "Height") + '" and "Price" columns.');
       const truthy = (v) => /^\s*(y|yes|true|1)\s*$/i.test(String(v == null ? "" : v));
       // Absent column (index < 0) → undefined: the key is dropped from the JSON body, and the
@@ -3041,7 +3366,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           heightIn: ftInToInches(String(cols[iH] == null ? "" : cols[iH]).replace(/\s/g, "")),
           price: cols[iPrice],
           showImageOnEstimate: bool(cols, iPhoto, true), active: bool(cols, iActive, true),
-          internalOnly: bool(cols, iInternal, false), archived: bool(cols, iArch, false),
+          internalOnly: bool(cols, iInternal, false), taxable: bool(cols, iTaxable, true), archived: bool(cols, iArch, false),
         };
         if (hasSwingOp) {
           row.swingOut = bool(cols, iSwOut, false); row.swingIn = bool(cols, iSwIn, false);
@@ -3095,7 +3420,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -3322,6 +3647,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         {dCbx("show_image_on_estimate", "Photo on estimate", "Attach this item's photo to its line on the customer's estimate")}
         {dCbx("active", "Active", "Unchecked = hidden from the designer entirely")}
         {dCbx("internalOnly", "Internal only", "Reps can still place it in the designer; customers can't add it on the client-facing page (already-placed items still show)")}
+        {dCbx("taxable", "Taxable", "Untick if you don't charge sales tax on this item. It then shows on the quote and invoice under a separate non-taxable subtotal.")}
         <span style={{ flex: 1 }} />
         <button onClick={() => setEdit(null)} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Cancel</button>
         <button onClick={saveLine} disabled={busy || !edit.draft.name.trim()} style={{ ...S.btn(ACCENT, "#FFF"), opacity: (busy || !edit.draft.name.trim()) ? 0.55 : 1 }}>{busy ? "Saving…" : `Save ${noun}`}</button>
@@ -3349,6 +3675,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       </div>
       {!r.active && chip("Hidden", "#F1F5F9", "#64748B", "Active is off — not offered in the designer")}
       {r.internalOnly && chip("Internal", "#E2E8F0", "#475569", "Internal Designer only — customers can't add it")}
+      {r.taxable === false && chip("No tax", "#FEF3C7", "#B45309", "Not subject to sales tax — appears under the non-taxable subtotal on quotes and invoices")}
       {r.archived && chip("Archived", "#FEF3C7", "#B45309", "Retired from new builds; still shows on existing designs")}
       <button onClick={() => setEdit({ id: r.id, draft: { ...r } })} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>Edit</button>
       <button onClick={() => quickSave(i, { archived: !r.archived })} disabled={busy}
@@ -3886,6 +4213,14 @@ function ColorsView({ viewingLabel = null }) {
       allow_custom: !!c.allow_custom, is_default: !!c.is_default, active: c.active !== false,
       hex: c.hex || null, pricing_method: c.pricing_method || "each", rate: (c.rate != null ? String(c.rate) : "0"),
       door_rate: (c.door_rate != null ? String(c.door_rate) : "0"),
+      // Sales tax (migration 148): absent reads as taxable, matching the column default.
+      taxable: c.taxable !== false,
+      // ⚠️ THIS MAP IS A WHITELIST AND FORGETTING A FIELD LOOKS LIKE A BROKEN SAVE.
+      // Caught in the browser, not by reading: the code saved to the database correctly and
+      // the server returned it correctly, and it still came back blank on screen, because
+      // every column added to `colors` has to be added in FOUR places -- the migration, the
+      // server's SELECT, the server's write, and here. Three of the four were done.
+      code: c.code || "",
     })));
   };
   useEffect(() => { load(); }, []);
@@ -3897,7 +4232,7 @@ function ColorsView({ viewingLabel = null }) {
     siding: category === "paint", trim: category === "paint",
     shingle: category === "shingle", metal: category === "metal", door: false,
     allow_custom: false, is_default: false, active: true, hex: preset ? preset.hex : null,
-    pricing_method: "each", rate: "0", door_rate: "0",
+    pricing_method: "each", rate: "0", door_rate: "0", taxable: true, code: "",
   }]);
   const removeRow = (gi) => setRows((rs) => rs.filter((_, i) => i !== gi));
   // Swap two rows by their GLOBAL indices (callers pass same-section neighbors to reorder within a section).
@@ -3933,7 +4268,7 @@ Anything not shown here will be removed from their account.`)) return;
         siding: !!r.siding, trim: !!r.trim, shingle: !!r.shingle, metal: !!r.metal, door: !!r.door,
         allowCustom: !!r.allow_custom, isDefault: !!r.is_default, active: r.active !== false,
         sortOrder: i, hex: r.hex || null, pricingMethod: r.pricing_method || "each", rate: numOf(r.rate),
-        doorRate: numOf(r.door_rate),
+        doorRate: numOf(r.door_rate), taxable: r.taxable !== false, code: r.code || "",
       }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_colors", colors } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
@@ -3990,29 +4325,34 @@ Anything not shown here will be removed from their account.`)) return;
                   is the longest at 54px) and clip below that. The Doors + Door price columns
                   (2026-08-24) squeezed name/method further; short checkbox headers (Siding/
                   Trim/Doors) tolerate 5-6% because thc wraps, Custom/Default keep 8%. */}
+              {/* Code (163) came out of swatch/name/method/rate rather than being appended,
+                  so each branch still sums to 100 — 15 columns here, 11 below. */}
               {showST ? (
                 <>
-                  <col style={{ width: "7%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "12%" }} /><col style={{ width: "8%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "7%" }} /><col style={{ width: "5%" }} /><col style={{ width: "10%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "5%" }} /><col style={{ width: "5%" }} /><col style={{ width: "5%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "6%" }} /><col style={{ width: "4%" }} /><col style={{ width: "5%" }} />
                 </>
               ) : (
                 <>
-                  <col style={{ width: "9%" }} /><col style={{ width: "8%" }} /><col style={{ width: "21%" }} />
-                  <col style={{ width: "17%" }} /><col style={{ width: "12%" }} />
-                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "6%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "7%" }} /><col style={{ width: "16%" }} /><col style={{ width: "8%" }} />
+                  <col style={{ width: "14%" }} /><col style={{ width: "11%" }} />
+                  <col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "4%" }} />
                 </>
               )}
             </colgroup>
             <thead><tr>
               <th style={thc}>Order</th><th style={thc}>Swatch</th><th style={thc}>Color name</th>
+              <th style={thc} title="Your short code for this colour. It becomes a segment of every building serial number, e.g. the RE, BL and DW in 0826LBA1016REBLDWS5000.">Code</th>
               {showST && <th style={thc}>Siding</th>}
               {showST && <th style={thc}>Trim</th>}
               {showST && <th style={thc} title="Customers can pick this color for doors set to use paint colors">Doors</th>}
               <th style={thc}>How it’s priced</th><th style={thc}>Rate (USD)</th>
               {showST && <th style={thc} title="Flat $ added per door painted this color — separate from the siding/trim rate">Door price (USD)</th>}
               <th style={thc} title="Lets the customer type their own color instead of picking one">Custom</th>
-              <th style={thc}>Default</th><th style={thc}>Active</th><th style={thc}></th>
+              <th style={thc}>Default</th><th style={thc}>Active</th>
+              <th style={thc} title="Untick if you don’t charge sales tax on this colour’s upcharge. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th>
+              <th style={thc}></th>
             </tr></thead>
             <tbody>
               {entries.map(({ r, gi }, pos) => (
@@ -4027,6 +4367,17 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   <td style={tdc}>
                     <input type="text" value={r.label} placeholder="e.g. Barn Red" onChange={(e) => setRow(gi, "label", e.target.value)} style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box" }} />
+                  </td>
+                  {/* Placeholder SUGGESTS, it never fills. Carolyn: "they might have other
+                      color codes that they want to change it to" — a builder's paper system
+                      already has codes and the app has to match it, not the reverse. Upper-
+                      casing on the way in matches what the server stores, so the field does
+                      not appear to change under you after a save. */}
+                  <td style={tdc}>
+                    <input type="text" value={r.code || ""} maxLength={4}
+                      placeholder={(r.label || "").replace(/[^A-Za-z]/g, "").slice(0, 2).toUpperCase() || "??"}
+                      onChange={(e) => setRow(gi, "code", e.target.value.toUpperCase().slice(0, 4))}
+                      style={{ ...S.input, width: "100%", minWidth: 0, boxSizing: "border-box", textTransform: "uppercase" }} />
                   </td>
                   {showST && <td style={ctr}>{chk(gi, "siding")}</td>}
                   {showST && <td style={ctr}>{chk(gi, "trim")}</td>}
@@ -4052,6 +4403,7 @@ Anything not shown here will be removed from their account.`)) return;
                   </td>
                   <td style={ctr}>{chk(gi, "is_default")}</td>
                   <td style={ctr}>{chk(gi, "active")}</td>
+                  <td style={ctr}>{chk(gi, "taxable")}</td>
                   <td style={ctr}>
                     <button onClick={() => removeRow(gi)} style={S.btn("#FEF2F2", "#DC2626")}>✕</button>
                   </td>

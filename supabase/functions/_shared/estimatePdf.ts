@@ -70,6 +70,35 @@ export interface EstimatePdfInput {
    *  (letterhead, table, totals, terms) is deliberately identical: the SS quote and the SS
    *  invoice describe the same sale and must not drift apart visually or numerically. */
   docKind?: "estimate" | "invoice";
+  /**
+   * Sales tax (migration 127). ABSENT renders the original two-row Subtotal/Total block,
+   * byte for byte — which is what every pre-tax document, and every GHL-mode estimate, still
+   * needs until CRM invoicing is switched off.
+   *
+   * Present, the totals block splits into the two pools tax is charged on and not, with each
+   * discount shown under the pool the rep aimed it at. Every figure here is READ, not derived:
+   * they are the values `_shared/estimateLines.ts::subtotalsFromSnapshot` computed and
+   * submit-estimate stamped into the snapshot, so the document cannot round differently from
+   * the total the customer signed for. See that module for why the pools do not prorate.
+   */
+  tax?: {
+    /** client_settings.ss_tax_label — "Sales tax", "GST", a state name. */
+    label?: string | null;
+    /** Fraction (0.0725), for the display parenthetical only — never to recompute `amount`. */
+    rate?: number | null;
+    /** The tax actually charged. */
+    amount?: number | null;
+    /** "Bibb County, GA" — appended to the tax row when known. */
+    jurisdiction?: string | null;
+    taxableSubtotal?: number | null;
+    nonTaxableSubtotal?: number | null;
+    /** taxableSubtotal minus the taxable discounts — what `amount` was charged on. */
+    taxableBase?: number | null;
+    nonTaxableNet?: number | null;
+  } | null;
+  /** The individual discounts, each under the pool it reduces. Only read when `tax` is set;
+   *  the pre-tax block keeps rendering the single collapsed `discount` row it always has. */
+  discountRows?: { description?: string | null; amount?: number | null; taxable?: boolean }[] | null;
 }
 
 // ── Page metrics (US Letter, points) ─────────────────────────────────────────────────────
@@ -273,9 +302,19 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
   ensureRoom(40); // header + at least one row's worth
   drawTableHeader();
 
+  // Non-taxable rows are marked so a customer can reconcile the two subtotals against the
+  // lines above them. The marker is a plain ASCII "*", NOT a dagger: sanitizeText keeps only
+  // \n, \x20-\x7E and \xA1-\xFF, so U+2020 would render as "?" — and pdf-lib throws on it
+  // outright if it ever reached drawText unsanitized.
+  const taxOn = !!input?.tax;
+  let anyNonTaxable = false;
+
   let subtotal = 0;
   for (const li of lines) {
-    const name = sanitizeText(li?.name).trim() || sanitizeText(li?.itemKey).trim() || "Item";
+    const nonTaxable = taxOn && !!li?.nonTaxable;
+    if (nonTaxable) anyNonTaxable = true;
+    const baseName = sanitizeText(li?.name).trim() || sanitizeText(li?.itemKey).trim() || "Item";
+    const name = nonTaxable ? `${baseName} *` : baseName;
     const desc = sanitizeText(li?.desc).trim();
     const qty = Number(li?.qty) || 0; // 0-qty renders honestly as 0 / $0.00
     const unit = Number(li?.amount) || 0;
@@ -307,8 +346,26 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
 
   // ── Totals ────────────────────────────────────────────────────────────────────────────
   // The whole block moves together — Subtotal on one page and Total on the next reads like
-  // a mistake on a legal-ish document.
-  const totalsH = 8 + 16 + (discount > 0 ? 14 : 0) + 8 + 18;
+  // a mistake on a legal-ish document. So its height is measured BEFORE anything is drawn,
+  // and the taxed variant has a variable number of rows (one per discount, in the pool the
+  // rep aimed it at), which the measure has to account for or the guarantee is gone.
+  const tx = input?.tax ?? null;
+  const dRows = (tx && Array.isArray(input?.discountRows) ? input!.discountRows! : [])
+    .map((r) => ({
+      description: sanitizeText(r?.description).trim(),
+      amount: round2(Math.abs(Number(r?.amount) || 0)),
+      taxable: r?.taxable !== false, // absent reads as taxable — the designer's default
+    }))
+    .filter((r) => r.amount > 0);
+  const nTaxableDisc = dRows.filter((r) => r.taxable).length;
+  const nNonTaxDisc = dRows.length - nTaxableDisc;
+  const num = (v: unknown, fallback = 0) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+
+  const totalsH = tx
+    // taxable subtotal + its discounts + (net row only when a discount moved it) + blank,
+    // then the same for the non-taxable pool, then subtotal + rule + tax + total.
+    ? 8 + 15 * (2 + dRows.length + (nTaxableDisc ? 1 : 0) + (nNonTaxDisc ? 1 : 0)) + 10 + 15 + 8 + 18 + 15
+    : 8 + 16 + (discount > 0 ? 14 : 0) + 8 + 18;
   ensureRoom(totalsH);
   y -= 8;
   const labelRight = COL.amountRight - 100; // labels right-aligned left of the value column
@@ -317,15 +374,74 @@ export async function buildFormalEstimatePdf(input: EstimatePdfInput): Promise<U
     page.drawText(value, { x: COL.amountRight - font.widthOfTextAtSize(value, size), y: y - size, size, font, color });
     y -= size + 5;
   };
-  drawTotalRow("Subtotal", fmtMoney(subtotal), helv, 10);
-  if (discount > 0) drawTotalRow("Discount", fmtMoney(-discount), helv, 10, GRAY);
+  /** A discount, indented under the pool it reduces, named with its reason. */
+  const drawDiscountRow = (r: { description: string; amount: number }) => {
+    const label = r.description ? `Discount - ${r.description}` : "Discount";
+    page.drawText(label, { x: labelRight - helv.widthOfTextAtSize(label, 9) + 10, y: y - 9, size: 9, font: helv, color: GRAY });
+    const v = fmtMoney(-r.amount);
+    page.drawText(v, { x: COL.amountRight - helv.widthOfTextAtSize(v, 9), y: y - 9, size: 9, font: helv, color: GRAY });
+    y -= 14;
+  };
+
+  if (tx) {
+    // The two pools, each showing its own discounts and its own net. Printing the net beside
+    // the discounts is what lets a customer check the tax themselves: the figure the tax row
+    // names as its base is on the page directly above it, not the output of a proration rule
+    // they cannot see (Carolyn 2026-08-27 — "never assume").
+    const taxableSub = num(tx.taxableSubtotal);
+    const nonTaxSub = num(tx.nonTaxableSubtotal);
+    const taxableBase = num(tx.taxableBase, taxableSub);
+    const nonTaxNet = num(tx.nonTaxableNet, nonTaxSub);
+
+    drawTotalRow("Taxable subtotal", fmtMoney(taxableSub), helv, 10);
+    dRows.filter((r) => r.taxable).forEach(drawDiscountRow);
+    if (nTaxableDisc) drawTotalRow("Taxable", fmtMoney(taxableBase), helv, 10);
+
+    y -= 4;
+    drawTotalRow("Non-taxable subtotal", fmtMoney(nonTaxSub), helv, 10);
+    dRows.filter((r) => !r.taxable).forEach(drawDiscountRow);
+    if (nNonTaxDisc) drawTotalRow("Non-taxable", fmtMoney(nonTaxNet), helv, 10);
+
+    y -= 4;
+    drawTotalRow("Subtotal", fmtMoney(round2(taxableBase + nonTaxNet)), helv, 10);
+
+    // "Sales tax (7.25% · Bibb County, GA)". The rate is a LABEL — the amount beside it is the
+    // stored figure the customer signed for, never rate x base recomputed here.
+    const rate = Number(tx.rate);
+    const pct = Number.isFinite(rate) && rate > 0
+      ? `${round2(rate * 100).toString().replace(/\.0+$/, "")}%`
+      : "";
+    const juris = sanitizeText(tx.jurisdiction).trim();
+    const paren = [pct, juris].filter(Boolean).join(" · ");
+    const taxLabel = sanitizeText(tx.label).trim() || "Sales tax";
+    drawTotalRow(paren ? `${taxLabel} (${paren})` : taxLabel, fmtMoney(num(tx.amount)), helv, 10);
+  } else {
+    drawTotalRow("Subtotal", fmtMoney(subtotal), helv, 10);
+    if (discount > 0) drawTotalRow("Discount", fmtMoney(-discount), helv, 10, GRAY);
+  }
   page.drawLine({ start: { x: labelRight - 60, y }, end: { x: COL.amountRight, y }, thickness: 0.8, color: RULE });
   y -= 6;
   // Clamped at >= 0 defensively: the upstream discount clamp should make a negative total
-  // impossible, but a stale snapshot must not print a negative grand total. NOTE: no tax
-  // line — the snapshot carries per-line nonTaxable flags but no tax figure; inventing one
-  // here would disagree with what GHL/QBO compute. The estimate presents pre-tax numbers.
-  drawTotalRow("Total", fmtMoney(Math.max(0, round2(subtotal - discount))), bold, 12);
+  // impossible, but a stale snapshot must not print a negative grand total.
+  //
+  // WITHOUT `tax` this is the pre-tax total it has always been. That is not a rendering
+  // choice — a snapshot with no tax figure IS a pre-tax document, and inventing a tax line
+  // for it here would disagree with whatever computed the number the customer already holds.
+  // With `tax`, the grand total is the pools plus the stored tax amount, which is the same
+  // arithmetic totalFromSnapshot does; the two must agree because the signed consent
+  // sentence quotes one of them and the invoice quotes the other.
+  const grand = tx
+    ? Math.max(0, round2(num(tx.taxableBase, num(tx.taxableSubtotal)) + num(tx.nonTaxableNet, num(tx.nonTaxableSubtotal)) + num(tx.amount)))
+    : Math.max(0, round2(subtotal - discount));
+  drawTotalRow("Total", fmtMoney(grand), bold, 12);
+
+  // The footnote for the "*" markers, drawn only when a line actually wore one.
+  if (anyNonTaxable) {
+    ensureRoom(14);
+    y -= 2;
+    page.drawText("* Not subject to sales tax", { x: MARGIN, y: y - 8, size: 8, font: helv, color: GRAY });
+    y -= 12;
+  }
 
   // ── Terms footer ──────────────────────────────────────────────────────────────────────
   const terms = sanitizeText(input?.quoteTerms).trim();
