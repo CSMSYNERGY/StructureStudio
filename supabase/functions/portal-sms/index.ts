@@ -615,6 +615,16 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
                "Go back, answer yes to the EIN question, and enter it — then submit again.",
       }, 400);
     }
+    if (err instanceof TrustHubError && err.code === 21717) {
+      // ⚠️ NOT A FAULT. Twilio reports a brand APPROVED before it will answer use-case
+      // questions about it, and its own guidance is to pause after brand submission. Hit on
+      // the first live run: the builder had done nothing wrong and was told "Support has been
+      // notified", which is a dead end for something that clears itself in a minute.
+      return json({
+        error: "The carriers have approved your business but need another minute before the campaign can go in. " +
+               "Wait a moment and submit again.",
+      }, 409);
+    }
     if (err instanceof TrustHubError && err.code === 21724) {
       return json({
         error: "This registration has used all three free resubmissions. Support has to take it from here.",
@@ -780,16 +790,36 @@ async function advanceOne(
 
     case "brand_approved": {
       // Stage 5–7: the Messaging Service, then the campaign against the eligible use cases.
-      const svc = reg.messaging_service_sid
-        ? { serviceSid: reg.messaging_service_sid }
-        : await createMessagingService({
-            friendlyName: `${clientId} messaging`,
-            inboundWebhookUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-inbound?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
-            statusCallbackUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-status?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
-          });
+      let svc: { serviceSid: string };
+      if (reg.messaging_service_sid) {
+        svc = { serviceSid: reg.messaging_service_sid };
+      } else {
+        svc = await createMessagingService({
+          friendlyName: `${clientId} messaging`,
+          inboundWebhookUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-inbound?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
+          statusCallbackUrl: `${Deno.env.get("SUPABASE_URL")}/functions/v1/sms-status?key=${Deno.env.get("SMS_INBOUND_SECRET") ?? ""}`,
+        });
+        // ⚠️ WRITE IT DOWN BEFORE ANYTHING ELSE CAN THROW. Everything below this line can
+        // fail, and until 2026-08-31 a failure meant the SID was never persisted, so the next
+        // attempt built a SECOND Messaging Service and abandoned the first. Observed on the
+        // very first live run: MG7ae8… was orphaned with our inbound webhook still on it.
+        // A leaked service is not free of consequence, it is an endpoint pointing at us that
+        // nothing owns.
+        await set({ messaging_service_sid: svc.serviceSid });
+      }
 
       // ⚠️ NEVER HARDCODE THE USE CASE. What a brand may register is only knowable after it
       // is approved, and it varies by brand tier.
+      //
+      // ⚠️ 21717 HERE MEANS "TOO SOON", NOT "BROKEN". Twilio reports the brand APPROVED before
+      // it will answer use-case questions about it, and Twilio's own guidance is to pause
+      // after brand submission for exactly this reason. `advance` is a button, so it does not
+      // wait for next_poll_at the way the lazy sweep does, and a builder clicking straight
+      // through hits this every time. It used to surface as "Support has been notified",
+      // which is a dead end for something that fixes itself in a minute.
+      // 21717 out of here means "too soon" and is translated for the builder by the handler's
+      // catch. Nothing is written, so the row stays brand_approved and a retry reuses the
+      // Messaging Service persisted above.
       const eligible = await fetchEligibleUseCases(svc.serviceSid, reg.brand_sid);
       const wanted = String(p.useCase ?? "");
       const pick = eligible.find((u) => u.code === wanted)
