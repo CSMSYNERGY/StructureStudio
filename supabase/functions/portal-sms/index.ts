@@ -102,6 +102,8 @@ const GATES: GateTable = {
   // Diagnostic: is TWILIO_AUTH_TOKEN the real account auth token? See the branch below for
   // why this cannot be answered any other way.
   check_auth_token: { area: "settings_billing", level: "edit" },
+  // Testing rig. Same bar as submitting, because it changes what submitting DOES.
+  set_mock:        { area: "settings_billing", level: "edit" },
 };
 
 const AUP_TEXT =
@@ -212,6 +214,10 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     campaignStatus: reg?.campaign_status ?? null,
     errors: Array.isArray(reg?.last_errors) ? reg.last_errors : [],
     brandUpdatesLeft: Math.max(0, 3 - Number(reg?.brand_update_count ?? 0)),
+    // ⚠️ ALWAYS PROJECTED, never hidden behind a debug flag. A mock registration looks
+    // identical to a real one right up until a text does not arrive, so the screen has to
+    // say which one it is.
+    mockBrand: !!reg?.mock_brand,
     intake: {
       legalBusinessName: reg?.legal_business_name ?? "",
       einLast4: reg?.ein_last4 ?? "",
@@ -344,6 +350,29 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           updated_at: new Date().toISOString(),
         }).eq("client_id", clientId);
         await note("aup_accepted", {});
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "set_mock": {
+        // ⚠️ ONLY BEFORE ANYTHING IS SUBMITTED. Past `ready` a brand exists at Twilio and is
+        // either mock or not; flipping our row then would make the screen lie about a thing
+        // that can no longer change.
+        const reg = await load();
+        if (!["none", "intake", "aup_pending", "ready"].includes(reg.status)) {
+          return json({ error: "This registration has already been submitted, so it is too late to change that." }, 409);
+        }
+        const want = !!p.mock;
+        const { error } = await admin.from("sms_registrations")
+          .update({ mock_brand: want, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId);
+        if (error) {
+          // Migration 170's trigger is the real authority here, and it raises rather than
+          // returning a row. Translate it instead of leaking a Postgres message.
+          return json({ error: /internal account/i.test(error.message)
+            ? "Test registrations are only available on the internal CSM Synergy account."
+            : "Could not change that just now." }, 400);
+        }
+        await note(want ? "mock_enabled" : "mock_disabled", {});
         return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 
@@ -670,7 +699,16 @@ async function advanceOne(
       // is bought is a refund waiting to happen; a charge taken after, with no hold, is a
       // registration we paid Twilio for and forgot to bill. The idempotency key is the
       // TENANT plus the act — never a timestamp — so a double Submit takes one hold.
-      const held = await takeHold(admin, clientId, "sms_registration", `sms_reg:${clientId}`, userId ?? null);
+      //
+      // ⚠️ A MOCK BRAND COSTS NOTHING AT TWILIO, so it must not be charged for. Internal
+      // accounts are comped and the meters are disarmed, so nothing would land today either
+      // way — but a charging path whose correctness depends on two OTHER switches being off
+      // is one refactor away from billing somebody for a test.
+      const wantMock = reg.mock_brand === true;
+      const held: { ok: true; holdId: number | null } | { ok: false; status: number; body: Record<string, unknown> } =
+        wantMock
+          ? { ok: true, holdId: null }
+          : await takeHold(admin, clientId, "sms_registration", `sms_reg:${clientId}`, userId ?? null);
       if (!held.ok) throw new BillingRefusal(held.status, held.body);
 
       let b;
@@ -679,6 +717,7 @@ async function advanceOne(
           customerProfileBundleSid: reg.customer_profile_sid,
           a2pProfileBundleSid: reg.a2p_profile_sid,
           tier: reg.brand_tier,
+          mock: wantMock,
         });
       } catch (e) {
         // Twilio refused, so nothing was bought. Release the hold rather than capturing it —
@@ -695,11 +734,23 @@ async function advanceOne(
           p_usage: { brand_sid: b.brandSid, tier: reg.brand_tier }, p_ref_id: b.brandSid,
         }).then(() => {}, () => {});
       }
-      await note("brand_registered", { brandSid: b.brandSid, tier: reg.brand_tier });
+      // ⚠️ ASKED FOR A MOCK AND GOT A REAL ONE. That means the parameter was ignored and a
+      // REAL brand now exists, billed, against a business that only meant to test. Say so
+      // loudly rather than letting the bill be the first anyone hears of it.
+      if (wantMock && !b.mock) {
+        await logEdgeError({
+          fn: "portal-sms", clientId, code: "sms_mock_brand_came_back_real",
+          message: `Asked Twilio for a mock brand and it created a REAL one (${b.brandSid}). This has been charged.`,
+          context: { brandSid: b.brandSid, tier: reg.brand_tier },
+        }).catch(() => {});
+      }
+      await note("brand_registered", { brandSid: b.brandSid, tier: reg.brand_tier, mock: b.mock });
       return await set({
         brand_sid: b.brandSid,
         brand_status: normalizeBrandStatus(b.status),
         brand_identity_status: b.identityStatus,
+        // What Twilio SAYS it made, not what we asked for.
+        mock_brand: b.mock,
         status: "brand_pending",
         next_poll_at: soon(30),
       });

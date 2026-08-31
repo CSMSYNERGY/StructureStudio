@@ -396,7 +396,11 @@ export async function registerBrand(opts: {
   customerProfileBundleSid: string;   // BU… from stage 1
   a2pProfileBundleSid: string;        // BU… from stage 2
   tier: "low_volume_standard" | "standard" | "sole_proprietor";
-}): Promise<{ brandSid: string; status: string; identityStatus: string | null }> {
+  /** Register a MOCK brand: free, unvetted, cannot send, deleted by Twilio after 30 days.
+   *  Only ever true for an internal account — the database trigger in migration 170 makes
+   *  that an invariant rather than a convention. */
+  mock?: boolean;
+}): Promise<{ brandSid: string; status: string; identityStatus: string | null; mock: boolean }> {
   const form: Record<string, string> = {
     CustomerProfileBundleSid: opts.customerProfileBundleSid,
     A2PProfileBundleSid: opts.a2pProfileBundleSid,
@@ -409,12 +413,21 @@ export async function registerBrand(opts: {
   // brand $4.50 instead of $46, at the cost of a lower throughput ceiling (2,000 T-Mobile
   // segments/day), which is far above anything a shed builder sends.
   if (opts.tier === "low_volume_standard") form.SkipAutomaticSecVet = "true";
+  // ⚠️ SENT ONLY WHEN TRUE. Twilio documents the default as false, and sending "false"
+  // explicitly would be relying on it parsing the string the way we expect. Absent is the
+  // safer way to say "real".
+  if (opts.mock) form.Mock = "true";
 
   const b = await call("POST", `${MESSAGING}/a2p/BrandRegistrations`, form);
+  // ⚠️ TRUST TWILIO'S ANSWER, NOT OUR REQUEST. The response carries `mock`, so the row
+  // records what was actually created rather than what we asked for. If the parameter were
+  // ever ignored we would have registered a REAL brand while believing otherwise, and the
+  // bill would be the first anyone heard of it.
   return {
     brandSid: String(b?.sid ?? ""),
     status: String(b?.status ?? "PENDING"),
     identityStatus: b?.identity_status ? String(b.identity_status) : null,
+    mock: b?.mock === true,
   };
 }
 

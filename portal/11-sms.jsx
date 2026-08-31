@@ -199,6 +199,21 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
           <h3 style={{ margin: 0, fontSize: 16 }}>Text messaging{viewingLabel ? ` — ${viewingLabel}` : ""}</h3>
           <SmsStatusChip status={status} />
+          {/* ⚠️ A MOCK REGISTRATION IS INDISTINGUISHABLE FROM A REAL ONE until a text fails
+              to arrive. It moves through the same states and reports the same "approved".
+              So it is labelled here, next to the status, and not behind a debug setting.
+              Only an internal account can have one (migration 170 enforces that in the
+              database), so nobody outside CSM Synergy will ever see this. */}
+          {data.mockBrand && (
+            <span title="Registered with Twilio Mock=true: free and unvetted, but it cannot send messages and Twilio deletes it after 30 days."
+              style={{
+                fontSize: 11, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase",
+                color: "#92400E", background: "#FEF3C7", border: "1px solid #FDE68A",
+                borderRadius: 999, padding: "3px 9px",
+              }}>
+              Test registration &middot; cannot send
+            </span>
+          )}
           <button type="button" onClick={() => refresh()} disabled={busy}
             style={{ marginLeft: "auto", background: "none", border: "1px solid #CBD5E1", borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 700, color: "#475569" }}>
             Refresh
