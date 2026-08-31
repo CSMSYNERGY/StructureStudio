@@ -60,10 +60,22 @@ class BillingRefusal extends Error {
   }
 }
 
+// ⚠️ WITHOUT THESE THE WHOLE FEATURE IS DEAD IN A BROWSER, and silently. This function was
+// the ONLY portal-* function that never declared them, so every call from the portal — the
+// preflight included — was blocked by CORS and the Text Messaging panel rendered an empty
+// skeleton forever. Nothing errored server-side, and curl could not see it: curl sends no
+// Origin, so it never triggers a preflight and every hand-test passed. Same values as every
+// sibling; each function declares its own (there is no shared helper to import).
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { ...cors, "Content-Type": "application/json" },
   });
 }
 
