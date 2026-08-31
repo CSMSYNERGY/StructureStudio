@@ -283,6 +283,29 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             </div>
           </SmsField>
 
+          {/* ⚠️ SAY IT THE MOMENT THEY ANSWER NO, not after they have filled fifteen fields.
+              The server refuses this intake (validateIntake), so without this the builder
+              completes the whole form and is turned away at Save — the worst possible place
+              to learn it. Sole proprietor needs a different Twilio chain that is not built:
+              a Starter profile, no EIN fields, and the mobile carried on the brand. */}
+          {hasEin === false && (
+            <div style={{
+              border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 8,
+              padding: "11px 13px", margin: "0 0 14px",
+            }}>
+              <div style={{ fontSize: 13, color: "#92400E", fontWeight: 700, marginBottom: 5 }}>
+                We can&rsquo;t set this up without an EIN yet
+              </div>
+              <div style={{ fontSize: 12.5, color: "#78350F", lineHeight: 1.55 }}>
+                Registering a business with no tax ID goes through a different carrier process,
+                and we haven&rsquo;t built it. If your business does have an EIN, answer
+                &ldquo;Yes&rdquo; above. If it genuinely doesn&rsquo;t, get in touch and
+                we&rsquo;ll tell you where it stands &mdash; please don&rsquo;t fill the rest of
+                this in, it won&rsquo;t save.
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 14px" }}>
             <SmsField label="Legal business name" hint="Exactly as it appears on your IRS letter." wide>
               <input style={SMS_INPUT} value={form.legalBusinessName} disabled={readOnly}

@@ -57,9 +57,14 @@ Deno.test("Inc. and Corp. are caught the same way as LLC", () => {
   }
 });
 
-Deno.test("a genuine unincorporated sole proprietor is allowed through", () => {
+Deno.test("a genuine sole proprietor is refused too — the chain is not built", () => {
+  // This test asserted the OPPOSITE until 2026-08-31, and the change is the point: sole
+  // proprietor needs a Starter profile, no EIN fields and the mobile on the brand, none of
+  // which we send. Letting a clean-looking intake through only meant charging for a
+  // rejection. When the second chain IS built, this test flips back — deliberately.
   const problems = validateIntake({ ...GOOD, legalBusinessName: "Pat Miller Sheds", ein: "" }, false);
-  assertEquals(problems, []);
+  assert(problems.some((p) => /EIN/i.test(p)),
+    `expected an EIN-only refusal, got: ${JSON.stringify(problems)}`);
 });
 
 Deno.test("a free email address is refused — it is a documented rejection cause", () => {

@@ -198,6 +198,25 @@ export function validateIntake(intake: Partial<BuilderIntake>, hasEin: boolean):
     problems.push(
       "This business name looks like a registered company (LLC, Inc. or Corp.), which means it has an EIN. " +
       "Companies with a tax ID cannot register as a sole proprietor — go back and enter the EIN.");
+  } else {
+    // SOLE PROPRIETOR IS NOT BUILT, AND THIS REFUSAL IS WHAT STOPS SOMEBODY PAYING FOR IT.
+    // Verified against Twilio's docs 2026-08-31: sole proprietor is a DIFFERENT CHAIN, not a
+    // flag on this one. It needs a STARTER customer profile (we create a Secondary), the EIN
+    // fields OMITTED (we hardcode business_registration_identifier "EIN"), and the mobile
+    // number carried on the BRAND (we put it on the profile's authorized representative).
+    // Only BrandType branches today, so a no-EIN builder would submit the standard-tier shape
+    // and be rejected — after the registration fee had already been taken.
+    //
+    // The OTP everyone worries about is NOT the problem: Twilio texts the sole proprietor and
+    // they reply within 24 hours, which needs no code from us at all. The chain above it does.
+    //
+    // Refused HERE rather than at the submit step because this function is the one choke point
+    // that save_intake and the ready->submit path BOTH already call, so it cannot be routed
+    // around by a third caller added later.
+    problems.push(
+      "Texting can only be set up for a business that has an EIN at the moment. Registering without " +
+      "one goes through a different carrier process that we have not built yet — if that is your " +
+      "situation, contact support and we will tell you where it stands.");
   }
 
   const site = String(intake.websiteUrl ?? "").trim();
