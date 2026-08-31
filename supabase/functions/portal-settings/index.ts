@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { clientIp } from "../_shared/adminGate.ts";
 import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logError.ts";
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
@@ -195,6 +196,9 @@ const GATES: GateTable = {
   crm_complete_activity: { area: "contacts", level: "edit" },
   crm_save_contact:      { area: "contacts", level: "edit" },
   crm_send_sms:          { area: "contacts", level: "edit" },
+  // Recording that a customer gave permission is a claim about them, so it sits at the
+  // same level as texting them — the people who talk to customers, not everyone.
+  crm_record_consent:    { area: "contacts", level: "edit" },
   // Customer Uploads (migration 151). Signing an upload and deleting a file are writes;
   // the READ rides crm_record, which is already gated above.
   crm_file_sign:         { area: "contacts", level: "edit" },
@@ -3875,6 +3879,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // customer will see. Never the platform's, and never another tenant's.
       from: (smsCfg && smsCfg.sms_status === "active") ? (smsCfg.sms_number ?? null) : null,
       optedOut: !!(contact && contact.sms_opt_out_at),
+      // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
+      // rather than let someone type a message and discover it on Send. Asked as "is there a
+      // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
+      // cannot disagree about who is textable. Revocation is the opt-out above; these are two
+      // separate facts and the UI shows the right sentence for each.
+      consented: !!(contact && contact.phone_digits) && await (async () => {
+        const { data: g } = await admin.from("sms_consent_log")
+          .select("action").eq("client_id", clientId)
+          .eq("phone_digits", contact.phone_digits).eq("action", "granted")
+          .limit(1).maybeSingle();
+        return !!g;
+      })(),
     };
 
     // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
@@ -4047,6 +4063,56 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: out.error ?? "The text could not be sent.", reason: out.reason }, 400);
     }
     return json({ ok: true, id: out.id });
+  }
+
+  // ── Record permission a customer gave in person ───────────────────────────────────
+  // The back catalogue has no consent records — every contact captured before the gate's
+  // checkbox existed is unreachable — and the only lawful ways in are the customer ticking
+  // the box or texting first. This is the third: a human recording permission actually given.
+  //
+  // ⚠️ IT IS AN ATTESTATION, NOT A TOGGLE, and the difference is the whole design. Someone is
+  // asserting that a specific person agreed to be texted, and that assertion is what would be
+  // produced if the claim were ever challenged. So the sentence they agreed to is stored
+  // VERBATIM alongside WHO said it — the same rule the designer gate follows. A one-click
+  // "enable texting" would manufacture evidence, which is worse than having none.
+  if (action === "crm_record_consent") {
+    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : "";
+    if (!contactId) return json({ error: "Which customer?" }, 400);
+    const { data: c } = await admin.from("crm_contacts")
+      .select("id, phone_digits, sms_opt_out_at")
+      .eq("client_id", clientId).eq("id", contactId).maybeSingle();
+    if (!c) return json({ error: "That customer could not be found." }, 404);
+    if (!c.phone_digits) return json({ error: "This customer has no phone number on file." }, 400);
+
+    // ⛔ AN OPT-OUT OUTRANKS THIS, ALWAYS. Someone who replied STOP cannot be put back by a
+    // colleague ticking a box — only they can, by replying START. Refusing loudly here is the
+    // difference between a control and a loophole.
+    if (c.sms_opt_out_at) {
+      return json({
+        error: "This customer replied STOP. Only they can undo that, by replying START to that number.",
+      }, 409);
+    }
+
+    const attestation = payload.attestation ? String(payload.attestation).trim().slice(0, 1000) : "";
+    if (!attestation) return json({ error: "The permission statement is required." }, 400);
+    const note = payload.note ? String(payload.note).trim().slice(0, 500) : "";
+
+    const { error: insErr } = await admin.from("sms_consent_log").insert({
+      client_id: clientId,
+      phone_digits: c.phone_digits,
+      contact_id: c.id,
+      action: "granted",
+      source: "operator",
+      // The attestation IS the disclosure here — what the person recording it certified.
+      disclosure_text: attestation,
+      ip: clientIp(req),
+      user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
+      detail: { recordedBy: userId ?? null, note: note || null },
+    });
+    if (insErr) {
+      return dbFail(req, clientId, "record that permission", insErr);
+    }
+    return json({ ok: true });
   }
 
   if (action === "crm_send_email") {

@@ -1409,6 +1409,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   const [upBusy, setUpBusy] = useState(false);
   const [upMsg, setUpMsg] = useState(null);
   const [textMsg, setTextMsg] = useState(null);
+  // Recording permission a customer gave in person — the third way into the consent record,
+  // alongside the designer gate's checkbox and the customer texting first. Needed because the
+  // back catalogue predates consent entirely and is otherwise unreachable.
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [consentTicked, setConsentTicked] = useState(false);
+  const [consentNote, setConsentNote] = useState("");
   const [act, setAct] = useState({ kind: "call", subject: "", dueAt: "" });
   // Note/activity/focus save failures. sendEmail already reports through mailMsg, but that
   // renders only inside the Email tab — these controls need their own slot, keyed by control
@@ -1619,6 +1625,32 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     setUpBusy(false);
     const fail = (r && r.error) || (error ? await fnError(error) : null);
     if (fail) { setUpMsg({ err: fail }); return; }
+    load();
+  };
+
+  // ⚠️ THE SENTENCE IS THE EVIDENCE. It is stored verbatim as what this person certified, so
+  // it has to read as an assertion someone would stand behind — not UI chrome. Same rule the
+  // designer gate follows for the customer's own tick.
+  const CONSENT_ATTESTATION =
+    "I confirm this customer gave us permission to text them about their quote and building, " +
+    "and that I recorded it accurately.";
+
+  const recordConsent = async () => {
+    if (!consentTicked) return;
+    setBusy(true); setTextMsg(null);
+    const { data: r, error } = await sb.functions.invoke("portal-settings", {
+      body: {
+        action: "crm_record_consent",
+        contactId: (data.contact && data.contact.id) || null,
+        attestation: CONSENT_ATTESTATION,
+        note: consentNote.trim() || undefined,
+      },
+    });
+    setBusy(false);
+    const fail = (r && r.error) || (error ? await fnError(error) : null);
+    if (fail) { setTextMsg({ err: fail }); return; }
+    setConsentOpen(false); setConsentTicked(false); setConsentNote("");
+    setTextMsg({ ok: "Permission recorded." });
     load();
   };
 
@@ -2095,6 +2127,57 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <div style={{ ...S.err, marginBottom: 0 }}>
                     This customer replied STOP, so we can&rsquo;t text them. They can reply START to that
                     same number to opt back in.
+                  </div>
+                ) : (data.sms && !data.sms.consented) ? (
+                  /* ⚠️ NO PERMISSION ON FILE — say so BEFORE they type, not on Send. Every
+                     contact captured before the designer gate had a consent box is in this
+                     state, so for now this is most of the back catalogue. The two routes the
+                     customer can take are named first, because they are the ones that need no
+                     claim from us; recording it by hand is offered last and deliberately
+                     framed as an assertion rather than a switch. */
+                  <div style={{ border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 8, padding: "11px 13px" }}>
+                    <div style={{ fontSize: 13, color: "#92400E", fontWeight: 700, marginBottom: 5 }}>
+                      We don&rsquo;t have permission to text this customer yet
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#78350F", lineHeight: 1.55 }}>
+                      They can switch it on themselves by ticking the texting box on your design
+                      link, or simply by texting you first — either one is recorded automatically.
+                    </div>
+                    {!consentOpen ? (
+                      <button type="button" onClick={() => setConsentOpen(true)}
+                        style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", marginTop: 9 }}>
+                        They already gave permission — record it
+                      </button>
+                    ) : (
+                      <div style={{ marginTop: 10, borderTop: "1px solid #FDE68A", paddingTop: 10 }}>
+                        <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                          <input type="checkbox" checked={consentTicked}
+                            onChange={(e) => setConsentTicked(e.target.checked)}
+                            style={{ marginTop: 2, width: 15, height: 15, flex: "0 0 auto", cursor: "pointer" }} />
+                          <span style={{ fontSize: 12, color: "#78350F", lineHeight: 1.5 }}>
+                            {CONSENT_ATTESTATION}
+                          </span>
+                        </label>
+                        <input value={consentNote} onChange={(e) => setConsentNote(e.target.value)}
+                          maxLength={200}
+                          placeholder="How they gave it — e.g. asked us at the lot on 12 Aug (optional)"
+                          style={{ ...S.input, width: "100%", boxSizing: "border-box", marginTop: 8, fontSize: 12.5 }} />
+                        <div style={{ display: "flex", gap: 8, marginTop: 9, alignItems: "center", flexWrap: "wrap" }}>
+                          <button type="button" style={S.btn(ACCENT, "#FFF")} disabled={busy || !consentTicked}
+                            onClick={recordConsent}>
+                            {busy ? "Recording…" : "Record permission"}
+                          </button>
+                          <button type="button" style={S.btn("#FFF", "#64748B")}
+                            onClick={() => { setConsentOpen(false); setConsentTicked(false); setConsentNote(""); }}>
+                            Cancel
+                          </button>
+                          <span style={{ fontSize: 11, color: "#92400E" }}>
+                            Recorded against your name.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {textMsg && textMsg.err && <div style={{ ...S.err, marginTop: 8, marginBottom: 0 }}>{textMsg.err}</div>}
                   </div>
                 ) : (
                   <>
