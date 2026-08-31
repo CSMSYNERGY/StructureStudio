@@ -572,8 +572,16 @@ export async function fetchCampaign(serviceSid: string): Promise<{ status: strin
  * not as a retry mechanism. The operator flow for a rejection is: fix it in the Console,
  * then re-poll.
  */
-export async function deleteCampaign(serviceSid: string): Promise<void> {
-  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`);
+/** ⚠️ THE CAMPAIGN SID BELONGS ON THE PATH. Without it Twilio answers 405 (code 20004,
+ *  "does not support the attempted HTTP method DELETE"), which reads like a permissions or
+ *  API-version problem rather than a missing path segment. Proven against the live API on
+ *  2026-08-31 while clearing the step-1 test objects; this function had no callers, so the
+ *  wrong URL had never been exercised.
+ *
+ *  Pass the QE… sid the REST API returns, NOT the CM… one from Event Streams — they are
+ *  different SID spaces and the CM sid matches nothing here. */
+export async function deleteCampaign(serviceSid: string, campaignSid: string): Promise<void> {
+  await call("DELETE", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p/${campaignSid}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
