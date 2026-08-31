@@ -45,6 +45,21 @@ import {
 // a representative's mobile. Codes and our own sentences travel; raw detail goes to
 // app_errors, matching portal-settings' dbFail contract.
 
+/** A billing refusal raised inside the staged advance. advanceOne is called behind the
+ *  single-flight lock and its thrown errors are caught by the handler's generic 502 — which
+ *  would turn "your wallet is short $49" into "something went wrong". This carries the real
+ *  status and the authored sentence out intact. */
+class BillingRefusal extends Error {
+  readonly status: number;
+  readonly body: Record<string, unknown>;
+  constructor(status: number, body: Record<string, unknown>) {
+    super(String(body?.error ?? "billing refused"));
+    this.name = "BillingRefusal";
+    this.status = status;
+    this.body = body;
+  }
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -82,6 +97,68 @@ const AUP_TEXT =
   "them, that we will stop when someone asks us to stop, and that we are responsible for " +
   "what we send. I understand our messages are sent under our own business's carrier " +
   "registration and that false information here can get our texting shut off.";
+
+/**
+ * Take a wallet hold before spending, and hand back how to settle it.
+ *
+ * Mirrors the video_3d_generation path in portal-settings — same RPCs, same error names,
+ * same verdicts — because a second, subtly different money path is how two charging
+ * behaviours end up in one product.
+ *
+ * ⚠️ `meter_inactive` IS NOT A FAILURE. It is the ARMING RAIL: migration 169 seeds these
+ * meters inactive so this code can deploy and be watched running FREE, and then one boolean
+ * turns the money on. An inactive meter returns `{ ok: true, holdId: null }` and the caller
+ * proceeds unbilled. Treating it as an error would make arming a code change instead of a
+ * data change, which is the whole point of the rail.
+ *
+ * ⚠️ IDEMPOTENCY IS NOT OPTIONAL HERE. Both callers can be retried — a builder pressing
+ * Submit twice, a lost response on a number purchase — and a hold without an idempotency key
+ * charges twice for one thing. The key is derived from the tenant and the specific act, never
+ * from a timestamp.
+ */
+// deno-lint-ignore no-explicit-any
+async function takeHold(admin: any, clientId: string, kind: string, idem: string, userId: string | null): Promise<
+  { ok: true; holdId: number | null } | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  const { data: hold, error } = await admin
+    .rpc("wallet_hold", { p_client_id: clientId, p_kind: kind, p_idem: idem.slice(0, 120), p_user: userId })
+    .maybeSingle() as { data: any; error: any };
+
+  if (error) {
+    // The meter is unreachable. REFUSE rather than proceed — the alternative is spending real
+    // money at Twilio with no record that we ever intended to charge for it.
+    await logEdgeError({
+      fn: "portal-sms", clientId, code: "wallet_hold_failed",
+      message: `Wallet hold failed, refusing: ${error.message}`, context: { kind },
+    }).catch(() => {});
+    return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now — please try again shortly." } };
+  }
+
+  const err = hold?.err ?? null;
+  if (err === "insufficient_funds") {
+    const price = hold?.price_cents ?? 0;
+    const bal = hold?.balance_after ?? 0;
+    return {
+      ok: false, status: 402,
+      body: {
+        error: `This costs $${(price / 100).toFixed(2)} and your wallet has $${(bal / 100).toFixed(2)}. Add funds in Settings → Billing, then try again.`,
+        code: "insufficient_funds", priceCents: price, balanceCents: bal,
+      },
+    };
+  }
+  if (err === "hold_in_flight") {
+    return { ok: false, status: 409, body: { error: "A charge for this account is already being processed — give it a moment." } };
+  }
+  if (err === "meter_unknown") {
+    await logEdgeError({
+      fn: "portal-sms", clientId, code: "wallet_meter_missing",
+      message: `usage_prices has no ${kind} row`,
+    }).catch(() => {});
+    return { ok: false, status: 503, body: { error: "The billing meter is unavailable right now — please try again shortly." } };
+  }
+  // No error, or `meter_inactive` (the arming rail) — proceed. holdId null means unbilled.
+  return { ok: true, holdId: err ? null : (hold?.hold_id ?? null) };
+}
 
 Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
   // A table-free warm ping, answered BEFORE auth and before the body is read, so it costs
@@ -183,7 +260,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
             .select("*").maybeSingle();
           if (locked) {
             try {
-              reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note);
+              reg = await advanceOne(admin, clientId, locked, {}, Deno.env.get("TWILIO_PRIMARY_PROFILE_SID") ?? "", note, null);
             } catch (e) {
               // A sweep failure must never break the page it was riding on. The builder
               // still gets their status; the next look tries again.
@@ -282,7 +359,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         }
 
         try {
-          const out = await advanceOne(admin, clientId, locked, p, primary, note);
+          const out = await advanceOne(admin, clientId, locked, p, primary, note, userId ?? null);
           return json({ ok: true, ...view(out, await numbersOf()) });
         } finally {
           // Always release, even on failure: a stuck lock parks a builder for five minutes
@@ -325,9 +402,36 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // lost in flight, and buying again would silently rent a second number forever.
         const already = await findPurchasedNumbers(clientId);
         const dupe = already.find((n) => n.phoneNumber === wanted);
-        const bought = dupe ?? await purchaseNumber({
-          phoneNumber: wanted, clientId, messagingServiceSid: reg.messaging_service_sid,
-        });
+
+        // ⚠️ The number bills MONTHLY at Twilio from the moment it is bought, so the first
+        // month is charged here. Idempotent on the tenant + the number, so a retry after a
+        // lost response reconciles to the same hold rather than charging for a second month.
+        //
+        // ⏭ RECURRING IS NOT WIRED. This takes the FIRST month only. There is no pg_cron on
+        // this project, so the monthly charge needs the same lazy-sweep treatment the
+        // registration poller uses — see the work log. Until then a number bills us monthly
+        // and the builder once, which is a known, bounded shortfall rather than a silent one.
+        const heldNum = await takeHold(admin, clientId, "sms_number_monthly", `sms_num:${clientId}:${wanted}`, userId ?? null);
+        if (!heldNum.ok) return json(heldNum.body, heldNum.status);
+
+        let bought;
+        try {
+          bought = dupe ?? await purchaseNumber({
+            phoneNumber: wanted, clientId, messagingServiceSid: reg.messaging_service_sid,
+          });
+        } catch (e) {
+          if (heldNum.holdId) {
+            await admin.rpc("wallet_release", { p_hold_id: heldNum.holdId, p_reason: "number purchase failed" })
+              .then(() => {}, () => {});
+          }
+          throw e;
+        }
+        if (heldNum.holdId) {
+          await admin.rpc("wallet_capture", {
+            p_hold_id: heldNum.holdId, p_cost_cents: null,
+            p_usage: { phone_number: bought.phoneNumber }, p_ref_id: bought.sid,
+          }).then(() => {}, () => {});
+        }
 
         await admin.from("sms_numbers").insert({
           client_id: clientId,
@@ -449,6 +553,9 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         return json({ error: `Unrecognised action "${action}".` }, 400);
     }
   } catch (e) {
+    // A billing refusal is the product declining with a price attached, not a fault. It keeps
+    // its own status and its own sentence rather than being flattened into the 502 below.
+    if (e instanceof BillingRefusal) return json(e.body, e.status);
     const err = e as TrustHubError;
     // Twilio's body can echo the EIN and the representative's mobile. It goes to app_errors,
     // never to the browser.
@@ -490,6 +597,9 @@ async function advanceOne(
   p: Record<string, any>,
   primaryProfileSid: string,
   note: (t: string, d: unknown) => Promise<void>,
+  // Attribution on the wallet hold — who authorised the charge. Null on the lazy sweep,
+  // which is nobody pressing anything; that path never reaches a charging state anyway.
+  userId: string | null,
 ): Promise<any> {
   const set = async (patch: Record<string, unknown>) => {
     await admin.from("sms_registrations")
@@ -537,16 +647,42 @@ async function advanceOne(
     }
 
     case "profile_pending": {
-      // ⚠️ THE MONEY STEP. Guarded by the lock above; reconciled by brand_sid below so a
-      // repeat can never register twice.
+      // ⚠️ THE MONEY STEP, in both senses: Twilio bills us for the brand registration, and
+      // this is where the builder is charged for it. Guarded by the advance lock above and
+      // reconciled by brand_sid below, so a repeat can never register — or charge — twice.
       if (reg.brand_sid) {
         return await set({ status: "brand_pending", next_poll_at: soon(30) });
       }
-      const b = await registerBrand({
-        customerProfileBundleSid: reg.customer_profile_sid,
-        a2pProfileBundleSid: reg.a2p_profile_sid,
-        tier: reg.brand_tier,
-      });
+
+      // ⚠️ HOLD BEFORE SPENDING, CAPTURE AFTER IT SUCCEEDS. A charge taken before the thing
+      // is bought is a refund waiting to happen; a charge taken after, with no hold, is a
+      // registration we paid Twilio for and forgot to bill. The idempotency key is the
+      // TENANT plus the act — never a timestamp — so a double Submit takes one hold.
+      const held = await takeHold(admin, clientId, "sms_registration", `sms_reg:${clientId}`, userId ?? null);
+      if (!held.ok) throw new BillingRefusal(held.status, held.body);
+
+      let b;
+      try {
+        b = await registerBrand({
+          customerProfileBundleSid: reg.customer_profile_sid,
+          a2pProfileBundleSid: reg.a2p_profile_sid,
+          tier: reg.brand_tier,
+        });
+      } catch (e) {
+        // Twilio refused, so nothing was bought. Release the hold rather than capturing it —
+        // the builder must not pay for a registration that does not exist.
+        if (held.holdId) {
+          await admin.rpc("wallet_release", { p_hold_id: held.holdId, p_reason: "brand registration failed" })
+            .then(() => {}, () => {});
+        }
+        throw e;
+      }
+      if (held.holdId) {
+        await admin.rpc("wallet_capture", {
+          p_hold_id: held.holdId, p_cost_cents: null,
+          p_usage: { brand_sid: b.brandSid, tier: reg.brand_tier }, p_ref_id: b.brandSid,
+        }).then(() => {}, () => {});
+      }
       await note("brand_registered", { brandSid: b.brandSid, tier: reg.brand_tier });
       return await set({
         brand_sid: b.brandSid,
