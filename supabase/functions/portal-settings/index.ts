@@ -1241,7 +1241,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
-      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order").eq("client_id", clientId).order("delta_in"),
+      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft").eq("client_id", clientId).order("delta_in"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
@@ -2693,6 +2693,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
 
+    // The widths this style actually sells — used only to collapse an all-ticked list back to
+    // null, so a later-added width is offered automatically rather than needing a re-tick.
+    const szRes = await admin.from("building_sizes").select("width_ft").eq("client_id", clientId).eq("style_id", styleId).eq("active", true);
+    if (szRes.error) return dbFail(req, clientId, "read that style's sizes", szRes.error);
+    const allWidths = [...new Set((szRes.data ?? []).map((z: { width_ft: number }) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((x, y) => x - y);
+
     const exRes = await admin.from("style_wall_heights").select("id").eq("client_id", clientId).eq("style_id", styleId);
     if (exRes.error) return dbFail(req, clientId, "read your current wall heights", exRes.error);
     const existingIds = new Set((exRes.data ?? []).map((r: { id: string }) => String(r.id)));
@@ -2725,12 +2731,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${rateRaw}" is not a usable dollar amount${unchanged}`); i++; continue; }
         ratePerLf = n;
       }
+      // Widths this increase is hauled at. ABSENT / null = every width, and it stays a LIVING
+      // default: a width added to the style later is offered automatically instead of silently
+      // dropping out because nobody re-ticked it. Ticking them ALL collapses back to null for
+      // the same reason — the fixture window-colour contract, migration 119.
+      let widthsFt: number[] | null = null;
+      if (Array.isArray(row?.widthsFt)) {
+        const cleaned = (row.widthsFt as unknown[])
+          .map((w) => Number(w))
+          .filter((w) => Number.isFinite(w) && w > 0);
+        const picked = [...new Set(cleaned)].sort((x, y) => x - y);
+        // All of this style's widths ticked = back to the living default (null), so a width
+        // added to the style later is offered automatically rather than needing a re-tick.
+        widthsFt = (allWidths.length && picked.length === allWidths.length && allWidths.every((w) => picked.includes(w)))
+          ? null : picked;
+      }
       const patch = {
         delta_in: deltaIn,
         rate_per_lf: ratePerLf,
         taxable: row?.taxable !== false,
         active: row?.active !== false,
         sort_order: i,
+        widths_ft: widthsFt,
         updated_at: new Date().toISOString(),
       };
       const res = isExisting

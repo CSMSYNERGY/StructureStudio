@@ -2793,6 +2793,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         ratePerLf: r.rate_per_lf != null ? String(r.rate_per_lf) : "",
         taxable: r.taxable !== false,
         active: r.active !== false,
+        widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null,
       });
     });
     setByStyle(m);
@@ -2802,7 +2803,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   const setRow = (styleId, idx, field, val) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
   const addRow = (styleId) =>
-    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true }] }));
+    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, widthsFt: null }] }));
   const delRow = (styleId, idx) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).filter((_, i) => i !== idx) }));
 
@@ -2832,6 +2833,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             ratePerLf: String(r.ratePerLf == null ? "" : r.ratePerLf).trim(),
             taxable: r.taxable,
             active: r.active,
+            widthsFt: r.widthsFt,
           })),
         }),
       });
@@ -2843,8 +2845,25 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
     setBusyId(null);
   };
 
+  // The widths this style actually sells, from its own sizes.
+  const widthsOf = (styleId) => [...new Set(((cat && cat.sizes) || [])
+    .filter((z) => z.style_id === styleId && z.active !== false)
+    .map((z) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((a, b) => a - b);
+
+  // null means "every width" — ticking one off has to materialise the full list first, or the
+  // living default would be lost the moment a builder unticks a single box.
+  const toggleWidth = (styleId, idx, w, on, all) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => {
+      if (i !== idx) return r;
+      const cur = Array.isArray(r.widthsFt) ? r.widthsFt : all;
+      const next = on ? [...new Set([...cur, w])].sort((a, b) => a - b) : cur.filter((x) => x !== w);
+      // Back to all ticked = back to the living default.
+      return { ...r, widthsFt: (all.length && next.length === all.length) ? null : next };
+    }) }));
+
   const renderSection = (st) => {
     const rows = byStyle[st.id] || [];
+    const widths = widthsOf(st.id);
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
         <div style={S.h2}>{st.label}</div>
@@ -2854,10 +2873,11 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
           </p>
         ) : (
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 620, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "26%" }} /><col style={{ width: "26%" }} /><col style={{ width: "16%" }} /><col style={{ width: "16%" }} /><col style={{ width: "16%" }} /></colgroup>
+            <colgroup><col style={{ width: "16%" }} /><col style={{ width: "18%" }} /><col style={{ width: "32%" }} /><col style={{ width: "12%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /></colgroup>
             <thead><tr>
               <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
+              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. All ticked = every width, including any you add later.">Offered on widths</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={{ ...S.th, textAlign: "center" }}>Active</th>
               <th style={S.th}></th>
@@ -2867,6 +2887,21 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                 <tr key={r.id || ("new-" + i)}>
                   <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
                   <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={S.td}>
+                    {widths.length === 0 ? <span style={{ color: "#94A3B8", fontSize: 12 }}>no sizes yet</span> : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {widths.map((w) => {
+                          const on = !Array.isArray(r.widthsFt) || r.widthsFt.indexOf(w) !== -1;
+                          return (
+                            <label key={w} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                              <input type="checkbox" checked={on} onChange={(e) => toggleWidth(st.id, i, w, e.target.checked, widths)} style={{ width: 14, height: 14, cursor: "pointer", accentColor: DOOR_MINT }} />
+                              {w}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
@@ -2891,7 +2926,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         style carries its own list. The customer picks <b>one</b> increase for the whole building
         and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
         lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
-        offering it yet.
+        offering it yet. Tick the <b>widths</b> each increase can be hauled at — a wider building
+        already has a taller roof, so a narrow one can take more; all ticked means every width,
+        including any you add later.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}

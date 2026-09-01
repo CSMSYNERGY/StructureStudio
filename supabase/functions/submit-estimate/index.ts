@@ -629,11 +629,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       return json({ error: `Cannot price a wall-height upgrade: the style "${style}" is not in your catalog.` }, 400);
     }
     const whRes = await supabase.from("style_wall_heights")
-      .select("delta_in, rate_per_lf, taxable, active")
+      .select("delta_in, rate_per_lf, taxable, active, widths_ft")
       .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn).maybeSingle();
-    const wh = whRes.data as { rate_per_lf: number | null; taxable: boolean | null; active: boolean } | null;
+    const wh = whRes.data as { rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null } | null;
     if (whRes.error || !wh || !wh.active || wh.rate_per_lf == null) {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
+    }
+    // Offered on this WIDTH? Total haul height is wall + roof and the roof grows with width, so
+    // an increase legal on an 8 wide can be illegal on a 14. The browser already filters the
+    // picker, but this is the check that counts: the payload is attacker-controlled, and a
+    // building that cannot be hauled is not a quote we can honour. NULL widths_ft = every width.
+    if (Array.isArray(wh.widths_ft) && !wh.widths_ft.some((w) => Number(w) === buildingWidthFt)) {
+      return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't available on a ${buildingWidthFt} ft wide "${styleLabel}" — taller walls are limited by width for hauling. Choose standard height or a narrower building.` }, 400);
     }
     const whRate = Number(wh.rate_per_lf) || 0;
     targetItems.push(tagLine({

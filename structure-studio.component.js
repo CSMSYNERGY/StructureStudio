@@ -886,9 +886,9 @@ function ssAllowedOrigin(origin) {
 // on a style that offers no increases. The two are mutually exclusive — picking one clears the
 // other — so "last thing the customer touched" always wins instead of one silently shadowing
 // the other. Clamped to the same 5-14 ft band _shared/styleD3.ts enforces server-side.
-function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel) {
+function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
   const d = Number(sel && sel.wallHeightDeltaIn) || 0;
-  if (d > 0 && resolveWallHeight(C, styleKey, d)) {
+  if (d > 0 && resolveWallHeight(C, styleKey, d, widthFt)) {
     const o = (styleCfg && styleCfg.d3) || {};
     const base = Number(o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || (C && C.wallHeightFt) || 8) || 8;
     return Math.max(5, Math.min(14, base + d / 12));
@@ -896,15 +896,33 @@ function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel) {
   return (sel && sel.wallHeight) || 0;
 }
 
-function wallHeightOptionsFor(C, styleKey) {
+// An increase is only offered on the WIDTHS it can be hauled at: total haul height is wall +
+// roof and the roof grows with width, so a narrow building has headroom a wide one does not
+// (Carolyn 2026-09-01 — "you can increase the wall height more on an 8 wide than a 16 wide").
+// ABSENT widthsFt means every width, and it is a LIVING default: a width added to the style
+// later is offered automatically, rather than silently dropping out because nobody re-ticked
+// it. Same contract as a fixture's window colours.
+function wallHeightFitsWidth(opt, widthFt) {
+  if (!opt) return false;
+  const w = Number(widthFt) || 0;
+  if (!Array.isArray(opt.widthsFt)) return true;
+  return opt.widthsFt.some((x) => Number(x) === w);
+}
+function wallHeightOptionsFor(C, styleKey, widthFt) {
   const m = (C && C.wallHeightOptions) || {};
   const list = styleKey ? m[styleKey] : null;
-  return Array.isArray(list) ? list : [];
+  if (!Array.isArray(list)) return [];
+  // widthFt omitted = "what does this style offer at all", which is what the portal and the
+  // tests ask. A designer always passes the building's real width.
+  return widthFt === undefined ? list : list.filter((o) => wallHeightFitsWidth(o, widthFt));
 }
-function resolveWallHeight(C, styleKey, deltaIn) {
+function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
   const d = Number(deltaIn) || 0;
   if (d <= 0) return null;
-  return wallHeightOptionsFor(C, styleKey).find((o) => Number(o.deltaIn) === d) || null;
+  const hit = wallHeightOptionsFor(C, styleKey).find((o) => Number(o.deltaIn) === d) || null;
+  if (!hit) return null;
+  // A pick that no longer fits the building prices NOTHING, matching the server's refusal.
+  return widthFt === undefined || wallHeightFitsWidth(hit, widthFt) ? hit : null;
 }
 
 function computeSelectionRows(sel, paintColors, C, items) {
@@ -1043,7 +1061,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
   rows.push({ key: "building", label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null });
   // Taller walls sit directly under the building because that is what they change. A selection
   // charge, so it is NOT in LAYOUT_PRICE_ORDER and never touches the inclusion machinery.
-  const whOpt = resolveWallHeight(C, styleKey, sel && sel.wallHeightDeltaIn);
+  const whOpt = resolveWallHeight(C, styleKey, sel && sel.wallHeightDeltaIn, bW);
   if (whOpt) {
     const whRate = Number(whOpt.ratePerLf) || 0;
     rows.push({
@@ -7448,6 +7466,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     setShedW(p.w); setShedH(p.h);
     prevSizeRef.current = sel.size;
+    // A wall-height increase is offered per WIDTH (hauling), so a size change can take the
+    // customer's pick away. Drop it back to Standard and SAY SO — carrying it silently would
+    // quote a building that cannot legally leave the lot, and removing it silently would move
+    // their total with no explanation.
+    const curDelta = Number(sel.wallHeightDeltaIn) || 0;
+    if (curDelta > 0 && !resolveWallHeight(C, sel.style, curDelta, p.w)) {
+      setSel((s) => ({ ...s, wallHeightDeltaIn: 0 }));
+      setToast(`A ${curDelta}" wall-height increase isn't available on a ${p.w} ft wide building — set back to standard height.`);
+      setTimeout(() => setToast(null), 6000);
+    }
   }, [sel.size]);
 
   // Snap a loaded layout back onto legal positions. Designs saved before the size-change
@@ -9735,7 +9763,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
           painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
           scale, mgX, mgY,
-          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel)),
+          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW)),
           roofType: sel.roofType,
           roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
           fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
@@ -11177,7 +11205,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // Wall height — only when THIS style offers increases (hauling limits differ per
                 // style, so the list is per-style and most styles have none). Standard is always
                 // the first choice and always re-selectable.
-                const whList = wallHeightOptionsFor(C, sel.style);
+                const whList = wallHeightOptionsFor(C, sel.style, bldgW);
                 if (!whList.length) return null;
                 const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
                 const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
@@ -11948,7 +11976,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel))}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -12727,7 +12755,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel))}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}

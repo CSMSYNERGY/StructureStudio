@@ -16,7 +16,7 @@ const SRC = await Deno.readTextFile(
   new URL("../../../../structure-studio.component.js", import.meta.url),
 );
 
-const START = "function wallHeightOptionsFor(C, styleKey) {";
+const START = "function wallHeightFitsWidth(opt, widthFt) {";
 const END = "function computeSelectionRows(";
 const i = SRC.indexOf(START);
 const j = SRC.indexOf(END, i);
@@ -27,22 +27,24 @@ if (i < 0 || j < 0) {
   );
 }
 const BLOCK = SRC.slice(i, j);
-for (const name of ["wallHeightOptionsFor", "resolveWallHeight"]) {
+for (const name of ["wallHeightFitsWidth", "wallHeightOptionsFor", "resolveWallHeight"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
 const { wallHeightOptionsFor, resolveWallHeight } = new Function(
-  `${BLOCK}; return { wallHeightOptionsFor, resolveWallHeight };`,
+  `${BLOCK}; return { wallHeightFitsWidth, wallHeightOptionsFor, resolveWallHeight };`,
 )() as {
-  wallHeightOptionsFor: (C: unknown, k: string) => { deltaIn: number; ratePerLf: number | null }[];
-  resolveWallHeight: (C: unknown, k: string, d: unknown) => { deltaIn: number; ratePerLf: number | null } | null;
+  wallHeightOptionsFor: (C: unknown, k: string, w?: number) => { deltaIn: number; ratePerLf: number | null }[];
+  resolveWallHeight: (C: unknown, k: string, d: unknown, w?: number) => { deltaIn: number; ratePerLf: number | null } | null;
 };
 
 // get_config's shape after migration 172: keyed by style, offered heights only.
 const C = {
   showPricing: true,
   wallHeightOptions: {
-    lofted: [{ deltaIn: 6, ratePerLf: 2 }, { deltaIn: 12, ratePerLf: 8 }],
+    // +12in is hauled only on the narrow widths; +6in carries no widthsFt at all, which means
+    // EVERY width and keeps meaning that when a new width is added to the style later.
+    lofted: [{ deltaIn: 6, ratePerLf: 2 }, { deltaIn: 12, ratePerLf: 8, widthsFt: [8, 10] }],
     utility: [],
   },
 };
@@ -104,4 +106,36 @@ Deno.test("legacy 3D absolute pick is not a delta and prices nothing", () => {
   const legacySel = { wallHeight: 9 };
   assertEquals(resolveWallHeight(C, "lofted", (legacySel as { wallHeightDeltaIn?: number }).wallHeightDeltaIn), null);
   assertFalse(!!resolveWallHeight(C, "lofted", undefined));
+});
+
+Deno.test("an increase is only offered on the widths it can be hauled at", () => {
+  // Carolyn 2026-09-01: "you can increase the wall height more on an 8 wide than a 16 wide and
+  // still remain in the height range for hauling." Total haul height is wall + roof, and the
+  // roof grows with width.
+  assertEquals(wallHeightOptionsFor(C, "lofted", 8).map((o) => o.deltaIn), [6, 12]);
+  assertEquals(wallHeightOptionsFor(C, "lofted", 10).map((o) => o.deltaIn), [6, 12]);
+  assertEquals(wallHeightOptionsFor(C, "lofted", 12).map((o) => o.deltaIn), [6]);
+  assertEquals(wallHeightOptionsFor(C, "lofted", 14).map((o) => o.deltaIn), [6]);
+});
+
+Deno.test("a pick that no longer fits the building prices nothing", () => {
+  // The customer picked +12in on an 8 wide, then switched to a 14 wide. The browser drops it and
+  // says so; this pins that it also stops PRICING, so a stale pick can never ride into a quote.
+  assertEquals(resolveWallHeight(C, "lofted", 12, 8)?.ratePerLf, 8);
+  assertEquals(resolveWallHeight(C, "lofted", 12, 14), null);
+  assertEquals(resolveWallHeight(C, "lofted", 6, 14)?.ratePerLf, 2, "an unrestricted increase still fits");
+});
+
+Deno.test("absent widthsFt is a LIVING default, not a snapshot", () => {
+  // +6in lists no widths, so a width the builder adds to the style tomorrow is offered
+  // automatically. Storing the width list eagerly would silently drop new sizes instead.
+  for (const w of [8, 10, 12, 14, 16, 20]) {
+    assert(resolveWallHeight(C, "lofted", 6, w), `+6in should be offered at ${w} ft`);
+  }
+});
+
+Deno.test("omitting the width asks what the style offers AT ALL", () => {
+  // The portal editor and the estimate-side lookup both want the full list, not a filtered one.
+  assertEquals(wallHeightOptionsFor(C, "lofted").length, 2);
+  assertEquals(resolveWallHeight(C, "lofted", 12)?.ratePerLf, 8);
 });
