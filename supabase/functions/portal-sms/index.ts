@@ -16,6 +16,7 @@ import {
   fetchEligibleUseCases,
   createCampaign,
   fetchCampaign,
+  deleteCampaign,
   searchAvailableNumbers,
   purchaseNumber,
   findPurchasedNumbers,
@@ -98,6 +99,9 @@ const GATES: GateTable = {
   // (it discovers `action === "x"`, not `switch`), so omitting a line here is a runtime 403
   // that reads like a broken feature, with no push-time warning at all.
   save_copy:       { area: "settings_billing", level: "edit" },
+  // Clears a REJECTED campaign so the copy can be fixed and tried again. The delete itself
+  // costs nothing; the spend is the `advance` one press later, which carries its own gate.
+  retry_campaign:  { area: "settings_billing", level: "edit" },
   // ⚠️ SPENDS MONEY.
   advance:         { area: "settings_billing", level: "edit" },
   search_numbers:  { area: "settings_billing", level: "edit" },
@@ -260,6 +264,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     campaignStatus: reg?.campaign_status ?? null,
     errors: Array.isArray(reg?.last_errors) ? reg.last_errors : [],
     brandUpdatesLeft: Math.max(0, 3 - Number(reg?.brand_update_count ?? 0)),
+    campaignRetriesLeft: Math.max(0, 3 - Number(reg?.campaign_attempt_count ?? 0)),
     // ⚠️ ALWAYS PROJECTED, never hidden behind a debug flag. A mock registration looks
     // identical to a real one right up until a text does not arrive, so the screen has to
     // say which one it is.
@@ -407,6 +412,78 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           updated_at: new Date().toISOString(),
         }).eq("client_id", clientId);
         await note("aup_accepted", {});
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "retry_campaign": {
+        // ── THE WAY OUT OF campaign_failed ────────────────────────────────────────────────
+        // Until 2026-09-01 there was none: no branch here, no button, and deleteCampaign() had
+        // no callers anywhere. A builder whose campaign the carriers rejected was told "we have
+        // been notified and will be in touch" and could do nothing — which is the same shape as
+        // the profile_pending dead end, one stage later.
+        //
+        // ⚠️ THIS DELETES, IT DOES NOT RESUBMIT, AND THAT IS FORCED BY TWILIO. The Usa2p
+        // resource has NO update operation, so the rejected copy is immutable — Twilio still
+        // holds whatever was sent, and fixing our own row changes nothing there. The only
+        // remedy is to destroy the campaign and build a new one.
+        //
+        // ⚠️ IT DOES NOT CREATE THE REPLACEMENT EITHER. It drops the row back to
+        // `brand_approved`, which is the state whose card now renders the copy form pre-filled
+        // from the database. That is deliberate: a campaign is rejected because of what it SAID,
+        // so handing the builder the same text and resubmitting it unchanged would just buy the
+        // same refusal again. They edit, then press Continue, and that press is the existing
+        // `advance` with its existing gate and its existing validation.
+        const reg = await load();
+        if (reg.status !== "campaign_failed") {
+          return json({ error: "There is no rejected campaign to clear." }, 409);
+        }
+        // Mirrors the brand path's three free resubmissions. The retry is free; the Continue it
+        // unlocks is a real billed campaign submission, so the cap is a SPEND limit.
+        if (Number(reg.campaign_attempt_count ?? 0) >= 3) {
+          return json({ error: "This registration has used its three retries. Contact support so we can look at it with you." }, 409);
+        }
+        if (!trustHubConfigured()) {
+          return json({ error: "Texting is not switched on for this platform yet." }, 503);
+        }
+
+        // Best effort, and deliberately so. If the campaign is already gone at Twilio — deleted
+        // by hand in the console, or reaped — a 404 here must not trap the builder in the exact
+        // state this action exists to clear. Anything else is reported, because silently losing
+        // a delete would leave an orphan attached to the brand.
+        if (reg.campaign_sid && reg.messaging_service_sid) {
+          try {
+            await deleteCampaign(reg.messaging_service_sid, reg.campaign_sid);
+          } catch (e) {
+            const err = e as TrustHubError;
+            if (err?.status !== 404) {
+              await logEdgeError({
+                fn: "portal-sms", clientId, code: "campaign_delete_failed",
+                message: `retry_campaign could not delete ${reg.campaign_sid}: ${err?.message}`,
+                context: { status: err?.status ?? 0, code: err?.code ?? 0 },
+              }).catch(() => {});
+              return json({ error: "The carriers would not release the old submission just now. Try again shortly." }, 502);
+            }
+          }
+        }
+
+        await note("campaign_retry", {
+          deletedCampaignSid: reg.campaign_sid ?? null,
+          attempt: Number(reg.campaign_attempt_count ?? 0) + 1,
+        });
+        await admin.from("sms_registrations").update({
+          campaign_sid: null,
+          campaign_cm_sid: null,
+          campaign_status: null,
+          campaign_attempt_count: Number(reg.campaign_attempt_count ?? 0) + 1,
+          last_errors: [],
+          needs_attention: false,
+          attention_note: null,
+          // Back to the state that renders the copy form. The messaging service is KEPT: it is
+          // reusable, and minting a second one is the orphan bug a2d3e33 already fixed once.
+          status: "brand_approved",
+          next_poll_at: new Date(Date.now() + 60_000).toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
         return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 

@@ -680,14 +680,68 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       )}
 
       {/* A campaign rejection cannot be retried from here — see the server. */}
+      {/* ── A rejected campaign, and the way out of it ────────────────────────────────────
+          This card used to say "we have been notified and will be in touch" and offer NOTHING —
+          no button here, no branch in portal-sms, and deleteCampaign() had no callers anywhere.
+          That stranded the first real rejection exactly the way profile_pending did, one stage
+          later, and the promise of a human had no mechanism behind it.
+
+          ⚠️ THE ERRORS ARE THE POINT OF THIS SCREEN. A campaign is refused for a NAMED reason —
+          usually the copy below, sometimes something on the builder's own website — and
+          resubmitting the same text buys the same refusal at full price. So the reasons are
+          shown verbatim, and clearing the rejection deliberately drops back to the step that
+          renders the copy form rather than resubmitting anything. */}
       {status === "campaign_failed" && (
         <div style={card}>
-          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>We need to fix this for you</h4>
-          <p style={{ margin: 0, fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-            The carriers rejected the description of how you will use texting. This one has to
-            be corrected by us directly rather than resubmitted — we have been notified and
-            will be in touch.
+          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>The carriers turned this one down</h4>
+          <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+            They told us why. Fix what they named, then start the last step again.
           </p>
+
+          {(data.errors || []).length > 0 && (
+            <ul style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
+              {(data.errors || []).map((e, i) => (
+                <li key={i}>
+                  {e.description || String(e)}
+                  {e.fields && e.fields.length > 0 && (
+                    <span style={{ color: "#64748B" }}> — they looked at: {e.fields.join(", ")}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {readOnly ? (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              An owner — or an admin with billing access — can clear this and try again from
+              Settings &rarr; Text Messaging.
+            </div>
+          ) : data.campaignRetriesLeft < 1 ? (
+            <div style={{ fontSize: 12.5, color: "#92400E", lineHeight: 1.5 }}>
+              This registration has used its three tries. Contact support and we will look at it
+              with you rather than spending another submission.
+            </div>
+          ) : (
+            <>
+              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
+                Clearing this costs nothing. It takes you back to the last step with your wording
+                on screen so you can change it — sending it again is what costs.{" "}
+                <strong>{data.campaignRetriesLeft}</strong>{" "}
+                {data.campaignRetriesLeft === 1 ? "try" : "tries"} left.
+              </div>
+              <button type="button" disabled={busy}
+                onClick={() => {
+                  if (!window.confirm(
+                    "Clear this rejected submission? The old one is withdrawn from the "
+                    + "carriers and cannot be brought back. You will go back to the last "
+                    + "step, where you can change your wording before sending it again.")) return;
+                  act(() => call("retry_campaign"));
+                }}
+                style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+                {busy ? "Clearing…" : "Clear it and let me try again"}
+              </button>
+            </>
+          )}
         </div>
       )}
 
