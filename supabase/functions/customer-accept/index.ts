@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
+import { phoneKey } from "../_shared/phoneKey.ts";
 import { amountOwed, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
@@ -128,16 +129,9 @@ const fmtMoney = (n: number): string => {
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
 
-/** Canonical last-10-digits phone form for the ownership compares. The session identity is
- *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
- *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
- *  and refused a verified customer their own signature (fails closed, but wrongly). Strips
- *  exactly one leading US "1" from an 11-digit string; nothing looser — any other shape
- *  compares as-is. Compare-only: the stored phone_digits evidence stays the raw identity. */
-function phoneKey(value: unknown): string {
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-}
+// phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
+// three private copies of the check that decides whether a stranger can read, sign or PAY
+// someone else's invoice is how one of them drifts. Behaviour is unchanged.
 
 const MAX_SIGNATURE_BYTES = 300 * 1024;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];

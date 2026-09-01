@@ -150,6 +150,19 @@ verify_jwt = true
 # contact phone matches the session's verified phone. SS-mode tenants only.
 verify_jwt = true
 
+[functions.customer-pay]
+# The customer paying their builder's invoice (migration 174). Same auth story as
+# customer-accept: the anon key passes the gateway, so verify_jwt is NOT the auth — the
+# customer_sessions token is, and on top of it the ownership compare against the design's
+# contact phone. SS-mode tenants only, and only once the invoice is signed.
+verify_jwt = true
+
+[functions.portal-payments]
+# The builder charging a card from the Orders tab (migration 174). JWT-authenticated like
+# every other portal-* function: resolveTenant resolves a real user through client_users
+# and checks its GATES table, and client_id is never read from the body.
+verify_jwt = true
+
 [functions.qbo-oauth-connect]
 # Starting an OAuth flow attaches a QuickBooks company to a tenant — an owner/admin action.
 verify_jwt = true

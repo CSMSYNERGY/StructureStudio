@@ -486,6 +486,62 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       return "$" + n.toFixed(2);
     }
   }
+  // Every figure the pay block prints, derived in ONE place and kept PURE so preflight can
+  // lift it out of the shipped file and execute it against fixtures (see
+  // checkMyQuotesPayFigures in scripts/preflight.mjs). This page is not compiled, not
+  // eslinted and unknown to deno check — its tax block is covered the same way for exactly
+  // this reason, and a pay panel is strictly more money than a tax line.
+  //
+  // Takes CENTS (what customer-pay speaks) and returns display strings via fmtMoney, which
+  // takes DOLLARS. That conversion happens here, once.
+  function payFigures(opt) {
+    var out = { rows: [], askCents: 0, canPay: false, notice: null, noticeTone: "info" };
+    if (!opt) return out;
+    var settled = opt.settledCents || 0;
+    var pending = opt.pendingCents || 0;
+    var bal = (opt.balanceCents === null || opt.balanceCents === undefined) ? null : opt.balanceCents;
+    var deposit = (opt.depositCents === null || opt.depositCents === undefined) ? null : opt.depositCents;
+
+    if (bal !== null && bal <= 0 && pending <= 0) {
+      out.rows.push({ label: "Paid in full", value: fmtMoney(settled / 100), tone: "good" });
+      return out;
+    }
+    // A bank payment that has not funded is NOT money, and the ask is deliberately not
+    // reduced by it — that would look like credit for money nobody has. The button is
+    // removed instead: the way a customer pays twice is by being shown one that still says
+    // they owe it.
+    if (pending > 0) {
+      out.notice = "Bank transfer submitted — clearing. Nothing more to do.";
+      out.noticeTone = "wait";
+      if (bal !== null) out.rows.push({ label: "Balance", value: fmtMoney(bal / 100), tone: "muted" });
+      return out;
+    }
+    if (!opt.canPay) {
+      out.notice = opt.message || null;
+      if (bal !== null && bal > 0) out.rows.push({ label: "Balance", value: fmtMoney(bal / 100), tone: "muted" });
+      return out;
+    }
+    out.canPay = true;
+    out.askCents = opt.askCents || 0;
+    if (opt.askKind === "deposit") {
+      out.rows.push({ label: "Due now", value: fmtMoney(out.askCents / 100), tone: "big" });
+      if (bal !== null) {
+        out.rows.push({
+          label: settled > 0 ? "Paid so far" : "Invoice total",
+          value: fmtMoney((settled > 0 ? settled : bal) / 100),
+          tone: "muted",
+        });
+      }
+      if (deposit !== null && settled > 0) {
+        out.rows.push({ label: "Balance after this", value: fmtMoney((bal - out.askCents) / 100), tone: "muted" });
+      }
+    } else {
+      out.rows.push({ label: settled > 0 ? "Balance" : "Amount due", value: fmtMoney(out.askCents / 100), tone: "big" });
+      if (settled > 0) out.rows.push({ label: "Paid so far", value: fmtMoney(settled / 100), tone: "muted" });
+    }
+    return out;
+  }
+
   function fmtDate(v) {
     if (!v) return null;
     var d = new Date(v);
@@ -722,6 +778,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var sgnDate = fmtDate(inv.signedAt);
       sgn.textContent = "Invoice signed ✓" + (sgnDate ? " · " + sgnDate : "");
       card.appendChild(sgn);
+      // ...and this is where the road used to end. A signed invoice with money outstanding
+      // is the open action, so it takes the position invoiceBlock had.
+      card.appendChild(payBlock(q));
     } else if (inv) {
       card.appendChild(invoiceBlock(q, inv));
     }
@@ -818,6 +877,239 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   // The invoice awaiting signature, rendered inside its quote's card (migration 136).
   // Green rather than the change order's amber: this is the expected happy path, not a
   // complication — the customer accepted, the builder billed, one signature closes it.
+  // ── Paying (migration 174) ──────────────────────────────────────────────────────────
+  // Renders lazily: the figures and the tokenizer URL both come from the server, because
+  // what is payable is a server decision (deposit vs balance, the pending-ACH block, the
+  // signature gate) and because this repo is PUBLIC — no CardPointe host may appear in a
+  // file a customer downloads.
+  function payBlock(q) {
+    var box = document.createElement("div");
+    box.style.cssText = "margin-top:12px;border:1px solid #BFDBFE;background:#EFF6FF;border-radius:10px;padding:12px";
+    var status = document.createElement("div");
+    status.style.cssText = "font-size:13px;color:#475569";
+    status.textContent = "Checking what's left to pay…";
+    box.appendChild(status);
+
+    callFn("customer-pay", { action: "pay_options", token: token, quoteRef: q.quoteRef })
+      .then(function (r) {
+        if (invalidSession(r)) { box.textContent = ""; return; }
+        if (!r.ok || !r.data || r.data.error) {
+          // A tenant who has not switched payments on simply has no pay surface, rather
+          // than one that sits there failing.
+          box.textContent = "";
+          return;
+        }
+        renderPay(box, q, r.data);
+      })
+      .catch(function () { box.textContent = ""; });
+    return box;
+  }
+
+  function renderPay(box, q, opt) {
+    box.textContent = "";
+    var fig = payFigures(opt);
+
+    for (var i = 0; i < fig.rows.length; i++) {
+      var row = fig.rows[i];
+      var line = document.createElement("div");
+      line.className = row.tone === "big" ? "qc-tax-total" : "qc-tax-row";
+      line.style.cssText = "display:flex;justify-content:space-between;gap:12px;" +
+        (row.tone === "big" ? "font-size:17px;font-weight:800;color:#0F172A;margin-bottom:2px" : "font-size:13px;color:#475569");
+      var l = document.createElement("span"); l.textContent = row.label;
+      var v = document.createElement("span");
+      v.style.cssText = "font-variant-numeric:tabular-nums;font-weight:" + (row.tone === "big" ? "800" : "700");
+      v.textContent = row.value || "—";
+      line.appendChild(l); line.appendChild(v);
+      box.appendChild(line);
+    }
+
+    if (fig.notice) {
+      var n = document.createElement("div");
+      n.style.cssText = "font-size:13px;margin-top:8px;line-height:1.45;color:" +
+        (fig.noticeTone === "wait" ? "#92400E" : "#475569");
+      n.textContent = fig.notice;
+      box.appendChild(n);
+      if (fig.noticeTone === "wait") {
+        var sub = document.createElement("div");
+        sub.style.cssText = "font-size:12px;color:#64748B;margin-top:4px;line-height:1.45";
+        sub.textContent = "Bank transfers take 2–3 business days. If it doesn't go through we'll let you know and you can try again.";
+        box.appendChild(sub);
+      }
+    }
+    if (!fig.canPay) return;
+
+    // A standing disclaimer BEFORE the card is entered, because whether a fee applies
+    // cannot be known until the card is — the brands forbid surcharging debit. It also
+    // points at the cheaper rail, which is in everyone's interest.
+    var disc = document.createElement("div");
+    disc.style.cssText = "font-size:12px;color:#64748B;margin-top:8px;line-height:1.45";
+    disc.textContent = "A card fee may apply. Paying by bank transfer or debit card avoids it.";
+    box.appendChild(disc);
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-primary";
+    btn.style.cssText = "width:100%;margin-top:10px;font-size:15px;padding:12px 14px";
+    btn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+    btn.addEventListener("click", function () { openPayPanel(box, q, opt, fig, btn); });
+    box.appendChild(btn);
+  }
+
+  function openPayPanel(box, q, opt, fig, btn) {
+    // Toggle, the same idiom as the accept and sign panels — this page has no modal
+    // pattern, and a fixed overlay plus a mobile keyboard plus an iframe is the layout
+    // that traps a customer with no visible way out.
+    var open = box.querySelector(".sign-panel");
+    if (open) { open.parentNode.removeChild(open); btn.textContent = "Pay " + fmtMoney(fig.askCents / 100); return; }
+    btn.textContent = "Cancel";
+
+    var panel = document.createElement("div");
+    panel.className = "sign-panel";
+    panel.style.cssText = "margin-top:12px";
+
+    var rail = "card";
+    var tabs = document.createElement("div");
+    tabs.className = "sign-tabs";
+    var frameWrap = document.createElement("div");
+    frameWrap.style.cssText = "margin-top:10px";
+    var errEl = document.createElement("div");
+    errEl.className = "err";
+    errEl.style.cssText = "margin-top:8px";
+    var payToken = null, payExpiry = null;
+
+    var payBtn = document.createElement("button");
+    payBtn.type = "button";
+    payBtn.className = "btn btn-primary";
+    payBtn.style.cssText = "width:100%;margin-top:12px;font-size:15px;padding:12px 14px";
+    payBtn.disabled = true;
+    payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+
+    function mountFrame() {
+      frameWrap.textContent = "";
+      payToken = null; payExpiry = null; payBtn.disabled = true;
+      setError(errEl, "");
+      var f = document.createElement("iframe");
+      f.title = "Payment details";
+      f.setAttribute("scrolling", "no");
+      f.setAttribute("frameborder", "0");
+      f.style.cssText = "width:100%;border:0;height:" + (rail === "ach" ? "76px" : "132px");
+      f.src = rail === "ach" ? opt.tokenizer.achUrl : opt.tokenizer.cardUrl;
+      frameWrap.appendChild(f);
+      if (rail === "ach") {
+        var hint = document.createElement("div");
+        hint.style.cssText = "font-size:12px;color:#64748B;margin-top:6px;line-height:1.45";
+        hint.textContent = "Find these at the bottom of a cheque, or in your banking app. Routing number first, then a slash, then your account number.";
+        frameWrap.appendChild(hint);
+      }
+      return f;
+    }
+
+    // ⚠️ THE ORIGIN TEST IS THE WHOLE SECURITY OF THIS LISTENER. This page holds a session
+    // token in localStorage and had no message listener at all before now; without this,
+    // any page that opened this one could post a forged token and we would hand it to the
+    // server. The origin comes from customer-pay, so it can never be attacker-chosen.
+    var frame = null;
+    var onMsg = function (e) {
+      if (e.origin !== opt.tokenizer.origin) return;
+      if (!frame || e.source !== frame.contentWindow) return;
+      var m = null;
+      try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m && m.validationError) { payToken = null; payBtn.disabled = true; setError(errEl, m.validationError); return; }
+      if (m && m.errorCode && String(m.errorCode) !== "0") {
+        payToken = null; payBtn.disabled = true;
+        setError(errEl, m.errorMessage || "That doesn't look right — check it and try again.");
+        return;
+      }
+      var tok = m && (m.token || m.message);
+      if (!tok) return;
+      setError(errEl, "");
+      payToken = String(tok); payExpiry = m.expiry || null; payBtn.disabled = false;
+      if (rail === "card") probeSurcharge();
+    };
+    window.addEventListener("message", onMsg, false);
+
+    var feeEl = document.createElement("div");
+    feeEl.style.cssText = "font-size:13px;margin-top:8px;line-height:1.45;color:#92400E";
+    function probeSurcharge() {
+      feeEl.textContent = "";
+      callFn("customer-pay", { action: "surcharge_probe", token: token, quoteRef: q.quoteRef, payToken: payToken })
+        .then(function (r) {
+          if (!r.ok || !r.data) return;
+          if (r.data.applies === true && r.data.chargeCents) {
+            feeEl.textContent = "A " + r.data.percent + "% card fee applies to this card — you'll be charged " +
+              fmtMoney(r.data.chargeCents / 100) + ".";
+            payBtn.textContent = "Pay " + fmtMoney(r.data.chargeCents / 100);
+          } else if (r.data.applies === false) {
+            feeEl.style.color = "#475569";
+            feeEl.textContent = "No card fee on this card.";
+          }
+        })
+        .catch(function () { /* a fee we could not look up must never block a payment */ });
+    }
+
+    ["card", "ach"].forEach(function (id) {
+      var t = document.createElement("button");
+      t.type = "button";
+      t.className = "sign-tab" + (id === rail ? " is-on" : "");
+      t.textContent = id === "card" ? "Card" : "Bank account";
+      t.addEventListener("click", function () {
+        rail = id;
+        var all = tabs.querySelectorAll(".sign-tab");
+        for (var j = 0; j < all.length; j++) all[j].className = "sign-tab";
+        t.className = "sign-tab is-on";
+        feeEl.textContent = "";
+        payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+        // A reload rather than a field toggle: the two rails need different tokenizer
+        // parameters (a bank account is typed as routing/account, which needs the full
+        // keyboard), and a reload correctly discards whatever was typed in the other tab.
+        frame = mountFrame();
+      });
+      tabs.appendChild(t);
+    });
+
+    panel.appendChild(tabs);
+    panel.appendChild(frameWrap);
+    panel.appendChild(feeEl);
+    panel.appendChild(errEl);
+    panel.appendChild(payBtn);
+    box.appendChild(panel);
+    frame = mountFrame();
+
+    payBtn.addEventListener("click", function () {
+      if (!payToken) { setError(errEl, "Enter your details above first."); return; }
+      payBtn.disabled = true;
+      var was = payBtn.textContent;
+      payBtn.textContent = "Paying…";
+      callFn("customer-pay", {
+        action: "pay",
+        token: token,
+        quoteRef: q.quoteRef,
+        rail: rail,
+        payToken: payToken,
+        expiry: payExpiry || undefined,
+        // The echo that keeps three numbers identical: what is on screen, what the token
+        // was minted against, and what is charged. The SERVER decides the figure.
+        confirmChargeCents: fig.askCents,
+      })
+        .then(function (r) {
+          window.removeEventListener("message", onMsg, false);
+          if (invalidSession(r)) {
+            token = null; lsDel(tokenKey); show("phone");
+            setError($("phone-error"), "Your session expired. Enter your number and we'll text you a new code.");
+            return;
+          }
+          if (r.ok && r.data && r.data.ok) { loadQuotes(); return; }
+          payBtn.disabled = false; payBtn.textContent = was;
+          window.addEventListener("message", onMsg, false);
+          setError(errEl, errText(r, "That payment didn't go through. Check the details and try again."));
+        })
+        .catch(function () {
+          payBtn.disabled = false; payBtn.textContent = was;
+          setError(errEl, "Couldn't reach the server. Check your connection and try again.");
+        });
+    });
+  }
+
   function invoiceBlock(q, inv) {
     var box = document.createElement("div");
     box.style.cssText = "margin-top:12px;border:1px solid #BBF7D0;background:#F0FDF4;border-radius:10px;padding:12px";

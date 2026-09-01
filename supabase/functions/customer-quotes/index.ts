@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
+import { phoneKey } from "../_shared/phoneKey.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 
@@ -45,15 +46,7 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  renders as "sent" — the safe floor — rather than leaking internal vocabulary. */
 const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"]);
 
-/** Canonical last-10-digits phone form for the ownership compare. The session identity is
- *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
- *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
- *  and hid every quote from a verified customer. Strips exactly one leading US "1" from
- *  an 11-digit string; nothing looser — any other shape compares as-is. */
-function phoneKey(value: unknown): string {
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-}
+// phoneKey moved to _shared/phoneKey.ts (174) — see the note in customer-accept.
 
 /**
  * The tax breakdown a customer sees on their own card (migration 148) — the same pools the

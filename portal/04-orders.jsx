@@ -1127,7 +1127,14 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
       const ps = payByOrder[o.id] || [];
       return {
         o, d: byCode[o.short_code] || null, pays: ps,
-        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
+        // ⚠️ SETTLED MONEY ONLY (migration 174). A bank payment is not money until it
+        // funds — it can come back Rejected up to three days later, and a builder who
+        // scheduled a build against it has a real problem. `pending` counts toward
+        // NOTHING here, and that is why this split lives at this one source: balOf, every
+        // status chip, the tiles and the detail card all inherit the honesty from it
+        // rather than each re-deciding.
+        paid: ps.reduce((s, p) => s + (p.voided_at || p.funding_state === "pending" || p.funding_state === "returned" ? 0 : (p.amount_cents || 0)), 0),
+        pending: ps.reduce((s, p) => s + (!p.voided_at && p.funding_state === "pending" ? (p.amount_cents || 0) : 0), 0),
         coPending: pendingCo.has(o.short_code),
       };
     });
@@ -1233,7 +1240,16 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     // Collected more than the total — say so plainly instead of "Paid in full",
     // which would hide that a refund/credit is owed back to the customer.
     if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
+    // "Paid in full" uses SETTLED money only — a pending bank payment can never produce it.
     if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
+    // Clearing OUTRANKS "Partially paid", and the order matters: "partially paid" is a
+    // claim about money we hold, and clearing money is money we do not hold yet.
+    if ((r.pending || 0) > 0) return { key: "clearing", label: "Bank payment clearing", bg: "#FEF3C7", fg: "#92400E" };
+    // NOTE: no "Deposit paid" chip at LIST level, deliberately. The deposit lives on
+    // invoice_sends, which has RLS with zero policies and is not browser-readable — the
+    // same reason designs.ss_invoice_sent_at had to exist. Deriving it here would need
+    // either a mirrored column or a per-row edge call on every list load. The deposit IS
+    // shown on the order itself, where pay_options already carries it.
     if (r.paid > 0) return { key: "partial", label: "Partially paid", bg: "#DBEAFE", fg: "#1E40AF" };
     // Nothing collected yet — and these are now THREE different jobs, each waiting on a
     // different person. A quote the customer accepted but nobody has billed is the OWNER's
@@ -2314,6 +2330,154 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
 
+  // ── Taking the payment, rather than recording one already taken (migration 174) ──────
+  // This lives INSIDE the Record-a-payment modal on purpose. The method chips already say
+  // cash / check / card / ach; picking a card or a bank account and then choosing "charge
+  // it now" is the same sentence a builder says out loud. What it must never do is blur
+  // the two: recording cannot fail in a way that costs money, and charging can, so the
+  // choice is explicit and the confirmation text differs.
+  const [collect, setCollect] = useState("recorded");   // "recorded" | "charge"
+  const [entry, setEntry] = useState("keyed");          // "keyed" | "swipe"
+  const [payOpts, setPayOpts] = useState(null);
+  const [payToken, setPayToken] = useState(null);
+  const [payExpiry, setPayExpiry] = useState(null);
+  const [tokenErr, setTokenErr] = useState("");
+  const [surcharge, setSurcharge] = useState(null);
+  const [armed, setArmed] = useState(false);
+  const frameRef = useRef(null);
+  const modalRef = useRef(null);
+  const chargeable = method === "card" || method === "ach";
+
+  // What CAN be charged is decided by the server, never here: the deposit-vs-balance rule,
+  // the pending-ACH block and the signature gate all live in portal-payments. The browser
+  // renders the answer and echoes the figure back.
+  useEffect(() => {
+    if (!payOpen) return;
+    let alive = true;
+    (async () => {
+      const { data } = await sb.functions.invoke("portal-payments", {
+        body: { action: "pay_options", orderId: o.id },
+      });
+      if (alive && data) setPayOpts(data);
+    })();
+    return () => { alive = false; };
+  }, [payOpen, o.id]);
+
+  // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
+  // security of this listener — without it any page that opens this one could post a forged
+  // token. The origin comes from the SERVER (pay_options), so it can never be
+  // attacker-chosen, and this repo is public so it could not be hardcoded anyway.
+  useEffect(() => {
+    if (!payOpen || collect !== "charge") return;
+    const origin = payOpts && payOpts.tokenizer ? payOpts.tokenizer.origin : "";
+    if (!origin) return;
+    const onMsg = (e) => {
+      if (e.origin !== origin) return;
+      if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
+      let m = null;
+      try { m = JSON.parse(e.data); } catch (_e) { return; }
+      if (m && m.validationError) { setPayToken(null); setTokenErr(m.validationError); return; }
+      // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
+      // indistinguishable from a strange token and the button would arm on nothing.
+      if (m && m.errorCode && String(m.errorCode) !== "0") {
+        setPayToken(null);
+        setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
+        return;
+      }
+      const tok = m && (m.token || m.message);
+      if (!tok) return;
+      setTokenErr(""); setPayExpiry(m.expiry || null); setPayToken(String(tok)); setArmed(false);
+    };
+    window.addEventListener("message", onMsg, false);
+    return () => window.removeEventListener("message", onMsg, false);
+  }, [payOpen, collect, payOpts]);
+
+  // Whether a surcharge applies cannot be known until the CARD is known — the card brands
+  // forbid it on debit, so the same order is one price on one card and another on the next.
+  // Probe once a token exists, and never let a failed probe block a payment.
+  useEffect(() => {
+    if (!payToken || method !== "card") { setSurcharge(null); return; }
+    let alive = true;
+    (async () => {
+      const { data } = await sb.functions.invoke("portal-payments", {
+        body: { action: "surcharge_probe", payToken },
+      });
+      if (alive && data) setSurcharge(data);
+    })();
+    return () => { alive = false; };
+  }, [payToken, method]);
+
+  // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
+  // whatever element has focus, fast, ending in Enter. This modal's amount box carries
+  // autoFocus, so an un-trapped swipe would type track data into it. While armed, every
+  // keystroke that reaches this document is one that did NOT reach the iframe — swallow it
+  // and say so. Never echo, never buffer, never log those characters: they are card data.
+  useEffect(() => {
+    if (!armed) return;
+    const el = frameRef.current;
+    if (el) { try { el.focus(); } catch (_e) {} }
+    const swallow = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      setTokenErr("That swipe didn't land in the card box. Press Ready, then swipe again.");
+    };
+    const refocus = () => { try { if (frameRef.current) frameRef.current.focus(); } catch (_e) {} };
+    document.addEventListener("keydown", swallow, true);
+    document.addEventListener("focusin", refocus, true);
+    // An indefinitely armed page is one where the next thing anyone types disappears.
+    const t = setTimeout(() => setArmed(false), 60000);
+    return () => {
+      document.removeEventListener("keydown", swallow, true);
+      document.removeEventListener("focusin", refocus, true);
+      clearTimeout(t);
+    };
+  }, [armed]);
+
+  const askCents = payOpts && payOpts.canCharge ? payOpts.askCents : 0;
+  const feeCents = surcharge && surcharge.applies && surcharge.percent
+    ? Math.round(askCents * (surcharge.percent / 100)) : 0;
+
+  const closePay = () => {
+    setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
+    setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed");
+  };
+
+  const chargeCard = async () => {
+    if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
+    if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-payments", {
+      body: {
+        action: "charge",
+        orderId: o.id,
+        rail: method === "ach" ? "ach" : "card",
+        payToken,
+        expiry: payExpiry || undefined,
+        entry,
+        // The echo that keeps three numbers provably identical: what is on screen, what the
+        // token was minted against, and what is charged.
+        confirmChargeCents: askCents,
+      },
+    });
+    setBusy(false);
+    if (error) {
+      // A non-2xx from an edge function surfaces as a generic message; the real sentence —
+      // the decline reason, or "do NOT try again" — is in the body.
+      let m = "That payment didn't go through.";
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+      setMsg({ err: m });
+      setPayToken(null);
+      return;
+    }
+    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); return; }
+    closePay();
+    setMsg({
+      ok: data && data.pending
+        ? `Bank payment submitted for ${money(data.amountCents)} — it clears in 2-3 business days.`
+        : `Charged ${money(data.amountCents)}${data && data.last4 ? ` to the card ending ${data.last4}` : ""}.`,
+    });
+    onChanged();
+  };
+
   // SS-mode orders (the design carries an SS quote) render the invoice-style order
   // document (migration 127), which needs the FULL design row (the list query stays
   // narrow), the signatures, the change orders, and the order_paperwork projection
@@ -2419,6 +2583,39 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     onChanged();
   };
 
+  // A CardPointe payment cannot be voided from the browser — RLS refuses any update to a
+  // row with a gateway, and rightly: the money is at the card network, and a local void
+  // would leave the books saying one thing and the merchant account another. So this asks
+  // the server to reverse it, and the row only changes if the gateway agrees.
+  const voidGatewayPayment = async (p) => {
+    const settledAlready = p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
+    if (!window.confirm(
+      `${settledAlready ? "Refund" : "Cancel"} this ${money(p.amount_cents)} payment at the card network?\n\n` +
+      "The customer gets the money back. This can't be undone from here.",
+    )) return;
+    setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-payments", {
+      body: { action: settledAlready ? "refund_payment" : "void_payment", paymentId: p.id },
+    });
+    if (error) {
+      let m = "That couldn't be reversed.";
+      let settled = false;
+      try { const ctx = await error.context.json(); if (ctx) { if (ctx.error) m = ctx.error; settled = !!ctx.settled; } } catch (_e) {}
+      // "Already settled" is not a failure, it is the next step — a refund rather than a void.
+      if (settled) {
+        const { data: rd, error: re } = await sb.functions.invoke("portal-payments", {
+          body: { action: "refund_payment", paymentId: p.id },
+        });
+        if (!re && rd && !rd.error) { setMsg({ ok: `Refunded ${money(rd.refunded)}.` }); onChanged(); return; }
+      }
+      setMsg({ err: m });
+      return;
+    }
+    if (data && data.error) { setMsg({ err: data.error }); return; }
+    setMsg({ ok: data && data.refunded ? `Refunded ${money(data.refunded)}.` : "Payment cancelled at the card network." });
+    onChanged();
+  };
+
   const unvoidPayment = async (p) => {
     const { error } = await sb.from("payments")
       .update({ voided_at: null, void_reason: null }).eq("id", p.id);
@@ -2515,13 +2712,30 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <div>
                     <b style={{ textDecoration: dead ? "line-through" : "none" }}>{(PAY_METHODS.find((m) => m[0] === p.method) || [, p.method])[1]}</b>
                     {p.gateway === "ghl" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#EDE9FE", color: "#5B21B6", borderRadius: 5, padding: "2px 6px" }}>Synergy/GHL</span>}
+                    {p.gateway === "cardpointe" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#DCFCE7", color: "#166534", borderRadius: 5, padding: "2px 6px" }}>Taken here</span>}
+                    {p.funding_state === "pending" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FEF3C7", color: "#92400E", borderRadius: 5, padding: "2px 6px" }}>Clearing</span>}
+                    {p.funding_state === "returned" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFE4E6", color: "#9F1239", borderRadius: 5, padding: "2px 6px" }}>Returned</span>}
                     {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>Voided</span>}
-                    <div style={{ fontSize: 11, color: "#94A3B8" }}>{fmtDate(p.received_at)}{p.reference ? ` · ${p.reference}` : ""}{dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}</div>
+                    <div style={{ fontSize: 11, color: "#94A3B8" }}>
+                      {fmtDate(p.received_at)}
+                      {p.instrument_last4 ? ` · ••${p.instrument_last4}` : (p.reference ? ` · ${p.reference}` : "")}
+                      {p.funding_state === "pending" ? " · clears in 2-3 business days" : ""}
+                      {dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}
+                    </div>
                   </div>
-                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
-                  {/* Imported payments are read-only here — GHL owns them, and a local
-                      void would silently come back (or diverge) on the next sync. */}
-                  {p.gateway
+                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
+                  {/* GHL-imported payments stay read-only — GHL owns them, and a local void
+                      would silently come back (or diverge) on the next sync. A CardPointe
+                      payment is different: the money is at the card network, so voiding it
+                      HAS to go through the edge function, which only marks the row voided
+                      if the gateway agrees. (RLS enforces the same thing from below — the
+                      browser cannot update a row where gateway IS NOT NULL.) */}
+                  {p.gateway === "cardpointe"
+                    ? (dead
+                      ? <span title="Already reversed at the card network" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                      : <button type="button" onClick={() => voidGatewayPayment(p)} title="Cancel or refund this at the card network"
+                          style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Refund</button>)
+                    : p.gateway
                     ? <span title="Recorded in Synergy/GHL — manage it there" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
                     : <button type="button" onClick={() => (dead ? unvoidPayment(p) : voidPayment(p))} title={dead ? "Restore this payment" : "Void this payment"}
                         style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>{dead ? "Restore" : "Void"}</button>}
@@ -2714,18 +2928,29 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
       )}
 
       {payOpen && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setPayOpen(false); }}
+        <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
-          <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontSize: 15.5, fontWeight: 800 }}>Record a payment</div>
-              <button type="button" onClick={() => setPayOpen(false)}
-                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+              <div style={{ fontSize: 15.5, fontWeight: 800 }}>{collect === "charge" ? "Take a payment" : "Record a payment"}</div>
+              <button type="button" onClick={closePay} disabled={armed}
+                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: armed ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: armed ? 0.4 : 1 }}>×</button>
             </div>
             <div style={{ padding: "17px 18px" }}>
               <span style={S.lbl}>Amount</span>
-              <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
-              {bal > 0 && (
+              {collect === "charge" ? (
+                // The amount is the SERVER's, not the operator's: the deposit-vs-balance
+                // rule lives in portal-payments and the figure here is echoed back to it.
+                <div style={{ ...S.input, fontSize: 20, fontWeight: 800, background: "#F8FAFC", color: "#0F172A" }}>
+                  {money(askCents)}
+                  {payOpts && payOpts.askKind === "deposit" && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0E7490", marginLeft: 8 }}>deposit</span>
+                  )}
+                </div>
+              ) : (
+                <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
+              )}
+              {collect === "recorded" && bal > 0 && (
                 <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
                   <button type="button" onClick={() => setAmount((bal / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Full balance</button>
                   <button type="button" onClick={() => setAmount((Math.round(bal / 2) / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Half</button>
@@ -2739,17 +2964,117 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   ))}
                 </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
-                <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
-                <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: "#475569", lineHeight: 1.45, marginTop: 12 }}>
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#64748B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>
-                <div>You're recording money you already collected — no card is charged here. Taking cards in the portal is coming next.</div>
+              {/* The fork, and it only appears where it can mean anything. Cash and a
+                  cheque can only ever be recorded; a card or a bank account can be either
+                  already collected elsewhere (a terminal, a phone call) or taken right
+                  here. Making it an explicit choice is what keeps the two apart — one
+                  cannot fail in a way that costs money and the other can. */}
+              {chargeable && payOpts && payOpts.canCharge && (
+                <div style={{ marginTop: 13 }}>
+                  <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
+                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); }}
+                        style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {chargeable && payOpts && !payOpts.canCharge && payOpts.message && (
+                <div style={{ marginTop: 10, fontSize: 11.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 11px" }}>
+                  {payOpts.message} You can still record a payment taken elsewhere.
+                </div>
+              )}
+
+              {collect === "charge" ? (
+                <div style={{ marginTop: 13 }}>
+                  {method === "card" && (
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                      {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
+                        <button key={id} type="button" onClick={() => { setEntry(id); setPayToken(null); setArmed(false); }}
+                          style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                      ))}
+                    </div>
+                  )}
+                  <span style={S.lbl}>{method === "ach" ? "Routing / account number" : entry === "swipe" ? "Card reader" : "Card details"}</span>
+                  {/* The tokenizer URL is composed SERVER-SIDE and never appears in this
+                      file: the repo is public, and it puts the test/production switch in a
+                      secret rather than in code a customer can download. */}
+                  {payOpts && payOpts.tokenizer && (
+                    <iframe
+                      ref={frameRef}
+                      title="Payment details"
+                      src={method === "ach" ? payOpts.tokenizer.achUrl : entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
+                      style={{ width: "100%", height: method === "ach" ? 74 : 128, border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
+                      frameBorder="0" scrolling="no"
+                    />
+                  )}
+                  {method === "ach" && (
+                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
+                      Routing number, then a slash, then the account number. Bank payments take 2-3 business days to clear.
+                    </div>
+                  )}
+                  {method === "card" && entry === "swipe" && (
+                    <div style={{ marginTop: 8 }}>
+                      {/* ⚠️ The reader is a USB KEYBOARD. Arming is what stops a swipe from
+                          typing card data into the amount box, and nothing is armed while
+                          the modal is merely open. */}
+                      <button type="button" onClick={() => { setArmed(true); setTokenErr(""); }} disabled={armed}
+                        style={{ ...S.btn(armed ? "#DCFCE7" : "#F1F5F9", armed ? "#166534" : "#334155"), border: "1px solid #E2E8F0", fontSize: 12, width: "100%" }}>
+                        {armed ? "Ready — swipe the card now" : payToken ? "Card read ✓ — swipe again" : "Ready to swipe"}
+                      </button>
+                      {armed && (
+                        <div style={{ fontSize: 11, color: "#166534", marginTop: 6 }}>
+                          Don't type anything until it reads. This clears itself after a minute.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {tokenErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
+                  {payToken && !tokenErr && (
+                    <div style={{ fontSize: 11.5, color: "#047857", marginTop: 7, fontWeight: 700 }}>
+                      {method === "ach" ? "Bank details captured ✓" : "Card captured ✓"}
+                    </div>
+                  )}
+                  {/* Fiserv adds the surcharge itself and reports it back, so this is a
+                      display of THEIR answer, never our arithmetic. It cannot be known
+                      before the card is: the brands forbid surcharging debit. */}
+                  {surcharge && surcharge.applies === true && feeCents > 0 && (
+                    <div style={{ marginTop: 10, fontSize: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", color: "#92400E" }}>
+                      A {surcharge.percent}% card fee applies to this card — the customer will be charged{" "}
+                      <strong>{money(askCents + feeCents)}</strong>. {money(askCents)} goes to the balance.
+                    </div>
+                  )}
+                  {surcharge && surcharge.applies === false && (
+                    <div style={{ marginTop: 10, fontSize: 11.5, color: "#475569" }}>No card fee on this card.</div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
+                  <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
+                  <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: collect === "charge" ? "#ECFDF5" : "#F8FAFC", border: `1px solid ${collect === "charge" ? "#A7F3D0" : "#E2E8F0"}`, borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: collect === "charge" ? "#065F46" : "#475569", lineHeight: 1.45, marginTop: 12 }}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke={collect === "charge" ? "#059669" : "#64748B"} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>
+                <div>
+                  {collect === "charge"
+                    ? (method === "ach"
+                      ? "This debits the customer's bank account now. It won't count toward the balance until it clears."
+                      : "This charges the customer's card now, for real.")
+                    : "You're recording money you already collected — no card is charged here. To take a card now, choose Card or ACH above."}
+                </div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
-                <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
-                <button onClick={() => setPayOpen(false)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+                {collect === "charge" ? (
+                  <button onClick={chargeCard} disabled={busy || !payToken} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : `Charge ${money(askCents + feeCents)}`}
+                  </button>
+                ) : (
+                  <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
+                )}
+                <button onClick={closePay} disabled={armed} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: armed ? 0.5 : 1 }}>Cancel</button>
               </div>
             </div>
           </div>
