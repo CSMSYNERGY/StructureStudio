@@ -50,6 +50,8 @@ const WALL_THICKNESS = 6;
 // Built-in annotation tools that are merged into ITEMS for every client.
 // Distinct from `layoutItems` in config (which the client controls): these
 // are universal drawing aids — a free-text note and a freeform line.
+// Annotation tools, deliberately UNGROUPED: they are not part of the building, so they render
+// in the unlabelled tail below the sections rather than under a heading of their own.
 const BUILT_IN_TOOLS = {
   textNote: { label: "Note", color: "#0F172A", icon: "📝", shortLabel: "Note", noteType: true, width: 4, height: 1 },
   line: { label: "Line", color: "#475569", icon: "📏", shortLabel: "Line", lineType: true, width: 4, height: 0 },
@@ -498,25 +500,25 @@ const FIXTURE_DOOR_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: t
 // The single "Door" palette tool. Arming it and clicking a wall opens the door picker
 // (below) instead of placing immediately — the shopper chooses WHICH door (and its swing/
 // operation where more than one is offered) in the popup.
-const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", isDoorPicker: true };
+const DOOR_PICKER_CFG = { label: "Door", color: FIXTURE_DOOR_COLOR, wallOnly: true, width: 3, height: 0.5, shortLabel: "DOOR", isDoorPicker: true, group: "doors" };
 // Custom ramps (custom mode). The "Ramp" tool attaches to a door (doorSnap) and opens the ramp
 // picker. A placed custom ramp is a normal type:"ramp" item — so it reuses ALL the existing ramp
 // machinery (render, door-snap follow, delete-cascade, z-order) — but carries the chosen style's
 // own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
 const FIXTURE_RAMP_COLOR = "#0284C7";
-const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true };
+const RAMP_PICKER_CFG = { label: "Ramp", color: FIXTURE_RAMP_COLOR, icon: "⬛", doorSnap: true, width: 3, height: 2, shortLabel: "RAMP", isRampPicker: true, group: "doors" };
 // Simple ramp — a fully self-contained option (render + placement), NO longer the built-in `ramp`
 // layout item. Auto-widths to the door it attaches to (handled in handleClick's doorSnap branch,
 // same as before). Stone color matches the old built-in so already-placed ramps look identical.
 // ITEMS.ramp is ALWAYS this cfg (so every placed type:"ramp" renders), placeable only when the
 // tenant offers a simple ramp (rampSettings.enabled + simple mode).
-const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap: true, width: 3, height: 3, shortLabel: "RAMP", isSimpleRamp: true };
+const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap: true, width: 3, height: 3, shortLabel: "RAMP", isSimpleRamp: true, group: "doors" };
 // Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
 // window is a normal type:"window" item — so it reuses the built-in window's render (mullions,
 // wall bar), collision, and payload — but carries the chosen style's width + a priced snapshot
 // (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
 const FIXTURE_WINDOW_COLOR = "#0EA5E9";
-const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true };
+const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true, group: "windows" };
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";

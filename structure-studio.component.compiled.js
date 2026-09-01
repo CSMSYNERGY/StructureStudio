@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 886874b50e23)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 bb9a6dcd7f67)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -25,6 +25,8 @@ var DEFAULT_CLIENT_ID="junior-barns";// ─── STRUCTURE STUDIO ENGINE ──
 var WALL_THICKNESS=6;// Built-in annotation tools that are merged into ITEMS for every client.
 // Distinct from `layoutItems` in config (which the client controls): these
 // are universal drawing aids — a free-text note and a freeform line.
+// Annotation tools, deliberately UNGROUPED: they are not part of the building, so they render
+// in the unlabelled tail below the sections rather than under a heading of their own.
 var BUILT_IN_TOOLS={textNote:{label:"Note",color:"#0F172A",icon:"📝",shortLabel:"Note",noteType:true,width:4,height:1},line:{label:"Line",color:"#475569",icon:"📏",shortLabel:"Line",lineType:true,width:4,height:0}};// Storage props (see D3_PROPS). ONE item type; which prop it is rides on the item's own
 // `propKind`, so a tenant gains the whole set at once and a design saved with a prop we later
 // rename still renders (d3PropSpec falls back).
@@ -146,20 +148,20 @@ var FIXTURE_DOOR_COLOR_DOUBLE="#B45309";// matches the built-in Double Door glyp
 function fixtureDoorColor(item){return item&&item.operation==="double"?FIXTURE_DOOR_COLOR_DOUBLE:FIXTURE_DOOR_COLOR;}var FIXTURE_DOOR_CFG={label:"Door",color:FIXTURE_DOOR_COLOR,wallOnly:true,width:3,height:0.5,shortLabel:"DOOR",noPalette:true,isFixtureDoor:true};// The single "Door" palette tool. Arming it and clicking a wall opens the door picker
 // (below) instead of placing immediately — the shopper chooses WHICH door (and its swing/
 // operation where more than one is offered) in the popup.
-var DOOR_PICKER_CFG={label:"Door",color:FIXTURE_DOOR_COLOR,wallOnly:true,width:3,height:0.5,shortLabel:"DOOR",isDoorPicker:true};// Custom ramps (custom mode). The "Ramp" tool attaches to a door (doorSnap) and opens the ramp
+var DOOR_PICKER_CFG={label:"Door",color:FIXTURE_DOOR_COLOR,wallOnly:true,width:3,height:0.5,shortLabel:"DOOR",isDoorPicker:true,group:"doors"};// Custom ramps (custom mode). The "Ramp" tool attaches to a door (doorSnap) and opens the ramp
 // picker. A placed custom ramp is a normal type:"ramp" item — so it reuses ALL the existing ramp
 // machinery (render, door-snap follow, delete-cascade, z-order) — but carries the chosen style's
 // own width/length + a priced snapshot (vs the simple built-in ramp which takes the door's width).
-var FIXTURE_RAMP_COLOR="#0284C7";var RAMP_PICKER_CFG={label:"Ramp",color:FIXTURE_RAMP_COLOR,icon:"⬛",doorSnap:true,width:3,height:2,shortLabel:"RAMP",isRampPicker:true};// Simple ramp — a fully self-contained option (render + placement), NO longer the built-in `ramp`
+var FIXTURE_RAMP_COLOR="#0284C7";var RAMP_PICKER_CFG={label:"Ramp",color:FIXTURE_RAMP_COLOR,icon:"⬛",doorSnap:true,width:3,height:2,shortLabel:"RAMP",isRampPicker:true,group:"doors"};// Simple ramp — a fully self-contained option (render + placement), NO longer the built-in `ramp`
 // layout item. Auto-widths to the door it attaches to (handled in handleClick's doorSnap branch,
 // same as before). Stone color matches the old built-in so already-placed ramps look identical.
 // ITEMS.ramp is ALWAYS this cfg (so every placed type:"ramp" renders), placeable only when the
 // tenant offers a simple ramp (rampSettings.enabled + simple mode).
-var SIMPLE_RAMP_CFG={label:"Ramp",color:"#78716C",icon:"⬛",doorSnap:true,width:3,height:3,shortLabel:"RAMP",isSimpleRamp:true};// Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
+var SIMPLE_RAMP_CFG={label:"Ramp",color:"#78716C",icon:"⬛",doorSnap:true,width:3,height:3,shortLabel:"RAMP",isSimpleRamp:true,group:"doors"};// Catalog windows. The "Window" tool is wall-placed (like the door picker). A placed catalog
 // window is a normal type:"window" item — so it reuses the built-in window's render (mullions,
 // wall bar), collision, and payload — but carries the chosen style's width + a priced snapshot
 // (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
-var FIXTURE_WINDOW_COLOR="#0EA5E9";var WINDOW_PICKER_CFG={label:"Window",color:FIXTURE_WINDOW_COLOR,icon:"🪟",wallOnly:true,width:2,height:0.5,shortLabel:"WIN",isWindowPicker:true};function fixtureInitialSwing(fx){if(fx.swingIn&&fx.swingOut)return fx.swingDefault||"in";if(fx.swingIn)return"in";if(fx.swingOut)return"out";return null;}function fixtureInitialOperation(fx){if(fx.opSlideUp)return"slideup";if(fx.opDouble)return"double";if(fx.opRight&&fx.opLeft)return fx.opDefault||"right";if(fx.opRight)return"right";if(fx.opLeft)return"left";return null;}// Color defaults for a catalog door (colors feature, migration 116). fixed → the owner's
+var FIXTURE_WINDOW_COLOR="#0EA5E9";var WINDOW_PICKER_CFG={label:"Window",color:FIXTURE_WINDOW_COLOR,icon:"🪟",wallOnly:true,width:2,height:0.5,shortLabel:"WIN",isWindowPicker:true,group:"windows"};function fixtureInitialSwing(fx){if(fx.swingIn&&fx.swingOut)return fx.swingDefault||"in";if(fx.swingIn)return"in";if(fx.swingOut)return"out";return null;}function fixtureInitialOperation(fx){if(fx.opSlideUp)return"slideup";if(fx.opDouble)return"double";if(fx.opRight&&fx.opLeft)return fx.opDefault||"right";if(fx.opRight)return"right";if(fx.opLeft)return"left";return null;}// Color defaults for a catalog door (colors feature, migration 116). fixed → the owner's
 // fixed color or none (today's rendering); paint → the door-flagged palette's default;
 // match → the color whose label equals the building's CURRENT body/trim paint selection,
 // falling back to the palette default. Trim fields ride only when the door is two-tone
