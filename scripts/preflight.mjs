@@ -806,10 +806,14 @@ function denoTest() {
 
   const errors = [];
   for (const g of groups) {
-    // --allow-env only: the tests stub globalThis.fetch / inject fake clients, so no network
-    // permission is needed — and withholding it means a test that accidentally reaches the real
-    // internet fails loudly instead of passing slowly.
-    const args = ["test", "--quiet", "--allow-env", "--node-modules-dir=none"];
+    // --allow-env and a repo-scoped --allow-read, nothing else. The tests stub globalThis.fetch
+    // / inject fake clients, so NO network permission is granted — withholding --allow-net means
+    // a test that accidentally reaches the real internet fails loudly instead of passing slowly,
+    // and that property is untouched by the read grant. Read is needed because some tests assert
+    // against the SHIPPED source rather than a copy of it (wallSlab_test lifts the designer's
+    // slab rules; the my-quotes check does the same for that page) — a copied-out copy would keep
+    // passing while the real file drifted. Scoped to the repo so a test still cannot wander.
+    const args = ["test", "--quiet", "--allow-env", `--allow-read=${root}`, "--node-modules-dir=none"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
     args.push(...g.files);
     const res = runDeno(args, join(root, FUNCTIONS_DIR));

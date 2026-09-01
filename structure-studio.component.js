@@ -204,20 +204,52 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   return false;
 }
 
-// Does a wall-mounted item (door / window / rough opening) at `sn` overlap a WORKBENCH on the
-// same wall? checkDoorCollision above deliberately only compares wallOnly items to each other, and
-// a workbench is wallSnap, so it is skipped there — which meant the invariant was enforced in one
-// direction only: dragging a workbench into a door showed "A door is blocking this wall!", while
-// dragging the DOOR onto the workbench silently succeeded and produced exactly the layout that
-// toast exists to prevent, rasterized into the PDF and sent to the shop. Same math as the
-// workbench-side check, read from the other side.
-function checkWorkbenchOverlap(sn, widthFtPx, existing, itemTypes, sc) {
+// Wall SLABS — the workbench family: items that own a span of wall and stop other things
+// sharing it. `wallSnap` alone is not the test, because electrical devices are wallSnap too
+// and must not block a door; `modelKey` is the discriminator. Its ABSENCE means a config
+// predating it, where wallSnap meant workbench and nothing else — so a tenant whose config
+// row has not been regenerated keeps the old rule rather than silently losing it.
+const SS_SLAB_BANDS = {
+  wallBench: (h) => [0, h],
+  wallShelf: (h) => [h, h + 2],
+  wallShelfDouble: (h) => [h, h + 20],
+};
+function ssSlabModel(type, itemTypes) {
+  const c = itemTypes && itemTypes[type];
+  if (!c || !c.wallSnap) return null;
+  if (!c.modelKey) return "legacy";
+  return SS_SLAB_BANDS[c.modelKey] ? c.modelKey : null;
+}
+// The inches-off-floor band an item occupies on its wall. A workbench stands on the floor and
+// blocks everything under its top; a shelf is mounted and blocks only its own board(s), which
+// is what lets a shelf hang above a bench. A legacy slab blocks the full height — today's
+// behaviour exactly, so nothing changes for a tenant until their config carries modelKey.
+function ssSlabBand(it, itemTypes) {
+  const model = ssSlabModel(it.type, itemTypes);
+  if (!model) return null;
+  if (model === "legacy") return [0, 1e4];
+  const c = itemTypes[it.type];
+  const h = Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : c.heightOffFloorIn) || 0;
+  return SS_SLAB_BANDS[model](h);
+}
+function ssBandsOverlap(a, b) { return !!a && !!b && a[0] < b[1] && b[0] < a[1]; }
+
+// Does an item at `sn` overlap a wall slab on the same wall? checkDoorCollision above
+// deliberately only compares wallOnly items to each other, and a slab is wallSnap, so it is
+// skipped there — which meant the invariant was enforced in one direction only: dragging a
+// workbench into a door showed "A door is blocking this wall!", while dragging the DOOR onto
+// the workbench silently succeeded and produced exactly the layout that toast exists to
+// prevent, rasterized into the PDF and sent to the shop. `cand` is the placing item when the
+// caller is itself a slab; a wallOnly caller passes nothing and blocks the full height.
+function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
   if (!sn.wall) return false;
+  const candBand = (cand && ssSlabBand(cand, itemTypes)) || [0, 1e4];
   const isH = sn.wall === "north" || sn.wall === "south";
   const candPos = isH ? sn.x : sn.y;
   const candHalf = widthFtPx / 2;
   for (const ob of existing) {
-    if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
+    if (ob.wall !== sn.wall || !ssSlabModel(ob.type, itemTypes)) continue;
+    if (!ssBandsOverlap(candBand, ssSlabBand(ob, itemTypes))) continue;
     const obHalf = ((ob.widthFt || (itemTypes[ob.type] && itemTypes[ob.type].width)) * sc) / 2;
     const obPos = isH ? ob.x : ob.y;
     if (Math.abs(candPos - obPos) < candHalf + obHalf - 2) return true;
@@ -294,7 +326,12 @@ function rampPosFor(rmp, sn, g) {
 // Items the customer sizes themselves, so shrinking one to fit a smaller building
 // preserves their intent. A DOOR is not in this list on purpose: a 6 ft double door
 // quietly becoming 4 ft would change what they are buying.
-const SS_SHRINKABLE = { workbench: true, roughOpening: true, loft: true };
+const SS_SHRINKABLE = { workbench: true, roughOpening: true, loft: true, shelf: true, doubleShelf: true };
+// Palette sections, in display order. The KEY is what `layout_item_types.palette_group`
+// stores; an item with no group (every tenant config until it is regenerated) renders in the
+// unlabelled tail, which is what keeps the grouped palette safe to ship ahead of the data.
+const PALETTE_GROUP_LABEL = { doors: "Doors", windows: "Windows", interior: "Interior", electrical: "Electrical" };
+const PALETTE_GROUP_ORDER = ["doors", "windows", "interior", "electrical"];
 const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east", "west"], east: ["west", "north", "south"], west: ["east", "north", "south"] };
 
 /**
@@ -335,7 +372,7 @@ function reflowItems(items, prev, next, ITEMS) {
           : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY);
         const cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
         if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
-        if (checkWorkbenchOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale)) continue;
+        if (checkWallSlabOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale)) continue;
         return sn;
       }
     }
@@ -812,7 +849,7 @@ function rampPlacementForDoor(door, rampDepthFt, pW, pH, mgX, mgY, scale) {
 // the emailed estimate to the penny. Needs C.layoutPricing ({key:{rate,method,byStyle}})
 // and C.sizePricing ({styleKey:{sizeLabel:{basePrice,widthFt,lengthFt}}}) — both are
 // present only when the tenant's show_pricing is on (else {} → returns no rows).
-const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "loft", "ramp"];
+const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "shelf", "doubleShelf", "loft", "ramp"];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
 function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? "−" + s : s; }
 // Building / Paint Colors / Roof summary for the "Details" section, in the SAME order they appear
@@ -903,7 +940,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (it.type === "fixtureDoor") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); continue; }
       if (it.type === "window") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); else placedKeys.add("window"); continue; }
       if (it.type === "ramp") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); placedKeys.add("ramp"); continue; }
-      if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "roughOpening") placedKeys.add(it.type);
+      if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "shelf" || it.type === "doubleShelf" || it.type === "roughOpening") placedKeys.add(it.type);
     }
   }
   const declinedLines = []; let declinedTotal = 0;
@@ -1043,7 +1080,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   const rampSettings = C.rampSettings || null;
   const rampSimplePriced = !!(rampSettings && rampSettings.price != null);
   let singleDoors = 0, doubleDoors = 0, builtinWindows = 0, lofts = 0, loftSqft = 0;
-  const workbenchFt = [];
+  const workbenchFt = [], shelfFt = [], doubleShelfFt = [];
   const customRamps = [], simpleRamps = [];
   const customWindows = [];
   for (const it of items) {
@@ -1053,6 +1090,8 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     // (no fixtureItemId) keep pricing via the layout "window" rate.
     else if (it.type === "window") { if (it.fixtureItemId && it.price != null) customWindows.push(it); else builtinWindows++; }
     else if (it.type === "workbench") workbenchFt.push(Number(it.widthFt) || 0);
+    else if (it.type === "shelf") shelfFt.push(Number(it.widthFt) || 0);
+    else if (it.type === "doubleShelf") doubleShelfFt.push(Number(it.widthFt) || 0);
     else if (it.type === "loft") { lofts++; loftSqft += (Number(it.widthFt) || 0) * (Number(it.heightFt) || 0); }
     else if (it.type === "ramp") { if (it.fixtureItemId && it.price != null) customRamps.push(it); else simpleRamps.push(it); }
   }
@@ -1063,6 +1102,10 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     doubleDoor: { count: doubleDoors },
     window:     { count: builtinWindows },
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
+    // Shelves aggregate like the workbench — every placed run summed into ONE lineal_ft line,
+    // so a size inclusion nets once rather than once per shelf. Mirrors submit-estimate.
+    shelf:       { count: shelfFt.length, lengthFt: shelfFt.reduce((s, f) => s + f, 0) },
+    doubleShelf: { count: doubleShelfFt.length, lengthFt: doubleShelfFt.reduce((s, f) => s + f, 0) },
     loft:       { count: lofts, optionSqft: loftSqft },
     // Legacy layout "ramp" row applies only to simple ramps that AREN'T priced by the new ramp
     // settings — otherwise ramps price below (custom by snapshot, simple by ramp settings).
@@ -4067,6 +4110,23 @@ function buildShed3DModel(THREE, p) {
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
       interiorGroup.add(g);
+    } else if (c && (c.modelKey === "wallShelf" || c.modelKey === "wallShelfDouble")) {
+      // A mounted board hugging its wall at the builder's height — two boards for a double,
+      // 16 in apart. Unlike the bench it has no legs: nothing stands on the floor.
+      const w = it.widthFt || c.width, d = it.heightFt || c.height;
+      const g = new THREE.Group();
+      const shelfMat = mat(D3_COLORS.bench);
+      const baseY = (Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : c.heightOffFloorIn) || 48) / 12;
+      const tiers = c.modelKey === "wallShelfDouble" ? [baseY, baseY + 16 / 12] : [baseY];
+      tiers.forEach((y) => {
+        const board = box(shelfMat, w, 0.12, d);
+        board.position.y = y;
+        g.add(board);
+      });
+      if (it.rotation === 90) g.rotation.y = Math.PI / 2;
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      g.userData = { itemId: it.id, floorItem: true };
+      interiorGroup.add(g);
     } else if (it.type === "ramp") {
       const wf = WALLS[it.wall];
       if (!wf) return;
@@ -4865,7 +4925,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // Workbench check too — checkDoorCollision deliberately skips workbenches, so the
         // in-viewer picker / included chip could drop its door or window straight onto one.
         // Same refusal the 2D placement paths gained in the 2026-08-20 audit.
-        if (checkWorkbenchOverlap(sn, widthFt * scale, liveItems, itemTypes, scale)) {
+        if (checkWallSlabOverlap(sn, widthFt * scale, liveItems, itemTypes, scale)) {
           flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return false;
         }
@@ -4939,18 +4999,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             flash3("A door is blocking this wall — try a different wall, or move the door first.");
             return;
           }
-          const isH = sn.wall === "north" || sn.wall === "south";
-          const candPos = isH ? sn.x : sn.y;
-          const candHalf = cfg.width * scale / 2;
-          for (let i = 0; i < liveItems.length; i++) {
-            const ob = liveItems[i];
-            if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
-            const obW = (ob.widthFt || itemTypes[ob.type].width) * scale / 2;
-            const obPos = isH ? ob.x : ob.y;
-            if (Math.abs(candPos - obPos) < candHalf + obW - 2) {
-              flash3("Another workbench is in the way. Try a different spot on the wall.");
-              return;
-            }
+          if (checkWallSlabOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale, candidate)) {
+            flash3("Something else is already mounted there. Try a different spot on the wall.");
+            return;
           }
           idCounter++;   // only burned on success, like 2D
           commitPlaced3(candidate);
@@ -4982,7 +5033,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           flash3("Something is already on that spot. Pick a clear part of the wall.");
           return;
         }
-        if (checkWorkbenchOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale)) {
+        if (checkWallSlabOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale)) {
           flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return;
         }
@@ -5105,7 +5156,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // covers both commit sites below with one check.
             const dOthers3 = liveItems.filter((i) => i.id !== it.id);
             if (checkDoorCollision({ ...it, ...sn, widthFt: wFt }, { ...c, width: wFt }, dOthers3, itemTypes, scale)) return;
-            if (checkWorkbenchOverlap(sn, wFt * scale, dOthers3, itemTypes, scale)) return;
+            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale)) return;
             if (vertical) {
               // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
@@ -5129,10 +5180,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               }
               commitLive(it, sn, { walls: [it.wall, sn.wall], interior: rampMoved });
             }
-          } else if (it.type === "workbench") {
-            // Same rules as the 2D wallSnap drag: snap to the nearest wall's
-            // interior, blocked by doors and other benches on that wall.
-            dragPlane.set(new THREE.Vector3(0, 1, 0), -(D3.BENCH_H / 2));
+          } else if (ssSlabModel(it.type, itemTypes)) {
+            // Same rules as the 2D wallSnap drag: snap to the nearest wall's interior, blocked
+            // by doors and by other slabs on that wall WHOSE HEIGHT BAND OVERLAPS this one.
+            // The drag plane sits at the item's own height so the pointer ray meets the thing
+            // being dragged — a shelf at 48 in does not grab on the bench's plane.
+            const slabC = itemTypes[it.type] || {};
+            const slabY = slabC.modelKey && slabC.modelKey !== "wallBench"
+              ? (Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : slabC.heightOffFloorIn) || 48) / 12
+              : D3.BENCH_H / 2;
+            dragPlane.set(new THREE.Vector3(0, 1, 0), -slabY);
             const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
             if (!p) return;
             const pageX = mgX + (p.x + bldgW / 2) * scale;
@@ -5142,16 +5199,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, (c.height || 2) * scale, pWpx, pHpx, mgX, mgY);
             const others = liveItems.filter((i) => i.id !== it.id);
             if (checkDoorCollision({ ...it, ...sn }, { ...c, width: wFt }, others, itemTypes, scale)) return;
-            const isH = sn.wall === "north" || sn.wall === "south";
-            const candPos = isH ? sn.x : sn.y;
-            const candHalf = wFt * scale / 2;
-            for (let oi = 0; oi < others.length; oi++) {
-              const ob = others[oi];
-              if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
-              const obW = (ob.widthFt || (itemTypes[ob.type] || {}).width || 6) * scale / 2;
-              const obPos = isH ? ob.x : ob.y;
-              if (Math.abs(candPos - obPos) < candHalf + obW - 2) return;
-            }
+            if (checkWallSlabOverlap(sn, wFt * scale, others, itemTypes, scale, { ...it, ...sn })) return;
             if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) commitLive(it, sn, { interior: true });
           } else if (it.type === "loft") {
             // Same rules as the 2D free drag: integer-foot rounding, wall +
@@ -7805,7 +7853,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Workbench check too, as the built-in wall placement below runs — checkDoorCollision
       // skips workbenches, so an included chip could drop its door/window straight onto one
       // (audit 2026-08-20).
-      if (checkWorkbenchOverlap(sn, iwPx2, items, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, iwPx2, items, ITEMS, scale)) {
         setToast("A workbench is on that wall — place this somewhere else on the wall."); setTimeout(() => setToast(null), 4000); return;
       }
       setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
@@ -7913,26 +7961,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (cfg.wallSnap) {
       const clickedWall = wall || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
       const sn = snapToWallInterior(clickedWall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
-      const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+      // depthIn (builder-set, inches) IS the drawn footprint depth when present; absent, the
+      // config's own height stands, which is every item that predates the column. Both numbers
+      // are SNAPSHOT onto the item so re-pricing a shelf later never moves one already placed.
+      const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width,
+        heightFt: cfg.depthIn != null ? cfg.depthIn / 12 : cfg.height,
+        ...(cfg.depthIn != null ? { depthIn: cfg.depthIn } : {}),
+        ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
       const others = items.filter((i) => i.id !== candidate.id);
       if (checkDoorCollision(candidate, cfg, others, ITEMS, scale)) {
         setToast("A door is blocking this wall! Try clicking a different wall, or move the door first.");
         setTimeout(() => setToast(null), 5000);
         return;
       }
-      // Check workbench overlap on same wall during placement
-      const isH = sn.wall === "north" || sn.wall === "south";
-      const candPos = isH ? sn.x : sn.y;
-      const candHalf = cfg.width * scale / 2;
-      for (const ob of others) {
-        if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
-        const obW = (ob.widthFt || ITEMS[ob.type].width) * scale / 2;
-        const obPos = isH ? ob.x : ob.y;
-        if (Math.abs(candPos - obPos) < candHalf + obW - 2) {
-          setToast("Another workbench is in the way. Try a different spot on the wall.");
-          setTimeout(() => setToast(null), 4000);
-          return;
-        }
+      // Another slab already owns this span AT THIS HEIGHT — a shelf may hang above a bench.
+      if (checkWallSlabOverlap(sn, cfg.width * scale, others, ITEMS, scale, candidate)) {
+        setToast("Something else is already mounted there. Try a different spot on the wall.");
+        setTimeout(() => setToast(null), 4000);
+        return;
       }
       ni = candidate;
       idCounter++;
@@ -7965,7 +8011,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setTimeout(() => setToast(null), 4000);
         return;
       }
-      if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
         setToast("A workbench is on that wall — place this somewhere else on the wall.");
         setTimeout(() => setToast(null), 4000);
         return;
@@ -8009,7 +8055,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSwapId(null); setDoorPick(null);
         return;
       }
-      if (checkWorkbenchOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale)) {
         setToast("A workbench is on that wall — the wider door would overlap it.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setDoorPick(null);
@@ -8073,9 +8119,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Same second check as the built-in wall placement and the drag path: checkDoorCollision
     // skips workbenches (wallSnap, not wallOnly), so a picked catalog door landed straight
-    // on a workbench — the exact layout checkWorkbenchOverlap exists to prevent
+    // on a workbench — the exact layout checkWallSlabOverlap exists to prevent
     // (audit 2026-08-20).
-    if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
       setToast("A workbench is on that wall — place this somewhere else on the wall.");
       setTimeout(() => setToast(null), 4000);
       setDoorPick(null);
@@ -8112,7 +8158,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSwapId(null); setWindowPick(null);
         return;
       }
-      if (checkWorkbenchOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale)) {
         setToast("A workbench is on that wall — the wider window would overlap it.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setWindowPick(null);
@@ -8159,7 +8205,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Workbench check too, as the built-in wall placement runs — checkDoorCollision skips
     // workbenches, so a picked catalog window landed straight on one (audit 2026-08-20).
-    if (checkWorkbenchOverlap(sn, iwPx, items, ITEMS, scale)) {
+    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
       setToast("A workbench is on that wall — place this somewhere else on the wall.");
       setTimeout(() => setToast(null), 4000);
       setWindowPick(null);
@@ -8453,7 +8499,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const dOthers = items.filter((i) => i.id !== dragging.id);
       const dCand = { ...it, ...sn, widthFt: iWidthFt };
       if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) return;
-      if (checkWorkbenchOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale)) return;
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale)) return;
       // A ramp snapped to this door must follow it (position + wall); otherwise it
       // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
       // rampPlacementForDoor honours the ramp's own depth (catalog ramps vary), so it
@@ -8473,16 +8519,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Check collision with doors AND other workbenches on same wall
       const others = items.filter((i) => i.id !== dragging.id);
       if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)) return;
-      // Check workbench overlap on same wall
-      const isH = sn.wall === "north" || sn.wall === "south";
-      const candPos = isH ? sn.x : sn.y;
-      const candHalf = iWidthFt * scale / 2;
-      for (const ob of others) {
-        if (ob.type !== "workbench" || ob.wall !== sn.wall) continue;
-        const obW = (ob.widthFt || ITEMS[ob.type].width) * scale / 2;
-        const obPos = isH ? ob.x : ob.y;
-        if (Math.abs(candPos - obPos) < candHalf + obW - 2) return; // overlap
-      }
+      // Refuse a move that would land this slab on another at the same height
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, others, ITEMS, scale, cand)) return;
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
     } else {
       // Notes drag anywhere on the visible page (no plan constraint)
@@ -8815,7 +8853,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih);
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
-      if (item.type === "workbench") { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText("Workbench", 0, 13); }
+      if (ssSlabModel(item.type, ITEMS)) { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText(cfg.label || "Workbench", 0, 13); }
       else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
       else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
       // The SVG twin of this label lives in the item map — same text, same rule. CLAUDE.md's
@@ -8914,7 +8952,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     });
     const winCount = items.filter((i) => i.type === "window" && !i.fixtureItemId).length;
     if (winCount > 0) bullets.push(`Window${winCount > 1 ? "s ×" + winCount : ""}`);
-    items.filter((i) => i.type === "workbench").forEach((wb) => bullets.push(`${wb.widthFt}ft Workbench`));
+    items.filter((i) => ssSlabModel(i.type, ITEMS)).forEach((wb) => bullets.push(`${wb.widthFt}ft ${(ITEMS[wb.type] && ITEMS[wb.type].label) || "Workbench"}`));
     const loftItems = items.filter((i) => i.type === "loft");
     if (loftItems.length > 0) {
       const loftSqft = Math.round(loftItems.reduce((s, l) => s + (Number(l.widthFt) || 0) * (Number(l.heightFt) || 0), 0));
@@ -9778,7 +9816,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           return {
             type: item.type,
             wall: displayLabel ? displayLabel.toLowerCase() : (item.wall || null),
-            ...(item.type === "workbench" ? { lengthFt: item.widthFt } : {}),
+            ...(item.type === "workbench" || item.type === "shelf" || item.type === "doubleShelf" ? { lengthFt: item.widthFt } : {}),
+            ...(item.depthIn != null ? { depthIn: item.depthIn } : {}),
+            ...(item.heightOffFloorIn != null ? { heightOffFloorIn: item.heightOffFloorIn } : {}),
             ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null, colorId: item.colorId || null, colorLabel: item.colorLabel || null, trimColorId: item.trimColorId || null, trimColorLabel: item.trimColorLabel || null } : {}),
             ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
             ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId, colorId: item.colorId || null, colorLabel: item.colorLabel || null } : {}),
@@ -9846,6 +9886,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Built-in windows only (catalog windows are priced from windows[] by snapshot).
           windows: items.filter((i) => i.type === "window" && !i.fixtureItemId).length,
           workbenches: items.filter((i) => i.type === "workbench").map((i) => {
+            const lbl = getDisplayLabel(i.wall, frontWall);
+            return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
+          }),
+          shelves: items.filter((i) => i.type === "shelf").map((i) => {
+            const lbl = getDisplayLabel(i.wall, frontWall);
+            return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
+          }),
+          doubleShelves: items.filter((i) => i.type === "doubleShelf").map((i) => {
             const lbl = getDisplayLabel(i.wall, frontWall);
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
@@ -11192,10 +11240,40 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
               </span>
             ); };
+          // Sections (Doors · Windows · Interior · …). An item carrying no `group` — which is
+          // every item in every tenant config until it is regenerated — lands in the unlabelled
+          // tail, and a list with NO groups at all returns null so the row renders exactly as it
+          // always has. An unrecognised group name also falls to the tail rather than being
+          // filtered away: a dropped tool is invisible, and invisible is the worst failure here.
+          const sectionsOf = (list) => {
+            if (!list.some(([, c]) => c && c.group)) return null;
+            const by = {};
+            list.forEach((e) => {
+              const g = (e[1] && e[1].group) || "";
+              const k = PALETTE_GROUP_LABEL[g] ? g : "";
+              (by[k] = by[k] || []).push(e);
+            });
+            const out = [];
+            PALETTE_GROUP_ORDER.forEach((g) => { if (by[g] && by[g].length) out.push([PALETTE_GROUP_LABEL[g], by[g]]); });
+            if (by[""] && by[""].length) out.push([null, by[""]]);
+            return out;
+          };
+          const renderAddl = () => {
+            const secs = sectionsOf(addl);
+            if (!secs) return addl.map(btn);
+            return secs.map(([label, list], i) => (
+              <div key={label || ("ss-ungrouped-" + i)} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+                {label && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>{label}</span>}
+                {list.map(btn)}
+              </div>
+            ));
+          };
           if (incl.length === 0) {
+            // With sections each carries its own heading, so the single "Place:" label would
+            // just be a fifth heading with nothing under it.
             return (<>
-              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>
-              {addl.map(btn)}
+              {!sectionsOf(addl) && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>}
+              {renderAddl()}
             </>);
           }
           // Included items on their own row, a full-width horizontal rule, then the additional
@@ -11207,7 +11285,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
             <div style={{ width: "100%", borderTop: "1px solid #CBD5E1", margin: "2px 0" }} />
             <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
-            {addl.map(btn)}
+            {renderAddl()}
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
@@ -11518,7 +11596,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const itemW = item.widthFt || cfg.width;
             const itemH = item.heightFt || cfg.height;
             const iw = itemW * scale; const ih = itemH * scale;
-            const isWB = item.type === "workbench";
+            // Every wall SLAB gets the length label and the ◄ ► stretch grips, not just the
+            // workbench — that is what makes a shelf drag and stretch exactly like one.
+            const isWB = !!ssSlabModel(item.type, ITEMS);
             return (
               <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
                 onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
@@ -11626,7 +11706,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     ) : isWB ? (
                       <>
                         <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
-                        <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>Workbench</text>
+                        <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>{cfg.label}</text>
                       </>
                     ) : cfg.propType ? (
                       // Its NAME, not "Item" and not dimensions. A plan is read by the person

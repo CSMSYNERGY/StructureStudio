@@ -1223,8 +1223,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable").eq("client_id", clientId).order("sort_order"),
-      admin.from("layout_item_types").select("item_key, label"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable, depth_in, height_off_floor_in").eq("client_id", clientId).order("sort_order"),
+      // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
+      // Height off floor for wall-mounted items, and shows the master default where the tenant
+      // has not overridden it.
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
@@ -1244,9 +1247,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Failing the request is right for a settings read; a half-true catalog is not.
     for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
-    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
+    const typeByKey: Record<string, any> = {};
+    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false }));
+      .map((i: any) => {
+        const t = typeByKey[i.item_key] || {};
+        // Tenant override wins, master default fills in. null (not 0) means "not set", which is
+        // what lets the grid show a blank rather than claiming a 0-inch shelf.
+        const depth = i.depth_in != null ? i.depth_in : t.depth_in;
+        const off = i.height_off_floor_in != null ? i.height_off_floor_in : t.height_off_floor_in;
+        return { key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key,
+          archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false,
+          wallSnap: !!t.wall_snap, depthIn: depth != null ? Number(depth) : null,
+          heightOffFloorIn: off != null ? Number(off) : null };
+      });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
@@ -1639,6 +1653,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ? await admin.from("layout_item_pricing").update(patch).eq("id", existingId)
         : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, ...patch });
       if (res.error) { skipped.push(`${itemKey}: ${res.error.message}`); continue; }
+      // Dimensions for a wall-mounted item (171): depth of the drawn footprint, and how far off
+      // the floor it hangs — the number that lets a shelf sit above a workbench without the two
+      // colliding. They live on client_layout_items, not layout_item_pricing, so they are
+      // written separately and ONLY when the row carries the field: presence-guarded exactly
+      // like imageUrl above, so a save from an older client can never blank a builder's setup.
+      // An explicit empty string clears the override and falls back to the master default.
+      const dims: Record<string, unknown> = {};
+      let dimBad = "";
+      for (const [field, col] of [["depthIn", "depth_in"], ["heightOffFloorIn", "height_off_floor_in"]] as [string, string][]) {
+        if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
+        const raw = String((row as Record<string, unknown>)[field] ?? "").trim();
+        if (raw === "") { dims[col] = null; continue; }
+        const n = Number(raw);
+        // Refuse, never coerce — the same posture as the rate above. A silently-zeroed depth
+        // would draw a zero-thickness shelf on the customer's plan.
+        if (!Number.isFinite(n) || n < 0) { dimBad = `${itemKey}: invalid ${field} "${raw}"`; break; }
+        dims[col] = n;
+      }
+      if (dimBad) { skipped.push(dimBad); continue; }
+      if (Object.keys(dims).length) {
+        const dRes = await admin.from("client_layout_items").update(dims).eq("client_id", clientId).eq("item_key", itemKey);
+        if (dRes.error) { skipped.push(`${itemKey}: ${dRes.error.message}`); continue; }
+      }
       saved++;
     }
     return json({ ok: true, saved, skipped });

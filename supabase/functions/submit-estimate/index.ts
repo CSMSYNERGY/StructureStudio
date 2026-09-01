@@ -927,6 +927,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const desc = summary.workbenches.map((wb: any) => `${wb.wall ? wb.wall + " wall " : ""}${wb.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
     pushItem(["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], "workbench", desc, { count: summary.workbenches.length, lengthFt: totalFt });
   }
+  // Shelves follow the workbench rule exactly: every run of one type summed into ONE lineal_ft
+  // line, so a size inclusion nets once rather than once per shelf. Single and double are
+  // separate item_keys because they are separate buttons and separate prices to the builder.
+  for (const [key, field, names] of [
+    ["shelf", "shelves", ["Shelf", "Shelving", "Shelves"]],
+    ["doubleShelf", "doubleShelves", ["Double Shelf", "Double Shelving", "Shelves"]],
+  ] as [string, string, string[]][]) {
+    const rows = (summary as Record<string, unknown>)[field];
+    if (!Array.isArray(rows) || rows.length === 0) continue;
+    const totalShelfFt = rows.reduce((s: number, r: any) => s + (Number(r.lengthFt) || 1), 0);
+    const shelfDesc = rows.map((r: any) => `${r.wall ? r.wall + " wall " : ""}${r.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
+    pushItem(names, key, shelfDesc, { count: rows.length, lengthFt: totalShelfFt });
+  }
   if (summary.lofts > 0) {
     // qty/amount are derived from the loft's configured method inside pushItem: per-unit (each)
     // uses the loft count, per-area (sqft_option) uses total loft sqft.
@@ -1154,6 +1167,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (summary.windows > 0) placedKeys.add("window");
     if (summary.lofts > 0) placedKeys.add("loft");
     if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
+    if (Array.isArray(summary.shelves) && summary.shelves.length > 0) placedKeys.add("shelf");
+    if (Array.isArray(summary.doubleShelves) && summary.doubleShelves.length > 0) placedKeys.add("doubleShelf");
     if (rampCount > 0) placedKeys.add("ramp");
     if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
     // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.

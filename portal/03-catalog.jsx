@@ -2773,7 +2773,8 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
     // no longer shown or archived here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
+        wallSnap: !!it.wallSnap, depthIn: it.depthIn != null ? String(it.depthIn) : "", heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "" };
     });
   };
 
@@ -2870,7 +2871,15 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       const rateOf = (r) => { const s = String(r.rate ?? "").trim(); return s === "" ? 0 : Number(s); };
       const bad = src.filter((r) => { const n = rateOf(r); return !Number.isFinite(n) || n < 0; });
       if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.map((r) => `${r.label} ("${r.rate}")`).join(", ")}.`);
-      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null }));
+      // Dimensions ride the same Save prices click. Only wall-mounted items carry them, and a
+      // blank clears the override back to the master default — so they are sent as typed, not
+      // coerced, and an unusable one is named rather than silently becoming 0.
+      const dimBad = src.filter((r) => r.wallSnap && [r.depthIn, r.heightOffFloorIn].some((v) => {
+        const t = String(v ?? "").trim(); return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      }));
+      if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
+      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
+        ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
@@ -2939,9 +2948,9 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
           <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Depth (in)</th><th style={S.th}>Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal</th><th style={S.th}></th>
               </tr></thead>
-              <tbody><SkelRows cols={6} rows={6} widths={["58%", "80%", "60%", "50%", "24%", "44%"]} /></tbody>
+              <tbody><SkelRows cols={8} rows={6} widths={["58%", "80%", "60%", "40%", "40%", "50%", "24%", "44%"]} /></tbody>
             </table>
           </div>
         ) : rows.length === 0 ? (
@@ -2954,7 +2963,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -2967,6 +2976,18 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     </td>
                     <td style={S.td}>
                       <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    {/* Dimensions apply to wall-mounted items only; a dash reads as "not applicable
+                        here", which an empty box would not. Blank = fall back to our default. */}
+                    <td style={S.td}>
+                      {r.wallSnap
+                        ? <input type="number" min="0" step="0.5" value={r.depthIn} placeholder="default" onChange={(e) => setRow(r.item_key, "depthIn", e.target.value)} style={{ ...S.input, width: 96 }} />
+                        : <span style={{ color: "#CBD5E1" }}>—</span>}
+                    </td>
+                    <td style={S.td}>
+                      {r.wallSnap
+                        ? <input type="number" min="0" step="0.5" value={r.heightOffFloorIn} placeholder="default" onChange={(e) => setRow(r.item_key, "heightOffFloorIn", e.target.value)} style={{ ...S.input, width: 96 }} />
+                        : <span style={{ color: "#CBD5E1" }}>—</span>}
                     </td>
                     <td style={S.td}>
                       {r.image_url ? (
