@@ -2294,7 +2294,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
   const doToggle = async (on) => {
     setConfirmToggle(null);
     const r = await invoke("set_rtp_enabled", { on });
-    if (r) { setMsg({ ok: on ? "Real-time pricing is LIVE — your building prices now come from your material costs." : "Real-time pricing is off — your manual prices are restored." }); await load(); }
+    if (r) { setMsg({ ok: on ? "Real-Time Pricing is LIVE — your building prices now come from your material costs." : "Real-Time Pricing is off — your manual prices are restored." }); await load(); }
   };
 
   // ── The workbook (download) ── Materials + one sheet per selected style + Overhead +
@@ -2371,9 +2371,9 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
       wsO.addRow([]);
       wsO.addRow(["Types: multiplier (multiplies the running price), flat (adds dollars), percent_of_price (a reporting allocation OF the final price — does not change it)."]);
 
-      const wsP = wb.addWorksheet("Current Prices");
+      const wsP = wb.addWorksheet("Basic Pricing");
       wsP.addRow(["Reference only — this sheet is not imported."]).getCell(1).font = { italic: true, color: { argb: "FF64748B" } };
-      wsP.addRow(["Style", "Size", "Current price", "Computed price"]);
+      wsP.addRow(["Style", "Size", "Basic Pricing", "Real-Time Pricing"]);
       paintHdr(wsP, 2, 4);
       wsP.columns = [{ width: 22 }, { width: 10 }, { width: 14 }, { width: 15 }];
       styles().forEach((s) => sizesFor(s.id).forEach((z) => {
@@ -2403,7 +2403,12 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
       const lcName = (n) => String(n).trim().toLowerCase();
       const matSheet = sheets.find((s) => lcName(s.name) === "materials");
       const ovhSheet = sheets.find((s) => lcName(s.name) === "overhead");
-      const styleSheets = sheets.filter((s) => !["materials", "overhead", "current prices"].includes(lcName(s.name)));
+      // ⚠️ BOTH NAMES, FOREVER. The read-only price reference tab was renamed "Current Prices"
+      // -> "Basic Pricing" on 2026-09-01. Dropping the old name would silently reclassify a
+      // workbook downloaded before that date as a STYLE sheet and feed its rows to the BOM
+      // importer; keeping only the old one breaks every workbook downloaded after. Neither is
+      // a sheet we read, so listing both costs nothing and is the only safe shape.
+      const styleSheets = sheets.filter((s) => !["materials", "overhead", "current prices", "basic pricing"].includes(lcName(s.name)));
       if (!matSheet && !styleSheets.length) throw new Error("This doesn't look like the Real-Time Pricing workbook — no Materials sheet and no style sheets.");
 
       const materials = [];
@@ -2506,7 +2511,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
         <div style={{ marginLeft: "auto" }}>
           <button onClick={() => setConfirmToggle({ to: !enabled })} disabled={busy}
             style={S.btn(enabled ? "#FEF2F2" : "#166534", enabled ? "#DC2626" : "#FFF")}>
-            {enabled ? "Turn off — restore manual prices" : "Go live with real-time pricing"}
+            {enabled ? "Turn off — restore manual prices" : "Go live with Real-Time Pricing"}
           </button>
         </div>
       </div>
@@ -2676,7 +2681,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
           </p>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
-              <thead><tr><th style={S.th}>Style</th><th style={S.th}>Size</th><th style={S.th}>Materials</th><th style={S.th}>Computed</th><th style={S.th}>Current</th><th style={S.th}>Where it goes</th></tr></thead>
+              <thead><tr><th style={S.th}>Style</th><th style={S.th}>Size</th><th style={S.th}>Materials</th><th style={S.th}>Real-Time Pricing</th><th style={S.th}>Basic Pricing</th><th style={S.th}>Where it goes</th></tr></thead>
               <tbody>
                 {previewRows.map((p) => (
                   <tr key={p.size_id}>
@@ -2702,7 +2707,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
           <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 560, width: "100%", maxHeight: "84vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
             <div style={{ background: confirmToggle.to ? "#166534" : "#92400E", color: "#FFF", padding: "15px 18px", fontSize: 15.5, fontWeight: 800 }}>
-              {confirmToggle.to ? "Go live with real-time pricing?" : "Turn real-time pricing off?"}
+              {confirmToggle.to ? "Go live with Real-Time Pricing?" : "Turn Real-Time Pricing off?"}
             </div>
             <div style={{ padding: "16px 18px" }}>
               {confirmToggle.to ? (<>
@@ -2726,7 +2731,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
                 </table>
               </>) : (
                 <p style={{ fontSize: 13, color: "#475569", margin: "0 0 12px", lineHeight: 1.6 }}>
-                  Every building goes back to the manual price it had before real-time pricing went live.
+                  Every building goes back to the manual price it had before Real-Time Pricing went live.
                   Your materials, bills and overhead stay saved — going live again re-applies them.
                 </p>
               )}
