@@ -58,7 +58,7 @@ insert into public.layout_item_types
   (item_key, label, icon, color, default_width, default_height, wall_only, wall_snap, door_snap,
    short_label, sort_order, active, palette_group, model_key, depth_in, height_off_floor_in, hidden_until_priced)
 values
-  ('shelf', 'Shelf', '📚', '#D97706', 4, 1, false, true, false,
+  ('shelf', 'Single Shelf', '📚', '#D97706', 4, 1, false, true, false,
    'SHELF', 60, true, 'interior', 'wallShelf', 12, 48, true),
   ('doubleShelf', 'Double Shelf', '📚', '#B45309', 4, 1, false, true, false,
    'DBL SHELF', 61, true, 'interior', 'wallShelfDouble', 12, 48, true)

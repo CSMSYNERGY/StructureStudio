@@ -931,7 +931,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // line, so a size inclusion nets once rather than once per shelf. Single and double are
   // separate item_keys because they are separate buttons and separate prices to the builder.
   for (const [key, field, names] of [
-    ["shelf", "shelves", ["Shelf", "Shelving", "Shelves"]],
+    ["shelf", "shelves", ["Single Shelf", "Shelf", "Shelving", "Shelves"]],
     ["doubleShelf", "doubleShelves", ["Double Shelf", "Double Shelving", "Shelves"]],
   ] as [string, string, string[]][]) {
     const rows = (summary as Record<string, unknown>)[field];
