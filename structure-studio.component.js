@@ -3747,20 +3747,33 @@ function buildShed3DModel(THREE, p) {
     // It projects toward the eave it already sits nearest, so a dormer placed on the right
     // half runs right. Held back from the eave so it can never overhang the edge.
     const dirU = fr < 0 ? -1 : 1;
-    const uOut = dirU > 0 ? Math.min(uTop + 3.0, S / 2 - 0.3) : Math.max(uTop - 3.0, -S / 2 + 0.3);
-    const run = Math.abs(uOut - uTop);
-    if (run > 0.6) {
-      const mainDrop = yTop - profYAt(uOut);
-      // ⚠️ THE RISE IS CLAMPED BY THE MAIN ROOF, not by the input. The face can only be as
-      // tall as the main roof falls across the run: any taller and this dormer's own roof
-      // would slope UP on its way out, which is not a dormer, it is a ramp. Clamping here
-      // rather than at the input is deliberate -- the ceiling depends on pitch and position,
-      // so a fixed max on the number box would be wrong for most styles.
-      const rise = Math.max(0.3, Math.min(roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5, mainDrop - 0.3));
-      const yOut = profYAt(uOut) + rise;
+    // ⚠️ THE RUN IS DERIVED FROM THE RISE, NOT FIXED. A shed dormer only stands proud of the
+    // roof by the amount the MAIN roof falls faster than the dormer's own does, so with a
+    // fixed 3 ft run the face could only ever be (mainSlope - dormSlope) x 3 -- about 1.2 ft
+    // on a 6:12 -- and 1.2 ft of lift over 3 ft reads as a torn shingle lying on the slope,
+    // not as a dormer. It rendered exactly that way on beta before this.
+    //
+    // So: the builder asks for a rise, and the dormer extends as far as it needs to to earn
+    // it. The main slope is MEASURED off the profile rather than read from roofCfg.pitch, so
+    // this is right on a gambrel's two pitches as well as a gable's one.
+    const probe = 0.5;
+    const mainSlope = Math.max(0.05, (yTop - profYAt(uTop + dirU * probe)) / probe);
+    const dormSlope = Math.max(0.08, mainSlope * 0.35);          // visibly shallower than the roof
+    const eaveU = dirU > 0 ? (S / 2 - 0.3) : (-S / 2 + 0.3);
+    const wantRise = Math.max(0.5, roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5);
+    // Clamped by the eave, not by the number box: how tall a dormer fits depends on pitch and
+    // position, so a fixed max on the input would be wrong for most styles. Running out of
+    // roof shortens the dormer rather than refusing it.
+    const run = Math.min(wantRise / (mainSlope - dormSlope), Math.abs(eaveU - uTop));
+    if (run > 0.8) {
+      const uOut = uTop + dirU * run;
+      const yOut = yTop - dormSlope * run;   // the dormer's own roof line at the outer end
+      // What actually shows: the gap between the two roof planes, which IS the face height.
+      const face = Math.max(0.3, yOut - profYAt(uOut));
       const du = uOut - uTop, dy = yOut - yTop;
       const slen = Math.sqrt(du * du + dy * dy) || 1;
       const ang = Math.atan2(dy, du);
+      const rise = face;
       // ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
       // dormer's single box does. Tilting it to the dormer's OWN pitch is what makes the
       // top face meet the slab instead of leaving an air gap under it, and it buries the

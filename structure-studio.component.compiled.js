@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 334dfc6e0f92)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 e64b4d84203f)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -1239,12 +1239,22 @@ cap.rotation.x=sgn*Math.atan2(capRise,half);cap.position.set(dU,baseY+dRise+capR
 // Skipped on a shed roof for the same reason the gable dormer is.
 if(dormW>0.5&&roofCfg.type!=="shed"&&dormerIsTransom){var _fr=Math.max(-0.85,Math.min(0.85,roofCfg.dormerOffsetU!=null?roofCfg.dormerOffsetU:0.45));var uTop=S/2*_fr;var yTop=profYAt(uTop);// It projects toward the eave it already sits nearest, so a dormer placed on the right
 // half runs right. Held back from the eave so it can never overhang the edge.
-var dirU=_fr<0?-1:1;var uOut=dirU>0?Math.min(uTop+3.0,S/2-0.3):Math.max(uTop-3.0,-S/2+0.3);var run=Math.abs(uOut-uTop);if(run>0.6){var mainDrop=yTop-profYAt(uOut);// ⚠️ THE RISE IS CLAMPED BY THE MAIN ROOF, not by the input. The face can only be as
-// tall as the main roof falls across the run: any taller and this dormer's own roof
-// would slope UP on its way out, which is not a dormer, it is a ramp. Clamping here
-// rather than at the input is deliberate -- the ceiling depends on pitch and position,
-// so a fixed max on the number box would be wrong for most styles.
-var rise=Math.max(0.3,Math.min(roofCfg.dormerRiseFt!=null?roofCfg.dormerRiseFt:2.5,mainDrop-0.3));var yOut=profYAt(uOut)+rise;var _du=uOut-uTop,_dy=yOut-yTop;var _slen=Math.sqrt(_du*_du+_dy*_dy)||1;var ang=Math.atan2(_dy,_du);// ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
+var dirU=_fr<0?-1:1;// ⚠️ THE RUN IS DERIVED FROM THE RISE, NOT FIXED. A shed dormer only stands proud of the
+// roof by the amount the MAIN roof falls faster than the dormer's own does, so with a
+// fixed 3 ft run the face could only ever be (mainSlope - dormSlope) x 3 -- about 1.2 ft
+// on a 6:12 -- and 1.2 ft of lift over 3 ft reads as a torn shingle lying on the slope,
+// not as a dormer. It rendered exactly that way on beta before this.
+//
+// So: the builder asks for a rise, and the dormer extends as far as it needs to to earn
+// it. The main slope is MEASURED off the profile rather than read from roofCfg.pitch, so
+// this is right on a gambrel's two pitches as well as a gable's one.
+var probe=0.5;var mainSlope=Math.max(0.05,(yTop-profYAt(uTop+dirU*probe))/probe);var dormSlope=Math.max(0.08,mainSlope*0.35);// visibly shallower than the roof
+var eaveU=dirU>0?S/2-0.3:-S/2+0.3;var wantRise=Math.max(0.5,roofCfg.dormerRiseFt!=null?roofCfg.dormerRiseFt:2.5);// Clamped by the eave, not by the number box: how tall a dormer fits depends on pitch and
+// position, so a fixed max on the input would be wrong for most styles. Running out of
+// roof shortens the dormer rather than refusing it.
+var run=Math.min(wantRise/(mainSlope-dormSlope),Math.abs(eaveU-uTop));if(run>0.8){var uOut=uTop+dirU*run;var yOut=yTop-dormSlope*run;// the dormer's own roof line at the outer end
+// What actually shows: the gap between the two roof planes, which IS the face height.
+var face=Math.max(0.3,yOut-profYAt(uOut));var _du=uOut-uTop,_dy=yOut-yTop;var _slen=Math.sqrt(_du*_du+_dy*_dy)||1;var ang=Math.atan2(_dy,_du);var rise=face;// ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
 // dormer's single box does. Tilting it to the dormer's OWN pitch is what makes the
 // top face meet the slab instead of leaving an air gap under it, and it buries the
 // upslope end inside the main roof, which is where a real shed dormer's framing goes.
@@ -1329,7 +1339,7 @@ var lowEnd=A[1]<=B[1]?A:B;if(lowEnd[1]<=H+0.01){var towardLow=lowEnd===A?-1:1;//
 // at a free edge jointExt returns OV, so the slab's end face is the plane through
 // here. Factored out of the fascia's own expression WITHOUT reordering its float
 // ops, so the fascia below is bit-for-bit where it has always been.
-var eaveU=lowEnd[0]+towardLow*ux*OV;var eaveY=lowEnd[1]+towardLow*uy*OV;if(!EAVE_OPEN){var edgeU=eaveU+nx*(D3.ROOF_T/2+0.02);var edgeY=eaveY+ny*(D3.ROOF_T/2+0.02);var fascia=box(trimMat,0.14,0.4,L+OV*2);fascia.position.set(edgeU,edgeY-0.14,L/2);rg.add(fascia);}else{// OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
+var _eaveU=lowEnd[0]+towardLow*ux*OV;var eaveY=lowEnd[1]+towardLow*uy*OV;if(!EAVE_OPEN){var edgeU=_eaveU+nx*(D3.ROOF_T/2+0.02);var edgeY=eaveY+ny*(D3.ROOF_T/2+0.02);var fascia=box(trimMat,0.14,0.4,L+OV*2);fascia.position.set(edgeU,edgeY-0.14,L/2);rg.add(fascia);}else{// OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
 // the roof deck at 24 in on centre. On the building this was measured from it is
 // the highest-contrast element there is, and a painted fascia is precisely what
 // it is NOT: the two are alternatives, never both.
@@ -1342,7 +1352,7 @@ var TAIL_DROP=3.5/12;// visible projection below the deck underside
 // between tail and deck.
 var tailN=0.02-TAIL_DROP+TAIL_H/2;var tailLen=OV+0.5;// outboard face flush with the slab end,
 // inboard end buried behind the wall
-var tailU=eaveU-towardLow*ux*(tailLen/2)+nx*tailN;var tailY=eaveY-towardLow*uy*(tailLen/2)+ny*tailN;var tailRot=Math.atan2(dy,du);// same rotation as the slab it hangs under
+var tailU=_eaveU-towardLow*ux*(tailLen/2)+nx*tailN;var tailY=eaveY-towardLow*uy*(tailLen/2)+ny*tailN;var tailRot=Math.atan2(dy,du);// same rotation as the slab it hangs under
 var addTail=function addTail(z){var tl=box(tailMat(),tailLen,TAIL_H,TAIL_W);tl.rotation.z=tailRot;tl.position.set(tailU,tailY,z);rg.add(tl);};// COUNT IS A RULE, not a number. Bays are laid across the wall span z in [0, L]
 // and rounded to whole bays, so both gable walls always carry an end rafter and
 // no stub bay is left over. An 8x8 at 24 o.c. gives 4 bays and 5 tails, which is
