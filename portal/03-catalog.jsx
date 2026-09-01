@@ -2756,6 +2756,145 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// -- Wall Height Upgrades (172) ----------------------------------------------------------
+// One card, one section per building style -- the ColorsView pattern, and for the reason
+// Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
+// The heights on offer differ per style because HAULING limits do, which is why this is not
+// one list for the whole tenant.
+//
+// renderSection is a plain function and NOT a component, deliberately: as a component React
+// remounts it on every keystroke and the input loses focus. Same note as ColorsView.
+function WallHeights({ viewingLabel = null, clientId = null }) {
+  // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [byStyle, setByStyle] = useState({});
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const m = {};
+    (data.styles || []).forEach((st) => { m[st.id] = []; });
+    (data.wallHeights || []).forEach((r) => {
+      (m[r.style_id] = m[r.style_id] || []).push({
+        id: r.id,
+        deltaIn: String(r.delta_in),
+        ratePerLf: r.rate_per_lf != null ? String(r.rate_per_lf) : "",
+        taxable: r.taxable !== false,
+        active: r.active !== false,
+      });
+    });
+    setByStyle(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (styleId, idx, field, val) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
+  const addRow = (styleId) =>
+    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true }] }));
+  const delRow = (styleId, idx) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).filter((_, i) => i !== idx) }));
+
+  const save = async (styleId, styleLabel) => {
+    setBusyId(styleId); setMsg(null);
+    try {
+      const rows = byStyle[styleId] || [];
+      // Refuse, never coerce -- the same posture as the rate grid. A silently-zeroed increase
+      // would quote a structural change at nothing.
+      const bad = rows.filter((r) => {
+        const d = Number(String(r.deltaIn).trim());
+        return !Number.isInteger(d) || d <= 0 || d > 48;
+      });
+      if (bad.length) throw new Error("Nothing was saved \u2014 every increase must be a whole number of inches between 1 and 48. Check: " + bad.map((r) => '"' + r.deltaIn + '"').join(", ") + ".");
+      const badRate = rows.filter((r) => {
+        const t = String(r.ratePerLf == null ? "" : r.ratePerLf).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badRate.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + badRate.map((r) => "+" + r.deltaIn + " in (\"" + r.ratePerLf + "\")").join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: scoped({
+          action: "save_wall_heights",
+          styleId,
+          rows: rows.map((r) => ({
+            id: r.id || undefined,
+            deltaIn: Number(String(r.deltaIn).trim()),
+            ratePerLf: String(r.ratePerLf == null ? "" : r.ratePerLf).trim(),
+            taxable: r.taxable,
+            active: r.active,
+          })),
+        }),
+      });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: styleLabel + ": saved " + (data.saved || 0) + " height(s)" + (data.deleted ? ", removed " + data.deleted : "") + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusyId(null);
+  };
+
+  const renderSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
+        <div style={S.h2}>{st.label}</div>
+        {rows.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px" }}>
+            No taller-wall option offered on this style — customers see no wall-height choice.
+          </p>
+        ) : (
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 620, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "26%" }} /><col style={{ width: "26%" }} /><col style={{ width: "16%" }} /><col style={{ width: "16%" }} /><col style={{ width: "16%" }} /></colgroup>
+            <thead><tr>
+              <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
+              <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
+              <th style={{ ...S.th, textAlign: "center" }}>Active</th>
+              <th style={S.th}></th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.id || ("new-" + i)}>
+                  <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => addRow(st.id)} style={{ background: "transparent", border: "none", color: "#1B7895", fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0 }}>+ Add increase</button>
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>{busyId === st.id ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Wall Height Upgrades</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 660 }}>
+        Taller walls, offered per building style — hauling limits differ per building, so each
+        style carries its own list. The customer picks <b>one</b> increase for the whole building
+        and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
+        lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
+        offering it yet.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (cat.styles || []).filter((st) => st.active !== false).map(renderSection)}
+    </div>
+  );
+}
+
 function LayoutPricing({ viewingLabel = null, clientId = null }) {
   // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);

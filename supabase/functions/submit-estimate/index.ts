@@ -612,6 +612,43 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const buildingArea = buildingWidthFt * buildingDepthFt;             // sqft_building
   const buildingPerimeter = 2 * (buildingWidthFt + buildingDepthFt);  // perimeter_building
 
+  // ── Taller walls (172) ──────────────────────────────────────────────────────────────────
+  // A SELECTION charge, not a placed item: nothing is on the floor plan, so this deliberately
+  // sits outside pushItem and outside the inclusion / declined-item machinery entirely. The
+  // customer picks ONE increase for the whole building and it is charged per lineal foot of
+  // perimeter — Carolyn's Lofted Barn +6" at $2/lf on a 12x24 is 72 lf x $2 = $144.
+  //
+  // The rate is re-read from the table here and NEVER taken from the payload: get_config
+  // publishes it to an anonymous browser, so a forged body could otherwise price its own
+  // upgrade. An increase that is not offered, not active, or not priced is a hard 400 — the
+  // same posture as an unpriced size above, and for the same reason: emailing a quote that
+  // silently charged $0 for a real structural change is worse than refusing to send one.
+  const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
+  if (wallHeightDeltaIn > 0) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price a wall-height upgrade: the style "${style}" is not in your catalog.` }, 400);
+    }
+    const whRes = await supabase.from("style_wall_heights")
+      .select("delta_in, rate_per_lf, taxable, active")
+      .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn).maybeSingle();
+    const wh = whRes.data as { rate_per_lf: number | null; taxable: boolean | null; active: boolean } | null;
+    if (whRes.error || !wh || !wh.active || wh.rate_per_lf == null) {
+      return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
+    }
+    const whRate = Number(wh.rate_per_lf) || 0;
+    targetItems.push(tagLine({
+      name: `Taller Walls (+${wallHeightDeltaIn} in)`,
+      qty: buildingPerimeter,
+      amount: whRate,
+      priceId: "",
+      productId: "",
+      attachments: [],
+      currency: "USD",
+      type: "one_time",
+      description: `${buildingPerimeter} ft of wall at $${whRate.toFixed(2)} per foot`,
+    }, { kind: "wall_height", nonTaxable: wh.taxable === false }));
+  }
+
   // Resolve a layout add-on to a GHL line item using its configured pricing_method. `amount`
   // is always PER-UNIT; GHL multiplies it by qty. `count` is how many of the item were placed;
   // lengthFt / optionSqft carry the per-measure quantity for the two measured methods:

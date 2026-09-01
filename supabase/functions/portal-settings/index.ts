@@ -114,6 +114,7 @@ const GATES: GateTable = {
   save_colors:                    { area: "settings_options", level: "edit" },
   save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
+  save_wall_heights:              { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
@@ -1218,7 +1219,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
@@ -1239,13 +1240,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
+      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order").eq("client_id", clientId).order("delta_in"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -1286,7 +1289,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       };
     } catch (_) { wallet = null; }
 
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -2674,6 +2677,79 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // clientId is JWT-resolved (own tenant only). The designer is selection-only today
   // (get_config exposes label/siding/trim/allowCustom/isDefault/swatch, never a price);
   // rate/pricing_method are persisted here for a later paint-pricing pass.
+  // Wall-height upgrades per building style (172). Full-replace for ONE style at a time: the
+  // editor renders a card per style and saves that card, so a tenant with eight styles never
+  // has to round-trip the other seven to change one. `styleId` scopes both the write and the
+  // delete sweep, and is verified to belong to THIS tenant before either.
+  if (action === "save_wall_heights") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId required" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+
+    // The style must be this tenant's. clientId comes from the JWT, never the body, so this
+    // is what stops a crafted styleId writing heights onto another builder's catalog.
+    const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
+    if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
+    if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
+
+    const exRes = await admin.from("style_wall_heights").select("id").eq("client_id", clientId).eq("style_id", styleId);
+    if (exRes.error) return dbFail(req, clientId, "read your current wall heights", exRes.error);
+    const existingIds = new Set((exRes.data ?? []).map((r: { id: string }) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    const seenDeltas = new Set<number>();
+    let i = 0;
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      // KEPT before validated — the save_colors invariant. A row that fails validation must be
+      // reported as skipped and LEFT ALONE, never swept by the delete below.
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing row left unchanged" : "";
+
+      const deltaIn = Number(row?.deltaIn);
+      if (!Number.isInteger(deltaIn) || deltaIn <= 0 || deltaIn > 48) {
+        skipped.push(`row ${i}: "${row?.deltaIn}" is not a whole number of inches between 1 and 48${unchanged}`); i++; continue;
+      }
+      if (seenDeltas.has(deltaIn)) { skipped.push(`+${deltaIn} in: listed twice${unchanged}`); i++; continue; }
+      seenDeltas.add(deltaIn);
+
+      // Refuse, never coerce — the rate posture everywhere in this file. A blank rate is a
+      // deliberate "offer it later": the row is stored unpriced and get_config withholds it.
+      const rateRaw = String(row?.ratePerLf ?? "").trim();
+      let ratePerLf: number | null = null;
+      if (rateRaw !== "") {
+        const n = Number(rateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${rateRaw}" is not a usable dollar amount${unchanged}`); i++; continue; }
+        ratePerLf = n;
+      }
+      const patch = {
+        delta_in: deltaIn,
+        rate_per_lf: ratePerLf,
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        sort_order: i,
+        updated_at: new Date().toISOString(),
+      };
+      const res = isExisting
+        ? await admin.from("style_wall_heights").update(patch).eq("id", rid).eq("client_id", clientId)
+        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...patch }).select("id").maybeSingle();
+      if (res.error) { skipped.push(`+${deltaIn} in: ${res.error.message}`); i++; continue; }
+      if (!isExisting && (res as { data?: { id?: string } }).data?.id) keptIds.add(String((res as { data: { id: string } }).data.id));
+      saved++; i++;
+    }
+    const sweep = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (sweep.length) {
+      const del = await admin.from("style_wall_heights").delete().in("id", sweep).eq("client_id", clientId);
+      if (del.error) return dbFail(req, clientId, "remove the wall heights you deleted", del.error);
+      deleted = sweep.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }

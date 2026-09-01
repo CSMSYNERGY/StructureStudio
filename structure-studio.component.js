@@ -872,6 +872,41 @@ function ssAllowedOrigin(origin) {
   } catch { return false; }
 }
 
+// ── Taller walls (172) ──────────────────────────────────────────────────────────────────
+// The increases a builder offers on THIS style, and the one the customer picked. Heights are
+// stored as DELTA INCHES over the style's standard wall, because that is how they are sold
+// ("+6 inches") and because a delta survives an edit to the style's baseline, where a stored
+// absolute would silently become a different upgrade.
+//
+// resolveWallHeight returns null for a delta this style does not offer, so the preview prices
+// nothing — the server answers the same case with a hard 400, and a preview that charged for
+// something the estimate then refuses is worse than one that shows nothing.
+// The absolute height the 3D model builds at. A chosen INCREASE wins and is added to the
+// style's own standard; a legacy absolute pick (the 3D footer, which predates 172) still works
+// on a style that offers no increases. The two are mutually exclusive — picking one clears the
+// other — so "last thing the customer touched" always wins instead of one silently shadowing
+// the other. Clamped to the same 5-14 ft band _shared/styleD3.ts enforces server-side.
+function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel) {
+  const d = Number(sel && sel.wallHeightDeltaIn) || 0;
+  if (d > 0 && resolveWallHeight(C, styleKey, d)) {
+    const o = (styleCfg && styleCfg.d3) || {};
+    const base = Number(o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || (C && C.wallHeightFt) || 8) || 8;
+    return Math.max(5, Math.min(14, base + d / 12));
+  }
+  return (sel && sel.wallHeight) || 0;
+}
+
+function wallHeightOptionsFor(C, styleKey) {
+  const m = (C && C.wallHeightOptions) || {};
+  const list = styleKey ? m[styleKey] : null;
+  return Array.isArray(list) ? list : [];
+}
+function resolveWallHeight(C, styleKey, deltaIn) {
+  const d = Number(deltaIn) || 0;
+  if (d <= 0) return null;
+  return wallHeightOptionsFor(C, styleKey).find((o) => Number(o.deltaIn) === d) || null;
+}
+
 function computeSelectionRows(sel, paintColors, C, items) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
@@ -1006,6 +1041,20 @@ function computeSelectionRows(sel, paintColors, C, items) {
   const styleSize = [styleLabel, sel && sel.size].filter(Boolean).join(" ") || "—";
   const buildingDetail = declinedLines.length ? [`Original building price: ${fmtMoney2(buildingPrice)}`, ...declinedLines].join("\n") : "";
   rows.push({ key: "building", label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null });
+  // Taller walls sit directly under the building because that is what they change. A selection
+  // charge, so it is NOT in LAYOUT_PRICE_ORDER and never touches the inclusion machinery.
+  const whOpt = resolveWallHeight(C, styleKey, sel && sel.wallHeightDeltaIn);
+  if (whOpt) {
+    const whRate = Number(whOpt.ratePerLf) || 0;
+    rows.push({
+      key: "wallHeight",
+      label: `Taller Walls (+${whOpt.deltaIn} in)`,
+      qty: buildingPerimeter,
+      unit: fmtMoney2(whRate) + " / ft",
+      total: showP ? Math.round(whRate * buildingPerimeter * 100) / 100 : null,
+      method: "lineal_ft",
+    });
+  }
   const painted = sel && sel.paint === "Painted";
   let pDetail = "Unpainted", pTotal = 0;
   if (painted) {
@@ -9636,7 +9685,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
           painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
           scale, mgX, mgY,
-          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight),
+          style3d: d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel)),
           roofType: sel.roofType,
           roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
           fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
@@ -9772,6 +9821,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...(sel.paint === "Painted" ? { paintBodyColor: paintColors.body || "TBD", paintTrimColor: paintColors.trim || "TBD" } : {}),
           // Customer's 3D wall-height pick (feet). Additive — absent when the
           // customer never touched it; pricing hookup is a catalog follow-up.
+          // The DELTA is what the server prices — it re-reads the rate from the catalog, so a
+          // forged body cannot invent its own upgrade. wallHeightFt stays alongside it as the
+          // resolved absolute the 3D model was built at, and is still priced by nobody.
+          ...(sel.wallHeightDeltaIn ? { wallHeightDeltaIn: Number(sel.wallHeightDeltaIn) } : {}),
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
           // unselected, so the estimate always shows the Roof line in order.
@@ -11070,6 +11123,40 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </select>
                 </div>
               )}
+              {(() => {
+                // Wall height — only when THIS style offers increases (hauling limits differ per
+                // style, so the list is per-style and most styles have none). Standard is always
+                // the first choice and always re-selectable.
+                const whList = wallHeightOptionsFor(C, sel.style);
+                if (!whList.length) return null;
+                const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
+                const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
+                const cur = Number(sel.wallHeightDeltaIn) || 0;
+                const cell = (on) => ({
+                  padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  background: on ? accent : "#FFF", color: on ? "#FFF" : "#334155",
+                  border: "none", borderRight: "1px solid #CBD5E1", lineHeight: 1.25,
+                });
+                return (
+                  <div>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Wall Height</span>
+                    <div style={{ display: "inline-flex", border: "1px solid #CBD5E1", borderRadius: 6, overflow: "hidden" }}>
+                      <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
+                      {whList.map((o, i) => {
+                        const rate = Number(o.ratePerLf) || 0;
+                        const add = C.showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
+                        return (
+                          <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
+                            style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
+                            +{o.deltaIn}&Prime;
+                            {add != null && <span style={{ display: "block", fontSize: 10, fontWeight: 600, opacity: 0.8 }}>+{fmtMoney2(add)}</span>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
               {roofTypes.length > 0 && (() => {
                 // Roof color list depends on the chosen type. Custom-color handling mirrors paint.
                 const roofList = roofColorsFor(sel.roofType);
@@ -11811,7 +11898,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               bldgW={bldgW} bldgH={bldgH} items={items} itemTypes={ITEMS}
               painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
               frontWall={frontWall} scale={scale} mgX={mgX} mgY={mgY}
-              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
+              style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel))}
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -12590,7 +12677,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           styleValue={sel.style} frontWall={frontWall}
           painted={sel.paint === "Painted"} paintBody={paintColors.body} paintTrim={paintColors.trim}
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
-          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), sel.wallHeight)}
+          style3d={d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel))}
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
@@ -12601,7 +12688,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             setPaintColors({ body: pc.body, trim: pc.trim });
             setSel((p) => ({ ...p, paint: (pc.body || pc.trim) ? "Painted" : "No Paint" }));
           }}
-          onWallHeight={(h) => setSel((p) => ({ ...p, wallHeight: h }))}
+          // Clears the 2D increase: the two pickers are mutually exclusive, so a height chosen
+          // here is not silently shadowed by an increase chosen there.
+          onWallHeight={(h) => setSel((p) => ({ ...p, wallHeight: h, wallHeightDeltaIn: 0 }))}
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}

@@ -2702,7 +2702,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
-      {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><WallHeights viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
