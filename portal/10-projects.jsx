@@ -310,7 +310,15 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
         {err && <div style={S.err}>{err}</div>}
 
         {canWrite && (
-          <div style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+          /* Paste attaches (Carolyn 2026-08-29): a screenshot lives in the clipboard, and
+             Chromium also hands over a FILE copied in Explorer (a PDF, say) — both arrive
+             in clipboardData.files. Pasted files APPEND to the staged list; plain text
+             falls through to the textarea untouched. */
+          <div onPaste={(e) => {
+              const pasted = [...(e.clipboardData?.files || [])].filter((f) => f && f.size);
+              if (pasted.length) { e.preventDefault(); setFiles((cur) => [...cur, ...pasted].slice(0, 10)); }
+            }}
+            style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
             <textarea rows={3} placeholder="Add a note or update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
               value={compose} onChange={(e) => setCompose(e.target.value)} />
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
@@ -324,8 +332,11 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
                 style={{ background: "none", border: "none", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                 📎 Attach
               </button>
+              <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste</span>
+              {/* Picked files APPEND too, so pasting a screenshot and then browsing for a
+                  PDF keeps both. The old replace-on-pick silently dropped earlier picks. */}
               <input ref={fileRef} type="file" multiple accept="image/*,video/*,.pdf" style={{ display: "none" }}
-                onChange={(e) => { setFiles(Array.from(e.target.files || []).slice(0, 10)); }} />
+                onChange={(e) => { const add = Array.from(e.target.files || []); if (add.length) setFiles((cur) => [...cur, ...add].slice(0, 10)); e.target.value = ""; }} />
               <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: busy || !compose.trim() ? 0.6 : 1 }}
                 disabled={busy || !compose.trim()} onClick={post}>{busy ? "Posting…" : "Post"}</button>
             </div>
