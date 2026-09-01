@@ -21,6 +21,7 @@ import {
   findPurchasedNumbers,
   normalizeBrandStatus,
   normalizeCampaignStatus,
+  validateCampaignCopy,
   TrustHubError,
   BUSINESS_TYPES,
   JOB_POSITIONS,
@@ -91,6 +92,12 @@ const GATES: GateTable = {
   // the business's legal identity, so it is held to the same bar as submitting it.
   save_intake:     { area: "settings_billing", level: "edit" },
   accept_aup:      { area: "settings_billing", level: "edit" },
+  // The text the CARRIERS read, published under the business's name. Spends nothing and is
+  // not a submission, but it is the same material save_intake collects, so it is held to the
+  // same bar. ⚠️ preflight does NOT cross-check this file's GATES against its `case` labels
+  // (it discovers `action === "x"`, not `switch`), so omitting a line here is a runtime 403
+  // that reads like a broken feature, with no push-time warning at all.
+  save_copy:       { area: "settings_billing", level: "edit" },
   // ⚠️ SPENDS MONEY.
   advance:         { area: "settings_billing", level: "edit" },
   search_numbers:  { area: "settings_billing", level: "edit" },
@@ -105,6 +112,45 @@ const GATES: GateTable = {
   // Testing rig. Same bar as submitting, because it changes what submitting DOES.
   set_mock:        { area: "settings_billing", level: "edit" },
 };
+
+/** Everything the browser might send, clipped to what a column and Twilio will hold. */
+function normalizeCopy(raw: unknown): { description: string; messageFlow: string; messageSamples: string[] } {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  return {
+    description: String(c.description ?? "").trim().slice(0, 4096),
+    messageFlow: String(c.messageFlow ?? "").trim().slice(0, 4096),
+    messageSamples: (Array.isArray(c.messageSamples) ? c.messageSamples : [])
+      .map((s) => String(s ?? "").trim().slice(0, 1024)).slice(0, 5),
+  };
+}
+
+/** The copy that will ACTUALLY be submitted: what the caller sent, falling back FIELD BY FIELD
+ *  to what we stored.
+ *
+ *  ⚠️ FIELD BY FIELD, NOT OBJECT BY OBJECT, and that distinction is the whole bug fix. The
+ *  portal ALWAYS posts a `copy` object — the brand_approved card posts
+ *  {description:"", messageFlow:"", messageSamples:["",""]} from a freshly-mounted React state,
+ *  because the carriers take days and a page reload by then is certain. So "did they send one?"
+ *  is the wrong question, and answering it was the deterministic 400 that left a builder staring
+ *  at a refusal with no form on screen to fix it.
+ *
+ *  ⚠️ THIS IS ALSO THE FORWARD-COMPAT SEAM. Edge functions go live for beta AND production the
+ *  moment they deploy, while the portal artifact only reaches production on the Monday
+ *  promotion. With this merge in place the CURRENTLY DEPLOYED portal — the one whose
+ *  brand_approved card has no form at all — stops 400ing as soon as a row has stored copy. */
+function mergeCopy(reg: any, posted: unknown) {
+  const p = normalizeCopy(posted);
+  const stored = normalizeCopy({
+    description: reg?.campaign_description,
+    messageFlow: reg?.campaign_message_flow,
+    messageSamples: Array.isArray(reg?.campaign_message_samples) ? reg.campaign_message_samples : [],
+  });
+  return {
+    description: p.description || stored.description,
+    messageFlow: p.messageFlow || stored.messageFlow,
+    messageSamples: p.messageSamples.filter(Boolean).length >= 2 ? p.messageSamples : stored.messageSamples,
+  };
+}
 
 const AUP_TEXT =
   "I confirm that this business will only text people who have given us permission to text " +
@@ -224,6 +270,17 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       websiteUrl: reg?.website_url ?? "",
       privacyPolicyUrl: reg?.privacy_policy_url ?? "",
       termsUrl: reg?.terms_url ?? "",
+    },
+    // The campaign copy, so the form can PRE-FILL. Until 2026-09-01 this was never stored and
+    // never returned, so the brand_approved card — reached days later, after a certain reload —
+    // rendered no form and posted two empty strings into a guaranteed refusal.
+    // Always two slots, so the form always has two boxes to draw.
+    copy: {
+      description: reg?.campaign_description ?? "",
+      messageFlow: reg?.campaign_message_flow ?? "",
+      messageSamples: (Array.isArray(reg?.campaign_message_samples) && reg.campaign_message_samples.length >= 2)
+        ? reg.campaign_message_samples.map((s: unknown) => String(s ?? ""))
+        : ["", ""],
     },
     aupAcceptedAt: reg?.aup_accepted_at ?? null,
     aupText: AUP_TEXT,
@@ -350,6 +407,30 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           updated_at: new Date().toISOString(),
         }).eq("client_id", clientId);
         await note("aup_accepted", {});
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "save_copy": {
+        const reg = await load();
+        // Editable right up to the moment the campaign is submitted, and never after: the Usa2p
+        // resource has NO update operation, so past this point our stored text would silently
+        // disagree with what the carriers actually hold. Same reasoning as save_intake's 409.
+        if (!["none", "intake", "aup_pending", "ready", "profile_pending", "brand_pending",
+              "brand_failed", "brand_approved"].includes(reg.status)) {
+          return json({ error: "The carriers already have this description and it cannot be changed here. Contact support." }, 409);
+        }
+        // ⚠️ CAPS ONLY, NOT THE FULL RULES. A hard validation here would make a half-typed draft
+        // unsaveable, which is the exact thing this action exists to allow. The full rules run at
+        // submit, where the form is on screen to answer them.
+        const c = normalizeCopy(p.copy);
+        await admin.from("sms_registrations").update({
+          campaign_description: c.description || null,
+          campaign_message_flow: c.messageFlow || null,
+          campaign_message_samples: c.messageSamples,
+          campaign_copy_updated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("copy_saved", { descChars: c.description.length, samples: c.messageSamples.length });
         return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 
@@ -674,6 +755,24 @@ async function advanceOne(
       const problems = validateIntake(intake, reg.brand_tier !== "sole_proprietor");
       if (problems.length) throw new TrustHubError({ message: problems[0], status: 400, code: 0, permanent: true });
 
+      // ⚠️ WRITE THE COPY DOWN BEFORE THE FIRST TWILIO CALL. Until 2026-09-01 `p.copy` was read
+      // NOWHERE in this branch and never stored, so the paragraphs the builder typed on this very
+      // screen were gone the moment the page reloaded — and the carriers take days, so it always
+      // did. Persisting first also means a throw anywhere in the twelve calls below loses no
+      // typing, and validating first means an empty MessageFlow is refused here rather than by
+      // the carriers a week later.
+      const readyCopy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(readyCopy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
+      }
+      await set({
+        campaign_description: readyCopy.description,
+        campaign_message_flow: readyCopy.messageFlow,
+        campaign_message_samples: readyCopy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
+
       // Stages 1 and 2. Twilio's ISV guide is explicit that the trust product does NOT have
       // to reach `approved` before the brand, so both are created in one pass and the first
       // real wait is at the brand itself.
@@ -834,26 +933,41 @@ async function advanceOne(
         });
       }
 
-      const copy = (p.copy ?? {}) as any;
-      const samples: string[] = Array.isArray(copy.messageSamples) ? copy.messageSamples.filter(Boolean) : [];
-      if (samples.length < 2) {
-        throw new TrustHubError({
-          message: "At least two example messages are needed before the campaign can be submitted.",
-          status: 400, code: 0, permanent: true,
-        });
+      // ⚠️ THE COPY COMES FROM THE ROW, NOT ONLY FROM THE REQUEST. This card is reached after a
+      // page reload BY DEFINITION — the carriers take days — so the browser's form state is empty
+      // by the time anyone gets here. Reading only p.copy is why this used to answer 400 with no
+      // form on screen to fix it.
+      const copy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(copy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
       }
+      const samples: string[] = copy.messageSamples.filter(Boolean);
+      // Keep whatever the caller improved: a campaign rejection can only be re-authored from our
+      // own record, because the Usa2p resource has no update operation.
+      await set({
+        campaign_description: copy.description,
+        campaign_message_flow: copy.messageFlow,
+        campaign_message_samples: copy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
+      // The four fields below are NOT part of the persisted copy and deliberately still come
+      // from the request: they are per-submission flags and boilerplate, not the paragraphs a
+      // builder authored and would need back to re-author a rejection. `mergeCopy` carries only
+      // the three that are worth surviving a reload.
+      const extra = (p.copy ?? {}) as Record<string, unknown>;
       const c = await createCampaign({
         serviceSid: svc.serviceSid, brandSid: reg.brand_sid, useCase: pick.code,
         copy: {
-          description: String(copy.description ?? ""),
-          messageFlow: String(copy.messageFlow ?? ""),
+          description: copy.description,
+          messageFlow: copy.messageFlow,
           messageSamples: samples,
           optOutKeywords: "STOP", helpKeywords: "HELP", optInKeywords: "START",
-          helpMessage: String(copy.helpMessage ?? ""),
-          optOutMessage: String(copy.optOutMessage ?? ""),
+          helpMessage: String(extra.helpMessage ?? ""),
+          optOutMessage: String(extra.optOutMessage ?? ""),
         },
-        hasEmbeddedLinks: !!copy.hasEmbeddedLinks,
-        hasEmbeddedPhone: !!copy.hasEmbeddedPhone,
+        hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
+        hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
       });
       await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid });
       return await set({

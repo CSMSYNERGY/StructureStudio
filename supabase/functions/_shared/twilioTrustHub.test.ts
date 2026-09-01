@@ -4,6 +4,7 @@ import {
   validateIntake,
   normalizeBrandStatus,
   normalizeCampaignStatus,
+  validateCampaignCopy,
   JOB_POSITIONS,
   BUSINESS_TYPES,
 } from "./twilioTrustHub.ts";
@@ -136,4 +137,90 @@ Deno.test("campaign VERIFIED means approved; REJECTED means failed", () => {
   assertEquals(normalizeCampaignStatus("REJECTED"), "FAILED");
   assertEquals(normalizeCampaignStatus("IN_PROGRESS"), "PENDING");
   assertEquals(normalizeCampaignStatus(""), "PENDING");
+});
+
+Deno.test("Event Streams says success/failure where REST says VERIFIED/REJECTED", () => {
+  // ⚠️ REGRESSION GUARD FOR A REAL STALL. TCR rejected the first live campaign and Event
+  // Streams delivered `campaignregistrationstatus: "failure"`. That is not "REJECTED", so it
+  // fell through to `default`, was stored verbatim as "FAILURE", and never matched the
+  // `s === "FAILED"` branch in twilio-events — so the row stayed campaign_pending with
+  // needs_attention false, and the builder's screen read "the carriers are reviewing…"
+  // indefinitely while the answer had already arrived and been recorded.
+  assertEquals(normalizeCampaignStatus("failure"), "FAILED");
+  assertEquals(normalizeCampaignStatus("FAILURE"), "FAILED");
+  assertEquals(normalizeCampaignStatus("success"), "APPROVED");
+  assertEquals(normalizeCampaignStatus("SUCCESS"), "APPROVED");
+  // The Event Streams spelling for "still waiting" already matched, and must keep matching.
+  assertEquals(normalizeCampaignStatus("pending"), "PENDING");
+});
+
+// ── validateCampaignCopy ─────────────────────────────────────────────────────────────────
+// Every case below is a shape the FIRST REAL REGISTRATION actually produced or nearly did.
+// The submit button was `disabled={busy}` and nothing else, and the server read the copy only
+// in a later branch, so a builder submitted with the consent question and both examples left at
+// their placeholders while the screen said "Everything is filled in."
+
+const GOOD_COPY = {
+  description: "We send our customers a one-time password to access their quotes in our portal.",
+  messageFlow: "Customers tick a consent checkbox when they request a quote on our website.",
+  messageSamples: [
+    "Hi [Name], your Structure Studio code is 123456. Reply STOP to opt out.",
+    "Hi [Name], your building is scheduled for delivery on [Date]. Reply STOP to opt out.",
+  ],
+};
+
+Deno.test("a complete campaign copy passes", () => {
+  assertEquals(validateCampaignCopy(GOOD_COPY), []);
+});
+
+Deno.test("an EMPTY MessageFlow is refused — it is a documented TCR rejection cause", () => {
+  // This is the one the live registration shipped with. The carriers check it against the
+  // consent language actually on the website, so blank is a refusal, not an unanswered field.
+  const problems = validateCampaignCopy({ ...GOOD_COPY, messageFlow: "" });
+  assert(problems.length > 0, "an empty messageFlow must be refused");
+  assert(problems.some((p) => /agree to be texted/i.test(p)), "the message must name the field");
+});
+
+Deno.test("placeholder-only samples are refused, not counted", () => {
+  // The inputs render a placeholder when the value is "", which is exactly how two blank
+  // examples looked filled in on screen.
+  const problems = validateCampaignCopy({ ...GOOD_COPY, messageSamples: ["", ""] });
+  assert(problems.some((p) => /Two example messages are required/i.test(p)));
+});
+
+Deno.test("one real sample and one blank is still only one sample", () => {
+  const problems = validateCampaignCopy({ ...GOOD_COPY, messageSamples: [GOOD_COPY.messageSamples[0], "  "] });
+  assert(problems.some((p) => /Two example messages are required/i.test(p)));
+});
+
+Deno.test("samples with no STOP are refused — the most-cited campaign rejection", () => {
+  const problems = validateCampaignCopy({
+    ...GOOD_COPY,
+    messageSamples: [
+      "Hi [Name], your quote is ready and waiting in our portal for you.",
+      "Hi [Name], your building is scheduled for delivery on [Date] this week.",
+    ],
+  });
+  assert(problems.some((p) => /how to stop/i.test(p)), "at least one sample must carry STOP");
+});
+
+Deno.test("a too-short sample is refused", () => {
+  const problems = validateCampaignCopy({ ...GOOD_COPY, messageSamples: ["STOP", "ok STOP"] });
+  assert(problems.some((p) => /too short/i.test(p)));
+});
+
+Deno.test("more than five samples is refused", () => {
+  const problems = validateCampaignCopy({ ...GOOD_COPY, messageSamples: Array(6).fill(GOOD_COPY.messageSamples[0]) });
+  assert(problems.some((p) => /Five example messages/i.test(p)));
+});
+
+Deno.test("a one-word description is refused", () => {
+  // "Passwords." is a sentence a builder would genuinely type, and the carriers will not take it.
+  assert(validateCampaignCopy({ ...GOOD_COPY, description: "Passwords." }).length > 0);
+});
+
+Deno.test("missing fields are refused rather than throwing", () => {
+  // The browser can post {} — the brand_approved card did exactly that after a reload.
+  const problems = validateCampaignCopy({});
+  assert(problems.length >= 3, "description, messageFlow and samples must all complain");
 });

@@ -22,7 +22,13 @@ const SMS_STATE_COPY = {
   intake:            { label: "Details needed",        tone: "idle",   blurb: "Tell us about your business so the phone carriers can approve you." },
   aup_pending:       { label: "One box to tick",       tone: "idle",   blurb: "Read and accept the texting rules to continue." },
   ready:             { label: "Ready to submit",       tone: "ready",  blurb: "Everything is filled in. Submitting sends your details to the carriers." },
-  profile_pending:   { label: "Submitting…",           tone: "wait",   blurb: "Sending your business details to the carriers." },
+  // ⚠️ NOT A WAITING STATE, despite where it sits in the chain. The server refuses to advance
+  // this one on its own (portal-sms/index.ts:264-270 — advancing it REGISTERS A BILLED BRAND,
+  // and the `status` action is only contacts:'view', so a sweep would let anyone who can open
+  // the Contacts tab spend the tenant's money by refreshing a page). That exclusion is right,
+  // but for a day it left the only exit unreachable and this copy told a builder to sit and
+  // wait for something that was never coming. The tone and the words both say "your move" now.
+  profile_pending:   { label: "One more step",         tone: "ready",  blurb: "Your business details are lodged. One more press registers your business with the carriers — that is the step that costs money." },
   brand_pending:     { label: "With the carriers",     tone: "wait",   blurb: "The phone carriers are checking your business. This usually takes a few days." },
   brand_failed:      { label: "Needs a correction",    tone: "bad",    blurb: "The carriers could not verify your business from what we sent." },
   brand_approved:    { label: "Business approved",     tone: "good",   blurb: "Your business passed. Now we register what you will use texting for." },
@@ -103,6 +109,90 @@ function SmsSteps({ status }) {
   );
 }
 
+/** The campaign copy form — ONE component, rendered at BOTH `ready` and `brand_approved`.
+ *
+ *  ⚠️ THE brand_approved CASE IS THE WHOLE POINT. The carriers take DAYS, so that card is
+ *  reached after a page reload by definition — and until 2026-09-01 it rendered NO form at all,
+ *  just a Continue button that posted a freshly-mounted state's two empty strings into a
+ *  guaranteed 400, with nothing on screen to fix it. Two copies of this markup would drift
+ *  straight back into that, so there is exactly one. */
+function SmsCopyForm({ copy, setCopy, readOnly }) {
+  return (
+    <>
+          <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>What you will text people about</h4>
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        The carriers read this. Write it about <em>your</em> business, and use real
+        examples of messages you would actually send. Do not put a customer&rsquo;s name
+        or number in an example — write <code>[Name]</code> instead.
+      </p>
+      <SmsField label="In a sentence, what will you text customers about?">
+        <input style={SMS_INPUT} value={copy.description} disabled={readOnly}
+          placeholder="Quote follow-ups, delivery times and build updates for customers who asked us for a quote."
+          onChange={(e) => setCopy({ ...copy, description: e.target.value })} />
+      </SmsField>
+      <SmsField label="How do people agree to be texted?"
+        hint="Describe where they tick the box. The carriers will look for it on your website, so it has to match what is actually there.">
+        <input style={SMS_INPUT} value={copy.messageFlow} disabled={readOnly}
+          placeholder="Customers tick a box giving us permission to text them when they request a quote on our website."
+          onChange={(e) => setCopy({ ...copy, messageFlow: e.target.value })} />
+      </SmsField>
+      {copy.messageSamples.map((sample, i) => (
+        <SmsField key={i} label={`Example message ${i + 1}`}>
+          <input style={SMS_INPUT} value={sample} disabled={readOnly}
+            placeholder={i === 0
+              ? "Hi [Name], it's Junior Barns. Your 12x20 barn quote is ready — reply here with any questions. Reply STOP to opt out."
+              : "Hi [Name], your building is scheduled for delivery on [Date]. Reply STOP to opt out."}
+            onChange={(e) => {
+              const next = copy.messageSamples.slice();
+              next[i] = e.target.value;
+              setCopy({ ...copy, messageSamples: next });
+            }} />
+        </SmsField>
+      ))}
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
+        Every message must say who you are and how to stop. Keep &ldquo;Reply STOP to opt
+        out&rdquo; in your examples.
+      </div>
+    </>
+  );
+}
+
+/** Mirrored from validateCampaignCopy in _shared/twilioTrustHub.ts, for the same reason
+ *  ssCanRead/ssCanWrite are mirrored from access.ts: the portal has no module loader, the
+ *  SERVER is the enforcement point, and a drift here costs a wrong button state, never a wrong
+ *  submission. Keep the two in step. */
+function smsCopyProblems(copy) {
+  const out = [];
+  const d = String((copy && copy.description) || "").trim();
+  const f = String((copy && copy.messageFlow) || "").trim();
+  const s = ((copy && copy.messageSamples) || []).map((x) => String(x || "").trim()).filter(Boolean);
+  if (d.length < 40) out.push("Say a bit more about what you will text customers about — a full sentence.");
+  if (f.length < 40) out.push("Describe where customers agree to be texted. Leaving this blank is one of the most common rejection reasons.");
+  if (s.length < 2) out.push("Two example messages are required.");
+  if (s.some((x) => x.length < 20)) out.push("Write each example out the way you would really send it.");
+  if (s.length && !s.some((x) => /STOP/i.test(x))) out.push("At least one example must show how to stop — keep “Reply STOP to opt out” in it.");
+  return out;
+}
+
+/** Anything a human typed into a US phone box -> "+1XXXXXXXXXX", or "" if it is not one.
+ *
+ *  The portal shows a US number the way a person writes it; TrustHub takes +1XXXXXXXXXX and
+ *  nothing else (validateIntake, _shared/twilioTrustHub.ts:237). The field used to pass raw
+ *  keystrokes straight through, so anyone typing "(616) 548-5148" — which is how every US
+ *  business writes their own number — was refused by the server with a message about a format
+ *  the field never helped them produce.
+ *
+ *  ⚠️ NOT toE164US / smsE164US. Those two take DIGITS ONLY and return null for anything already
+ *  carrying a "+", so neither can be pointed at formatPhone's "+1 (616) 548-5148" output. This
+ *  is the one place the display shape and the wire shape meet, and every call site that sends
+ *  `intake` goes through it — there is no route left that ships the display string. */
+function smsE164(raw) {
+  const d = String(raw == null ? "" : raw).replace(/\D/g, "");
+  if (d.length === 10) return "+1" + d;
+  if (d.length === 11 && d[0] === "1") return "+" + d;
+  return "";
+}
+
 function SmsField({ label, hint, children, wide }) {
   return (
     <label style={{ display: "block", marginBottom: 12, gridColumn: wide ? "1 / -1" : "auto" }}>
@@ -160,6 +250,21 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         setForm((f) => ({ ...f, legalBusinessName: d.intake.legalBusinessName, websiteUrl: d.intake.websiteUrl || "" }));
         setUrls({ privacyPolicyUrl: d.intake.privacyPolicyUrl || "", termsUrl: d.intake.termsUrl || "" });
       }
+      // ⚠️ SEED THE COPY ONLY WHILE THE FORM IS PRISTINE. refresh() runs after every action AND
+      // on a 60-second timer while pending, so an unconditional seed would delete a sentence the
+      // builder was halfway through typing. Empty-on-all-three is the only safe "they have not
+      // started" test — a partially typed form must win over the stored value every time.
+      if (d.copy) {
+        setCopy((c) => {
+          const pristine = !c.description && !c.messageFlow && !(c.messageSamples || []).some(Boolean);
+          if (!pristine) return c;
+          return {
+            description: d.copy.description || "",
+            messageFlow: d.copy.messageFlow || "",
+            messageSamples: (d.copy.messageSamples || []).length >= 2 ? d.copy.messageSamples.slice(0, 5) : ["", ""],
+          };
+        });
+      }
     } catch (e) { setErr(e.message); }
   }, [call, clientId]);
 
@@ -167,6 +272,15 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
 
   // A registration in a waiting state moves on its own. Poll gently so the builder does not
   // have to know to come back — but only while something is actually pending.
+  // ⚠️ TWO DIFFERENT QUESTIONS THAT USED TO SHARE ONE ANSWER, and the disagreement stranded a
+  // tenant for a day. `pending` asks "does this move on its own, so keep polling?".
+  // `waitingOnYou` asks "is the next move the BUILDER's?". profile_pending is the one state
+  // where they differ — the server's sweepable list (portal-sms/index.ts:270) excludes it on
+  // purpose, so the reassurance below was a promise nothing could keep.
+  //
+  // profile_pending STAYS in `pending`: the poll is what makes an operator-side unstick appear
+  // on a builder's already-open tab within the minute.
+  const waitingOnYou = data && data.status === "profile_pending";
   const pending = data && ["profile_pending", "brand_pending", "campaign_pending", "number_pending"].includes(data.status);
   useEffect(() => {
     if (!pending) return undefined;
@@ -236,8 +350,9 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         )}
         {err && <div style={{ marginTop: 12, color: "#B91C1C", fontSize: 13 }}>{err}</div>}
 
-        {/* Waiting states are where builders email to ask what is happening. Say it here. */}
-        {pending && (
+        {/* Waiting states are where builders email to ask what is happening. Say it here —
+            but ONLY where it is true. See waitingOnYou above. */}
+        {pending && !waitingOnYou && (
           <div style={{ marginTop: 12, fontSize: 12, color: "#64748B", lineHeight: 1.5 }}>
             Nothing for you to do — this page checks by itself and will update when the
             carriers answer. You can close it and come back.
@@ -386,8 +501,12 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                 onChange={(e) => setForm({ ...form, repEmail: e.target.value })} />
             </SmsField>
             <SmsField label="Mobile number" hint={hasEin ? "In case the carriers need to reach you." : "You will get a text with a code you must reply to within 24 hours."}>
-              <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="+15551234567"
-                onChange={(e) => setForm({ ...form, repPhone: e.target.value })} />
+              {/* formatPhone lives in 12-shell.jsx, a LATER part — but the parts are
+                  concatenated into one IIFE and it is a `function` declaration, so it hoists
+                  across the whole scope. (The "part order is load-bearing" rule in CLAUDE.md
+                  is about `const`, which does not hoist. This is the exception.) */}
+              <input style={SMS_INPUT} value={form.repPhone} disabled={readOnly} placeholder="(555) 123-4567"
+                onChange={(e) => setForm({ ...form, repPhone: formatPhone(e.target.value) })} />
             </SmsField>
             <SmsField label="Job title">
               <input style={SMS_INPUT} value={form.repBusinessTitle} disabled={readOnly}
@@ -411,7 +530,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <button type="button" disabled={busy}
               onClick={() => act(async () => {
                 const d = await call("save_intake", {
-                  hasEin, intake: form,
+                  hasEin, intake: { ...form, repPhone: smsE164(form.repPhone) },
                   privacyPolicyUrl: urls.privacyPolicyUrl, termsUrl: urls.termsUrl,
                 }).catch((e) => { throw e; });
                 void d;
@@ -440,53 +559,77 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       {/* ── Step 3: what they will send, then submit ───────────────────────── */}
       {status === "ready" && (
         <div style={card}>
-          <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>What you will text people about</h4>
-          <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-            The carriers read this. Write it about <em>your</em> business, and use real
-            examples of messages you would actually send. Do not put a customer&rsquo;s name
-            or number in an example — write <code>[Name]</code> instead.
-          </p>
-          <SmsField label="In a sentence, what will you text customers about?">
-            <input style={SMS_INPUT} value={copy.description} disabled={readOnly}
-              placeholder="Quote follow-ups, delivery times and build updates for customers who asked us for a quote."
-              onChange={(e) => setCopy({ ...copy, description: e.target.value })} />
-          </SmsField>
-          <SmsField label="How do people agree to be texted?"
-            hint="Describe where they tick the box. The carriers will look for it on your website, so it has to match what is actually there.">
-            <input style={SMS_INPUT} value={copy.messageFlow} disabled={readOnly}
-              placeholder="Customers tick a box giving us permission to text them when they request a quote on our website."
-              onChange={(e) => setCopy({ ...copy, messageFlow: e.target.value })} />
-          </SmsField>
-          {copy.messageSamples.map((sample, i) => (
-            <SmsField key={i} label={`Example message ${i + 1}`}>
-              <input style={SMS_INPUT} value={sample} disabled={readOnly}
-                placeholder={i === 0
-                  ? "Hi [Name], it's Junior Barns. Your 12x20 barn quote is ready — reply here with any questions. Reply STOP to opt out."
-                  : "Hi [Name], your building is scheduled for delivery on [Date]. Reply STOP to opt out."}
-                onChange={(e) => {
-                  const next = copy.messageSamples.slice();
-                  next[i] = e.target.value;
-                  setCopy({ ...copy, messageSamples: next });
-                }} />
-            </SmsField>
-          ))}
-          <div style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
-            Every message must say who you are and how to stop. Keep &ldquo;Reply STOP to opt
-            out&rdquo; in your examples.
-          </div>
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} />
 
           {!readOnly && (
             <>
+              {/* This step creates the TrustHub bundles and spends NOTHING — the charge is one
+                  state later, on the profile_pending card. Saying "starts the one-time setup
+                  charge" here was wrong twice over: it warned about money on the free step and
+                  left the paid step with no warning at all. */}
               <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
-                Submitting sends your details to the phone carriers and starts the one-time
-                setup charge. The carriers usually answer within a few days.
+                Submitting sends your business details to the carriers. Nothing is charged yet —
+                the next screen tells you before anything is.
               </div>
-              <button type="button" disabled={busy}
-                onClick={() => act(() => call("advance", { intake: form, copy }))}
-                style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>
+              {smsCopyProblems(copy).length > 0 && (
+                <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
+                  {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
+                </ul>
+              )}
+              {/* Save the copy BEFORE advancing, so a refusal further down does not cost the
+                  builder their typing — and so it is on the row when they come back days later. */}
+              <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
+                onClick={() => act(async () => {
+                  await call("save_copy", { copy });
+                  await call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy });
+                })}
+                style={{ background: smsCopyProblems(copy).length > 0 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: smsCopyProblems(copy).length > 0 ? "default" : "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>
                 {busy ? "Submitting…" : "Submit to the carriers"}
               </button>
             </>
+          )}
+        </div>
+      )}
+
+      {/* ── The money step, and the only card that is deliberately a SECOND click ──────────
+          ⚠️ THIS STATE IS NOT SWEPT AND MUST NEVER BE. portal-sms's lazy sweep excludes
+          profile_pending on purpose (index.ts:264-270): advancing it REGISTERS A BILLED BRAND,
+          and the `status` action is gated contacts:'view', so sweeping it would let anyone who
+          can open the Contacts tab spend the tenant's money by refreshing a page.
+
+          The consequence of that correct exclusion is that a PERSON has to press something —
+          and until 2026-09-01 there was nothing to press. The transition code sat right there
+          at index.ts:700 with all three routes to it blocked, so profile_pending was a dead end
+          that stranded the first real builder for a day while the page told her to wait. This
+          card is the missing press. */}
+      {status === "profile_pending" && (
+        <div style={card}>
+          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Register your business with the carriers</h4>
+          <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+            Your business details are lodged with the carriers. The next step registers the
+            business itself so they can start their checks — that usually takes a few days.
+          </p>
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
+            <strong>This is the step that costs money.</strong> Pressing Register submits a paid
+            carrier registration for your business. It cannot be undone and it is not refundable.
+          </div>
+          {readOnly ? (
+            <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              Only an owner — or an admin an owner has given billing access to — can start the
+              paid registration. Ask them to open Settings → Text Messaging.
+            </div>
+          ) : (
+            <button type="button" disabled={busy}
+              onClick={() => {
+                if (!window.confirm(
+                  "Register this business with the phone carriers?\n\n"
+                  + "This is the paid step. It cannot be undone or refunded, and it only needs "
+                  + "to be done once for this business.")) return;
+                act(() => call("advance"));
+              }}
+              style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>
+              {busy ? "Registering…" : "Register with the carriers"}
+            </button>
           )}
         </div>
       )}
@@ -496,10 +639,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         <div style={card}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>One more review</h4>
           <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569" }}>
-            Your business passed. The last step describes how you will use texting.
+            Your business passed. The last step describes how you will use texting — check it
+            still reads the way you want, because the carriers cannot be sent a correction later.
           </p>
-          <button type="button" disabled={busy} onClick={() => act(() => call("advance", { copy }))}
-            style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+          {/* ⚠️ THE FORM MUST BE HERE. This card is reached DAYS later, so the page has certainly
+              reloaded and the in-memory copy is empty. It used to render no fields at all and
+              post that empty state straight into a refusal. It is pre-filled from the row now. */}
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} />
+          {smsCopyProblems(copy).length > 0 && (
+            <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
+              {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
+            </ul>
+          )}
+          <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
+            onClick={() => act(async () => {
+              await call("save_copy", { copy });
+              await call("advance", { copy });
+            })}
+            style={{ background: smsCopyProblems(copy).length > 0 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: smsCopyProblems(copy).length > 0 ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
             {busy ? "Submitting…" : "Continue"}
           </button>
         </div>
@@ -515,7 +672,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             after that it has to go through support.
           </p>
           <button type="button" disabled={busy || data.brandUpdatesLeft < 1}
-            onClick={() => act(() => call("advance", { intake: form, copy }))}
+            onClick={() => act(() => call("advance", { intake: { ...form, repPhone: smsE164(form.repPhone) }, copy }))}
             style={{ background: data.brandUpdatesLeft < 1 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: data.brandUpdatesLeft < 1 ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
             Resubmit
           </button>

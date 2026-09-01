@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 8c5780419f78)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 334dfc6e0f92)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -647,7 +647,35 @@ function d3CladdingChoicesFor(styleCfg){var narrowed=styleCfg&&styleCfg.d3&&Arra
 // and `"batten"` differ only in relief, and `panel` carries no relief, so every existing
 // tenant renders exactly as it does now.
 function d3NormalizeCladding(v){var s=String(v==null?"":v).trim().toLowerCase();if(s==="lap"||s==="lapsiding"||s==="lap-siding")return"lap";if(s==="batten"||s==="board-and-batten"||s==="bnb")return"batten";if(s==="agpanel"||s==="ag"||s==="metal"||s==="panel-loc"||s==="panelloc")return"agpanel";return"panel";// null / "" / "groove" / "panel" / "t111" / anything unrecognised
-}// The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
+}// The ONE rule for roof orientation, and it is GEOMETRY -- never the door.
+//
+// `frontWall` is a TALKING CONVENTION. Whichever wall the door is on is called "the front"
+// so a rep on the phone can say "standing at the front looking at it, do you want the
+// window left or right of the door?". It drives the 2D labels, the ground labels and the
+// camera presets, and NOTHING structural. Feeding it into the ridge axis meant dragging the
+// only door from an end wall to a side wall silently rotated the roof 90 degrees on a
+// building whose framing had not moved -- Carolyn, 2026-08-31: "wherever the door is, is
+// considered the front of the building. That doesn't mean that the roof changes."
+//
+// The WIDTH side is the 8/10/12/14/16 dimension and is always the FIRST number in a size
+// label; the profile spans the shorter dimension and the ridge runs down the longer one.
+// Written as `lFt >= wFt` rather than "the first number", so a mis-entered length-first
+// label (16x8) still gets a ridge down its long axis instead of a spike across it.
+//
+// Callers: buildShed3DModel and D3ElevationSVG. They MUST stay one function -- the whole
+// point of the elevation drawing is that a builder can trust it against the 3D beside it,
+// and before this existed the two disagreed the moment a door was placed.
+function d3RoofAxes(roofCfg,wFt,lFt){var wideIsZ=lFt>=wFt;// portrait footprint: the length runs north<->south
+// For gable/gambrel the ridge is perpendicular to the span; for the shed the SLOPE runs
+// the long way, so the axes swap. Unchanged from the pre-fix door-less default.
+var uAxisIsX=(roofCfg&&roofCfg.type)==="shed"?!wideIsZ:wideIsZ;return{uAxisIsX:uAxisIsX,S:uAxisIsX?wFt:lFt,// profile span
+L:uAxisIsX?lFt:wFt,// extrusion length
+// Shed high end: the profile's -u end, ALWAYS. Geometry cannot name a high end, so this
+// is a fixed convention rather than a derivation -- and it is the end BOTH branches of
+// the old door-less fallback already produced, so no door-less design moves. A real
+// per-style control belongs in the d3.roof spec, and would need a styleD3.ts whitelist
+// entry or it is silently dropped on save.
+tallNeg:true};}// The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
 // plus the slope segments that get roof slabs.
 //
 // Extracted out of buildShed3DModel on 2026-08-25 so the calibration panel can DRAW the
@@ -681,10 +709,11 @@ function d3FtIn(ft){if(!isFinite(ft))return"";var neg=ft<0;var whole=Math.floor(
 // Deliberately SVG and not a second 3D view: the preview beside it is a perspective
 // three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL
 // context that should not grow overlay complexity.
-function D3ElevationSVG(_ref7){var spec=_ref7.spec,sizeLabel=_ref7.sizeLabel,focusKey=_ref7.focusKey;var roof=spec&&spec.roof||{};var m=/^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel||"12x16"));var w=m?parseFloat(m[1]):12,d=m?parseFloat(m[2]):16;// Mirrors buildShed3DModel's default front wall for a building with no doors placed --
-// fw = bldgH >= bldgW ? "north" : "west" -- which is what the calibration preview shows.
-// tallNeg is true for both of those, so the shed's high end is always on the left here.
-var frontNS=d>=w;var uAxisIsX=roof.type==="shed"?!frontNS:frontNS;var S=uAxisIsX?w:d;var H=spec&&spec.wallHeightFt||8;var OV=roof.overhang!=null?roof.overhang:0.6;var dedup=d3RoofProfile(roof,S,H,true).dedup;var peak=H;dedup.forEach(function(p){if(p[1]>peak)peak=p[1];});var VW=360,VH=210,PL=54,PR=54,PT=14,PB=34;var innerW=VW-PL-PR,innerH=VH-PT-PB;var sc=Math.min(innerW/Math.max(S+OV*2,1),innerH/Math.max(peak,1));var X=function X(u){return PL+innerW/2+u*sc;};var Y=function Y(y){return PT+innerH-y*sc;};// Overhang: extend the outermost slope segment past the wall by OV measured HORIZONTALLY,
+function D3ElevationSVG(_ref7){var spec=_ref7.spec,sizeLabel=_ref7.sizeLabel,focusKey=_ref7.focusKey;var roof=spec&&spec.roof||{};var m=/^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel||"12x16"));var w=m?parseFloat(m[1]):12,d=m?parseFloat(m[2]):16;// Shares d3RoofAxes with buildShed3DModel -- the SAME rule, always, doors or not. Until
+// 2026-09-01 this drawing used pure geometry while the 3D used the door, so the two
+// silently disagreed the moment a customer placed one. tallNeg is true, so the shed's
+// high end is always on the left here.
+var S=d3RoofAxes(roof,w,d).S;var H=spec&&spec.wallHeightFt||8;var OV=roof.overhang!=null?roof.overhang:0.6;var dedup=d3RoofProfile(roof,S,H,true).dedup;var peak=H;dedup.forEach(function(p){if(p[1]>peak)peak=p[1];});var VW=360,VH=210,PL=54,PR=54,PT=14,PB=34;var innerW=VW-PL-PR,innerH=VH-PT-PB;var sc=Math.min(innerW/Math.max(S+OV*2,1),innerH/Math.max(peak,1));var X=function X(u){return PL+innerW/2+u*sc;};var Y=function Y(y){return PT+innerH-y*sc;};// Overhang: extend the outermost slope segment past the wall by OV measured HORIZONTALLY,
 // which is how the renderer measures it (OV is feet past the wall, not along the rafter).
 var ext=function ext(far,near){var dx=near[0]-far[0],dy=near[1]-far[1];if(Math.abs(dx)<1e-6)return near;var k=OV/Math.abs(dx);return[near[0]+dx*k,near[1]+dy*k];};var eaveL=dedup.length>1?ext(dedup[1],dedup[0]):dedup[0];var eaveR=dedup.length>1?ext(dedup[dedup.length-2],dedup[dedup.length-1]):dedup[dedup.length-1];var roofPts=[eaveL].concat(dedup,[eaveR]).map(function(p){return X(p[0])+","+Y(p[1]);}).join(" ");var HL="#B45309",DIM="#A16207",INK="#78350F";var on=function on(k){return focusKey===k;};var dimStroke=function dimStroke(k){return{stroke:on(k)?HL:DIM,strokeWidth:on(k)?2:1};};var tick=function tick(x,y1,y2,k){return/*#__PURE__*/React.createElement("line",_extends({x1:x,y1:y1,x2:x,y2:y2},dimStroke(k)));};var label=function label(x,y,main,sub,k,anchor){return/*#__PURE__*/React.createElement("g",null,/*#__PURE__*/React.createElement("text",{x:x,y:y,textAnchor:anchor||"middle",style:{fontSize:10,fontWeight:800,fill:on(k)?HL:INK}},main),sub?/*#__PURE__*/React.createElement("text",{x:x,y:y+9,textAnchor:anchor||"middle",style:{fontSize:8,fill:DIM}},sub):null);};var isGam=roof.type==="gambrel";var s2=S/2;var kU=s2*(roof.kneeU||0.55),kY=H+s2*(roof.kneeRise||0.55);var rY=H+s2*(roof.ridgeRise||0.8);var ru=S*Math.max(-0.35,Math.min(0.35,roof.ridgeOffset||0));var pitch=roof.pitch!=null?roof.pitch:roof.type==="shed"?0.25:0.4;return/*#__PURE__*/React.createElement("svg",{viewBox:"0 0 ".concat(VW," ").concat(VH),style:{width:"100%",height:"auto",background:"#FFFBEB",border:"1px solid #FCD34D",borderRadius:8}},/*#__PURE__*/React.createElement("line",{x1:PL-10,y1:Y(0),x2:VW-PR+10,y2:Y(0),stroke:"#D6D3D1",strokeWidth:"1"}),/*#__PURE__*/React.createElement("rect",{x:X(-s2),y:Y(H),width:s2*2*sc,height:H*sc,fill:"#FEF3C7",stroke:INK,strokeWidth:"1.2"}),/*#__PURE__*/React.createElement("polyline",{points:roofPts,fill:"none",stroke:INK,strokeWidth:"2",strokeLinejoin:"round"}),tick(PL-22,Y(0),Y(H),"wallHeightFt"),/*#__PURE__*/React.createElement("line",_extends({x1:PL-26,y1:Y(H),x2:PL-18,y2:Y(H)},dimStroke("wallHeightFt"))),/*#__PURE__*/React.createElement("line",_extends({x1:PL-26,y1:Y(0),x2:PL-18,y2:Y(0)},dimStroke("wallHeightFt"))),label(PL-30,(Y(0)+Y(H))/2,d3FtIn(H),"wall","wallHeightFt","end"),tick(VW-PR+22,Y(0),Y(peak),null),label(VW-PR+26,(Y(0)+Y(peak))/2,d3FtIn(peak),"peak",null,"start"),/*#__PURE__*/React.createElement("line",{x1:X(-s2),y1:Y(0)+16,x2:X(s2),y2:Y(0)+16,stroke:DIM,strokeWidth:"1"}),label((X(-s2)+X(s2))/2,Y(0)+29,d3FtIn(S),"span",null),/*#__PURE__*/React.createElement("line",_extends({x1:X(eaveL[0]),y1:Y(eaveL[1])-9,x2:X(-s2),y2:Y(eaveL[1])-9},dimStroke("overhang"))),label((X(eaveL[0])+X(-s2))/2,Y(eaveL[1])-12,d3FtIn(OV),"eave","overhang"),!isGam&&label(X(ru)+(X(s2)-X(ru))/2,Y((H+peak)/2)-4,"".concat(Math.round(pitch*12),":12"),"pitch ".concat((+pitch).toFixed(2)),"pitch"),!isGam&&Math.abs(ru)>0.01&&/*#__PURE__*/React.createElement("g",null,/*#__PURE__*/React.createElement("line",_extends({x1:X(0),y1:Y(peak)-8,x2:X(ru),y2:Y(peak)-8},dimStroke("ridgeOffset"))),label((X(0)+X(ru))/2,Y(peak)-11,d3FtIn(Math.abs(ru)),"ridge shift","ridgeOffset")),isGam&&/*#__PURE__*/React.createElement("g",null,/*#__PURE__*/React.createElement("line",_extends({x1:X(0),y1:Y(kY)+10,x2:X(kU),y2:Y(kY)+10},dimStroke("kneeU"))),label((X(0)+X(kU))/2,Y(kY)+22,d3FtIn(kU),"knee out","kneeU"),tick(X(kU)+16,Y(H),Y(kY),"kneeRise"),label(X(kU)+20,(Y(H)+Y(kY))/2,d3FtIn(kY-H),"knee up","kneeRise","start"),tick(X(0)-16,Y(H),Y(rY),"ridgeRise"),label(X(0)-20,(Y(H)+Y(rY))/2,d3FtIn(rY-H),"ridge up","ridgeRise","end")));}// Resolve a style's 3D appearance: tenant config override (the style entry's
 // `d3` object) over the built-in per-style defaults, over the generic gable.
@@ -1116,21 +1145,19 @@ var pa0=o.a0+0.22,pa1=o.a1-0.22,ph=o.y1-0.05;og.add(wallBox(doorMat,wf,pa0,pa1,p
 // leaves / the panel seams, so splitting it would draw them twice.
 if(photoEntry)photoLayer(photoEntry,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0.16,o.it.colorHex||null);}ogs.push(og);});return{wg:wg,ogs:ogs};};Object.keys(WALLS).forEach(function(wname){var built=buildOneWall(wname,items);wallsGroup.add(built.wg);built.ogs.forEach(function(og){return openingsGroup.add(og);});});// ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
 // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
-// top. Ridge runs front↔back so the gable end faces the customer's FRONT
-// (derived from door placement, same rule the 2D labels use); the econo shed
-// slope descends front→back. No doors yet → longer axis.
+// top. The ridge runs down the building's LONGER axis and the gable ends cap
+// the width -- always, whatever the customer does with the doors. See
+// d3RoofAxes; the door decides the FRONT LABEL and nothing structural.
 var roofGroup=new THREE.Group();var roofCfg=p.styleSpec&&p.styleSpec.roof||D3_DEFAULT_ROOF;var OV=roofCfg.overhang!=null?roofCfg.overhang:D3.OVERHANG;// Eave finish. An AFFIRMATIVE test on purpose: absent, null, "fascia" and any junk
 // all fall through to the fascia branch, so no tenant who has not opted in moves.
 var EAVE_OPEN=roofCfg.eave==="open";// Raw, unpainted 2x stock for the tails. Created lazily so a model with no open eave
 // never mints it — a material built and never attached to a mesh is never reached by
 // the disposal walk, and is the one thing here that could actually leak.
-var _tailMat=null;var tailMat=function tailMat(){return _tailMat||(_tailMat=mat(D3_COLORS.bench,{roughness:0.95}));};var fw=frontWall||(bldgH>=bldgW?"north":"west");var frontNS=fw==="north"||fw==="south";// Profile u-axis: the axis the roof profile spans across. For gable/gambrel
-// the ridge is perpendicular to the front; for the shed the SLOPE runs
-// front→back, so the axes swap.
-var uAxisIsX=roofCfg.type==="shed"?!frontNS:frontNS;var S=uAxisIsX?bldgW:bldgH;// profile span
-var L=uAxisIsX?bldgH:bldgW;// extrusion length
-// One profile builder, shared with the calibration panel's elevation drawing.
-var _rp=d3RoofProfile(roofCfg,S,H,fw==="north"||fw==="west");var prof=_rp.prof;// profile polygon points [u, y], eave→ridge→eave
+var _tailMat=null;var tailMat=function tailMat(){return _tailMat||(_tailMat=mat(D3_COLORS.bench,{roughness:0.95}));};// ⚠️ GEOMETRY, NOT THE DOOR. `frontWall` used to decide the ridge axis here, which is why
+// moving a door rotated the roof. It now reaches only the ground labels and builtFrontWall.
+// See d3RoofAxes for the rule and the reason.
+var _d3RoofAxes=d3RoofAxes(roofCfg,bldgW,bldgH),uAxisIsX=_d3RoofAxes.uAxisIsX,S=_d3RoofAxes.S,L=_d3RoofAxes.L,tallNeg=_d3RoofAxes.tallNeg;// One profile builder, shared with the calibration panel's elevation drawing.
+var _rp=d3RoofProfile(roofCfg,S,H,tallNeg);var prof=_rp.prof;// profile polygon points [u, y], eave→ridge→eave
 var slopes=_rp.slopes;// top edges [[A,B], …] that get roof slabs
 var dedup=_rp.dedup;var shape=new THREE.Shape();dedup.forEach(function(pt,i){return i===0?shape.moveTo(pt[0],pt[1]):shape.lineTo(pt[0],pt[1]);});var rg=new THREE.Group();// local space: x = profile u, y = up, z = 0..L along the ridge
 // The gable END FACES are this extrusion's caps, and they are the wall above the plate
@@ -1412,7 +1439,9 @@ _g5.add(built);if(it.rotation)_g5.rotation.y=-(it.rotation*Math.PI)/180;_g5.posi
 var setShadowFlags=function setShadowFlags(grp){return grp.traverse(function(o){if(o.isMesh){o.castShadow=!(o.material&&o.material.transparent);o.receiveShadow=false;}});};setShadowFlags(root);envGroup.traverse(function(o){if(o.isMesh)o.castShadow=false;});ground.receiveShadow=true;floor.receiveShadow=true;// Scoped rebuilds for the live drag. sharedMats = the model-lifetime wall and
 // trim materials that per-wall disposal must keep (their maps ride along, so
 // the siding texture survives too). builtFrontWall lets the flush detect a
-// FRONT flip, which needs the full path (roof + ground labels re-home).
+// FRONT flip, which takes the full path because the GROUND LABELS re-home.
+// The roof does NOT re-home -- see d3RoofAxes -- so that rebuild produces an
+// identical roof and could one day be narrowed to the label group alone.
 var sharedMats=new Set([wallMat,trimMat,battenMat]);var model={root:root,envGroup:envGroup,wallMat:wallMat,trimMat:trimMat,battenMat:battenMat,gableMat:gableMat,roofGroup:roofGroup,openingsGroup:openingsGroup,wallsGroup:wallsGroup,interiorGroup:interiorGroup,builtFrontWall:frontWall};model.rebuildWalls=function(names,itemsNow){names.forEach(function(wname){if(!WALLS[wname])return;var oldWg=wallsGroup.children.find(function(g){return g.userData&&g.userData.wall===wname;});if(oldWg){wallsGroup.remove(oldWg);disposeSubtree(oldWg,sharedMats);}openingsGroup.children.filter(function(g){return g.userData&&g.userData.wall===wname;}).forEach(function(og){openingsGroup.remove(og);disposeSubtree(og,sharedMats);});var built=buildOneWall(wname,itemsNow);setShadowFlags(built.wg);wallsGroup.add(built.wg);built.ogs.forEach(function(og){setShadowFlags(og);openingsGroup.add(og);});});};model.rebuildInterior=function(itemsNow){Array.from(interiorGroup.children).forEach(function(g){interiorGroup.remove(g);disposeSubtree(g,null);});buildInterior(itemsNow);setShadowFlags(interiorGroup);};return model;}// Forget pending fixture-photo binds whose materials were just disposed — a
 // scoped drag rebuild otherwise leaves one dead bind per rebuilt frame while a
 // photo is still in flight, and the arriving photo would write into thousands
@@ -1552,7 +1581,8 @@ var camera=new THREE.PerspectiveCamera(34,1,0.1,dist*10);camera.position.set(cam
 var skyTex=d3MakeSkyTexture(THREE);var sky=skyTex?new THREE.Mesh(new THREE.SphereGeometry(dist*6.5,32,16,0,Math.PI*2,0,Math.PI/2+0.14),new THREE.MeshBasicMaterial({map:skyTex,side:THREE.BackSide,depthWrite:false})):null;if(sky){sky.position.y=-0.5;scene.add(sky);}// SmartBuild-style camera presets (3×3 grid), azimuth relative to the
 // FRONT wall so "F" always faces the side the 2D labels call FRONT.
 var setViewPreset=function setViewPreset(relDeg,polDeg){var e=engineRef.current;if(!e)return;var t=e.controls.target;var r=e.camera.position.distanceTo(t)||dist;// Front azimuth resolved at CALL time — dragging the only door to a
-// different wall re-homes the front (roof + labels already follow).
+// different wall re-homes the front (labels already follow; the roof
+// deliberately does not — see d3RoofAxes).
 var liveFw=getFrontWall(liveItems)||fw;var az=({south:0,north:Math.PI,east:Math.PI/2,west:-Math.PI/2}[liveFw]||0)+relDeg*Math.PI/180;var phi=(90-polDeg)*Math.PI/180;// measured from straight up
 e.camera.position.set(t.x+r*Math.sin(phi)*Math.sin(az),t.y+r*Math.cos(phi),t.z+r*Math.sin(phi)*Math.cos(az));e.camera.lookAt(t);e.controls.update();e.render();};// ── Drag-to-move wall items (first slice of Phase 6, plan §10.5) ──
 // Doors/windows/rough openings drag along the walls exactly like the 2D
@@ -1597,7 +1627,10 @@ var ph=d3PropSpec(it.propKind).h||3;highlight.scale.set((rot?d0:w)+0.3,ph+0.3,(r
 // flush time and upgrades a scoped rebuild to full, because the roof and
 // ground labels re-home with the front.
 var queueRebuild=function queueRebuild(scope){var full=!scope||scope.full===true;if(rebuildScope){if(full)rebuildScope.full=true;else{(scope.walls||[]).forEach(function(w){return rebuildScope.walls.add(w);});if(scope.interior)rebuildScope.interior=true;}return;}rebuildScope={full:full,walls:new Set(full?[]:scope.walls||[]),interior:!full&&Boolean(scope.interior)};requestAnimationFrame(function(){var sc=rebuildScope;rebuildScope=null;var e=engineRef.current;if(!e||!sc)return;// Recompute FRONT from the live items — dragging the only door to a
-// different wall re-orients the roof exactly like the 2D labels.
+// different wall re-homes the ground labels and the camera presets.
+// The ROOF does not move: see d3RoofAxes. The full rebuild below is
+// kept because the ground labels genuinely do re-home; it now yields
+// an identical roof, which is wasteful but exactly correct.
 var nf=getFrontWall(liveItems)||frontWall;if(sc.full||nf!==e.model.builtFrontWall){scene.remove(e.model.root);disposeShed3DModel(e.model);e.model=d3TimedBuild(function(){return buildShed3DModel(THREE,{bldgW:bldgW,bldgH:bldgH,wallHeightFt:spec.wallHeightFt,styleSpec:spec,roofColor:roofCss,roofType:roofType,items:liveItems,itemTypes:itemTypes,bodyColor:liveBodyCss,trimColor:liveTrimCss,frontWall:nf,scale:scale,mgX:mgX,mgY:mgY,fixtures:fixtures});});scene.add(e.model.root);}else{d3TimedBuild(function(){if(sc.walls.size)e.model.rebuildWalls(Array.from(sc.walls),liveItems);if(sc.interior)e.model.rebuildInterior(liveItems);});}applyShellMode(e);render();});};// Wall-height picks mutate the working spec and rebuild — walls, openings
 // and roof all recompute from the new plate height.
 var setWallHeight=function setWallHeight(h){spec.wallHeightFt=h||0;queueRebuild();};// Swatch picks recolor the live materials in place — no rebuild needed.

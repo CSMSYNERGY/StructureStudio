@@ -2214,6 +2214,42 @@ function d3NormalizeCladding(v) {
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
 }
 
+// The ONE rule for roof orientation, and it is GEOMETRY -- never the door.
+//
+// `frontWall` is a TALKING CONVENTION. Whichever wall the door is on is called "the front"
+// so a rep on the phone can say "standing at the front looking at it, do you want the
+// window left or right of the door?". It drives the 2D labels, the ground labels and the
+// camera presets, and NOTHING structural. Feeding it into the ridge axis meant dragging the
+// only door from an end wall to a side wall silently rotated the roof 90 degrees on a
+// building whose framing had not moved -- Carolyn, 2026-08-31: "wherever the door is, is
+// considered the front of the building. That doesn't mean that the roof changes."
+//
+// The WIDTH side is the 8/10/12/14/16 dimension and is always the FIRST number in a size
+// label; the profile spans the shorter dimension and the ridge runs down the longer one.
+// Written as `lFt >= wFt` rather than "the first number", so a mis-entered length-first
+// label (16x8) still gets a ridge down its long axis instead of a spike across it.
+//
+// Callers: buildShed3DModel and D3ElevationSVG. They MUST stay one function -- the whole
+// point of the elevation drawing is that a builder can trust it against the 3D beside it,
+// and before this existed the two disagreed the moment a door was placed.
+function d3RoofAxes(roofCfg, wFt, lFt) {
+  const wideIsZ = lFt >= wFt;               // portrait footprint: the length runs north<->south
+  // For gable/gambrel the ridge is perpendicular to the span; for the shed the SLOPE runs
+  // the long way, so the axes swap. Unchanged from the pre-fix door-less default.
+  const uAxisIsX = (roofCfg && roofCfg.type) === "shed" ? !wideIsZ : wideIsZ;
+  return {
+    uAxisIsX,
+    S: uAxisIsX ? wFt : lFt,   // profile span
+    L: uAxisIsX ? lFt : wFt,   // extrusion length
+    // Shed high end: the profile's -u end, ALWAYS. Geometry cannot name a high end, so this
+    // is a fixed convention rather than a derivation -- and it is the end BOTH branches of
+    // the old door-less fallback already produced, so no door-less design moves. A real
+    // per-style control belongs in the d3.roof spec, and would need a styleD3.ts whitelist
+    // entry or it is silently dropped on save.
+    tallNeg: true,
+  };
+}
+
 // The roof's cross-section: a polyline of [u, y] points running eave -> ridge -> eave,
 // plus the slope segments that get roof slabs.
 //
@@ -2287,12 +2323,11 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   const roof = (spec && spec.roof) || {};
   const m = /^(\d+(?:\.\d+)?)\s*[xX\u00d7]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
   const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
-  // Mirrors buildShed3DModel's default front wall for a building with no doors placed --
-  // fw = bldgH >= bldgW ? "north" : "west" -- which is what the calibration preview shows.
-  // tallNeg is true for both of those, so the shed's high end is always on the left here.
-  const frontNS = d >= w;
-  const uAxisIsX = roof.type === "shed" ? !frontNS : frontNS;
-  const S = uAxisIsX ? w : d;
+  // Shares d3RoofAxes with buildShed3DModel -- the SAME rule, always, doors or not. Until
+  // 2026-09-01 this drawing used pure geometry while the 3D used the door, so the two
+  // silently disagreed the moment a customer placed one. tallNeg is true, so the shed's
+  // high end is always on the left here.
+  const S = d3RoofAxes(roof, w, d).S;
   const H = (spec && spec.wallHeightFt) || 8;
   const OV = roof.overhang != null ? roof.overhang : 0.6;
   const dedup = d3RoofProfile(roof, S, H, true).dedup;
@@ -3526,9 +3561,9 @@ function buildShed3DModel(THREE, p) {
 
   // ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
   // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
-  // top. Ridge runs front↔back so the gable end faces the customer's FRONT
-  // (derived from door placement, same rule the 2D labels use); the econo shed
-  // slope descends front→back. No doors yet → longer axis.
+  // top. The ridge runs down the building's LONGER axis and the gable ends cap
+  // the width -- always, whatever the customer does with the doors. See
+  // d3RoofAxes; the door decides the FRONT LABEL and nothing structural.
   const roofGroup = new THREE.Group();
   const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const OV = roofCfg.overhang != null ? roofCfg.overhang : D3.OVERHANG;
@@ -3540,16 +3575,12 @@ function buildShed3DModel(THREE, p) {
   // the disposal walk, and is the one thing here that could actually leak.
   let _tailMat = null;
   const tailMat = () => (_tailMat || (_tailMat = mat(D3_COLORS.bench, { roughness: 0.95 })));
-  const fw = frontWall || (bldgH >= bldgW ? "north" : "west");
-  const frontNS = fw === "north" || fw === "south";
-  // Profile u-axis: the axis the roof profile spans across. For gable/gambrel
-  // the ridge is perpendicular to the front; for the shed the SLOPE runs
-  // front→back, so the axes swap.
-  const uAxisIsX = roofCfg.type === "shed" ? !frontNS : frontNS;
-  const S = uAxisIsX ? bldgW : bldgH;   // profile span
-  const L = uAxisIsX ? bldgH : bldgW;   // extrusion length
+  // ⚠️ GEOMETRY, NOT THE DOOR. `frontWall` used to decide the ridge axis here, which is why
+  // moving a door rotated the roof. It now reaches only the ground labels and builtFrontWall.
+  // See d3RoofAxes for the rule and the reason.
+  const { uAxisIsX, S, L, tallNeg } = d3RoofAxes(roofCfg, bldgW, bldgH);
   // One profile builder, shared with the calibration panel's elevation drawing.
-  const _rp = d3RoofProfile(roofCfg, S, H, fw === "north" || fw === "west");
+  const _rp = d3RoofProfile(roofCfg, S, H, tallNeg);
   const prof = _rp.prof;      // profile polygon points [u, y], eave→ridge→eave
   const slopes = _rp.slopes;  // top edges [[A,B], …] that get roof slabs
   const dedup = _rp.dedup;
@@ -4227,7 +4258,9 @@ function buildShed3DModel(THREE, p) {
   // Scoped rebuilds for the live drag. sharedMats = the model-lifetime wall and
   // trim materials that per-wall disposal must keep (their maps ride along, so
   // the siding texture survives too). builtFrontWall lets the flush detect a
-  // FRONT flip, which needs the full path (roof + ground labels re-home).
+  // FRONT flip, which takes the full path because the GROUND LABELS re-home.
+  // The roof does NOT re-home -- see d3RoofAxes -- so that rebuild produces an
+  // identical roof and could one day be narrowed to the label group alone.
   const sharedMats = new Set([wallMat, trimMat, battenMat]);
   const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
   model.rebuildWalls = (names, itemsNow) => {
@@ -4616,7 +4649,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         const t = e.controls.target;
         const r = e.camera.position.distanceTo(t) || dist;
         // Front azimuth resolved at CALL time — dragging the only door to a
-        // different wall re-homes the front (roof + labels already follow).
+        // different wall re-homes the front (labels already follow; the roof
+        // deliberately does not — see d3RoofAxes).
         const liveFw = getFrontWall(liveItems) || fw;
         const az = ({ south: 0, north: Math.PI, east: Math.PI / 2, west: -Math.PI / 2 }[liveFw] || 0) + (relDeg * Math.PI) / 180;
         const phi = ((90 - polDeg) * Math.PI) / 180;   // measured from straight up
@@ -4806,7 +4840,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const e = engineRef.current;
           if (!e || !sc) return;
           // Recompute FRONT from the live items — dragging the only door to a
-          // different wall re-orients the roof exactly like the 2D labels.
+          // different wall re-homes the ground labels and the camera presets.
+          // The ROOF does not move: see d3RoofAxes. The full rebuild below is
+          // kept because the ground labels genuinely do re-home; it now yields
+          // an identical roof, which is wasteful but exactly correct.
           const nf = getFrontWall(liveItems) || frontWall;
           if (sc.full || nf !== e.model.builtFrontWall) {
             scene.remove(e.model.root);

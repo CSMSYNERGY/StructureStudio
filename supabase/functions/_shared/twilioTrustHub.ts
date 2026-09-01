@@ -249,6 +249,59 @@ export function validateIntake(intake: Partial<BuilderIntake>, hasEin: boolean):
   return problems;
 }
 
+/**
+ * Cheap pre-flight on the campaign copy — the paragraphs the CARRIERS read. Every rule here is
+ * either a hard Twilio limit or a documented TCR rejection cause, and each one caught here is a
+ * vetting fee and a week not spent.
+ *
+ * ⚠️ THIS DID NOT EXIST UNTIL 2026-09-01, AND THE FIRST REAL REGISTRATION PROVED WHY IT HAD TO.
+ * The submit button was `disabled={busy}` and nothing else, and the server read `p.copy` only in
+ * a LATER branch. So the first live builder submitted with `messageFlow` EMPTY and BOTH sample
+ * messages EMPTY — placeholders showing through untouched inputs — while the screen told her
+ * "Everything is filled in."
+ *
+ * ⚠️ AN EMPTY MessageFlow IS A DOCUMENTED REJECTION, not a blank field. TCR reads it against the
+ * consent language actually present on the builder's website, so "" is a refusal waiting to
+ * happen rather than an unanswered question.
+ *
+ * ⚠️ ENFORCED SERVER-SIDE BECAUSE THE BROWSER IS NOT THE ONLY CALLER, and because the portal
+ * artifact reaches production a week after this function does. The portal mirrors these rules to
+ * grey the button out and say why; THIS is what makes them true.
+ */
+export function validateCampaignCopy(copy: Partial<CampaignCopy>): string[] {
+  const problems: string[] = [];
+
+  const desc = String(copy.description ?? "").trim();
+  if (desc.length < 40) {
+    problems.push("Say a bit more about what you will text customers about — the carriers want a full sentence, not a few words.");
+  } else if (desc.length > 4096) {
+    problems.push("That description is longer than the carriers accept. Keep it under about 4,000 characters.");
+  }
+
+  const flow = String(copy.messageFlow ?? "").trim();
+  if (flow.length < 40) {
+    problems.push("Describe where customers agree to be texted, in a full sentence. Leaving this out is one of the most common reasons the carriers reject a registration.");
+  } else if (flow.length > 4096) {
+    problems.push("That consent description is longer than the carriers accept. Keep it under about 4,000 characters.");
+  }
+
+  const samples = (Array.isArray(copy.messageSamples) ? copy.messageSamples : [])
+    .map((s) => String(s ?? "").trim()).filter(Boolean);
+  if (samples.length < 2) problems.push("Two example messages are required. Write ones you would really send.");
+  if (samples.length > 5) problems.push("Five example messages is the most the carriers accept.");
+  if (samples.some((s) => s.length < 20)) {
+    problems.push("One of the example messages is too short — write it out the way you would actually send it.");
+  }
+  if (samples.some((s) => s.length > 1024)) {
+    problems.push("One of the example messages is longer than a text message can be.");
+  }
+  // The single most-cited campaign rejection: no visible opt-out in the samples.
+  if (samples.length && !samples.some((s) => /\bSTOP\b/i.test(s))) {
+    problems.push("At least one example has to show people how to stop. Keep “Reply STOP to opt out” in it.");
+  }
+  return problems;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Stage 1 — Secondary Customer Profile
 // ─────────────────────────────────────────────────────────────────────────────
@@ -686,8 +739,20 @@ export function normalizeBrandStatus(raw: string): string {
 export function normalizeCampaignStatus(raw: string): string {
   const v = String(raw ?? "").trim().toUpperCase();
   switch (v) {
-    case "VERIFIED": case "APPROVED": return "APPROVED";
-    case "FAILED": case "REJECTED": return "FAILED";
+    // ⚠️ TWO VOCABULARIES, AND MISSING ONE STALLS A BUILDER SILENTLY. The REST resource says
+    // VERIFIED / REJECTED; **Event Streams says `success` / `failure`**, and the whole point of
+    // this function is to flatten that difference. `failure` was missing until 2026-09-01, so
+    // it fell through `default` and was stored VERBATIM as "FAILURE" — which is not "FAILED",
+    // so twilio-events never set status='campaign_failed', never set needs_attention, and
+    // never cleared next_poll_at.
+    //
+    // The real cost: TCR rejected the first live campaign 0.1s after submission, the rejection
+    // arrived and was recorded, and the builder's screen still read "Final review — the
+    // carriers are reviewing how you plan to use texting… Nothing for you to do." It would have
+    // said that forever. Exactly the shape of the Monday webhook bug in CLAUDE.md: the
+    // subscription's vocabulary is not the payload's vocabulary.
+    case "VERIFIED": case "APPROVED": case "SUCCESS": return "APPROVED";
+    case "FAILED": case "REJECTED": case "FAILURE": return "FAILED";
     case "PENDING": case "IN_PROGRESS": return "PENDING";
     default: return v || "PENDING";
   }
