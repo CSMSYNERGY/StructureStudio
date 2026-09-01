@@ -326,7 +326,6 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
     const columns = await boardColumns(board.id);
     const statusCol = columns.find((c) => c.type === "status");
-    const notesCol = columns.find((c) => c.type === "long_text");
     // Status is set ONCE, at creation, from how real the roadmap entry is — and never
     // touched again.
     // deno-lint-ignore no-explicit-any
@@ -353,15 +352,27 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       const values: Record<string, unknown> = {};
       const label = n.status === "planned" ? planned : idea;
       if (statusCol && label) values[statusCol.id] = label.id;
-      if (notesCol && n.detail) values[notesCol.id] = String(n.detail).slice(0, 8000);
-      const { error: iErr } = await admin.from("pm_items").insert({
+      const { data: made, error: iErr } = await admin.from("pm_items").insert({
         board_id: board.id, group_id: group.id,
         name: String(n.title || "Untitled").slice(0, 200),
         values, position: pos, release_note_id: n.id,
         created_by_email: "roadmap",
-      });
+      }).select("id").single();
       // A single clashing row must not abort the whole board load.
       if (iErr) { console.error("roadmap sync failed for note", n.id, iErr.message); continue; }
+      // The note's DETAIL opens the thread rather than filling a "Notes" column. It used
+      // to go into whatever long_text column the board happened to have, which meant
+      // deleting that column silently dropped the detail from every future roadmap card
+      // (Carolyn emptied both boards' Notes columns into their threads on 2026-08-29).
+      // Internal: the tenant-facing copy of this text is the release note itself.
+      if (n.detail && made) {
+        const { error: uErr } = await admin.from("pm_updates").insert({
+          item_id: made.id, author_email: "roadmap",
+          body: String(n.detail).slice(0, 8000),
+          client_visible: false, attachments: [],
+        });
+        if (uErr) console.error("roadmap detail note failed for", n.id, uErr.message);
+      }
       pos += 1024;
       added++;
     }
