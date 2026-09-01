@@ -454,6 +454,22 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
   const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
   const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
 
+  // ▲/▼ reorder for groups and columns (Carolyn 2026-08-29: "organize columns in the
+  // order I want"). The server has carried reorder_columns/reorder_groups since the
+  // boards shipped — this modal just never exposed them. Same idiom as the setup
+  // template editor: move locally is unnecessary because run() reloads the board.
+  const move = (list, idx, dir, action) => {
+    const to = idx + dir;
+    if (to < 0 || to >= list.length) return;
+    const next = list.slice();
+    next.splice(to, 0, next.splice(idx, 1)[0]);
+    run({ action, boardId: board.id, orderedIds: next.map((x) => x.id) });
+  };
+  const arrow = (label, onClick, dim) => (
+    <button type="button" onClick={onClick} disabled={dim} title={label === "▲" ? "Move up" : "Move down"}
+      style={{ background: "none", border: "none", color: dim ? "#E2E8F0" : "#94A3B8", fontSize: 12, fontWeight: 800, cursor: dim ? "default" : "pointer", padding: "0 2px", fontFamily: "inherit" }}>{label}</button>
+  );
+
   return (
     <AdmOverlay onClose={onClose} maxWidth={640} labelledBy="pm-bs-title">
       <div style={{ padding: "16px 20px", maxHeight: "82vh", overflowY: "auto" }}>
@@ -471,8 +487,10 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         </div>
 
         <span style={flabel}>Groups</span>
-        {groups.map((g) => (
+        {groups.map((g, gi) => (
           <div key={g.id} style={rowStyle}>
+            {arrow("▲", () => move(groups, gi, -1, "reorder_groups"), gi === 0)}
+            {arrow("▼", () => move(groups, gi, 1, "reorder_groups"), gi === groups.length - 1)}
             <input style={{ ...S.input, width: 180, padding: "4px 8px", fontSize: 12.5 }} defaultValue={g.name}
               onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== g.name) run({ action: "update_group", id: g.id, name: v }); }} />
             <PMSwatches value={g.color} onPick={(c) => run({ action: "update_group", id: g.id, color: c })} />
@@ -500,9 +518,11 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         </div>
 
         <span style={flabel}>Columns</span>
-        {columns.map((col) => (
+        {columns.map((col, ci) => (
           <div key={col.id}>
             <div style={rowStyle}>
+              {arrow("▲", () => move(columns, ci, -1, "reorder_columns"), ci === 0)}
+              {arrow("▼", () => move(columns, ci, 1, "reorder_columns"), ci === columns.length - 1)}
               <input style={{ ...S.input, width: 160, padding: "4px 8px", fontSize: 12.5 }} defaultValue={col.name}
                 onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== col.name) run({ action: "update_column", id: col.id, name: v }); }} />
               <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700, width: 70 }}>{(PM_COL_TYPES.find(([t]) => t === col.type) || [col.type, col.type])[1]}</span>
@@ -1423,6 +1443,10 @@ function ProjectsTab({ sub, onSub }) {
               canEdit={canWrite}
               onCellCommit={onCellCommit} onDropToGroup={onDropToGroup} onDropOnRow={onDropOnRow}
               onRowOpen={(r) => setOpenItemId(r.id)} onAddItem={onAddItem}
+              onReorderCols={(ids) => callOrReload(
+                { action: "reorder_columns", boardId: data.board.id, orderedIds: ids },
+                () => setData((d) => d && ({ ...d, columns: ids.map((id) => d.columns.find((c) => c.id === id)).filter(Boolean) })),
+              )}
               activeItemId={openItemId} />
           </>
         )}

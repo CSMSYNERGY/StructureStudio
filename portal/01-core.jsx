@@ -1083,13 +1083,14 @@ function StatusChips({ counts, value, onChange, extra = [] }) {
 // Clickable header cell. Clicking cycles the direction on the active column and
 // selects a new column (starting ascending). A faded ▲ hints unsorted columns
 // are clickable; the active column shows a solid ▲/▼ in the brand accent.
-function SortTh({ label, col, sortKey, sortDir, onSort, style }) {
+function SortTh({ label, col, sortKey, sortDir, onSort, style, thProps }) {
   const active = sortKey === col;
   return (
     <th
+      {...(thProps || {})}
       onClick={() => onSort(col)}
       title={`Sort by ${label}`}
-      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none" }}
+      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none", ...((thProps || {}).style || {}) }}
     >
       {label}
       <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>
