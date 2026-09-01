@@ -1090,7 +1090,13 @@ function SortTh({ label, col, sortKey, sortDir, onSort, style, thProps }) {
       {...(thProps || {})}
       onClick={() => onSort(col)}
       title={`Sort by ${label}`}
-      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none", ...((thProps || {}).style || {}) }}
+      // ⚠️ MERGE, never `style || S.th`. That fallback meant any caller passing a style
+      // — PMTable passes {width} for columns that have one — REPLACED the header
+      // typography wholesale, so those headers fell back to the browser's default <th>
+      // (big, black, centred) while widthless ones kept the real style. On a Projects
+      // board that showed up as every column added through the UI (no width) rendering
+      // differently from the seeded ones (Carolyn 2026-08-29, spotted on "Due").
+      style={{ ...S.th, ...(style || {}), cursor: "pointer", userSelect: "none", ...((thProps || {}).style || {}) }}
     >
       {label}
       <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>

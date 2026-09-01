@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 6ed1d3e93f50)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 0f8bdae7a047)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -497,7 +497,13 @@ if(items.length<2&&(value==="all"||!value))return null;var total=items.reduce(fu
 // Clickable header cell. Clicking cycles the direction on the active column and
 // selects a new column (starting ascending). A faded ▲ hints unsorted columns
 // are clickable; the active column shows a solid ▲/▼ in the brand accent.
-function SortTh(_ref20){var label=_ref20.label,col=_ref20.col,sortKey=_ref20.sortKey,sortDir=_ref20.sortDir,onSort=_ref20.onSort,style=_ref20.style,thProps=_ref20.thProps;var active=sortKey===col;return/*#__PURE__*/React.createElement("th",_extends({},thProps||{},{onClick:function onClick(){return onSort(col);},title:"Sort by ".concat(label),style:_objectSpread(_objectSpread({},style||S.th),{},{cursor:"pointer",userSelect:"none"},(thProps||{}).style||{})}),label,/*#__PURE__*/React.createElement("span",{style:{marginLeft:4,fontSize:9,verticalAlign:"middle",color:active?ACCENT:"#CBD5E1"}},active?sortDir==="asc"?"▲":"▼":"▲"));}// Stable-ish sort of `rows` by a per-row comparable value. Blanks (null/""/undefined)
+function SortTh(_ref20){var label=_ref20.label,col=_ref20.col,sortKey=_ref20.sortKey,sortDir=_ref20.sortDir,onSort=_ref20.onSort,style=_ref20.style,thProps=_ref20.thProps;var active=sortKey===col;return/*#__PURE__*/React.createElement("th",_extends({},thProps||{},{onClick:function onClick(){return onSort(col);},title:"Sort by ".concat(label)// ⚠️ MERGE, never `style || S.th`. That fallback meant any caller passing a style
+// — PMTable passes {width} for columns that have one — REPLACED the header
+// typography wholesale, so those headers fell back to the browser's default <th>
+// (big, black, centred) while widthless ones kept the real style. On a Projects
+// board that showed up as every column added through the UI (no width) rendering
+// differently from the seeded ones (Carolyn 2026-08-29, spotted on "Due").
+,style:_objectSpread(_objectSpread(_objectSpread({},S.th),style||{}),{},{cursor:"pointer",userSelect:"none"},(thProps||{}).style||{})}),label,/*#__PURE__*/React.createElement("span",{style:{marginLeft:4,fontSize:9,verticalAlign:"middle",color:active?ACCENT:"#CBD5E1"}},active?sortDir==="asc"?"▲":"▼":"▲"));}// Stable-ish sort of `rows` by a per-row comparable value. Blanks (null/""/undefined)
 // always sort last regardless of direction; numbers compare numerically and strings
 // case-insensitively (with numeric-aware collation so "2" < "10"). ISO date strings
 // sort chronologically as plain strings, so no special-casing is needed for dates.
