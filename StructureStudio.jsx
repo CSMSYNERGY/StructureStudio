@@ -7188,6 +7188,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return out;
   }, [sel.style, sel.size, C.buildingStyles]);
   const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
+  // The inclusion keys the customer can actually ACT on, and the single source of truth for
+  // both the "✓ Included — place or decline" chips and submitQuote's gate. Those two must
+  // never disagree: the gate demands every included item be placed or declined, so a key it
+  // counts but no chip offers is a design that can NEVER be quoted, with no way out from the
+  // screen. That shipped — see the two ways a key goes missing, both live:
+  //   • An item the tenant RETIRED. `doubleDoor` sits in every style's size inclusions here,
+  //     but the tenant moved to catalog doors, so it survives only as LEGACY_LAYOUT_FALLBACK's
+  //     render-only (noPalette) entry to keep old designs drawing.
+  //   • An item behind a PICKER. The shelving picker marks every shelf/workbench noPalette so
+  //     they collapse behind one button — which silently took the chip off an included workbench.
+  // The chips deliberately IGNORE noPalette for exactly this reason: noPalette means "not its own
+  // tool button", never "the customer may not have this". A key with no ITEMS entry at all (an
+  // archived fixture) stays excluded here — nothing can render a chip for it — so the gate
+  // stops demanding the impossible. That changes no money: the inclusion still nets in
+  // computeSelectionRows either way, and only an explicit decline ever credits.
+  const actionableIncludedKeys = includedItemKeys.filter((k) => ITEMS[k] && (embedded || !ITEMS[k].internalOnly));
 
   const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
   // Lead-capture gate: shoppers give name + phone before designing (the customer link is a
@@ -10058,7 +10074,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Every included item must be placed on the layout, or explicitly declined.
     const declinedKeys = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
-    const unplacedIncluded = includedItemKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
+    const unplacedIncluded = actionableIncludedKeys.filter((k) => !declinedKeys.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
     if (unplacedIncluded.length > 0) {
       const names = unplacedIncluded.map((k) => (ITEMS[k] && ITEMS[k].label) || k).join(", ");
       setSubmitError(`Please place all included items on your layout, or decline the ones you don't want: ${names}.`);
@@ -11697,8 +11713,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
+          // `entries` is the PALETTE (its own tool button); `incl` is the included row, which is
+          // built from actionableIncludedKeys instead so it still offers items that carry
+          // noPalette — a retired built-in, or a shelf collapsed behind the shelving picker. See
+          // the note on actionableIncludedKeys for why the two lists must not share a filter.
           const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette && (embedded || !c.internalOnly));
-          const incl = includedItemKeys.length ? entries.filter(([k]) => includedItemKeys.includes(k)) : [];
+          const inclSet = new Set(actionableIncludedKeys);
+          const incl = actionableIncludedKeys.length
+            ? Object.entries(ITEMS).filter(([k]) => inclSet.has(k))   // ITEMS order, not inclusion-map order
+            : [];
+          // An included item is never ALSO an "additional" tool — it is offered once, in the row
+          // that lets it be declined. Keyed on the full inclusion list, so a key that is included
+          // but unactionable still cannot reappear as a plain tool.
           const addl = includedItemKeys.length ? entries.filter(([k]) => !includedItemKeys.includes(k)) : entries;
           // Decline control for an included item: X it off (a deduction line is added on the
           // estimate). Declined items don't have to be placed on the layout.
@@ -11728,12 +11754,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               return { ...p, declinedItems: c.includes(key) ? c.filter((k) => k !== key) : [...c, key] };
             });
           };
-          // Included chips show the included quantity when it's more than a single unit
-          // (loft quantities are square footage; everything else is a count).
+          // Included chips show the included quantity when it's more than a single unit. The UNIT
+          // comes from the same pricing method computeSelectionRows measures by, not from the key:
+          // lineal_ft is feet, sqft_option is square feet, everything else is a count. Hardcoding
+          // "loft = sq ft, else a count" read an included 12 FEET of workbench as "Workbench ×12",
+          // i.e. twelve benches — a number the customer would then look for on their quote and
+          // never find, since the estimate bills it as feet.
+          const inclUnit = (key) => {
+            const lp = (C.layoutPricing || {})[key];
+            const ov = (lp && lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+            const method = (ov && ov.method) || (lp && lp.method) || "each";
+            return method === "sqft_option" ? "sq ft" : method === "lineal_ft" ? "ft" : null;
+          };
           const withQty = (key, cfg) => {
             const q = includedItemQty[key] || 1;
             if (q <= 1) return cfg;
-            return { ...cfg, label: key === "loft" ? `${cfg.label} (${q} sq ft)` : `${cfg.label} ×${q}` };
+            const u = inclUnit(key);
+            return { ...cfg, label: u ? `${cfg.label} (${q} ${u})` : `${cfg.label} ×${q}` };
           };
           const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
             ? (
