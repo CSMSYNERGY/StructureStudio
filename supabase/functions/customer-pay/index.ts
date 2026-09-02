@@ -38,6 +38,7 @@ import {
   cardpointeConfigured,
   CP_DEFAULT_MERCHID,
   cpSurchargeProbe,
+  cpTokenizerHeight,
   cpTokenizerOrigin,
   cpTokenizerUrl,
 } from "../_shared/cardpointe.ts";
@@ -252,6 +253,10 @@ Deno.serve(withErrorLog("customer-pay", async (req: Request) => {
         origin: cpTokenizerOrigin(),
         cardUrl: cpTokenizerUrl("card"),
         achUrl: cpTokenizerUrl("ach"),
+        // Served, not hardcoded in the page: at 132px the CVV sat below the fold of a
+        // non-scrolling frame and the form was quietly uncompletable.
+        cardHeight: cpTokenizerHeight("card"),
+        achHeight: cpTokenizerHeight("ach"),
       },
     });
   }

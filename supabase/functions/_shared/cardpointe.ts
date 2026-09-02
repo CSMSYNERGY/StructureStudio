@@ -470,11 +470,30 @@ export async function cpSurchargeProbe(
  * a numeric keypad has no slash) and drops the card grouping.
  */
 export function cpTokenizerUrl(rail: "card" | "ach"): string {
+  // ⚠️ THREE THINGS HERE ARE FIXES FOR DEFECTS SEEN ON A REAL PHONE (2026-09-02), not
+  // decoration. The first version of this looked fine in the markup and wrong on screen.
+  //
+  //  1. `body{margin:0}` — CardPointe's own document carries a default body margin, so
+  //     inputs at width:100% overflowed the iframe's right edge and the card number ran
+  //     off the side of the panel. width:100% is measured against a body that is WIDER
+  //     than the frame; resetting the margin is what actually contains it.
+  //  2. An EXPLICIT font stack, never `font-family:inherit`. Inside an iframe, `inherit`
+  //     resolves against the IFRAME's document — not the embedding page — so it inherited
+  //     the browser default and rendered the labels in serif against a sans-serif page.
+  //  3. `label` is styled at all. Only `input`/`select` were, so CardPointe's own field
+  //     labels were unstyled text sitting above nicely styled boxes.
+  //
+  // Only the properties on Fiserv's allow-list are honoured; anything else is dropped
+  // silently, so every declaration below is drawn from it.
+  const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   const css = encodeURIComponent(
-    "input{width:100%;box-sizing:border-box;font-size:16px;padding:11px 12px;" +
-      "border:1px solid #CBD5E1;border-radius:8px;color:#0F172A;font-family:inherit}" +
-      "select{font-size:16px;padding:10px;border:1px solid #CBD5E1;border-radius:8px}" +
-      ".error{color:#B91C1C;font-size:13px}",
+    `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
+      `label{display:block;font-family:${FONT};font-size:13px;font-weight:600;color:#475569;margin:10px 0 4px}` +
+      `input{width:100%;box-sizing:border-box;font-size:16px;padding:11px 12px;` +
+      `border:1px solid #CBD5E1;border-radius:8px;color:#0F172A;font-family:${FONT}}` +
+      `select{font-size:16px;padding:10px;border:1px solid #CBD5E1;border-radius:8px;` +
+      `font-family:${FONT};color:#0F172A;margin-right:6px}` +
+      `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`,
   );
   const common = [
     "enhancedresponse=true",
@@ -507,6 +526,20 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
       "placeholder=" + encodeURIComponent("Card number"),
     ];
   return `${CP_TOKENIZER_BASE}?${params.join("&")}`;
+}
+
+/**
+ * How tall the iframe has to be, in px, for the rail's full field set to be REACHABLE.
+ *
+ * Served rather than hardcoded in the pages, because the two surfaces (my-quotes.html and
+ * the portal's Record-a-payment modal) would otherwise carry two copies that drift — and
+ * this exact number is a defect if it is too small rather than merely ugly: the card set is
+ * number + expiry + CVV, and at the original 132px the CVV was simply below the fold of a
+ * non-scrolling frame. A customer could not complete a payment, and nothing errored.
+ * Generous on purpose: an over-tall frame is whitespace, an under-tall one is a dead form.
+ */
+export function cpTokenizerHeight(rail: "card" | "ach"): number {
+  return rail === "ach" ? 104 : 210;
 }
 
 /** The origin the browser must check every postMessage against. */

@@ -3415,7 +3415,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       ref={frameRef}
                       title="Payment details"
                       src={method === "ach" ? payOpts.tokenizer.achUrl : entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
-                      style={{ width: "100%", height: method === "ach" ? 74 : 128, border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
+                      // Height is SERVED (cpTokenizerHeight) so this modal and my-quotes.html
+                      // cannot drift. Too short is a dead form, not a cosmetic issue: at the
+                      // original 128px the CVV sat below the fold of a non-scrolling frame.
+                      style={{ width: "100%", display: "block", height: (method === "ach" ? (payOpts.tokenizer.achHeight || 104) : (payOpts.tokenizer.cardHeight || 210)), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
                       frameBorder="0" scrolling="no"
                     />
                   )}

@@ -263,6 +263,28 @@ Deno.test("the tokenizer URL carries the mobile-critical parameters", () => {
   check("origin", cp.cpTokenizerOrigin() === "https://isv-uat.example.invalid", cp.cpTokenizerOrigin());
 });
 
+Deno.test("the tokenizer css resets CardPointe's body margin and sets a REAL font", () => {
+  // Both are fixes for defects seen on a real phone (2026-09-02), and both are invisible
+  // in the markup — the only way they regress is silently.
+  const css = decodeURIComponent(cp.cpTokenizerUrl("card"));
+  // Without this the inputs at width:100% overflow the frame's right edge, because
+  // width:100% is measured against a body wider than the frame.
+  check("body margin reset", /body\{[^}]*margin:0/.test(css), css.slice(0, 200));
+  // `font-family:inherit` inside an iframe inherits from the IFRAME's document, not the
+  // page — which rendered the labels in serif against a sans-serif page.
+  check("no font-family:inherit anywhere", !/font-family:inherit/.test(css), css);
+  check("labels are styled at all", /label\{/.test(css), css.slice(0, 300));
+});
+
+Deno.test("the tokenizer is tall enough for its rail's full field set", () => {
+  // Not cosmetic: the card set is number + expiry + CVV, and at the original 132px the CVV
+  // was below the fold of a non-scrolling frame — the form could not be completed and
+  // nothing errored. A floor, not an exact value.
+  check("card fits three fields", cp.cpTokenizerHeight("card") >= 190, String(cp.cpTokenizerHeight("card")));
+  check("ach fits one field plus its label", cp.cpTokenizerHeight("ach") >= 90, String(cp.cpTokenizerHeight("ach")));
+  check("card is taller than ach", cp.cpTokenizerHeight("card") > cp.cpTokenizerHeight("ach"));
+});
+
 Deno.test("cardpointeConfigured is all-or-nothing", () => {
   // The nmiConfigured rule: a tokenizer base without credentials mints tokens nobody can
   // charge, and credentials without a tokenizer base cannot collect an instrument at all.

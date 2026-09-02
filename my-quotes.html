@@ -1032,7 +1032,17 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     // pattern, and a fixed overlay plus a mobile keyboard plus an iframe is the layout
     // that traps a customer with no visible way out.
     var open = box.querySelector(".sign-panel");
-    if (open) { open.parentNode.removeChild(open); btn.textContent = "Pay " + fmtMoney(fig.askCents / 100); return; }
+    if (open) {
+      open.parentNode.removeChild(open);
+      btn.className = "btn btn-primary";
+      btn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+      return;
+    }
+    // Demoted to secondary while the panel is open. It is the SAME button re-labelled, and
+    // left as a primary it was the loudest thing on the card — a big dark "Cancel" sitting
+    // above the form the customer is meant to fill in. The primary weight belongs to the
+    // Pay button at the bottom of the panel, which is the action.
+    btn.className = "btn btn-secondary";
     btn.textContent = "Cancel";
 
     var panel = document.createElement("div");
@@ -1064,7 +1074,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       f.title = "Payment details";
       f.setAttribute("scrolling", "no");
       f.setAttribute("frameborder", "0");
-      f.style.cssText = "width:100%;border:0;height:" + (rail === "ach" ? "76px" : "132px");
+      // Height comes from the SERVER (cpTokenizerHeight) so this page and the portal's
+      // modal cannot drift. Too short is not cosmetic: at the original 132px the CVV sat
+      // below the fold of a non-scrolling frame, so the form could not be completed and
+      // nothing errored. The fallbacks only matter for a cached page mid-deploy.
+      var tk = opt.tokenizer || {};
+      var h = rail === "ach" ? (tk.achHeight || 104) : (tk.cardHeight || 210);
+      f.style.cssText = "width:100%;border:0;display:block;height:" + h + "px";
       f.src = rail === "ach" ? opt.tokenizer.achUrl : opt.tokenizer.cardUrl;
       frameWrap.appendChild(f);
       if (rail === "ach") {

@@ -40,6 +40,7 @@ import {
   cpRefund,
   cpSettleStat,
   cpSurchargeProbe,
+  cpTokenizerHeight,
   cpTokenizerOrigin,
   cpTokenizerUrl,
   cpVoid,
@@ -155,6 +156,8 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
         // swipeonly is a SEPARATE url: the reader is a USB keyboard, and letting it share
         // the keyed-entry frame would mean a swipe could also be typed by hand.
         swipeUrl: cpTokenizerUrl("card") + "&swipeonly=true",
+        cardHeight: cpTokenizerHeight("card"),
+        achHeight: cpTokenizerHeight("ach"),
       },
     });
   }
