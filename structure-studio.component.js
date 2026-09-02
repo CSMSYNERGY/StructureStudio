@@ -236,6 +236,25 @@ function ssSlabBand(it, itemTypes) {
 }
 function ssBandsOverlap(a, b) { return !!a && !!b && a[0] < b[1] && b[0] < a[1]; }
 
+// How deep a wall-mounted item actually sits on the plan, in feet.
+//
+// THE BUILDER'S depthIn IS WHAT GETS DRAWN, so it is also what must be SNAPPED against.
+// Passing the config's own `height` to snapToWallInterior while drawing depthIn is what put
+// every slab half outside its wall — and straight through it in 3D, since the 3D model reads
+// the same x/y. It only showed once a builder set a depth bigger than the type's default
+// (Carolyn: 24 in shelves on a 1 ft default, a 36 in bench on a 2 ft one), which is why it
+// survived the first round of testing.
+//
+// An EXISTING item wins with its own snapshotted heightFt: re-pricing a shelf's depth must
+// never move one already on somebody's plan.
+function slabDepthFt(cfg, it) {
+  const own = it && it.heightFt != null ? Number(it.heightFt) : null;
+  if (own > 0) return own;
+  const d = cfg && cfg.depthIn != null ? Number(cfg.depthIn) / 12 : null;
+  if (d > 0) return d;
+  return (cfg && Number(cfg.height)) || 2;
+}
+
 // Does an item at `sn` overlap a wall slab on the same wall? checkDoorCollision above
 // deliberately only compares wallOnly items to each other, and a slab is wallSnap, so it is
 // skipped there — which meant the invariant was enforced in one direction only: dragging a
@@ -5121,8 +5140,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         if (cfg.wallSnap) {
           const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-          const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
-          const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+          const sn = snapToWallInterior(nw, pageX, pageY, cfg.width * scale, slabDepthFt(cfg) * scale, pWpx, pHpx, mgX, mgY);
+          const candidate = { id: idCounter, type: tool, ...sn, widthFt: cfg.width, heightFt: slabDepthFt(cfg) };
           if (checkDoorCollision(candidate, cfg, liveItems, itemTypes, scale)) {
             flash3("A door is blocking this wall — try a different wall, or move the door first.");
             return;
@@ -5324,7 +5343,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 6;
             const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-            const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, (c.height || 2) * scale, pWpx, pHpx, mgX, mgY);
+            const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY);
             const others = liveItems.filter((i) => i.id !== it.id);
             if (checkDoorCollision({ ...it, ...sn }, { ...c, width: wFt }, others, itemTypes, scale)) return;
             if (checkWallSlabOverlap(sn, wFt * scale, others, itemTypes, scale, { ...it, ...sn })) return;
@@ -7997,7 +8016,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
       return;
     }
-    const iwPx = cfg.width * scale; const ihPx = cfg.height * scale;
+    const iwPx = cfg.width * scale; const ihPx = slabDepthFt(cfg) * scale;
     let wall = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY);
     // Wall-only items always go on a wall; if the click missed the threshold,
     // fall back to the nearest wall so the placement still happens.
@@ -8103,7 +8122,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // config's own height stands, which is every item that predates the column. Both numbers
       // are SNAPSHOT onto the item so re-pricing a shelf later never moves one already placed.
       const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width,
-        heightFt: cfg.depthIn != null ? cfg.depthIn / 12 : cfg.height,
+        heightFt: slabDepthFt(cfg),
         ...(cfg.depthIn != null ? { depthIn: cfg.depthIn } : {}),
         ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
       const others = items.filter((i) => i.id !== candidate.id);
@@ -8652,7 +8671,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }));
     } else if (cfg.wallSnap) {
       const nw = getNearestWall(rx, ry, pW, pH, mgX, mgY);
-      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
+      const sn = snapToWallInterior(nw, rx, ry, iWidthFt * scale, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
       const others = items.filter((i) => i.id !== dragging.id);
