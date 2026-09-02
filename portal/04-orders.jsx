@@ -3478,7 +3478,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               <div style={{ marginTop: 13 }}><span style={S.lbl}>Method</span>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {PAY_METHODS.map(([id, label]) => (
-                    <button key={id} type="button" onClick={() => setMethod(id)}
+                    <button key={id} type="button" onClick={() => {
+                      setMethod(id);
+                      // Choosing Card or Bank INSIDE a payment modal almost always means
+                      // "take it now". Landing on Already collected made every card sale a
+                      // two-click job and delayed the tokenizer load to the worst moment.
+                      // This moves the TOGGLE only — nothing is charged until details are
+                      // entered and Charge is pressed, and Already collected is one click away.
+                      setCollect(id === "card" || id === "ach" ? "charge" : "recorded");
+                      setPayToken(null); setTokenErr(""); setArmed(false);
+                    }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
                 </div>
@@ -3505,8 +3514,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 </div>
               )}
 
-              {collect === "charge" ? (
-                <div style={{ marginTop: 13 }}>
+              {/* BOTH branches render; the inactive one is hidden rather than unmounted.
+                  That keeps the tokenizer iframe MOUNTED AND LOADING while the operator is
+                  still reading the modal — unmounting it meant the cross-origin round trip
+                  to CardPointe only began when "Charge it now" was pressed, which is the one
+                  moment somebody is actually waiting on it. */}
+              <div style={{ marginTop: 13, display: collect === "charge" ? "block" : "none" }}>
                   {method === "card" && (
                     <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                       {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
@@ -3570,13 +3583,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {surcharge && surcharge.applies === false && (
                     <div style={{ marginTop: 10, fontSize: 11.5, color: "#475569" }}>No card fee on this card.</div>
                   )}
-                </div>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
-                  <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
-                  <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
-                </div>
-              )}
+              </div>
+              <div style={{ display: collect === "charge" ? "none" : "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
+                <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
+                <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
+              </div>
 
               <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: collect === "charge" ? "#ECFDF5" : "#F8FAFC", border: `1px solid ${collect === "charge" ? "#A7F3D0" : "#E2E8F0"}`, borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: collect === "charge" ? "#065F46" : "#475569", lineHeight: 1.45, marginTop: 12 }}>
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke={collect === "charge" ? "#059669" : "#64748B"} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>

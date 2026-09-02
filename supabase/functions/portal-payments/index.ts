@@ -208,6 +208,20 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     await audit(`charge_${rail}`, null, `order=${orderId} cents=${decision.askCents}`).catch(() => {});
 
+    // ⚠️ ACH REQUIRES AN ACCOUNT-HOLDER NAME. Without it the gateway declines with
+    // "all name fields are empty" — a refusal that reads like a card problem and is really
+    // an incomplete request from us. customer-pay always had this (it passes the contact off
+    // the design); this path did not, so every bank payment taken by a builder failed while
+    // the identical customer-side charge succeeded. Card does not need it, but sending it
+    // improves AVS, so it goes on both rails.
+    let payerName: string | undefined;
+    if (money.shortCode) {
+      const { data: dRow } = await admin.from("designs")
+        .select("contact").eq("client_id", clientId).eq("short_code", money.shortCode).maybeSingle();
+      const n = (dRow?.contact as Record<string, unknown> | null)?.name;
+      if (typeof n === "string" && n.trim()) payerName = n.trim().slice(0, 60);
+    }
+
     const result = await chargeInvoicePayment(admin, {
       clientId,
       merchid,
@@ -218,6 +232,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       account: token,
       expiry: typeof payload?.expiry === "string" ? payload.expiry.trim().slice(0, 8) : undefined,
       postal: typeof payload?.postal === "string" ? payload.postal.trim().slice(0, 12) : undefined,
+      name: payerName,
       ecomind: swiped ? "R" : "E",
       actorKind: "staff",
       actorRef: userId ?? null,
@@ -252,6 +267,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (!token || token.length > 4096) return json({ error: "No card details were captured." }, 400);
     const rail: "card" | "ach" = payload?.rail === "ach" ? "ach" : "card";
     const note = typeof payload?.note === "string" ? payload.note.trim().slice(0, 200) : "";
+    // A counter sale has no design to read a name off, so the operator supplies one. ACH
+    // cannot proceed without it — refuse here with a sentence that says what to do, rather
+    // than letting the gateway answer "all name fields are empty".
+    const adhocName = typeof payload?.name === "string" ? payload.name.trim().slice(0, 60) : "";
+    if (rail === "ach" && !adhocName) {
+      return json({ error: "Enter the name on the bank account — a bank payment can't be taken without it." }, 400);
+    }
 
     const { data: order, error: oErr } = await admin.from("orders").insert({
       client_id: clientId,
@@ -276,6 +298,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
       account: token,
       expiry: typeof payload?.expiry === "string" ? payload.expiry.trim().slice(0, 8) : undefined,
       postal: typeof payload?.postal === "string" ? payload.postal.trim().slice(0, 12) : undefined,
+      name: adhocName || undefined,
       ecomind: payload?.entry === "swipe" ? "R" : "E",
       actorKind: "staff",
       actorRef: userId ?? null,
