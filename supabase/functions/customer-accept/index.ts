@@ -3,7 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
 import { phoneKey } from "../_shared/phoneKey.ts";
-import { amountOwed, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amountOwed, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -95,23 +95,10 @@ export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: stri
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
 }
 
-/**
- * The tax columns for a design_acceptances row, read off the snapshot the customer was looking
- * at (migration 148). Returns {} when the snapshot carries no tax — every GHL-mode design, and
- * every SS design issued before tax shipped — so the columns stay NULL rather than 0, keeping
- * "was not taxed" distinguishable from "was taxed at nothing".
- */
-// deno-lint-ignore no-explicit-any
-function taxFreeze(snap: any): Record<string, unknown> {
-  const t = snap?.tax;
-  if (!t || t.amount == null) return {};
-  return {
-    tax_rate: Number(t.rate) || 0,
-    tax_amount: Number(t.amount) || 0,
-    tax_jurisdiction: t.jurisdiction ?? null,
-    tax_source: t.source === "avalara" || t.source === "fallback" ? t.source : null,
-  };
-}
+// taxFreeze moved to _shared/estimateLines.ts (2026-09-02) — push_to_invoice freezes the same
+// four columns for a rep-attested acceptance, and these are what a disputed change order turns
+// on. Behaviour is unchanged. See that file's duplication ledger: portal-settings and this
+// function must be redeployed together when it changes.
 
 /** The three money columns an SS order carries, written TOGETHER so pretax + tax = total by
  *  construction. Falls back to the plain total for a snapshot with no tax, which is every

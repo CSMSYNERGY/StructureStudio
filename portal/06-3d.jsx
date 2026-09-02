@@ -435,14 +435,18 @@ function DesignerSettings({ clientId, setup3d = null }) {
   );
 }
 
-function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false }) {
+function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false, onOpenOrder = null, canPushInvoice = false }) {
   const SS = window.StructureStudio;
   if (!SS) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
   }
   return (
     <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
-      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} />
+      {/* onOpenOrder/canPushInvoice power Push to Invoice on the success screen. The host
+          owns both on purpose: only the shell knows this user's Orders access, and only it
+          can navigate without unmounting the designer (which would discard the design). */}
+      <SS clientId={clientId} embedded onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d}
+        onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} />
     </div>
   );
 }

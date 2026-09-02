@@ -1260,7 +1260,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -1361,8 +1361,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
       : Promise.resolve({ data: [] })
     ).then((r) => r, (e) => ({ error: e }));
 
+    // Through the server (portal-settings orders_designs), NOT direct RLS: the designs
+    // policy answers "may you read DESIGNS", and since this tab shipped to tenants its
+    // viewers include titles that hold Orders and not Designs. See that action's header.
     const dsnRes = codes.length
-      ? await sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
+      ? await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: codes } })
+          .then((r) => r.error ? { error: r.error } : { data: (r.data && r.data.designs) || [] })
       : { data: [] };
     // A failed designs read must not read as "no designs": byCode would come up empty,
     // the SS-only filter below would drop EVERY order, and the tab would show
@@ -1615,7 +1619,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     );
   }
 
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} />;
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -2073,7 +2077,7 @@ const ssUsd = (n) => {
 const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
 const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -2110,6 +2114,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const sel = design.selections || {};
   const pc = design.paint_colors || {};
   const locked = ["invoiced", "delivered"].includes(String(design.status || ""));
+  // The roof/cladding/paint dropdowns specifically. Editing one on a signed order RAISES a
+  // change order (stage_order_attribute_change), which moved onto its own permission area
+  // on 2026-09-01 — so they freeze to text without the grant. Deliberately NOT folded into
+  // `locked`: that flag also gates the invoicing panel below, and a rep holds orders:edit
+  // precisely so they CAN invoice, take payment and collect the signature. Two flags,
+  // because there are genuinely two questions.
+  const attrsLocked = locked || !coOn;
   const acceptance = (acceptances || []).find((a) => a.subject === "quote") || null;
   const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
     .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
@@ -2277,7 +2288,12 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const trail = [];
   if (acceptance && acceptance.total != null) {
     let running = Number(acceptance.total);
-    trail.push({ label: `Accepted ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
+    trail.push({
+      label: acceptance.method === "rep"
+        ? `Authorised by ${acceptance.recorded_by_name || "your team"} · ${fmtDate(acceptance.accepted_at)}`
+        : `Accepted ${fmtDate(acceptance.accepted_at)}`,
+      amountText: ssUsd(running), tone: "base",
+    });
     for (const c of ackedCos) {
       if (c.total_after_cents == null) {
         trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
@@ -2340,10 +2356,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       {pendingCo && (
         <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#B45309", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <b>CO-{pendingCo.co_no} is awaiting the customer's sign-off</b> — the values below include it; invoicing is blocked until they sign or you record their verbal OK.
-          <button type="button" onClick={discardStaged} disabled={anyBusy}
+          {/* The NOTICE stays for everyone: a rep whose invoicing is blocked has to be told
+              why. Discarding is the change-order power, so only the grant gets the button —
+              void_change_order refuses without it anyway, and offering a 403 is not an offer. */}
+          {coOn && <button type="button" onClick={discardStaged} disabled={anyBusy}
             style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", color: "#B45309", fontWeight: 700, fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
             Discard staged change
-          </button>
+          </button>}
         </div>
       )}
 
@@ -2355,7 +2374,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             const kind = String(li.kind || "");
             const lineTotal = ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
             let descCell = null;
-            if (!locked && kind === "paint") {
+            if (!attrsLocked && kind === "paint") {
               descCell = (
                 <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select style={selStyle} value={eff.paintStatus} onChange={(e) => change("paintStatus", e.target.value)}>
@@ -2375,7 +2394,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                   )}
                 </div>
               );
-            } else if (!locked && kind === "roof") {
+            } else if (!attrsLocked && kind === "roof") {
               descCell = (
                 <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select style={selStyle} value={eff.roofType} onChange={(e) => change("roofType", e.target.value)}>
@@ -2401,7 +2420,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                   <td style={{ ...td, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{ssUsd(lineTotal)}</td>
                 </tr>
                 {kind === "building" && optionRows("Cladding",
-                  locked
+                  attrsLocked
                     ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding)}</span>
                     : (
                       <select style={selStyle} value={eff.cladding} onChange={(e) => change("cladding", e.target.value)}>
@@ -2605,9 +2624,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           }}
           style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
       </div>
-      {locked && (
+      {attrsLocked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
-          This order is invoiced — its options are frozen. Changes go through a manual change order below.
+          {locked
+            ? "This order is invoiced — its options are frozen. Changes go through a manual change order below."
+            : "Changing these raises a change order, which needs the customer's sign-off. Ask an owner or admin to turn on Change Orders for you in Settings → Team."}
         </div>
       )}
 
@@ -2727,7 +2748,7 @@ function QrSvg({ matrix, size = 200 }) {
   );
 }
 
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null }) {
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -2900,11 +2921,10 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     let alive = true;
     (async () => {
       const [dRes, aRes, cRes, pRes] = await Promise.all([
-        sb.from("designs")
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact")
-          .eq("client_id", clientId).eq("short_code", o.short_code).maybeSingle(),
+        sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [o.short_code], detail: true } })
+          .then((r) => r.error ? { error: r.error, data: null } : { error: null, data: ((r.data && r.data.designs) || [])[0] || null }),
         sb.from("design_acceptances")
-          .select("subject, signer_name, accepted_at, total")
+          .select("subject, signer_name, accepted_at, total, method, recorded_by_name")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.from("change_orders")
           .select("id, co_no, source, status, total_after_cents, acknowledged_at")
@@ -3052,7 +3072,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             /* The invoice-style order document (migration 127) — letterhead, the priced
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
-            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
+            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
               onPreview={(url, title) => setPdfView({ url, title })}
               onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
@@ -3101,8 +3121,12 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           )}
 
           {/* SS-mode orders (the design carries an SS quote) get change orders. CRM-mode
-              orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
-          {ssMode && o.short_code && (
+              orders don't — the decision was SS-only (Carolyn 2026-08-23).
+              coOn = the change_orders grant (2026-09-01): reps hold orders:edit so they can
+              finalize the sale, but amending a signed agreement is handed out separately in
+              Team settings. Hiding the card is the courtesy; portal-settings refuses the
+              three change-order actions on the same grant, so this is not the gate. */}
+          {ssMode && coOn && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
               currentTotalCents={o.total_cents} reloadKey={ssReload} onChanged={changedAll} />
           )}
@@ -3284,7 +3308,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {kv("Address", addr || "—")}
                   {ssInvoiceAcceptance
                     ? kv("Signed", `${fmtDate(ssInvoiceAcceptance.accepted_at)} · ${ssInvoiceAcceptance.signer_name || ""}`)
-                    : ssAcceptance && kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
+                    : ssAcceptance && (ssAcceptance.method === "rep"
+                        ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
+                        : kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`))}
                   {addr && (
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
                       style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "block", textAlign: "center", marginTop: 8, fontSize: 12 }}>
@@ -3300,7 +3326,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             <div style={S.card}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
               {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
-              {kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {ssAcceptance && ssAcceptance.method === "rep"
+                ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
+                : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
               {kv("Change orders", (() => {
                 const cs = (ssDoc && ssDoc.cos) || [];
                 const acked = cs.filter((c) => c.status === "acknowledged").length;

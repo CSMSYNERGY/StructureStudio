@@ -18,7 +18,10 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
+// push_to_invoice's phone precondition must use the SAME comparison sign_invoice will use to
+// decide whether the customer owns the invoice — see that module's duplication ledger.
+import { phoneKey } from "../_shared/phoneKey.ts";
 // The change-order baseline, shared with submit-estimate so the two design_edit writers
 // cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
 // line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
@@ -229,6 +232,12 @@ const GATES: GateTable = {
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
+  // Push to Invoice from the designer (Carolyn 2026-09-01): the same irreversible send as
+  // send_invoice, and additionally it ATTESTS the acceptance on the customer's behalf. It
+  // can only ever be more consequential than send_invoice, never less, so it sits at the
+  // same gate — deliberately its own row rather than a flag on send_invoice, so this
+  // altitude is stated once per action and cannot be reached by a body parameter.
+  push_to_invoice:  { area: "orders", level: "edit" },
   // Re-sends the SS quote email (migration 122) — the rep who can edit designs can re-send
   // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
   // email to the design's own customer.
@@ -237,18 +246,23 @@ const GATES: GateTable = {
   // paperwork — it re-delivers a document they already have — but it does spend the
   // tenant's A2P campaign, so it sits at the same altitude as sending the invoice itself.
   text_sign_link:   { area: "orders", level: "edit" },
-  // Emails a pending change order to the customer for signature (migration 126). Same
-  // altitude as raising one from the order card: Orders edit.
-  send_change_order: { area: "orders", level: "edit" },
+  // Emails a pending change order to the customer for signature (migration 126).
+  // Moved off `orders` onto `change_orders` (2026-09-01) when reps gained orders:edit —
+  // amending a signed agreement is the one order power that is granted separately.
+  send_change_order: { area: "change_orders", level: "edit" },
   // The invoice-style order document (migration 127): letterhead + color options + the
   // service-role-only invoice_sends fields. A read.
   order_paperwork: { area: "orders", level: "view" },
+  // The designs behind the orders on screen. Exists because the Orders tab shipped to
+  // TENANTS (2026-09-01) and its designs read had been direct-RLS — see the action below.
+  orders_designs: { area: "orders", level: "view" },
   // Changing roof/cladding/paint on an order — reprices from the catalog and raises the
-  // change order. Same altitude as raising one by hand.
-  stage_order_attribute_change: { area: "orders", level: "edit" },
+  // change order. It reads like ordinary editing and is not: on a signed order these
+  // dropdowns ARE how a change order gets raised, so it sits with the others.
+  stage_order_attribute_change: { area: "change_orders", level: "edit" },
   // Discards a staged-but-unsigned change order, restoring the design as the customer
   // signed it (snapshot_before). Void with a reason, like the browser void.
-  void_change_order: { area: "orders", level: "edit" },
+  void_change_order: { area: "change_orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -5590,6 +5604,43 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // One call: the tenant's letterhead identity, the active colors palette (labels + flags +
   // hex for the dropdowns — deliberately NO rates; prices are only ever computed server-side
   // by the staging action), and the invoice_sends fields the sidebar shows (the table is
+  // ── orders_designs: the designs behind the orders on screen ──────────────────────────
+  // 154_area_access_rls.sql:84-95 wrote this action's spec before it was needed, on the day
+  // the designs RLS policy was deliberately NOT widened: "the day OrdersView ships to tenants
+  // this becomes real for all four titles holding orders >= 'view'. Fix it THEN, in code —
+  // move the designs read behind a portal-settings action gated { area: 'orders', level:
+  // 'view' }, so the SERVER decides which design rows an order viewer may see."
+  //
+  // That day is today. A crew leader or driver holds orders:'view' and designs:'none'; before
+  // this, OrdersView read designs straight through RLS and would have handed them every
+  // customer's name, phone, selections and figures. The tempting shortcut — widening the
+  // designs policy to `designs OR orders` — is explicitly refused there and stays refused:
+  // designs_ensure_order mints an order row for EVERY accepted design, so that EXISTS
+  // resolves to "every design ever sold" and gives the least privileged title in the product
+  // a clean list of exactly the thing the policy exists to withhold.
+  //
+  // The projection is deliberately narrow and fixed here rather than chosen by the caller: a
+  // browser must not be able to widen its own column list.
+  if (action === "orders_designs") {
+    const codes = Array.isArray(payload?.shortCodes)
+      ? payload.shortCodes.map((c: unknown) => String(c ?? "").trim()).filter(Boolean).slice(0, 2000)
+      : [];
+    const detail = payload?.detail === true;
+    if (!codes.length) return json({ ok: true, designs: [] });
+    if (detail && codes.length !== 1) {
+      return json({ error: "detail reads one design at a time." }, 400);
+    }
+    // The order document needs the priced snapshot and the configuration it was priced from;
+    // the list needs only enough to label a row. Two shapes, one gate, neither caller-chosen.
+    const cols = detail
+      ? "short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact"
+      : "short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at";
+    const { data, error } = await admin.from("designs")
+      .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
+    if (error) return dbFail(req, clientId, "read the designs for these orders", error);
+    return json({ ok: true, designs: data || [] });
+  }
+
   // service-role only, so this is its portal projection).
   if (action === "order_paperwork") {
     const shortCode = String(payload?.shortCode ?? "").trim();
@@ -6005,7 +6056,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, reverted, coNo: co.co_no });
   }
 
-  if (action === "send_invoice") {
+  // push_to_invoice rides this same handler on purpose. It is send_invoice with ONE extra
+  // step in front of it — the rep-attested acceptance, migration 178 — and everything after
+  // that step must be the same code, not a copy of it: the claim ladder, the number
+  // allocation, the amendment math, the PDF and the email are the parts that are hard to get
+  // right, and a second implementation of them is a second thing to keep correct. The extra
+  // step is inserted immediately above the acceptance gate below; the gate itself is
+  // untouched and simply passes, because by then the acceptance is real.
+  if (action === "send_invoice" || action === "push_to_invoice") {
+    const pushToInvoice = action === "push_to_invoice";
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
 
@@ -6022,7 +6081,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({ error: "Operator sends require explicit confirmation (confirmSend)." }, 400);
       }
       try {
-        await auditStrict("operator_send_invoice_attempt", null, `short_code=${shortCode}`);
+        // The action name rides in the audit row: a push ALSO attests the acceptance on the
+        // customer's behalf, so "an operator invoiced a stranger's customer" and "an
+        // operator declared a stranger's customer had agreed" must not read the same later.
+        await auditStrict(`operator_${action}_attempt`, null, `short_code=${shortCode}`);
       } catch (e) {
         return json({ error: (e as Error).message }, 503);
       }
@@ -6040,11 +6102,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
         // — there is no live GHL estimate to check.
         const { data: d, error: dErr } = await admin.from("designs")
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, inventory_unit_id")
+          // selections/paint_colors/contact are read ONLY for the push_to_invoice
+          // attestation below (the accepted_snapshot stamp and the phone precondition) and
+          // are untouched on the ordinary send_invoice path. That is a deliberate narrowing
+          // of the 2026-08-07 rule "no dead PII reads on the invoice path": the read is not
+          // dead here, it is the evidence. Nothing below logs any of the three.
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, selections, paint_colors, contact, inventory_unit_id")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+
+        // The order this invoice belongs to, for the caller to navigate to. The portal's
+        // order deep link is /portal/orders/o-<orders.id>, keyed on the UUID and not on
+        // order_no, so the id is what has to travel back. Best-effort by contract: an invoice
+        // that went out is not undone by our failing to say where it landed, so every caller
+        // treats a null orderId as "no link", never as an error.
+        const loadOrderRef = async (): Promise<{ orderId: string | null; orderNo: number | null }> => {
+          try {
+            const { data: o } = await admin.from("orders").select("id, order_no")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            return { orderId: o?.id ?? null, orderNo: o?.order_no ?? null };
+          } catch (_) {
+            return { orderId: null, orderNo: null };
+          }
+        };
 
         // AMENDMENTS (2026-08-27). A manual change order moves the TOTAL without touching
         // estimate_lines, so a document built from the snapshot alone bills the pre-change
@@ -6075,7 +6157,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           };
         };
 
-        const dStatus = String(d.status || "");
+        // `let`, not `const`: the push_to_invoice attestation below promotes the design and
+        // then brings this local up to what it wrote, so the acceptance gate reads the truth.
+        let dStatus = String(d.status || "");
         if (dStatus === "invoiced" || dStatus === "delivered") {
           // The invoice may have completed on paper (the email does not gate it — see
           // below). If the ledger says created-but-never-emailed, this click is the email
@@ -6108,12 +6192,177 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             if (out2.sent) {
               await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
                 .eq("client_id", clientId).eq("short_code", shortCode);
-              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true });
+              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true, attested: false, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()) });
             }
             return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out (${out2.reason || "failed"}). Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
           }
           return json({ error: "This design was already invoiced." }, 400);
         }
+        // ── PUSH TO INVOICE: the rep attests the acceptance (migration 178) ─────────────
+        // Carolyn, 2026-09-01: the rep should be able to invoice straight off the designer
+        // success screen without waiting for the customer to click Accept.
+        //
+        // This does NOT relax the gate below — it satisfies it. The gate is not a nuisance
+        // check; it is the proxy for four things the ~250 lines under it assume exist: the
+        // orders row, accepted_snapshot, orders.total_cents, and a design_acceptances row.
+        // Issuing an invoice without them breaks five places at once and every one is
+        // silent. The worst is accepted_snapshot: submit-estimate's 9-ALT change-order block
+        // is gated on accepted_at, so a rep who revises AFTER invoicing would raise no
+        // change order, and sign_invoice would then recompute the total from the NEW lines —
+        // putting an amount on the countersigned certificate that is not the one on the
+        // invoice PDF the customer is reading. No guard anywhere catches that, because the
+        // staleness check compares a CO's acknowledged_at to the invoice and there is no CO.
+        //
+        // So: write a real acceptance, attributed to the rep and never dressed as the
+        // customer's. Same posture as the verbal change-order acknowledgement (126).
+        let attested = false;
+        if (pushToInvoice && dStatus !== "accepted" && !d.accepted_at) {
+          // A quote that already has a pending change order is already accepted, so this
+          // branch cannot be reached with one outstanding — the 409 below still owns that
+          // case, and reaching it means the design was accepted the ordinary way.
+          const contact = (d.contact ?? {}) as Record<string, unknown>;
+          const signerName = String(contact.name ?? "").trim();
+
+          // The customer signs the invoice through a phone OTP session, and sign_invoice
+          // compares phoneKey(contact.phone) against that session. Without a usable phone
+          // the invoice could never be signed — while still spending an invoice number,
+          // claiming the inventory unit and creating a QuickBooks invoice. Carolyn,
+          // 2026-09-01: refuse outright rather than warn.
+          const phoneDigits = phoneKey(contact.phone);
+          if (phoneDigits.length < 10) {
+            return json({ error: "This customer has no phone number on file, and they sign the invoice by text. Add their number to the contact first, then push it to an invoice." }, 400);
+          }
+
+          // Who is attesting. Read from client_users by the VERIFIED session's userId, never
+          // from the body — the change_orders.verbal_recorded_by posture. Denormalised onto
+          // the row because it is evidence: it must still read correctly after the user is
+          // renamed or removed.
+          let recordedByName = String(userEmail ?? "").trim();
+          if (userId) {
+            const { data: cu } = await admin.from("client_users")
+              .select("full_name").eq("user_id", userId).maybeSingle();
+            const fullName = String(cu?.full_name ?? "").trim();
+            if (fullName) recordedByName = fullName;
+          }
+          if (!recordedByName) {
+            // The rep_named CHECK would refuse the insert anyway; refuse here with a sentence
+            // a person can act on instead of a constraint violation.
+            return json({ error: "We couldn't tell who is issuing this invoice. Sign out and back in, then try again." }, 400);
+          }
+
+          const attestedAtIso = new Date().toISOString();
+          const attestedTotal = totalFromSnapshot(d.estimate_lines);
+          let designVersion: number | null = null;
+          {
+            const { data: v } = await admin.from("design_versions")
+              .select("version").eq("short_code", shortCode)
+              .order("version", { ascending: false }).limit(1).maybeSingle();
+            designVersion = v?.version ?? null;
+          }
+
+          // The consent text is the durable evidence, so it is composed HERE and says what
+          // actually happened. It must never read as though the customer agreed on their own
+          // — the whole point of method='rep' is that the record is honest about who spoke.
+          // Local rather than shared: this is the only money string portal-settings composes
+          // (the PDFs and emails format their own), and it matches customer-accept's fmtMoney
+          // output so the two consent sentences read alike in the evidence table.
+          const money = (n: number) => {
+            const v = Math.round(n * 100) / 100;
+            const [int, frac] = Math.abs(v).toFixed(2).split(".");
+            return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+          };
+          const consentText =
+            `${recordedByName} issued invoice for quote ${d.ss_quote_number}` +
+            (attestedTotal != null ? ` for ${money(attestedTotal)}` : "") +
+            ` on the customer's behalf. The customer did not accept this quote electronically;` +
+            ` their agreement is recorded when they sign the invoice.`;
+
+          const { error: attErr } = await admin.from("design_acceptances").insert({
+            id: crypto.randomUUID(),
+            client_id: clientId,
+            short_code: shortCode,
+            subject: "quote",
+            quote_number: d.ss_quote_number,
+            design_version: designVersion,
+            total: attestedTotal,
+            ...taxFreeze(d.estimate_lines),
+            method: "rep",
+            signer_name: signerName || "(no name on file)",
+            consent_text: consentText,
+            phone_digits: phoneDigits,
+            recorded_by_user_id: userId ?? null,
+            recorded_by_name: recordedByName,
+            ip: clientIp(req),
+            user_agent: (req.headers.get("user-agent") || "").slice(0, 300) || null,
+            accepted_at: attestedAtIso,
+          });
+          if (attErr && String(attErr.code) !== "23505") {
+            return dbFail(req, clientId, "record the invoice authorisation", attErr);
+          }
+          attested = !attErr;
+
+          // 23505 on design_acceptances_quote_once = this quote was accepted between our read
+          // and our write — the customer clicked Accept, or a second push landed. THEIRS is
+          // the acceptance, and it has already promoted the design, stamped
+          // accepted_snapshot, opened the order and filled the total. Writing ours on top
+          // would move accepted_at to now and re-freeze the snapshot against lines they never
+          // saw — overwriting real customer evidence with a rep's. So take none of the writes
+          // below; just re-read what they wrote so the gate sees it, and invoice it.
+          if (!attested) {
+            const { data: fresh } = await admin.from("designs")
+              .select("status, accepted_at").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            d.accepted_at = fresh?.accepted_at ?? d.accepted_at;
+            dStatus = String(fresh?.status || dStatus);
+            audit("push_to_invoice_raced", null, `short_code=${shortCode} — accepted concurrently, kept their acceptance`);
+          } else {
+
+            // Promote the design. accepted_snapshot (153) is the frozen agreement every later
+            // change order diffs against — the single most important write in this block.
+            {
+              const patch: Record<string, unknown> = {
+                accepted_at: attestedAtIso,
+                updated_at: attestedAtIso,
+                accepted_snapshot: {
+                  estimateLines: d.estimate_lines,
+                  selections: d.selections,
+                  paintColors: d.paint_colors,
+                },
+              };
+              if (dStatus === "sent" || dStatus === "") patch.status = "accepted";
+              const { error: promErr } = await admin.from("designs").update(patch)
+                .eq("client_id", clientId).eq("short_code", shortCode);
+              // Not best-effort: without accepted_at the gate below refuses, and without the
+              // snapshot the change-order baseline is missing — which is the bug this whole
+              // block exists to prevent. Refuse before anything irreversible happens.
+              if (promErr) return dbFail(req, clientId, "record the acceptance", promErr);
+            }
+
+            // The order row. The designs_ensure_order trigger fires on the status change where
+            // it exists, but its CREATE lives on the wip/orders branch, so the flow must not
+            // depend on it — same idempotent shape customer-accept uses.
+            const { error: ordErr } = await admin.from("orders").upsert(
+              { client_id: clientId, short_code: shortCode, ordered_at: attestedAtIso },
+              { onConflict: "client_id,short_code", ignoreDuplicates: true },
+            );
+            if (ordErr) return dbFail(req, clientId, "open the order", ordErr);
+            if (attestedTotal != null) {
+              // NULL-only: a rep-set total is never clobbered.
+              const { error: totErr } = await admin.from("orders")
+                .update({ ...orderMoneyCols(d.estimate_lines, attestedTotal), total_source: "manual", updated_at: attestedAtIso })
+                .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
+              if (totErr) {
+                logEdgeError({ fn: "portal-settings", req, clientId, code: 500, message: `push_to_invoice order total fill failed: ${totErr.message}`, context: { shortCode } }).catch(() => {});
+              }
+            }
+
+            // `d` was read before all of the above, so the gate immediately below would still
+            // refuse on the stale copy. Bring the locals up to what was just written.
+            d.accepted_at = attestedAtIso;
+            if (dStatus === "sent" || dStatus === "") dStatus = "accepted";
+            audit("push_to_invoice_attested", null, `short_code=${shortCode} quote=${d.ss_quote_number} by=${recordedByName}`);
+          } // end: we won the acceptance claim
+        }
+
         if (dStatus !== "accepted" && !d.accepted_at) {
           return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept it from their quote page, then you invoice them and they sign that.` }, 400);
         }
@@ -6150,6 +6399,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           client_id: clientId, short_code: shortCode,
           issued_by: "structurestudio", status: "claimed", attempts: 1,
           sent_by_operator: operator ? operator.email : null,
+          // Who raised it. The GHL branch has always written this; the SS branch never did,
+          // so every StructureStudio-issued invoice has had a null commission earner
+          // (portal-commissions reads invoice_sends.sender_user_id). Putting a rep-initiated
+          // invoice button in the designer is the moment that stops being theoretical.
+          sender_user_id: userId ?? null,
           invoice_type: invoiceTypeFor(d),
         });
         if (claimIns.error) {
@@ -6337,7 +6591,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           ghlTotal: totalNum,
         });
 
-        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, ...(sent ? {} : { emailReason: sendReason }) });
+        // attested says whether THIS call performed the acceptance, so the designer can tell
+        // the rep "invoiced" from "recorded their approval and invoiced". orderId is the
+        // navigation target. sent:false is not a failure — the email never gates the invoice.
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, attested, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()), ...(sent ? {} : { emailReason: sendReason }) });
       }
     }
 

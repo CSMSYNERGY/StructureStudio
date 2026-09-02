@@ -6783,7 +6783,7 @@ async function ssExtractOrbitFrames(file, onStep) {
   }
 }
 
-function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false }) {
+function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
   //   embedded = true  → the Designer tab inside portal.html: business users building
@@ -7109,6 +7109,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [submitError, setSubmitError] = useState(null);
   // After a successful save, holds { code, viewUrl, imageUrl } for the success screen
   const [savedDesign, setSavedDesign] = useState(null);
+  // Push to Invoice (Carolyn 2026-09-01). Kept beside savedDesign because that is the only
+  // thing it acts on — the quote just submitted — and the same paths that clear one clear it.
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushErr, setPushErr] = useState("");
+  const [pushed, setPushed] = useState(null);
   // Current design's short code (set when a design is loaded or saved). Drives the
   // "all designs on this estimate" version list shown in the editor + success screen.
   const [designCode, setDesignCode] = useState(null);
@@ -12932,6 +12937,98 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
                     Copy customer link
                   </button>
+                  {/* PUSH TO INVOICE (Carolyn 2026-09-01) — the rep closes the sale here
+                      instead of leaving for the portal and waiting on the customer.
+
+                      `embedded` is MANDATORY, not defensive: this same component serves the
+                      public index.html with an anon client, and a shed shopper must never see
+                      a button that bills a real customer. canPushInvoice is the portal's
+                      orders:edit answer — presentation only; portal-settings re-checks it.
+                      A pending change order 409s server-side, so the amber banner above owns
+                      that case rather than a button that is going to fail. */}
+                  {embedded && canPushInvoice && !savedDesign.changeOrder && !pushed && (
+                    <button type="button" disabled={pushBusy}
+                      onClick={async () => {
+                        // The invoice number is spent whether or not the sale closes, and the
+                        // customer is emailed a bill — so the confirm names both, plus the
+                        // acceptance the rep is about to record on the customer's behalf.
+                        const ok = window.confirm(
+                          "Push this quote to an invoice?\n\n" +
+                          "This issues the invoice from StructureStudio (its own invoice number and PDF) and emails it to the customer immediately.\n\n" +
+                          "The customer has not accepted the quote yet, so this records that you authorised the invoice on their behalf. They still sign the invoice.",
+                        );
+                        if (!ok) return;
+                        setPushBusy(true); setPushErr("");
+                        try {
+                          const { data: result, error: fnErr } = await supabase.functions.invoke("portal-settings", { body: {
+                            action: "push_to_invoice", targetClientId: C.clientId,
+                            shortCode: savedDesign.code,
+                            // The operator branch refuses without this; the confirm above IS
+                            // the confirmation it is asking to have happened.
+                            confirmSend: true,
+                          } });
+                          // The portal's invoke wrapper unwraps errors for its own client; the
+                          // designer holds a separate client, so it unwraps its own — same
+                          // idiom submitQuote uses, or every refusal reads "Edge Function
+                          // returned a non-2xx status code" instead of the authored sentence.
+                          if (fnErr) {
+                            let detail = fnErr.message || "Could not create the invoice";
+                            try {
+                              if (fnErr.context && typeof fnErr.context.json === "function") {
+                                const errBody = await fnErr.context.json();
+                                if (errBody && errBody.error) detail = errBody.error;
+                              }
+                            } catch (_) { /* body unreadable — keep the generic message */ }
+                            throw new Error(detail);
+                          }
+                          if (!result?.ok) throw new Error(result?.error || "Could not create the invoice");
+                          setPushed(result);
+                          // Navigating is the ask, but it must never be the thing that loses
+                          // the result: the links render either way, so a rep without Orders
+                          // navigation still has the invoice and the order in front of them.
+                          if (result.orderId && onOpenOrder) onOpenOrder(result.orderId);
+                        } catch (e) {
+                          setPushErr((e && e.message) || "Could not create the invoice");
+                        } finally {
+                          setPushBusy(false);
+                        }
+                      }}
+                      style={{ ...S.btn("#0F766E", "#FFF"), padding: "9px 16px", fontSize: 13, opacity: pushBusy ? 0.6 : 1, cursor: pushBusy ? "default" : "pointer" }}>
+                      {pushBusy ? "Creating invoice..." : "Push to Invoice"}
+                    </button>
+                  )}
+                </div>
+              )}
+              {/* The outcome, kept on screen rather than announced and lost. `sent: false` is
+                  NOT a failure — the invoice is real and printable, the email just did not go
+                  (paper-first, portal-settings). So it reads as a warning beside the links. */}
+              {savedDesign.ssQuote && pushed && (
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#F0FDFA", border: "1px solid #99F6E4", borderRadius: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0F766E" }}>
+                    Invoice {pushed.invoiceNumber} created{pushed.sent ? " and emailed" : ""}
+                  </div>
+                  {!pushed.sent && (
+                    <div style={{ fontSize: 12, color: "#92400E", marginTop: 4 }}>
+                      The email didn't go out{pushed.emailReason ? ` (${pushed.emailReason})` : ""} — print the PDF or fix email sending in Settings → Email.
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                    {pushed.invoicePdfUrl && (
+                      <a href={pushed.invoicePdfUrl} target="_blank" rel="noopener"
+                        style={{ fontSize: 12.5, fontWeight: 700, color: "#0F766E" }}>Invoice (PDF)</a>
+                    )}
+                    {pushed.orderId && onOpenOrder && (
+                      <button type="button" onClick={() => onOpenOrder(pushed.orderId)}
+                        style={{ background: "none", border: "none", padding: 0, fontSize: 12.5, fontWeight: 700, color: "#0F766E", cursor: "pointer" }}>
+                        Open the order{pushed.orderNo ? ` #${pushed.orderNo}` : ""}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {savedDesign.ssQuote && pushErr && (
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, fontSize: 12.5, color: "#991B1B" }}>
+                  {pushErr}
                 </div>
               )}
             </div>
@@ -13138,7 +13235,7 @@ class DesignerErrorBoundary extends Component {
 // bundle uses (multi-tenant RPC vs. legacy direct table access).
 console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");
 
-export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false }) {
+export default function StructureStudio({ config: configProp = null, clientId: clientIdProp = null, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
   // state shape: { status: "ready", config } | { status: "loading" } | { status: "error", clientId, message }
   const [state, setState] = useState(() => (
     configProp ? { status: "ready", config: configProp } : { status: "loading" }
@@ -13296,5 +13393,5 @@ export default function StructureStudio({ config: configProp = null, clientId: c
       </div>
     );
   }
-  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} /></DesignerErrorBoundary>;
+  return <DesignerErrorBoundary embedded={embedded}><StructureStudioInner config={state.config} embedded={embedded} onSaved={onSaved} openDesign={openDesign} setup3d={setup3d} view3d={view3d} calibrationOnly={calibrationOnly} onOpenOrder={onOpenOrder} canPushInvoice={canPushInvoice} /></DesignerErrorBoundary>;
 }

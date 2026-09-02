@@ -403,3 +403,32 @@ export function amountOwed(
   if (!hasSnap) return orderTotal;
   return amendedInvoiceDocument(snap, acked, orderTotalCents).total;
 }
+
+/**
+ * The four tax columns an evidence row freezes from the snapshot it was shown against
+ * (migration 148). Returns {} when the snapshot carries no tax — every GHL-mode design, and
+ * every SS design issued before tax shipped — so the columns stay NULL rather than 0,
+ * keeping "was not taxed" distinguishable from "was taxed at nothing".
+ *
+ * Moved here from customer-accept's module scope (2026-09-02) when push_to_invoice needed
+ * the same freeze for a rep-attested acceptance. These columns are what a disputed change
+ * order turns on, and they must mean the same thing whether the customer clicked, signed, or
+ * the rep attested — two copies is exactly the drift that would be invisible until it
+ * mattered.
+ *
+ * ⚠️ Duplication ledger — importers, ALL of which must be redeployed together when this
+ *    changes (_shared bundles PER function):
+ *      customer-accept/index.ts
+ *      portal-settings/index.ts
+ */
+// deno-lint-ignore no-explicit-any
+export function taxFreeze(snap: any): Record<string, unknown> {
+  const t = snap?.tax;
+  if (!t || t.amount == null) return {};
+  return {
+    tax_rate: Number(t.rate) || 0,
+    tax_amount: Number(t.amount) || 0,
+    tax_jurisdiction: t.jurisdiction ?? null,
+    tax_source: t.source === "avalara" || t.source === "fallback" ? t.source : null,
+  };
+}

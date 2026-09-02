@@ -807,6 +807,11 @@ function Dashboard({ session }) {
   // Inventory offer their schedule entry points.
   const schedCanEdit = canAdmin || !!(myAccess && myAccess.build_schedule === "edit");
   const deliverCanEdit = canAdmin || !!(myAccess && myAccess.delivery_schedule === "edit");
+  // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation
+  // only — the server re-checks {area:'orders', level:'edit'} whatever the browser believes.
+  const ordersCanEdit = canAdmin || !!(myAccess && myAccess.orders === "edit");
+  // Amending a SIGNED order is granted separately from running one (access.ts, 2026-09-01).
+  const coCanEdit = canAdmin || !!(myAccess && myAccess.change_orders === "edit");
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
@@ -1080,7 +1085,14 @@ function Dashboard({ session }) {
                   thing the designer used it for, and it now lives in Settings -> Designer -> 3D,
                   so passing it would put the yellow bar back over every design people open. */}
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
-                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null}
+                canPushInvoice={ordersCanEdit}
+                /* navigate(), not location.assign: the designer host above is kept MOUNTED
+                   across tab switches, and a real navigation would throw away whatever is
+                   on the canvas. ssClampTab first, same as the record page's Orders link —
+                   sending someone to a tab they cannot open is its own dead end. */
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                  ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
           <div className="ss-inner">
@@ -1274,15 +1286,23 @@ function Dashboard({ session }) {
                 usersRefreshKey={usersRefreshKey} />
             )}
             {!gateLocked && activeTab === "orders" && (
-              /* Operators get the REAL, interactive Orders on their OWN portal so they can
-                 build and test the feature end to end (orders/payments RLS is scoped to
-                 current_client_id(), so direct reads/writes only work for one's own tenant —
-                 hence !viewing: while viewing ANOTHER tenant the direct-read path would show
-                 nothing, so keep the locked preview there). Everyone else sees the locked
-                 example-data preview. */
-              (isOperator && !viewing)
+              /* SHIPPED TO TENANTS 2026-09-01. Until then this was operators-only on their
+                 OWN portal and everyone else saw the locked example-data preview below.
+                 What had to be true first, named in advance by 154_area_access_rls.sql:84-95:
+                 OrdersView read designs through RLS, and its viewers now include titles that
+                 hold Orders and NOT Designs — a crew leader, a driver. Both of those reads
+                 moved behind portal-settings orders_designs (gated orders:view) in this same
+                 change. The designs RLS policy was NOT widened; that shortcut is refused at
+                 length in the migration and again in the action header, because
+                 designs_ensure_order mints a row for every accepted design and so it would
+                 resolve to "every design ever sold".
+                 !viewing survives: orders/payments RLS is scoped to current_client_id(), so
+                 an operator reading ANOTHER tenant's rows directly still gets nothing — the
+                 locked preview stays the honest answer there. */
+              (canAdmin || ssCanSeeTab("orders", myAccess) || isOperator) && !viewing
                 ? <OrdersView clientId={tenant.clientId}
                     schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
+                    coOn={coCanEdit}
                     /* A sold lot building is already waiting in the Delivery Schedule's
                        "to be loaded" pool (the pool is a query over sold units without a
                        sale stop), so this just takes the dispatcher there — no focus/

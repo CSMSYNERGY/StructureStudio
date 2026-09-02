@@ -60,6 +60,17 @@ export const AREAS: Area[] = [
   { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired",           levels: RVE },
   { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
   { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
+  // Amending a SIGNED order. Split out of `orders` (Carolyn, 2026-09-01: "Change Orders is
+  // the only feature they shouldn't have unless given permission in the team settings") when
+  // reps gained orders:edit so they could finalize an order, take payment and collect the
+  // signature. A change order re-opens an agreement the customer already committed to and
+  // asks them to commit again — a different kind of act from completing the order in front
+  // of you, and the one where a mistake costs the builder the customer's confidence.
+  //
+  // Omitted from every non-owner preset, so it is DENIED by default (see PRESETS' header) and
+  // an owner or admin hands it out per person. Deliberately NOT ownerGranted: an admin runs
+  // the business day to day and may legitimately grant this, unlike Billing.
+  { key: "change_orders",     label: "Change Orders",      group: "workspace", hint: "Amend a signed order — the customer signs off again", levels: RVE },
   { key: "build_schedule",    label: "Build Schedule",     group: "workspace", hint: "Crews, build dates, the board",       levels: RVE },
   { key: "delivery_schedule", label: "Delivery Schedule",  group: "workspace", hint: "Loads, routes, drivers",              levels: RVE },
   { key: "repairs",           label: "Repairs",            group: "workspace", hint: "Service jobs and history",            levels: RVE },
@@ -100,6 +111,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   owner: Object.fromEntries(AREA_KEYS.map((k) => [k, k === "commissions" ? "edit" : "edit"])),
   admin: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    change_orders: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
     settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",
@@ -108,7 +120,12 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   },
   sales_rep: {
     designer: "edit", designs: "edit", contacts: "edit",
-    inventory: "view", orders: "view", commissions: "own",
+    // orders:'edit' since 2026-09-01 (Carolyn): a rep should be able to edit, complete and
+    // finalize an order, take the payment and get the signature — the whole sale, from the
+    // designer's Push to Invoice through to money in. change_orders is deliberately ABSENT
+    // rather than 'none': omission is how a preset denies, and spelling it out would suggest
+    // the list is exhaustive when new areas must keep defaulting closed.
+    inventory: "view", orders: "edit", commissions: "own",
   },
   crew_leader: {
     build_schedule: "edit", repairs: "edit",
