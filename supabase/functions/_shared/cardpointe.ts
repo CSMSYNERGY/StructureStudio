@@ -99,6 +99,44 @@ export function cpAmount(cents: number): string {
   return (Math.round(cents) / 100).toFixed(2);
 }
 
+/**
+ * Expiry -> the gateway's MMYY, from whatever shape the browser handed us.
+ *
+ * ⚠️ THE TOKENIZER AND THE GATEWAY DISAGREE, and nothing says so out loud. The iFrame's
+ * postMessage returns `expiry` as **YYYYMM** ("203212" for 12/2032) while /auth expects
+ * **MMYY** ("1232"). Passing the tokenizer's value straight through — which is the obvious
+ * thing to do, since it is literally called `expiry` on both sides — sends a six-character
+ * value where four are expected. Observed live on 2026-09-02 by reading a real tokenizer
+ * message rather than the documentation, which describes neither format.
+ *
+ * Normalising HERE rather than in each page means one definition, both surfaces, and a
+ * browser still running a cached build is fixed too.
+ *
+ * Returns undefined for anything unrecognised, so a bad value is simply omitted from the
+ * request instead of being sent as garbage — a token carries its own expiry for its first
+ * use, so omitting is recoverable where a wrong value is not.
+ */
+export function cpExpiry(raw: unknown): string | undefined {
+  const d = String(raw ?? "").replace(/\D/g, "");
+  if (d.length === 4) {
+    // Already MMYY — unless it is YYMM, which we cannot distinguish and do not accept.
+    const mm = Number(d.slice(0, 2));
+    return mm >= 1 && mm <= 12 ? d : undefined;
+  }
+  if (d.length === 6) {
+    // YYYYMM (what the tokenizer sends) or MMYYYY (what a hand-typed field might).
+    const asYyyymm = Number(d.slice(4, 6));
+    if (Number(d.slice(0, 4)) >= 2000 && asYyyymm >= 1 && asYyyymm <= 12) {
+      return d.slice(4, 6) + d.slice(2, 4);
+    }
+    const asMm = Number(d.slice(0, 2));
+    if (asMm >= 1 && asMm <= 12 && Number(d.slice(2, 6)) >= 2000) {
+      return d.slice(0, 2) + d.slice(4, 6);
+    }
+  }
+  return undefined;
+}
+
 /** The gateway's decimal string -> cents. Rounded, because 6.00/0.01 style values arrive
  *  as strings and parseFloat can land a hair under. */
 export function cpCents(amount: unknown): number | null {
@@ -266,7 +304,9 @@ export async function cpAuth(req: CpAuthRequest): Promise<CpAuthResult> {
     capture: "Y",
     ecomind: req.ecomind ?? "E",
   };
-  if (req.expiry) body.expiry = req.expiry;
+  // Normalised, never passed through: the tokenizer says YYYYMM and /auth wants MMYY.
+  const exp = cpExpiry(req.expiry);
+  if (exp) body.expiry = exp;
   if (req.postal) body.postal = req.postal;
   if (req.name) body.name = req.name;
   if (req.rail === "ach") body.accttype = "ECHK";
@@ -486,13 +526,30 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
   // Only the properties on Fiserv's allow-list are honoured; anything else is dropped
   // silently, so every declaration below is drawn from it.
   const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  // ⚠️ READ THE TOKENIZER'S ACTUAL MARKUP BEFORE CHANGING THIS. It is a FLAT form using
+  // <br> separators — `<label>` (display:inline), `<br>`, `<input>` (inline-block) — and
+  // month/year are ALREADY siblings on one line with a "/" label between them:
+  //
+  //   <label id=cccardlabel><br><input id=ccnumfield><br>
+  //   <label id=ccexpirylabel><br><input id=ccexpiryfieldmonth> / <input id=ccexpiryfieldyear><br>
+  //   <label id=cccvvlabel><br><input id=cccvvfield>
+  //
+  // The first version of this CSS made the form UGLY in two ways, both self-inflicted:
+  //   * `label{display:block}` on top of the existing <br> is a DOUBLE line break — that
+  //     was the huge vertical gap between every label and its field.
+  //   * `input{width:100%}` hit the month and year fields too, so they wrapped onto
+  //     separate lines and dragged the frame from ~243px to 357px.
+  // So labels stay INLINE (the <br> already breaks the line) and width is set per FIELD,
+  // never on the `input` element generally. Only Fiserv's allow-listed properties apply;
+  // anything else is dropped silently.
   const css = encodeURIComponent(
     `body{margin:0;padding:0;font-family:${FONT};color:#0F172A}` +
-      `label{display:block;font-family:${FONT};font-size:13px;font-weight:600;color:#475569;margin:10px 0 4px}` +
-      `input{width:100%;box-sizing:border-box;font-size:16px;padding:11px 12px;` +
-      `border:1px solid #CBD5E1;border-radius:8px;color:#0F172A;font-family:${FONT}}` +
-      `select{font-size:16px;padding:10px;border:1px solid #CBD5E1;border-radius:8px;` +
-      `font-family:${FONT};color:#0F172A;margin-right:6px}` +
+      `label{font-family:${FONT};font-size:13px;font-weight:600;color:#475569}` +
+      `input{box-sizing:border-box;font-size:16px;padding:10px 12px;border:1px solid #CBD5E1;` +
+      `border-radius:8px;color:#0F172A;font-family:${FONT};margin-top:5px;margin-bottom:12px}` +
+      `#ccnumfield{width:100%}` +
+      `#ccexpiryfieldmonth{width:78px;margin-right:6px}#ccexpiryfieldyear{width:96px;margin-left:6px}` +
+      `#cccvvfield{width:110px}` +
       `.error{color:#B91C1C;font-size:13px;font-family:${FONT}}`,
   );
   const common = [
@@ -539,13 +596,13 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
  * Generous on purpose: an over-tall frame is whitespace, an under-tall one is a dead form.
  */
 export function cpTokenizerHeight(rail: "card" | "ach"): number {
-  // MEASURED against the live tokenizer, not estimated — the first guess (210) was still a
-  // dead form. Reading its DOM showed the card rail renders FOUR inputs, not three:
-  // ccnumfield, ccexpiryfieldMONTH, ccexpiryfieldYEAR and cccvvfield, each in its own block
-  // with its own label, and month/year stack no matter what width they are given (they are
-  // not in a shared row, so no CSS on the allow-list makes them sit side by side). Measured
-  // content height was 357px with the CVV's bottom edge at 367.
-  return rail === "ach" ? 150 : 400;
+  // MEASURED at a 283px frame against the live tokenizer, not estimated. With the CSS above
+  // — labels inline, month/year sharing one row — the card rail's content is 243px with the
+  // CVV's bottom edge at 231. It was 357px before, purely because the first CSS forced the
+  // expiry fields onto separate lines and doubled every label gap.
+  // Generous by ~20px: an over-tall frame is whitespace, an under-tall one is a form the
+  // customer cannot finish, and nothing errors when it happens.
+  return rail === "ach" ? 130 : 265;
 }
 
 /** The origin the browser must check every postMessage against. */

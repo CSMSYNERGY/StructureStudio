@@ -274,6 +274,15 @@ Deno.test("the tokenizer css resets CardPointe's body margin and sets a REAL fon
   // page — which rendered the labels in serif against a sans-serif page.
   check("no font-family:inherit anywhere", !/font-family:inherit/.test(css), css);
   check("labels are styled at all", /label\{/.test(css), css.slice(0, 300));
+  // ⚠️ The tokenizer's form is flat, using <br> separators, and its labels are inline.
+  // `label{display:block}` on top of those <br>s is a DOUBLE line break — it is what made
+  // the form look broken, so it must never come back.
+  check("labels are NOT forced to block", !/label\{[^}]*display:block/.test(css), css);
+  // width belongs on the individual FIELDS: a blanket input{width:100%} also hits the
+  // month and year boxes, which wraps them onto separate lines and doubles the height.
+  check("no blanket input width", !/input\{[^}]*width:100%/.test(css), css);
+  check("card number is full width", /#ccnumfield\{width:100%/.test(css), css);
+  check("month and year are narrow", /#ccexpiryfieldmonth\{width:\d+px/.test(css), css);
 });
 
 Deno.test("the tokenizer is tall enough for its rail's full field set", () => {
@@ -284,9 +293,32 @@ Deno.test("the tokenizer is tall enough for its rail's full field set", () => {
   // tokenizer — the card rail renders FOUR inputs (number, expiry month, expiry year, cvv),
   // each its own block. An earlier 210 passed a >=190 assertion and was still a dead form,
   // which is why this floor is anchored to the measurement rather than to a guess.
-  check("card clears the measured 367px content", cp.cpTokenizerHeight("card") >= 380, String(cp.cpTokenizerHeight("card")));
-  check("ach fits its field plus label", cp.cpTokenizerHeight("ach") >= 120, String(cp.cpTokenizerHeight("ach")));
+  // 243px of content at a 283px frame with the CVV's bottom at 231, MEASURED against the
+  // live tokenizer once the CSS stopped forcing month/year onto their own lines. The floor
+  // is anchored to that measurement — an earlier 210 passed a >=190 guess and was still an
+  // unfinishable form.
+  check("card clears the measured 243px content", cp.cpTokenizerHeight("card") >= 250, String(cp.cpTokenizerHeight("card")));
+  check("card is not absurdly tall either", cp.cpTokenizerHeight("card") <= 320, String(cp.cpTokenizerHeight("card")));
+  check("ach fits its field plus label", cp.cpTokenizerHeight("ach") >= 110, String(cp.cpTokenizerHeight("ach")));
   check("card is taller than ach", cp.cpTokenizerHeight("card") > cp.cpTokenizerHeight("ach"));
+});
+
+
+Deno.test("cpExpiry converts the tokenizer's YYYYMM to the gateway's MMYY", () => {
+  // OBSERVED LIVE 2026-09-02: the iFrame's postMessage carries expiry "203212" for 12/2032
+  // while /auth expects "1232". Both sides call the field `expiry`, and the documentation
+  // describes neither format, so passing it through looks obviously correct and is wrong.
+  check("tokenizer YYYYMM", cp.cpExpiry("203212") === "1232", String(cp.cpExpiry("203212")));
+  check("already MMYY passes through", cp.cpExpiry("1232") === "1232");
+  check("MMYYYY", cp.cpExpiry("122032") === "1232", String(cp.cpExpiry("122032")));
+  check("separators stripped", cp.cpExpiry("12/2032") === "1232", String(cp.cpExpiry("12 / 2032")));
+  // Unrecognised shapes are OMITTED, not guessed: a token carries its own expiry for its
+  // first use, so leaving it out is recoverable where a wrong value is not.
+  check("garbage", cp.cpExpiry("nope") === undefined);
+  check("empty", cp.cpExpiry("") === undefined);
+  check("null", cp.cpExpiry(null) === undefined);
+  check("impossible month", cp.cpExpiry("9932") === undefined, String(cp.cpExpiry("9932")));
+  check("too short", cp.cpExpiry("123") === undefined);
 });
 
 Deno.test("cardpointeConfigured is all-or-nothing", () => {
