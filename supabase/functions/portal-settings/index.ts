@@ -2075,8 +2075,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // 3. The estimate in the tenant's CRM. GHL exposes DELETE /invoices/estimate/:id; altId +
-    //    altType scope it to the sub-account, the same pair every other estimate call in this
-    //    file already sends. Two rules here, both deliberate:
+    //    altType scope it to the sub-account. They are NOT sent the way the rest of this file
+    //    sends them: for estimate MUTATIONS they are required in the JSON body, and only the
+    //    estimate LIST GET takes them on the query string. Assuming "the same pair every other
+    //    estimate call already sends" is what shipped a 422 here. Two rules, both deliberate:
     //
     //    (a) NEVER once an invoice exists. Converting an estimate marks it invoiced, and that
     //        invoice is the record behind money that may already have been collected —
@@ -2120,14 +2122,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                   Authorization: `Bearer ${creds.ghl_api_key}`,
                   Version: "2021-07-28",
                   Accept: "application/json",
+                  "Content-Type": "application/json",
                 },
+                // altId/altType go in the BODY for this endpoint. They are REQUIRED there, and
+                // sending them only on the query string is a missing-required-field DTO failure
+                // -> 422, which reads exactly like a state refusal and is why this looked like
+                // "GHL will not let us delete it" for a month. The query string is kept as well:
+                // it is harmless, and it covers the alternate reading of their docs.
+                body: JSON.stringify({ altId: creds.ghl_location_id, altType: "location" }),
               },
             );
             // 404 is the desired end state reached by another route (already deleted in the
             // CRM, or a half-finished earlier attempt), so it counts as done rather than as an
             // error the operator has to interpret. That is also what makes a retry safe.
             estimate = (r.ok || r.status === 404) ? "deleted" : "failed";
-            if (estimate === "failed") estimateError = `CRM returned ${r.status}`;
+            // Keep GHL's own words. A bare status turned a one-line DTO complaint into a
+            // month of guessing; the body is their validation output, so it carries no
+            // customer data. Capped because it lands in an error row, not a log stream.
+            if (estimate === "failed") {
+              const detail = (await r.text().catch(() => "")).slice(0, 300);
+              estimateError = `CRM returned ${r.status}${detail ? `: ${detail}` : ""}`;
+            }
           } catch (e) {
             estimate = "failed";
             estimateError = (e as Error)?.message || "network error";

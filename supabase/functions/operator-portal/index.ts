@@ -309,11 +309,17 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
       }
       case "get_portal": {
         const clientId = await assertClient(admin, payload.clientId);
-        // Same columns/shape as the owner portal's own reads (and as admin-catalog's
-        // get_client_portal) so DesignsTable/LeadsTable render unchanged.
+        // The UNION of the owner portal's own two reads, so DesignsTable and LeadsTable
+        // render unchanged in view-as. Both halves are load-bearing and have drifted before:
+        //   contact_id  -> LeadsTable (02-sales.jsx:764) builds each person's record link from
+        //                  it; without the column g.contactId stays null and the customer name
+        //                  degrades to inert text, so an operator cannot open a contact at all.
+        //   ss_quote_*  -> DesignsTable renders them (02-sales.jsx:463/:512); without them the
+        //                  Quote # column reads "-" for every SS-mode quote.
+        // Adding a column to either owner read means adding it here too.
         const [designs, versions, cfg, leads] = await Promise.all([
           admin.from("designs")
-            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id")
+            .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
             .eq("client_id", clientId).order("created_at", { ascending: false }),
           admin.from("design_versions")
             .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
