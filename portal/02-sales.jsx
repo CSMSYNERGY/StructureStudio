@@ -793,6 +793,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
         groups.set("lead-" + l.id, {
           key: "lead-" + l.id, browsing: true, source: l.source,
+          // A browsing lead is a PERSON too, so its name links to the record like every
+          // other row. captured_leads.contact_id is stamped by capture-lead (and by 130's
+          // backfill) — before that this was always null, which is why the newest row in
+          // the list, the one anybody clicks first, was the one row that did nothing.
+          contactId: l.contact_id || null,
           name: l.name || "", email: l.email || "", phone: l.phone || "",
           count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
           latestCode: null, topStatus: "browsing",
@@ -828,7 +833,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("captured_leads")
-        .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
+        .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
         .eq("client_id", clientId).order("updated_at", { ascending: false })
         .then((r) => r, () => ({ data: [] })),
     ]);

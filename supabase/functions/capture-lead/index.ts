@@ -131,6 +131,39 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
       message: `captured_leads upsert failed: ${leadErr.message}` });
   }
 
+  // ── The built-in CRM contact (migration 130) ──────────────────────────────
+  // The portal's Contacts list opens a person's record through crm_contacts, and it finds
+  // the id on THIS row — so a captured lead with no contact_id is a name that cannot be
+  // clicked. 130 stamped every lead that existed when it ran and nothing has stamped one
+  // since, which is why the newest browsing lead (the top row of the list, the one anyone
+  // clicks first) was always the dead one.
+  //
+  // BEST-EFFORT, like every other leg here: the public gate must never fail because
+  // bookkeeping did, so this is wrapped and only logged. `crm_ensure_contact` is
+  // service-role-only and resolves-or-creates by phone then email, so a lead who already
+  // has a record (from a design, or from an earlier visit) links to that same record
+  // rather than a second one. `source` is deliberately left alone — flipping it would
+  // relabel an existing customer as a browsing lead the day they come back to look again.
+  if (savedLead) {
+    try {
+      const { data: crmId, error: crmErr } = await sb.rpc("crm_ensure_contact", {
+        p_client_id: clientId,
+        p_name: name,
+        p_phone: phoneRaw,
+        p_email: leadRow.email,
+      });
+      if (crmErr) throw crmErr;
+      if (crmId) {
+        const { error: linkErr } = await sb.from("captured_leads")
+          .update({ contact_id: crmId }).eq("id", savedLead.id);
+        if (linkErr) throw linkErr;
+      }
+    } catch (e) {
+      await logEdgeError({ fn: "capture-lead", req, clientId, code: "crm_link",
+        message: `crm_contacts link failed - lead saved unlinked: ${(e as Error).message}` });
+    }
+  }
+
   // ── The consent record ────────────────────────────────────────────────────
   // Keyed on the PHONE, not the lead row: consent belongs to the person and has to survive
   // their contact being merged, renamed or re-created. Append-only — a later opt-out is a

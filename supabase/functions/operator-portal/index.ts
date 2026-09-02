@@ -322,7 +322,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
           // Browsing leads (migration 062) so the operator's view-as Contacts matches what
           // the tenant themselves sees. Additive: an error here must not break the portal.
           admin.from("captured_leads")
-            .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
+            .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
             .eq("client_id", clientId).order("updated_at", { ascending: false }),
         ]);
         if (designs.error) throw designs.error;
