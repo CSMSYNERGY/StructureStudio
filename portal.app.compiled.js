@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 7922af8d8ff4)
+// GENERATED FILE — do not edit. Compiled from portal.app.jsx (sha256 d070601f3744)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -1079,7 +1079,17 @@ delivery:{on:"#15803D",past:"#DCFCE7"}// green -- the ladder ends in "Delivered"
 };var CRM_RAIL_IDLE={bg:"#F1F5F9",fg:"#94A3B8"};// ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
 // rather than filling the first one, because filling it would claim the building is in it.
 // A building that has never been scheduled is not "in the first stage".
-function CrmChevronRail(_ref44){var stages=_ref44.stages,_ref44$idx=_ref44.idx,idx=_ref44$idx===void 0?null:_ref44$idx,tone=_ref44.tone,_ref44$title=_ref44.title,title=_ref44$title===void 0?null:_ref44$title;var t=tone||CRM_RAIL_TONES.sales;return/*#__PURE__*/React.createElement("div",{style:{display:"flex",gap:2,flexWrap:"wrap",flex:"1 1 auto",minWidth:0}},stages.map(function(s,i){return/*#__PURE__*/React.createElement("div",{key:i,title:idx==null?title||"Not started":i<=idx?"Reached":"Not yet",style:{flex:"1 1 90px",minWidth:0,padding:"5px 10px",fontSize:11,fontWeight:700,textAlign:"center",background:idx==null?CRM_RAIL_IDLE.bg:i<idx?t.past:i===idx?t.on:CRM_RAIL_IDLE.bg,color:idx==null?CRM_RAIL_IDLE.fg:i===idx?"#FFF":i<idx?t.on:CRM_RAIL_IDLE.fg,clipPath:"polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)"}},s.name);}));}// -- THE MULTI-PIPELINE BAR ----------------------------------------------------------
+function CrmChevronRail(_ref44){var stages=_ref44.stages,_ref44$idx=_ref44.idx,idx=_ref44$idx===void 0?null:_ref44$idx,tone=_ref44.tone,_ref44$title=_ref44.title,title=_ref44$title===void 0?null:_ref44$title;var t=tone||CRM_RAIL_TONES.sales;return/*#__PURE__*/React.createElement("div",{style:{display:"flex",gap:2,flexWrap:"wrap",flex:"1 1 auto",minWidth:0}},stages.map(function(s,i){return/*#__PURE__*/ (// ⚠️ THE NAME LEADS THE TOOLTIP, and that is not decoration. Build stage names are
+// tenant-authored and uncapped, so a long one can be narrowed by the flex basis until
+// the chevron's clipPath eats its ends; hover is then the only way to read it whole.
+// The dot version carried title={s.name} for exactly that reason and the first draft
+// of this rail dropped it, keeping only the status word.
+React.createElement("div",{key:i,title:"".concat(s.name," \u2014 ").concat(idx==null?title||"Not started":i<=idx?"Reached":"Not yet"),style:{// ⚠️ NO minWidth HERE ON PURPOSE. `min-width: 0` would let a chevron shrink past
+// its longest word, and since clipPath crops rather than scrolls, the word would
+// lose its ends with nothing to reveal them. The default `min-width: auto` keeps a
+// min-content floor: the rail wraps to another line instead of cropping. The
+// original CrmStageBar never set it either, so this is parity, not a new rule.
+flex:"1 1 90px",padding:"5px 10px",fontSize:11,fontWeight:700,textAlign:"center",background:idx==null?CRM_RAIL_IDLE.bg:i<idx?t.past:i===idx?t.on:CRM_RAIL_IDLE.bg,color:idx==null?CRM_RAIL_IDLE.fg:i===idx?"#FFF":i<idx?t.on:CRM_RAIL_IDLE.fg,clipPath:"polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)"}},s.name));}));}// -- THE MULTI-PIPELINE BAR ----------------------------------------------------------
 // Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
 // three rows there" (2026-08-28 @24:48). That is now literally what this is: one rail per
 // ladder, same chevrons, same height, same right edge, coloured per ladder.
