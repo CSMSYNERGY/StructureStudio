@@ -15,6 +15,7 @@ import {
   createMessagingService,
   fetchEligibleUseCases,
   createCampaign,
+  updateCampaign,
   fetchCampaign,
   deleteCampaign,
   searchAvailableNumbers,
@@ -422,10 +423,13 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // been notified and will be in touch" and could do nothing — which is the same shape as
         // the profile_pending dead end, one stage later.
         //
-        // ⚠️ THIS DELETES, IT DOES NOT RESUBMIT, AND THAT IS FORCED BY TWILIO. The Usa2p
-        // resource has NO update operation, so the rejected copy is immutable — Twilio still
-        // holds whatever was sent, and fixing our own row changes nothing there. The only
-        // remedy is to destroy the campaign and build a new one.
+        // ⛔ THIS DELETES, AND IT IS NO LONGER THE WAY OUT OF A REJECTION — the `campaign_failed`
+        // branch of `advanceOne` edits the campaign in place instead, which Twilio does not
+        // charge for. This paragraph used to claim the Usa2p resource has no update operation;
+        // it does (`UpdateUsAppToPerson`), that claim was false, and believing it is what threw
+        // away a paid campaign on 2026-09-02. Nothing in the portal calls this any more. Keep it
+        // only as the deliberate start-over — a campaign registered against the wrong USE CASE
+        // or keywords, which really are create-only — and expect it to cost a second vetting.
         //
         // ⚠️ IT DOES NOT CREATE THE REPLACEMENT EITHER. It drops the row back to
         // `brand_approved`, which is the state whose card now renders the copy form pre-filled
@@ -489,11 +493,13 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
       case "save_copy": {
         const reg = await load();
-        // Editable right up to the moment the campaign is submitted, and never after: the Usa2p
-        // resource has NO update operation, so past this point our stored text would silently
-        // disagree with what the carriers actually hold. Same reasoning as save_intake's 409.
+        // Editable while the wording can still reach Twilio, which now includes `campaign_failed`
+        // — that state's whole purpose is rewriting what the carriers refused, and locking the
+        // form there meant the only route to the text ran through a DESTRUCTIVE clear. It stays
+        // closed once a campaign is pending or live: our stored text would then silently
+        // disagree with what the carriers hold. Same reasoning as save_intake's 409.
         if (!["none", "intake", "aup_pending", "ready", "profile_pending", "brand_pending",
-              "brand_failed", "brand_approved"].includes(reg.status)) {
+              "brand_failed", "brand_approved", "campaign_failed"].includes(reg.status)) {
           return json({ error: "The carriers already have this description and it cannot be changed here. Contact support." }, 409);
         }
         // ⚠️ CAPS ONLY, NOT THE FULL RULES. A hard validation here would make a half-typed draft
@@ -1043,6 +1049,10 @@ async function advanceOne(
           helpMessage: String(extra.helpMessage ?? ""),
           optOutMessage: String(extra.optOutMessage ?? ""),
         },
+        // ⚠️ THE TWO FIELDS THAT USED TO BE COLLECTED AND THEN DROPPED. They come off the row,
+        // not the request: the builder typed them on the details screen, days before this.
+        privacyPolicyUrl: String(reg.privacy_policy_url ?? ""),
+        termsUrl: String(reg.terms_url ?? ""),
         hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
         hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
       });
@@ -1066,16 +1076,69 @@ async function advanceOne(
         });
       }
       if (status === "FAILED") {
-        // ⚠️ THERE IS NO CAMPAIGN UPDATE API. Deleting and re-creating is vetted as a new
-        // submission and charges the fee again; the free path is a human editing it in the
-        // Twilio Console. So this is an OPERATOR state, not an automatic retry.
+        // A rejection is a LOOP now, not an operator escalation: `campaign_failed` below edits
+        // this same campaign in place, for free, as many times as it takes.
         return await set({
           campaign_status: status, status: "campaign_failed", next_poll_at: null,
           needs_attention: true,
-          attention_note: "The carriers rejected the campaign. It has to be corrected in the Twilio Console — re-creating it through the API would be charged again.",
+          attention_note: "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.",
         });
       }
       return await set({ campaign_status: status, next_poll_at: soon(120) });
+    }
+
+    // ── THE FREE WAY BACK FROM A REJECTION ────────────────────────────────────────────────
+    // ⚠️ THIS EDITS THE EXISTING CAMPAIGN — it does not delete and re-create. Twilio assesses
+    // the vetting fee ONCE PER CAMPAIGN, so resubmitting the same resource is free and has no
+    // limit, while destroying it and building another buys a second vetting. This file
+    // asserted the opposite as fact for weeks and it cost a live campaign on 2026-09-02.
+    //
+    // Only ever reached by the builder pressing send: `campaign_failed` is deliberately NOT in
+    // the lazy sweep's list, because an automatic resubmit of unchanged wording would just buy
+    // the same refusal on a timer.
+    case "campaign_failed": {
+      if (!reg.campaign_sid || !reg.messaging_service_sid) {
+        // Nothing left at Twilio to edit — someone cleared it, or an older row never held a
+        // SID. Drop back to the state whose card offers the copy form and the create path.
+        return await set({
+          status: "brand_approved", needs_attention: false, attention_note: null,
+          next_poll_at: soon(30),
+        });
+      }
+      const copy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(copy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
+      }
+      await set({
+        campaign_description: copy.description,
+        campaign_message_flow: copy.messageFlow,
+        campaign_message_samples: copy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
+      const extra = (p.copy ?? {}) as Record<string, unknown>;
+      const c = await updateCampaign({
+        serviceSid: reg.messaging_service_sid,
+        campaignSid: reg.campaign_sid,
+        copy: {
+          description: copy.description,
+          messageFlow: copy.messageFlow,
+          messageSamples: copy.messageSamples.filter(Boolean),
+        },
+        privacyPolicyUrl: String(reg.privacy_policy_url ?? ""),
+        termsUrl: String(reg.terms_url ?? ""),
+        hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
+        hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
+      });
+      await note("campaign_resubmitted", { campaignSid: c.campaignSid, status: c.status });
+      return await set({
+        campaign_status: normalizeCampaignStatus(c.status),
+        status: "campaign_pending",
+        last_errors: [],
+        needs_attention: false,
+        attention_note: null,
+        next_poll_at: soon(60),
+      });
     }
 
     case "campaign_approved":

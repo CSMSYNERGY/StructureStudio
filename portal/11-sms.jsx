@@ -686,16 +686,17 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           That stranded the first real rejection exactly the way profile_pending did, one stage
           later, and the promise of a human had no mechanism behind it.
 
-          ⚠️ THE ERRORS ARE THE POINT OF THIS SCREEN. A campaign is refused for a NAMED reason —
-          usually the copy below, sometimes something on the builder's own website — and
-          resubmitting the same text buys the same refusal at full price. So the reasons are
-          shown verbatim, and clearing the rejection deliberately drops back to the step that
-          renders the copy form rather than resubmitting anything. */}
+          ⚠️ THE ERRORS ARE THE POINT OF THIS SCREEN. A campaign is refused for a NAMED reason,
+          so the reasons are shown verbatim, above the form that fixes them. They were empty
+          for the whole life of this card until 2026-09-02 — the webhook received Twilio's
+          error array and dropped it — so this rendered "they told us why" over nothing while
+          the same two fields were refused twice. */}
       {status === "campaign_failed" && (
         <div style={card}>
           <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>The carriers turned this one down</h4>
           <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-            They told us why. Fix what they named, then start the last step again.
+            They told us why. Change what they named below and send it again — there is no
+            charge for sending it again, and no limit on how many times you can.
           </p>
 
           {(data.errors || []).length > 0 && (
@@ -713,32 +714,30 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
 
           {readOnly ? (
             <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
-              An owner — or an admin with billing access — can clear this and try again from
-              Settings &rarr; Text Messaging.
-            </div>
-          ) : data.campaignRetriesLeft < 1 ? (
-            <div style={{ fontSize: 12.5, color: "#92400E", lineHeight: 1.5 }}>
-              This registration has used its three tries. Contact support and we will look at it
-              with you rather than spending another submission.
+              An owner — or an admin with billing access — can rewrite this and send it again
+              from Settings &rarr; Text Messaging.
             </div>
           ) : (
             <>
-              <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "#92400E", marginBottom: 12 }}>
-                Clearing this costs nothing. It takes you back to the last step with your wording
-                on screen so you can change it — sending it again is what costs.{" "}
-                <strong>{data.campaignRetriesLeft}</strong>{" "}
-                {data.campaignRetriesLeft === 1 ? "try" : "tries"} left.
-              </div>
-              <button type="button" disabled={busy}
-                onClick={() => {
-                  if (!window.confirm(
-                    "Clear this rejected submission? The old one is withdrawn from the "
-                    + "carriers and cannot be brought back. You will go back to the last "
-                    + "step, where you can change your wording before sending it again.")) return;
-                  act(() => call("retry_campaign"));
-                }}
-                style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
-                {busy ? "Clearing…" : "Clear it and let me try again"}
+              {/* ⚠️ THE FORM BELONGS HERE, ON THE REJECTION ITSELF. Until 2026-09-02 this card
+                  offered exactly one control — a button that DELETED the campaign at Twilio —
+                  so the only route to the wording ran through destroying the thing being
+                  fixed, and the yellow box beside it said that cost nothing. It cost the
+                  vetting fee and a try, on the click. Editing in place is free and unlimited,
+                  so the builder edits right here and presses send. */}
+              <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} />
+              {smsCopyProblems(copy).length > 0 && (
+                <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
+                  {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
+                </ul>
+              )}
+              <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
+                onClick={() => act(async () => {
+                  await call("save_copy", { copy });
+                  await call("advance", { copy });
+                })}
+                style={{ background: smsCopyProblems(copy).length > 0 ? "#CBD5E1" : ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", cursor: smsCopyProblems(copy).length > 0 ? "default" : "pointer", fontWeight: 800, fontSize: 13, fontFamily: "inherit" }}>
+                {busy ? "Sending…" : "Send it again"}
               </button>
             </>
           )}

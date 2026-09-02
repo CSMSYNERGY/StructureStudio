@@ -5,6 +5,8 @@ import {
   normalizeBrandStatus,
   normalizeCampaignStatus,
   validateCampaignCopy,
+  createCampaign,
+  updateCampaign,
   JOB_POSITIONS,
   BUSINESS_TYPES,
 } from "./twilioTrustHub.ts";
@@ -223,4 +225,62 @@ Deno.test("missing fields are refused rather than throwing", () => {
   // The browser can post {} — the brand_approved card did exactly that after a reload.
   const problems = validateCampaignCopy({});
   assert(problems.length >= 3, "description, messageFlow and samples must all complain");
+});
+
+// ── The two URL fields that were collected, stored, displayed, and never sent ──────────────
+// TCR made both mandatory on 2026-06-30. We omitted them and two live campaigns were refused
+// 1.1 SECONDS after creation (30908 PRIVACY_POLICY_URL, 30882 TERMS_AND_CONDITIONS_URL). These
+// cases assert the refusal now happens HERE, for free, before anything reaches Twilio — the
+// guard is the first statement in both writers, so neither test can touch the network.
+
+const SUBMIT_COPY = {
+  description: "Junior Barns texts customers about the quotes they asked for and their delivery dates.",
+  messageFlow: "Customers tick a consent box on our online quote form before we ever text them.",
+  messageSamples: [
+    "Hi [Name], it's Junior Barns. Your 12x20 barn quote is ready. Reply STOP to opt out.",
+    "Hi [Name], your building is scheduled for delivery on [Date]. Reply STOP to opt out.",
+  ],
+};
+
+async function refusal(fn: () => Promise<unknown>): Promise<string> {
+  try {
+    await fn();
+  } catch (e) {
+    return String((e as { message?: string })?.message ?? e);
+  }
+  return "";
+}
+
+Deno.test("a campaign with no privacy policy URL is refused before it is submitted", async () => {
+  const msg = await refusal(() => createCampaign({
+    serviceSid: "MG_test", brandSid: "BN_test", useCase: "MIXED", copy: SUBMIT_COPY,
+    privacyPolicyUrl: "", termsUrl: "https://juniorbarns.example/terms",
+  }));
+  assert(msg.includes("privacy policy"), `expected a policy-URL refusal, got: ${msg}`);
+});
+
+Deno.test("a campaign with no terms URL is refused the same way", async () => {
+  const msg = await refusal(() => createCampaign({
+    serviceSid: "MG_test", brandSid: "BN_test", useCase: "MIXED", copy: SUBMIT_COPY,
+    privacyPolicyUrl: "https://juniorbarns.example/privacy", termsUrl: "",
+  }));
+  assert(msg.includes("terms"), `expected a policy-URL refusal, got: ${msg}`);
+});
+
+Deno.test("a bare domain is not a URL — the carriers fetch these, so they need a scheme", async () => {
+  const msg = await refusal(() => createCampaign({
+    serviceSid: "MG_test", brandSid: "BN_test", useCase: "MIXED", copy: SUBMIT_COPY,
+    privacyPolicyUrl: "juniorbarns.example/privacy", termsUrl: "juniorbarns.example/terms",
+  }));
+  assert(msg.includes("privacy policy"), `expected a policy-URL refusal, got: ${msg}`);
+});
+
+Deno.test("the free in-place resubmit carries the URLs too — it is a whole-resource write", async () => {
+  // updateCampaign replaces the campaign rather than patching it, so dropping the URLs here
+  // would re-open exactly the hole createCampaign just had.
+  const msg = await refusal(() => updateCampaign({
+    serviceSid: "MG_test", campaignSid: "QE_test", copy: SUBMIT_COPY,
+    privacyPolicyUrl: "", termsUrl: "",
+  }));
+  assert(msg.includes("privacy policy"), `expected a policy-URL refusal, got: ${msg}`);
 });
