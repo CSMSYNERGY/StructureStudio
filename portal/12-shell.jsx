@@ -139,6 +139,62 @@ function Dashboard({ session }) {
     return () => { cancelled = true; };
   }, [session.access_token, viewing]);
 
+  // ── SUPPORT OPERATOR (migration 176) ─────────────────────────────────────────
+  // A support operator stands in the builder's shoes: the server resolves the VIEWED
+  // tenant's owner map instead of the operator god view. The browser has to agree, or the
+  // nav offers tabs whose every action 403s — the "disabled UI fails silently" shape, one
+  // level up.
+  //
+  // A SECOND rpc rather than a richer `is_operator`: that one is called by a live page and
+  // would break the moment its boolean became a record, and a schema change and a static
+  // asset cannot be deployed atomically. Same non-answer posture as its sibling above — a
+  // failed call keeps the last known value rather than reading as `false`, because false
+  // here means "full operator rights", which is the wrong way to fail.
+  const [isSupportOp, setIsSupportOp] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setIsSupportOp(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [session]);
+
+  // Only ever true INSIDE a tenant. On the operator's own portal a support account is just
+  // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
+  // their own account.
+  const supportView = !!viewing && isSupportOp;
+
+  // ⚠️ A SEPARATE STATE, NOT `tenant` / `entitlement` — and that separation IS the fix from
+  // audit 2026-08-20. Both of those hold the OPERATOR'S OWN values and both effects above
+  // skip while viewing, precisely because the invoke wrapper injects targetClientId and a
+  // TOKEN_REFRESHED re-render would otherwise overwrite them with the viewed tenant's and
+  // lock the operator's own portal after Exit. Writing the viewed values into a third place
+  // gets the support view what it needs without reintroducing that bug.
+  //
+  // Null means NOT LOADED, never "nothing" — the readers below fall back to the operator's
+  // own values while it is null, so a slow call shows the old behaviour for a moment rather
+  // than flashing an empty portal at Jonathan mid-call.
+  const [viewedCtx, setViewedCtx] = useState(null);
+  useEffect(() => {
+    if (!supportView) { setViewedCtx(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        // Both are in SS_TENANT_SCOPED_FNS, so the wrapper injects targetClientId and these
+        // answer for the VIEWED tenant — which is exactly what is wanted here and exactly
+        // what the two effects above must avoid.
+        const [st, bl] = await Promise.all([
+          sb.functions.invoke("portal-settings", { body: { action: "status" } }),
+          sb.functions.invoke("portal-billing", { body: { action: "status" } }),
+        ]);
+        if (cancelled) return;
+        setViewedCtx({
+          access: (st.data && st.data.access) || null,
+          entitlement: (bl.data && bl.data.entitlement) || null,
+        });
+      } catch (_e) { /* leave null — the fallbacks below keep the portal usable */ }
+    })();
+    return () => { cancelled = true; };
+  }, [supportView, viewing && viewing.clientId, session.access_token]);
+
   // Keep the address bar honest about where you actually are.
   //
   // Placement is doubly constrained, and BOTH constraints bit once.
@@ -160,9 +216,12 @@ function Dashboard({ session }) {
   //
   // `wanted` holds the URL's request until the gates have actually resolved, so an operator
   // whose app_operators row is still in flight is not mistaken for a refusal.
-  const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // A support operator is NOT an admin of the tenant they are viewing — the clamp has to
+  // apply to them so the access map governs which tabs resolve. Platform operators keep the
+  // blanket, which is what stops a subscription lapse locking us out of fixing an account.
+  const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null);
+    (tenant && tenant !== "none") ? tenant.access : null, supportView);
   useEffect(() => {
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
@@ -507,7 +566,9 @@ function Dashboard({ session }) {
   // describes the operator's role in their OWN client_users row — routinely "user", or
   // absent entirely — so using it here would leave Settings dead in the viewed account,
   // which is exactly the "only two tabs" symptom Carolyn reported.
-  const canAdmin = viewing ? isOperator : isAdmin;
+  // THE LINE THAT UNCLAMPS EVERY TAB. For a support operator it must be false, or
+  // ssClampTab returns every tab unmodified and the narrowed access map governs nothing.
+  const canAdmin = viewing ? (isOperator && !supportView) : isAdmin;
 
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
@@ -529,9 +590,14 @@ function Dashboard({ session }) {
   //
   // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
   // featureOn, or the blanket returns with it.
-  const view3dUnlocked = isOperator
-    || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
-        && entitlement.granted.indexOf("view_3d") !== -1);
+  // Support reads the VIEWED tenant's grant, not the operator blanket — otherwise a
+  // support account is shown a 3D tab on a builder who was never granted it.
+  const view3dUnlocked = supportView
+    ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
+        && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
+    : (isOperator
+      || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
+          && entitlement.granted.indexOf("view_3d") !== -1));
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -674,7 +740,12 @@ function Dashboard({ session }) {
   // The caller's resolved per-area map, straight from the status call (migration 100).
   // Operators viewing a tenant have none — their rights come from app_operators — and
   // canAdmin short-circuits every check below for them.
-  const myAccess = (tenant && tenant !== "none") ? tenant.access : null;
+  // Support reads the VIEWED tenant's resolved map. While it is still loading, fall back to
+  // the operator's own rather than to null: null clamps to a fallback tab, so the generous
+  // direction for a fraction of a second beats bouncing Jonathan off the page he opened.
+  const myAccess = supportView
+    ? ((viewedCtx && viewedCtx.access) || ((tenant && tenant !== "none") ? tenant.access : null))
+    : ((tenant && tenant !== "none") ? tenant.access : null);
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
@@ -691,7 +762,7 @@ function Dashboard({ session }) {
     // rather than a hand-rolled check so the two can never disagree; a null map still
     // passes (NONADMIN_TABS holds "designer"), so nothing changes for owners, admins,
     // operators or a tenant predating migration 100.
-    if (ssClampTab("designer", isOperator, canAdmin, myAccess) !== "designer") {
+    if (ssClampTab("designer", isOperator, canAdmin, myAccess, supportView) !== "designer") {
       window.alert("Opening a design in the Designer isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
       return;
     }
@@ -709,7 +780,7 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView);
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -780,7 +851,12 @@ function Dashboard({ session }) {
   //   * entitlement === null means "still loading" and must NOT read as off, or every page
   //     load would flash an upgrade card at a paying customer (same reason gateLocked
   //     tolerates null).
-  const featureOn = (key) => isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]));
+  // Support resolves the VIEWED tenant's subscription — the whole point of the flag. A null
+  // viewedCtx is STILL LOADING, never "off", the same rule the operator branch already uses:
+  // flashing an upgrade card at a paying builder mid support call is the worse failure.
+  const featureOn = (key) => (supportView
+    ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
+    : (isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]))));
   const schedUnlocked = featureOn("schedule_builds");
   // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
   // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
@@ -927,9 +1003,14 @@ function Dashboard({ session }) {
         {isOperator && (<>
         <div className="ss-navlabel">Operator</div>
         <nav className="ss-nav">
+          {/* Accounts is the switcher and support needs it — it is how they reach the next
+              builder. Admin and Projects are OUR consoles (delete_client lives in one, our
+              internal bug board is the other) and a support account standing in a builder's
+              shoes has no business in either. ssClampTab refuses the routes too, so a typed
+              URL lands on a real page rather than a hidden-but-reachable one. */}
           {navItem("accounts", "Accounts")}
-          {navItem("admin", "Admin")}
-          {navItem("projects", "Projects")}
+          {!supportView && navItem("admin", "Admin")}
+          {!supportView && navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -1091,7 +1172,7 @@ function Dashboard({ session }) {
                    across tab switches, and a real navigation would throw away whatever is
                    on the canvas. ssClampTab first, same as the record page's Orders link —
                    sending someone to a tab they cannot open is its own dead end. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
@@ -1203,6 +1284,14 @@ function Dashboard({ session }) {
                 recordId={sub.slice(2)}
                 isAdmin={canAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
+                /* The DESIGN record reaches this line without a subscription — the branch
+                   above turns a CONTACT record away, but a design record is what the free
+                   Pipeline list opens and it has to keep working. Its READ is exempt from the
+                   server's crm_ gate on purpose; every WRITE on the page is not, so the
+                   record used to render with a live Notes box that 403'd on Save. Passing the
+                   entitlement lets CrmRecord grey what it cannot save instead. */
+                crmUnlocked={crmUnlocked}
+                onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
                 /* Back goes to the list this record belongs to, which after the split is a
                    whole tab rather than a sub-view. */
                 onBack={() => navigate(sub.charAt(0) === "c" ? "contacts" : "designs")}
@@ -1219,7 +1308,7 @@ function Dashboard({ session }) {
                    can never drift from what the router will actually do. */
                 onNavigate={(k, id) => {
                   const kindTab = k === "contact" ? "contacts" : "designs";
-                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess) === kindTab ? kindTab : activeTab;
+                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess, supportView) === kindTab ? kindTab : activeTab;
                   navigate(dest, (k === "contact" ? "c-" : "d-") + id);
                 }}
                 onOpenDesign={(code) => openInDesigner(code)}
@@ -1227,7 +1316,7 @@ function Dashboard({ session }) {
                    ssClampTab first, because a crew leader may hold the record and not
                    Orders -- and dumping them on a list they cannot read is the same trap
                    the onNavigate comment above documents. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
               />
             ) : null}
@@ -1329,7 +1418,7 @@ function Dashboard({ session }) {
                 all local, and unmount-on-tab-switch would silently bin it.
                 Deliberately NOT behind `!gateLocked`: an operator whose OWN tenant is
                 billing-locked must still be able to run the console. */}
-            {adminOpened && isOperator && (
+            {adminOpened && isOperator && !supportView && (
               <div style={{ display: activeTab === "admin" ? "block" : "none" }}>
                 <AdminShell onOpenAccount={openAccount}
                   sub={activeTab === "admin" ? sub : null} onSub={(x) => navigate("admin", x)} />
@@ -1339,7 +1428,7 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && isOperator && (
+            {activeTab === "projects" && isOperator && !supportView && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
             {!gateLocked && activeTab === "releases" && (
@@ -1568,7 +1657,7 @@ function Dashboard({ session }) {
           portal (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a
           bug while inside a builder's account is exactly when you want it, and unlike
           the Feedback bubble above there is no tenant attribution to get wrong. */}
-      {isOperator && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
+      {isOperator && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
 
       {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
           verified session's user id — the browser never says whose row to update. */}

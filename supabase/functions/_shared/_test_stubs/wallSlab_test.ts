@@ -106,7 +106,7 @@ Deno.test("two shelves at the same height on the same span collide", () => {
 });
 
 Deno.test("a double shelf's upper board blocks what a single one would not", () => {
-  // wallShelfDouble spans heightOffFloor..+20in, so a 60in shelf lands inside a 48in double.
+  // wallShelfDouble spans heightOffFloor..2h+2in, so a 60in shelf lands inside a 48in double.
   const dbl = { type: "doubleShelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 48 };
   assert(checkWallSlabOverlap(at(100), 4 * SC, [dbl], ITEMS, SC, { type: "shelf", heightOffFloorIn: 60 }));
   const single = { type: "shelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 48 };
@@ -218,4 +218,49 @@ Deno.test("snapping at the TYPE height while drawing the builder's depth hangs o
   for (const wall of WALLS) {
     assertEquals(outsideByFt(Number(bench.height), slabDepthFt(bench), wall), 0.5);
   }
+});
+
+// ── The gap between a double's boards IS its height off the floor (2026-09-01) ──────
+// Carolyn declined a second field for the spacing: "whatever the height is off the floor is
+// also the height between the next shelf." That turned a hard-coded 16in gap into arithmetic,
+// and the band and the 3D geometry now BOTH derive from it — buildInterior puts the top board
+// at 2h, this band ends a board above it. These cases exist because the pre-existing
+// double-shelf test passes under the OLD h+20 rule too, so nothing was pinning the change.
+
+Deno.test("a double's band tracks its height off the floor, not a fixed 16in gap", () => {
+  const band = (h: number) => ssSlabBand({ type: "doubleShelf", heightOffFloorIn: h }, ITEMS);
+  assertEquals(band(48), [48, 98]);   // top board at 96, band ends a board above
+  assertEquals(band(24), [24, 50]);
+  assertEquals(band(36), [36, 74]);
+  // The old rule was h + 20 for every h — a constant width. The new one widens with h.
+  const w48 = band(48)![1] - band(48)![0];
+  const w24 = band(24)![1] - band(24)![0];
+  assert(w48 > w24, "the band must widen as the shelf is mounted higher");
+});
+
+Deno.test("a shelf just under the double's TOP board collides — the old rule missed this", () => {
+  // 90in sits above the old h+20 ceiling of 68 and below the real top board at 96. Under the
+  // hard-coded gap this placement was allowed and drew a shelf through the upper board.
+  const dbl = { type: "doubleShelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 48 };
+  assert(checkWallSlabOverlap(at(100), 4 * SC, [dbl], ITEMS, SC, { type: "shelf", heightOffFloorIn: 90 }));
+});
+
+Deno.test("a shelf clear ABOVE the double's top board is still allowed", () => {
+  // The band must not become "blocks everything above it" — that is the workbench rule, and
+  // applying it here would stop a shelf hanging over a double the way one hangs over a bench.
+  const dbl = { type: "doubleShelf", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 48 };
+  assertFalse(checkWallSlabOverlap(at(100), 4 * SC, [dbl], ITEMS, SC, { type: "shelf", heightOffFloorIn: 99 }));
+});
+
+Deno.test("a single shelf's band is unchanged by any of this", () => {
+  const band = (h: number) => ssSlabBand({ type: "shelf", heightOffFloorIn: h }, ITEMS);
+  assertEquals(band(48), [48, 50]);
+  assertEquals(band(24), [24, 26]);
+});
+
+Deno.test("a double still hangs above a workbench — the property slice 1 shipped for", () => {
+  // The uprights added for Carolyn join the two BOARDS rather than reaching the floor, exactly
+  // so this stays true. A floor-standing post would force the band to start at 0.
+  const bench = { type: "workbench", wall: "north", x: 100, y: 0, widthFt: 4, heightOffFloorIn: 36 };
+  assertFalse(checkWallSlabOverlap(at(100), 4 * SC, [bench], ITEMS, SC, { type: "doubleShelf", heightOffFloorIn: 48 }));
 });

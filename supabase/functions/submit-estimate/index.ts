@@ -11,6 +11,7 @@ import { deHtml, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_sh
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -1754,6 +1755,31 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         resolvedAt: new Date().toISOString(),
         ...(resolved.reason ? { reason: resolved.reason } : {}),
       };
+    }
+
+    // METERED (migration 179) — and ONLY a real Avalara answer costs anything. A `fallback`
+    // resolve never left the building: it means Avalara is unconfigured, the address had no
+    // state/postcode, or the lookup failed, and billing a tenant for our own outage is the
+    // one outcome worth being careful about. Inert until `tax_lookup` is armed.
+    //
+    // Deliberately AFTER the stamp and deliberately unable to fail the submit: the tax is
+    // already on the snapshot and the customer is waiting on their quote. Losing a charge
+    // costs cents; losing the quote costs the builder a sale.
+    if (resolved.source === "avalara") {
+      const meter = await chargeTaxCalculation(supabase, {
+        clientId,
+        kind: "tax_lookup",
+        idem: taxLookupIdem(clientId, String(designId), resolved.rate, resolved.jurisdiction),
+        refType: "design",
+        refId: String(designId),
+        memo: `Sales tax lookup${resolved.jurisdiction ? ` — ${resolved.jurisdiction}` : ""}`,
+      });
+      if (!meter.charged && meter.reason === "error") {
+        logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "tax_meter",
+          message: `tax_lookup charge failed for ${designId}`,
+        }).catch(() => {});
+      }
     }
 
     // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).

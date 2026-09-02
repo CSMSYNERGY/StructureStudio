@@ -901,13 +901,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .select("id, name, email, user_id, active").order("position");
         if (error) throw error;
         const { data: ops, error: oErr } = await admin.from("app_operators")
-          .select("user_id, can_write, can_bill");
+          .select("user_id, can_write, can_bill, support_only");
         if (oErr) throw oErr;
         const byUser = new Map((ops || []).map((o) => [o.user_id, o]));
         return json({
           people: (people || []).map((pp) => {
             const o = pp.user_id ? byUser.get(pp.user_id) : null;
-            return { ...pp, isOperator: !!o, canWrite: !!(o && o.can_write) };
+            return { ...pp, isOperator: !!o, canWrite: !!(o && o.can_write), supportOnly: !!(o && o.support_only) };
           }),
           me: user.id,
         });
@@ -1019,6 +1019,34 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const { error: aErr } = await admin.from("admin_audit").insert({
           action: enabled ? "operator_added" : "operator_removed", target_client_id: null, row_count: null,
           note: `operator:${actorEmail} ${enabled ? "granted" : "revoked"} operator access for ${row.email || row.name}`,
+        });
+        if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
+        return json({ ok: true });
+      }
+
+      // Migration 176. The switch that turns a platform operator into a SUPPORT one: in
+      // view-as they wear the VIEWED tenant's owner access map instead of the blanket
+      // operator god view, Billing forced off, and the Admin + Projects consoles refused
+      // (adminAuth denies this account outright — the browser only hides the tabs).
+      //
+      // Carolyn, 2026-09-01, on why it exists: "he needs to be able to mirror it ... to where
+      // he can see just exactly what they have permission to." Without it the only way to
+      // check a builder's own permissions was to make a login on their tenant.
+      case "set_operator_support": {
+        const id = str(payload.id, 40);
+        const supportOnly = payload.supportOnly === true;
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row || !row.user_id) return json({ error: "That person does not have operator access." }, 400);
+        // Not yourself. Turning your own account into support mid-session takes away the
+        // Admin and Projects consoles — including THIS screen — and the way back is SQL.
+        if (row.user_id === user.id) {
+          return json({ error: "You cannot put your own account into support mode — you would lose this screen." }, 400);
+        }
+        const { error } = await admin.from("app_operators").update({ support_only: supportOnly }).eq("user_id", row.user_id);
+        if (error) throw error;
+        const { error: aErr } = await admin.from("admin_audit").insert({
+          action: "operator_support_only", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} set support_only=${supportOnly} for ${row.email || row.name}`,
         });
         if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
         return json({ ok: true });

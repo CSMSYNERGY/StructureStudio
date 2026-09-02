@@ -2056,15 +2056,88 @@ const ssDeHtml = (s) => String(s || "")
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
   .trim();
 const ssRound2 = (n) => Math.round(n * 100) / 100;
+// One pool of the line items — MUST match _shared/estimateLines.ts `poolOf`.
+const ssPoolOf = (lines, wantTaxable) => {
+  let sum = 0;
+  for (const li of lines) {
+    if (!!(li && li.nonTaxable) === wantTaxable) continue; // nonTaxable true => not the taxable pool
+    sum += ssRound2((Number(li && li.qty) || 0) * (Number(li && li.amount) || 0));
+  }
+  return ssRound2(sum);
+};
 // Totals over the snapshot — MUST match _shared/estimateLines.ts `totalFromSnapshot`.
+//
+// TAX IS PART OF THE TOTAL, and this used to implement the pre-tax branch ONLY. Since 158b
+// put `tax_cents` inside orders.total_cents, that omission made every figure here short by
+// exactly the tax on a taxed order, with two consequences that both read as something else:
+// `designPricedCents` came out below a tax-inclusive `o.total_cents`, so baselineDriftCents
+// was non-zero on EVERY taxed accepted order and the drift banner blamed a discarded
+// revision for arithmetic; and the totals block printed a pre-tax total beside a PDF the
+// customer had signed at the taxed one. Only bit tenants with invoice_in_ghl = false and a
+// non-zero ss_tax_rate, which is why it survived — that was one tenant on 2026-09-02.
+//
+// The two shapes match _shared/estimatePdf.ts, so screen and paper cannot disagree:
+//   untaxed -> `subtotal` is GROSS and the caller renders Subtotal / Discount / Total.
+//   taxed   -> `subtotal` is NET of discounts (the PDF's own "Subtotal" row on a taxed
+//              document) and the caller renders Subtotal / <tax label> / Total. `discount`
+//              is still reported for reference but MUST NOT be subtracted again — it is
+//              already inside `subtotal`, exactly as the paper has it.
 const ssSnapTotals = (snap) => {
   const lines = (snap && Array.isArray(snap.lines)) ? snap.lines : [];
-  let subtotal = 0;
-  for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
-  subtotal = ssRound2(subtotal);
-  const discount = Number(snap && snap.discount) || 0;
-  const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
-  return { subtotal, discount, total };
+  const rawTax = (snap && snap.tax && snap.tax.amount != null) ? Number(snap.tax.amount) : null;
+  const tax = (rawTax != null && isFinite(rawTax)) ? Math.max(0, ssRound2(rawTax)) : null;
+
+  if (tax == null) {
+    let subtotal = 0;
+    for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+    subtotal = ssRound2(subtotal);
+    const discount = Number(snap && snap.discount) || 0;
+    // Clamped at >= 0 like estimatePdf.ts' Total row (audit 2026-08-20).
+    const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
+    return { subtotal, discount, tax: null, taxLabel: null, total };
+  }
+
+  // Discounts split by pool, as subtotalsFromSnapshot does: a non-taxable discount row must
+  // not shrink the base the tax was charged on, or the customer cannot check the tax against
+  // the figure printed above it.
+  const taxable = ssPoolOf(lines, true);
+  const nonTaxable = ssPoolOf(lines, false);
+  let taxableDiscount, nonTaxableDiscount;
+  const rows = snap.discounts && snap.discounts.rows;
+  if (Array.isArray(rows)) {
+    let t = 0, n = 0;
+    for (const r of rows) {
+      const amt = ssRound2(Math.abs(Number(r && r.amount) || 0));
+      if (amt <= 0) continue;
+      // Absent `taxable` reads as taxable — the designer's default for a new row, and the
+      // reading that never quietly removes something from the tax base.
+      if (r && r.taxable === false) n += amt; else t += amt;
+    }
+    taxableDiscount = ssRound2(t); nonTaxableDiscount = ssRound2(n);
+  } else {
+    taxableDiscount = ssRound2(Math.max(0, Number(snap.discount) || 0));
+    nonTaxableDiscount = 0;
+  }
+  const taxableBase = Math.max(0, ssRound2(taxable - taxableDiscount));
+  const nonTaxableNet = Math.max(0, ssRound2(nonTaxable - nonTaxableDiscount));
+  const subtotal = ssRound2(taxableBase + nonTaxableNet);
+
+  // "Sales tax (7.25% · Bibb County, GA)" — the rate and jurisdiction are a LABEL. The
+  // amount beside them is the stored figure the customer signed for, never rate x base
+  // recomputed here. Same construction as estimatePdf.ts.
+  const rate = Number(snap.tax.rate);
+  const pct = (isFinite(rate) && rate > 0) ? `${String(ssRound2(rate * 100)).replace(/\.0+$/, "")}%` : "";
+  const juris = String((snap.tax.jurisdiction || "")).trim();
+  const paren = [pct, juris].filter(Boolean).join(" · ");
+  const base = String(snap.tax.label || "").trim() || "Sales tax";
+
+  return {
+    subtotal,
+    discount: ssRound2(taxableDiscount + nonTaxableDiscount),
+    tax,
+    taxLabel: paren ? `${base} (${paren})` : base,
+    total: Math.max(0, ssRound2(subtotal + tax)),
+  };
 };
 const ssUsd = (n) => {
   if (n == null || !isFinite(Number(n))) return "—";
@@ -2474,9 +2547,17 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
           <span>Subtotal</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.subtotal)}</span>
         </div>
-        {totals.discount > 0 && (
+        {/* On a taxed document the discounts are already netted into Subtotal, exactly as
+            estimatePdf.ts prints it — showing a Discount row here too would read as a second
+            deduction the Total does not make. Untaxed keeps the collapsed row it always had. */}
+        {totals.tax == null && totals.discount > 0 && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
             <span>Discount</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>-{ssUsd(totals.discount)}</span>
+          </div>
+        )}
+        {totals.tax != null && (
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+            <span>{totals.taxLabel}</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>

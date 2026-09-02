@@ -556,12 +556,18 @@ function ssFallbackTab(access) {
 // to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
-function ssClampTab(tab, isOperator, canAdmin, access) {
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false) {
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /portal/reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
   if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
-  if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
+  // Accounts is the SWITCHER, and a support operator needs it — it is how they reach the
+  // next builder. Admin and Projects are the operator CONSOLES (the admin console is where
+  // delete_client lives, and Projects is our internal bug board), and someone standing in a
+  // builder's shoes has no business in either. Splitting the old single line is the whole
+  // difference; `supportView` defaults false so every existing caller is unchanged.
+  if (tab === "accounts") return isOperator ? tab : ssFallbackTab(access);
+  if (tab === "admin" || tab === "projects") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;

@@ -21,6 +21,11 @@ type Tables = {
   client_users?: any[];
   app_operators?: any | null;
   client_configs?: string[];   // slugs that exist
+  /** The VIEWED tenant's owner row, as the support-operator branch reads it. A separate
+   *  fixture because that query filters on role='owner' against a DIFFERENT tenant than the
+   *  caller's own client_users row — serving one array to both would let a test pass by
+   *  reading the operator's own mapping and never notice the branch was skipped. */
+  tenant_owner?: any[];
 };
 
 const audits: any[] = [];
@@ -41,7 +46,14 @@ function makeAdmin(t: Tables, opts: { auditFails?: boolean } = {}) {
       const chain: any = {
         select: () => chain,
         eq: () => chain,
-        limit: () => Promise.resolve({ data: t.client_users ?? [], error: null }),
+        // The support branch's owner lookup is the one client_users read that filters on
+        // role; everything else is the caller's own mapping.
+        limit: () => Promise.resolve({
+          data: (table === "client_users" && chain._eq && chain._eq.role === "owner")
+            ? (t.tenant_owner ?? [])
+            : (t.client_users ?? []),
+          error: null,
+        }),
         maybeSingle: () => {
           if (table === "app_operators") return Promise.resolve({ data: t.app_operators ?? null, error: null });
           if (table === "client_configs") {
@@ -51,8 +63,10 @@ function makeAdmin(t: Tables, opts: { auditFails?: boolean } = {}) {
           return Promise.resolve({ data: null, error: null });
         },
       };
-      // capture the slug passed to .eq("client_id", v) for client_configs
-      chain.eq = (_col: string, val: any) => { chain._slug = val; return chain; };
+      // capture the slug passed to .eq("client_id", v) for client_configs, and every column
+      // filtered on, so `limit` can tell the support branch's owner lookup apart.
+      chain._eq = {};
+      chain.eq = (col: string, val: any) => { chain._eq[col] = val; if (col === "client_id") chain._slug = val; return chain; };
       chain.select = () => chain;
       return chain;
     },
@@ -243,4 +257,139 @@ Deno.test("audit row carries actor + target", async () => {
   assertEquals(audits[0].target_client_id, "victim");
   assertEquals(audits[0].actor_email, "op@csmsynergy.com");
   assertEquals(audits[0].actor_user_id, "u1");
+});
+
+// ── The SUPPORT operator (migration 176) ──────────────────────────────────────
+// Carolyn, 2026-09-01: "when I log in as Junior Barnes, I get MY permissions, not Junior
+// Barnes permissions ... I can't go in and mirror one of them." Every operator in view-as was
+// handed effectiveAccess("owner","owner",null) — edit on all 18 areas — and the operator
+// branch never called checkGate at all, so nothing about the viewed tenant constrained them.
+//
+// These tests exist because BOTH halves of that are easy to half-fix. Narrowing the access map
+// without adding the gate call leaves a support operator carrying a narrow map that nothing
+// reads; adding the gate without narrowing the map changes nothing. The refusal test below is
+// the one that fails if either half is missing.
+
+const SUPPORT = { user_id: "u1", email: "jonathan@csmsynergy.com", can_write: true, can_bill: true, support_only: true };
+const PLATFORM = { user_id: "u1", email: "op@csmsynergy.com", can_write: true, can_bill: true, support_only: false };
+const BILLING_GATE = { save: { area: "settings_billing", level: "edit" as const } };
+const TENANT_OWNER = [{ role: "owner", title: "owner", access: null }];
+
+Deno.test("support operator wears the viewed tenant's owner map, minus Billing", async () => {
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { readActions: READS },
+  );
+  assertEquals(r.ok, true);
+  const ctx = (r as any).ctx;
+  // The owner short-circuits to edit everywhere, so everything EXCEPT billing is edit — which
+  // is what makes the one clamped area the whole assertion here.
+  assertEquals(ctx.access.settings_billing, "none");
+  assertEquals(ctx.access.designs, "edit");
+  assertEquals(ctx.access.settings_team, "edit");
+  assertEquals(ctx.operator.supportOnly, true);
+});
+
+Deno.test("support operator is REFUSED a Billing-gated action — the map is actually consulted", async () => {
+  // If checkGate is missing from the operator branch, this returns ok:true and the support
+  // account edits the card that pays for the product.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_GATE, readActions: READS },
+  );
+  assertEquals(r.ok, false);
+  assertEquals((r as any).status, 403);
+});
+
+Deno.test("a PLATFORM operator is unchanged by all of this", async () => {
+  // The regression guard. Support is a new behaviour, not a narrowing of the operator account
+  // CSM Synergy staff use to configure and repair tenants — a subscription lapse or a tenant's
+  // own access map must never lock us out of fixing their account.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: PLATFORM, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { gates: BILLING_GATE, readActions: READS },
+  );
+  assertEquals(r.ok, true);
+  const ctx = (r as any).ctx;
+  assertEquals(ctx.access.settings_billing, "edit");
+  assertEquals(ctx.operator.supportOnly, false);
+  assertEquals(ctx.canRead("settings_billing"), true);
+});
+
+Deno.test("support operator is refused requireBilling even holding can_bill", async () => {
+  // Two separate axes that an account can carry at once. Forcing the refusal here means it
+  // does not depend on anyone remembering to clear can_bill when they tick support_only.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: TENANT_OWNER }),
+    { readActions: READS, requireBilling: true },
+  );
+  assertEquals(r.ok, false);
+  assertEquals((r as any).status, 403);
+  assertEquals((r as any).body.error, "This operator account cannot change billing.");
+});
+
+Deno.test("a tenant with NO owner row falls back to the admin preset, not to nothing", async () => {
+  // Created but never invited, or the owner removed. "No access" would make support useless on
+  // exactly the accounts most likely to need it.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: [] }),
+    { readActions: READS },
+  );
+  assertEquals(r.ok, true);
+  const ctx = (r as any).ctx;
+  assertEquals(ctx.access.settings_billing, "none");
+  assertEquals(ctx.access.designs, "edit");
+  assertEquals(ctx.access.settings_structures, "edit");
+});
+
+Deno.test("support operator mirrors a NARROWED owner rather than assuming full access", async () => {
+  // An owner short-circuits to everything, so a non-owner title is what proves the map is
+  // really resolved from the row and not hardcoded. A driver sees deliveries and little else.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "save", targetClientId: "victim" }),
+    makeAdmin({
+      client_users: TEAM,
+      app_operators: SUPPORT,
+      client_configs: ["victim"],
+      tenant_owner: [{ role: "user", title: "driver", access: null }],
+    }),
+    { readActions: READS },
+  );
+  assertEquals(r.ok, true);
+  const ctx = (r as any).ctx;
+  assertEquals(ctx.access.delivery_schedule, "edit");
+  assertEquals(ctx.access.designs, "none");
+  assertEquals(ctx.canRead("designs"), false);
+  assertEquals(ctx.canRead("delivery_schedule"), true);
+  assertEquals(ctx.canEdit("delivery_schedule"), true);
+});
+
+Deno.test("a read-only support operator still cannot edit what it can see", async () => {
+  // can_write and the area map are ANDed, not alternatives.
+  signedIn();
+  const r = await resolveTenant(
+    req({ action: "status", targetClientId: "victim" }),
+    makeAdmin({
+      client_users: TEAM,
+      app_operators: { ...SUPPORT, can_write: false },
+      client_configs: ["victim"],
+      tenant_owner: TENANT_OWNER,
+    }),
+    { readActions: READS },
+  );
+  assertEquals(r.ok, true);
+  const ctx = (r as any).ctx;
+  assertEquals(ctx.canRead("designs"), true);
+  assertEquals(ctx.canEdit("designs"), false);
 });

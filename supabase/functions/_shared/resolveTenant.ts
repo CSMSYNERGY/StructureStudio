@@ -39,6 +39,9 @@ export type OperatorCtx = {
   email: string;
   canWrite: boolean;
   canBill: boolean;
+  /** A SUPPORT operator sees the tenant the way its own owner does, minus Billing — rather
+   *  than the god view every other operator gets. See the support branch below. */
+  supportOnly: boolean;
 };
 
 export type TenantCtx = {
@@ -295,7 +298,7 @@ export async function resolveTenant(
   // returns no rows for EVERYONE and would silently deny every operator.
   const { data: op, error: opErr } = await admin
     .from("app_operators")
-    .select("user_id, email, can_write, can_bill")
+    .select("user_id, email, can_write, can_bill, support_only")
     .eq("user_id", user.id)
     .maybeSingle();
   if (opErr) return { ok: false, status: 500, body: { error: opErr.message } };
@@ -319,17 +322,74 @@ export async function resolveTenant(
   if (!isRead && !op.can_write) {
     return { ok: false, status: 403, body: { error: "This operator account is read-only." } };
   }
-  if (opts.requireBilling && !op.can_bill) {
+  // A support operator is refused billing REGARDLESS of can_bill. The two flags are separate
+  // axes and an account could carry both; forcing it here means the refusal does not depend on
+  // anyone remembering to clear can_bill when they tick support_only. The area map below
+  // clamps settings_billing to "none" for the same reason, in the other direction.
+  if (opts.requireBilling && (!op.can_bill || op.support_only)) {
     return { ok: false, status: 403, body: { error: "This operator account cannot change billing." } };
   }
 
   const actor = { userId: user.id, email: op.email || user.email || "" };
   const a = makeAudit(admin, actor, clientId);
-  // An operator in view-as has NO client_users row on the viewed tenant, so there is no
-  // title or override map to resolve. Their rights come from app_operators and were already
-  // enforced above (can_write / can_bill); per-area access is therefore full, and the
+
+  // ── The operator's access map ────────────────────────────────────────────────
+  // A PLATFORM operator in view-as has NO client_users row on the viewed tenant, so there is
+  // no title or override map to resolve. Their rights come from app_operators and were
+  // already enforced above (can_write / can_bill); per-area access is therefore full, and the
   // read-only operator is still blocked by the can_write gate rather than by this map.
-  const opAcc = effectiveAccess("owner", "owner", null);
+  //
+  // A SUPPORT operator is the other shape, and it exists because the god view made one job
+  // impossible. Carolyn, 2026-09-01: "when I log in as Junior Barnes, I get MY permissions,
+  // not Junior Barnes permissions" — so she could not check her own per-area rules, and
+  // neither could support answer "what is this builder actually seeing?" The support operator
+  // resolves the VIEWED TENANT'S OWNER and wears their map instead.
+  //
+  // Billing is then forced off. The owner's own map says `edit` on it — owners short-circuit
+  // to everything — and mirroring that would hand a support account the card that pays for
+  // the product. "What the owner sees" is the goal; their payment details are not part of
+  // answering a support question.
+  //
+  // NO OWNER ROW is a real state — a tenant created but never invited, or one whose owner was
+  // removed — and the safe reading is NOT "no access", which would make support useless on
+  // exactly the accounts most likely to need it. It falls back to the admin preset, which is
+  // this codebase's existing name for "runs the business, does not see Billing" and is
+  // strictly narrower than the god view it replaces.
+  const supportOnly = !!op.support_only;
+  let opAcc: Record<string, Level>;
+  if (!supportOnly) {
+    opAcc = effectiveAccess("owner", "owner", null);
+  } else {
+    // limit(1), not maybeSingle(): a duplicate owner row must not lock support out entirely.
+    // Same reasoning as the client_users read on the normal path above.
+    const { data: ownerRows, error: ownerErr } = await admin
+      .from("client_users")
+      .select("role, title, access")
+      .eq("client_id", clientId)
+      .eq("role", "owner")
+      .limit(1);
+    if (ownerErr) return { ok: false, status: 500, body: { error: ownerErr.message } };
+    const ownerRow = ownerRows && ownerRows[0];
+    opAcc = {
+      ...(ownerRow
+        ? effectiveAccess(ownerRow.role, ownerRow.title, ownerRow.access)
+        : effectiveAccess("user", "admin", null)),
+      settings_billing: "none",
+    };
+  }
+
+  // ⚠️ THE LINE THAT MAKES THE MAP REAL. The operator branch has never consulted its own
+  // access map — every gated action reached its handler because checkGate was only ever
+  // called on the normal path. Narrowing opAcc above without this is decorative: a support
+  // operator would carry the owner's map and still be waved through every edge function.
+  // Platform operators keep the old behaviour deliberately — their map is full, so running
+  // the gate would change nothing, and skipping it keeps this a support-only behaviour
+  // change rather than a new way for an existing operator to be refused mid-incident.
+  if (supportOnly && gated) {
+    const denied = checkGate(gate, opAcc);
+    if (denied) return { ok: false, status: 403, body: { error: denied } };
+  }
+
   return {
     ok: true,
     ctx: {
@@ -337,10 +397,20 @@ export async function resolveTenant(
       role: "operator",
       userId: user.id,
       userEmail: user.email ?? "",
-      operator: { userId: actor.userId, email: actor.email, canWrite: !!op.can_write, canBill: !!op.can_bill },
+      operator: {
+        userId: actor.userId,
+        email: actor.email,
+        canWrite: !!op.can_write,
+        canBill: !!op.can_bill,
+        supportOnly,
+      },
       access: opAcc,
-      canRead: () => true,
-      canEdit: () => !!op.can_write,
+      // Support answers per area, from the map. A platform operator keeps the blanket yes —
+      // narrowing it would silently change what every existing operator can do.
+      canRead: supportOnly ? (area: string) => canRead(opAcc, area) : () => true,
+      canEdit: supportOnly
+        ? (area: string) => !!op.can_write && canEdit(opAcc, area)
+        : () => !!op.can_write,
       payload,
       action,
       audit: (act, n = null, note = null) => a(act, n, note, false).catch(() => {}),

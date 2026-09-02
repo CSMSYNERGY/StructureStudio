@@ -6,6 +6,7 @@ import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logErr
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
+import { chargeTaxCalculation, taxInvoiceIdem, taxLookupIdem } from "../_shared/taxMeter.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
@@ -710,6 +711,17 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
 
+  // WHO SKIPS THE PAID-FEATURE CHECKS. A platform operator does, and must: they are CSM
+  // Synergy staff configuring, demoing and repairing an account, and a subscription lapse
+  // cannot be allowed to lock us out of fixing it.
+  //
+  // A SUPPORT operator does NOT, and that is the entire point of the flag. They exist to see
+  // what the builder sees; an exemption here would show them Real-Time Pricing and the CRM on
+  // a tenant that never bought either, which is the opposite of mirroring — and it is the
+  // shape of bug that gets support to confidently talk a customer through a screen the
+  // customer does not have.
+  const entitlementExempt = Boolean(operator && !operator.supportOnly);
+
   // ── Record that a building has been sold ────────────────────────────────────────
   // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
   // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in
@@ -1338,7 +1350,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // up FOR tenants (the same isOperator bypass featureOn() has). Errors reading billing
   // fail CLOSED — a paid gate that fails open is no gate (the wallet's posture).
   const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
-  if (RTP_ACTIONS.has(action) && !operator) {
+  if (RTP_ACTIONS.has(action) && !entitlementExempt) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
     catch (e) { return dbFail(req, clientId, "check your Real-Time Pricing subscription", e); }
@@ -1377,7 +1389,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Carolyn asked for ("they only get the list view" — the list still has to WORK).
   const crmGated = action.startsWith("crm_") &&
     !(action === "crm_record" && payload?.kind === "design");
-  if (crmGated && !operator) {
+  if (crmGated && !entitlementExempt) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
@@ -5860,6 +5872,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           ...(resolvedCo.reason ? { reason: resolvedCo.reason } : {}),
         };
       }
+      // METERED (179) — the third and last place a rate is resolved. A change order re-asks
+      // Avalara (Carolyn's rule: a change order is a fresh lookup), so under per-lookup
+      // pricing it is a real billable call and leaving it out would meter two of three.
+      if (resolvedCo.source === "avalara") {
+        const meterCo = await chargeTaxCalculation(admin, {
+          clientId,
+          kind: "tax_lookup",
+          idem: taxLookupIdem(clientId, String(shortCode), resolvedCo.rate, resolvedCo.jurisdiction),
+          refType: "change_order",
+          refId: String(shortCode),
+          memo: `Sales tax lookup${resolvedCo.jurisdiction ? ` — ${resolvedCo.jurisdiction}` : ""}`,
+          actorUserId: userId ?? null,
+        });
+        if (!meterCo.charged && meterCo.reason === "error") {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: "tax_meter",
+            message: `tax_lookup charge failed for change order on ${shortCode}`,
+          }).catch(() => {});
+        }
+      }
     }
 
     // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption
@@ -6544,6 +6576,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
         // Record BEFORE the email: from here a retry re-sends this exact number + document.
         await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
+
+        // METERED (migration 179), and this is the right side of the record: the invoice now
+        // EXISTS and every retry from here re-sends this same number, so the charge keys on
+        // that number and a resend collapses onto it rather than billing twice. Only charged
+        // when the tax on it came from Avalara — a fallback rate cost us nothing to produce.
+        // Inert until `tax_invoice` is armed, and it cannot fail the send: the invoice is
+        // already recorded and the customer is waiting for it.
+        if ((d.estimate_lines as { tax?: { source?: unknown } } | null)?.tax?.source === "avalara") {
+          const meter = await chargeTaxCalculation(admin, {
+            clientId,
+            kind: "tax_invoice",
+            idem: taxInvoiceIdem(clientId, shortCode, invNumber),
+            refType: "invoice",
+            refId: String(invNumber),
+            memo: `Sales tax on invoice ${invNumber}`,
+            actorUserId: userId ?? null,
+          });
+          if (!meter.charged && meter.reason === "error") {
+            logEdgeError({
+              fn: "portal-settings", req, clientId, code: "tax_meter",
+              message: `tax_invoice charge failed for ${shortCode} (invoice ${invNumber})`,
+            }).catch(() => {});
+          }
+        }
 
         // The email. Contact read only here (the PII discipline of 2026-08-07). There is
         // NO GHL fallback in SS mode — there is no GHL invoice object to email.

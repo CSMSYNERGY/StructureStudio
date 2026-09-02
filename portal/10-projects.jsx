@@ -696,6 +696,22 @@ function PMPeopleEditor({ onChanged }) {
               can edit
             </label>
           )}
+          {/* Support mode (migration 176). Carolyn 2026-09-01: "he needs to be able to mirror
+              it ... to where he can see just exactly what they have permission to." Off, this
+              account sees every builder through the operator god view; on, it sees the account
+              the way that builder's OWNER does. Never offered for your own row — the server
+              refuses it too, because it would take this screen away from you. */}
+          {o.isOperator && o.user_id !== me && (
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: o.supportOnly ? "#7C3AED" : "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
+              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Projects console. Use this for support.">
+              <input type="checkbox" checked={!!o.supportOnly} disabled={busy}
+                onChange={(ev) => {
+                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Projects consoles, including this screen.`)) { load(); return; }
+                  run({ action: "set_operator_support", id: o.id, supportOnly: ev.target.checked });
+                }} />
+              support mode
+            </label>
+          )}
 
           {o.user_id === me
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>

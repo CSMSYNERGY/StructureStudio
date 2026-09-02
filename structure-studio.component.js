@@ -214,7 +214,15 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
 const SS_SLAB_BANDS = {
   wallBench: (h) => [0, h],
   wallShelf: (h) => [h, h + 2],
-  wallShelfDouble: (h) => [h, h + 20],
+  // The gap between the two boards IS the height off the floor. Carolyn declined a second
+  // field for it (2026-09-01): "let's just program it right now in the 3D to be whatever the
+  // height is off the floor is also the height between the next shelf. If that doesn't work
+  // for people, then we will change it." So the top board sits at 2h and the band ends a
+  // board's thickness above it, the same allowance the single carries.
+  // This MUST track the geometry below. It was a flat h+20 for a hard-coded 16in gap, and a
+  // band that no longer matches what is drawn fails in both directions at once: two doubles
+  // at one height stop refusing each other, and a legal placement starts being refused.
+  wallShelfDouble: (h) => [h, 2 * h + 2],
 };
 function ssSlabModel(type, itemTypes) {
   const c = itemTypes && itemTypes[type];
@@ -3801,8 +3809,73 @@ function buildShed3DModel(THREE, p) {
       guv.needsUpdate = true;
     }
   }
+  // ── SINGLE SLANT: the tall band above the plate is a WALL, not a soffit ────────────
+  // Carolyn, 2026-09-01: "this thing needs some help, the siding needs ... go all the way up."
+  //
+  // For gable and gambrel every swept side IS roof or soffit, so gableMat is right. A SHED
+  // profile is the triangle [-S/2,H] -> [-S/2,H+rise] -> [S/2,H], and ONE of its swept sides
+  // is the vertical face at u = -S/2 running the full length L: that is the high eave wall's
+  // band above the plate. It was drawing in flat body colour while the wall directly beneath
+  // it carried cladding, so the siding visibly stopped at the plate line.
+  //
+  // The fix is the material GROUP again -- the same move that gave the gable CAPS their
+  // cladding -- plus a UV rewrite, because the two surfaces do not share a convention.
+  // ExtrudeGeometry's side UVs are (y, 1-z)-ish and rotated 90 degrees from the wall's, so
+  // reusing them would run vertical battens sideways: a different bug wearing this one's
+  // clothes. wallBox anchors u to the ABSOLUTE run along the wall and v to the ABSOLUTE
+  // height, both in feet, so the band is re-UV'd into that same frame and lands in phase
+  // with the wall below by construction rather than by a tuned offset:
+  //   uAxisIsX -> the tall wall is WEST  (U = +z, origin -bldgH/2). rg carries position.z
+  //               = -L/2 and L = bldgH, so the offset and the origin cancel: u = local z.
+  //   else     -> the tall wall is NORTH (U = +x, origin -bldgW/2). rg carries rotation.y
+  //               = -PI/2 and position.x = L/2, which mirrors the run: u = L - local z.
+  // v is the profile's own y, which is already world height (rg has no y offset).
+  //
+  // ⚠️ RESIDUAL, deliberately left: the proud relief strips for batten/rib above the plate
+  // are built only on the two CAP faces, so this band gets the texture but not the 3D ribs.
+  // The texture is what reads as "the siding stops"; the strips are a separate pass and
+  // adding them here without seeing it would be guessing at a second thing.
+  if ((roofCfg && roofCfg.type) === "shed" && gableGeom.groups && gableGeom.groups.length === 2) {
+    const gpos = gableGeom.attributes.position, guv2 = gableGeom.attributes.uv;
+    const caps = gableGeom.groups[0], sides = gableGeom.groups[1];
+    if (gpos && guv2 && caps && sides) {
+      const inTallPlane = (i) => Math.abs(gpos.getX(i) + S / 2) < 1e-4;
+      // Non-indexed geometry: walk the side range three vertices at a time.
+      const triTall = [];
+      for (let t = 0; t < sides.count; t += 3) {
+        const i = sides.start + t;
+        triTall.push(inTallPlane(i) && inTallPlane(i + 1) && inTallPlane(i + 2));
+      }
+      // Both guards matter. NONE means the profile is not the shape we reasoned about;
+      // ALL would mean the whole side set sits in one plane, which cannot be a roof. Either
+      // way, fall through to today's behaviour rather than repainting the soffit.
+      if (triTall.some(Boolean) && !triTall.every(Boolean)) {
+        for (let k = 0; k < triTall.length; k++) {
+          if (!triTall[k]) continue;
+          for (let j = 0; j < 3; j++) {
+            const i = sides.start + k * 3 + j;
+            const lz = gpos.getZ(i);
+            guv2.setXY(i, uAxisIsX ? lz : (L - lz), gpos.getY(i));
+          }
+        }
+        guv2.needsUpdate = true;
+        // Re-cut the groups so the band draws with wallMat. Contiguous runs, so a future
+        // profile with the wall face split across the list still resolves correctly.
+        gableGeom.clearGroups();
+        gableGeom.addGroup(caps.start, caps.count, 0);
+        let k = 0;
+        while (k < triTall.length) {
+          const want = triTall[k];
+          let n = 1;
+          while (k + n < triTall.length && triTall[k + n] === want) n++;
+          gableGeom.addGroup(sides.start + k * 3, n * 3, want ? 0 : 1);
+          k += n;
+        }
+      }
+    }
+  }
   rg.add(new THREE.Mesh(gableGeom,
-    (gableGeom.groups && gableGeom.groups.length === 2) ? [wallMat, gableMat] : gableMat));
+    (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat));
 
   // Height of the roof profile at a given profile-u. The profile is just the dedup'd top
   // polyline, so one piecewise-linear walk serves gable, gambrel and shed alike.
@@ -4382,18 +4455,40 @@ function buildShed3DModel(THREE, p) {
       g.userData = { itemId: it.id, floorItem: true };
       interiorGroup.add(g);
     } else if (c && (c.modelKey === "wallShelf" || c.modelKey === "wallShelfDouble")) {
-      // A mounted board hugging its wall at the builder's height — two boards for a double,
-      // 16 in apart. Unlike the bench it has no legs: nothing stands on the floor.
+      // A mounted board hugging its wall at the builder's height. A double gets a second board
+      // the SAME distance above the first as the first is above the floor — Carolyn's decision
+      // (2026-09-01) not to add a second field for the gap. Unlike the bench neither board
+      // reaches the floor; the uprights below join the two rather than standing on anything.
+      // Keep SS_SLAB_BANDS.wallShelfDouble in step: it encodes this same arithmetic, and the
+      // 2D collision rules read it while this draws the picture.
       const w = it.widthFt || c.width, d = it.heightFt || c.height;
       const g = new THREE.Group();
       const shelfMat = mat(D3_COLORS.bench);
       const baseY = (Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : c.heightOffFloorIn) || 48) / 12;
-      const tiers = c.modelKey === "wallShelfDouble" ? [baseY, baseY + 16 / 12] : [baseY];
+      const isDouble = c.modelKey === "wallShelfDouble";
+      const tiers = isDouble ? [baseY, baseY * 2] : [baseY];
       tiers.forEach((y) => {
         const board = box(shelfMat, w, 0.12, d);
         board.position.y = y;
         g.add(board);
       });
+      if (isDouble) {
+        // THE UPRIGHTS GO BETWEEN THE BOARDS, NOT DOWN TO THE FLOOR. Carolyn described "a 2x4
+        // that goes from the top ... all the way down", and taking that literally to the floor
+        // would make this a standing unit: its slab band would have to become [0, top], which
+        // kills the one thing the shelf shipped for — hanging above a workbench. Joining the
+        // two boards reads as the same piece of timber and leaves the band mounted.
+        const postH = baseY - 0.12;                 // top of the lower board to under the upper
+        if (postH > 0.05) {                          // a shelf mounted almost on the floor gets none
+          const postW = 0.125, postD = 0.291;        // a real 2x4; this file rounds elsewhere
+          const bays = Math.max(1, Math.ceil(w / 4)); // one at each end, then every <= 4 ft
+          for (let k = 0; k <= bays; k++) {
+            const post = box(shelfMat, postW, postH, Math.min(postD, d));
+            post.position.set(-w / 2 + postW / 2 + (k / bays) * (w - postW), baseY * 1.5, 0);
+            g.add(post);
+          }
+        }
+      }
       if (it.rotation === 90) g.rotation.y = Math.PI / 2;
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
@@ -5003,6 +5098,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const ph = d3PropSpec(it.propKind).h || 3;
           highlight.scale.set((rot ? d0 : w) + 0.3, ph + 0.3, (rot ? w : d0) + 0.3);
           highlight.position.set(cx, ph / 2, cz);
+        } else if (c.modelKey === "wallShelf" || c.modelKey === "wallShelfDouble") {
+          // A shelf hangs; it does not stand. The bench-height box below starts at the floor
+          // and stops at 3 ft, so it drew the outline in the wrong place for a single at 48 in
+          // and cut a double off below its top board entirely. Mirror what buildInterior draws:
+          // the top board is at 2h for a double, h for a single.
+          const bh = (Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : c.heightOffFloorIn) || 48) / 12;
+          const top = (c.modelKey === "wallShelfDouble" ? bh * 2 : bh) + 0.12;
+          highlight.scale.set((rot ? d0 : w) + 0.3, top + 0.3, (rot ? w : d0) + 0.3);
+          highlight.position.set(cx, top / 2, cz);
         } else {
           highlight.scale.set((rot ? d0 : w) + 0.3, D3.BENCH_H + 0.3, (rot ? w : d0) + 0.3);
           highlight.position.set(cx, D3.BENCH_H / 2, cz);

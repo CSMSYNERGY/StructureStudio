@@ -83,10 +83,36 @@ export async function checkAdminAuth(
         // was iframed behind the shared password, which incidentally gated the same
         // actions; bringing Admin in natively removes that accident, so the real check
         // has to exist. `_shared/resolveTenant.ts:197` has always selected all four.
-        .select("user_id, email, can_write, can_bill")
+        .select("user_id, email, can_write, can_bill, support_only")
         .eq("user_id", user.id)
         .maybeSingle();
       if (opErr) return { ok: false, status: 500, body: { error: opErr.message } };
+
+      // ⛔ A SUPPORT OPERATOR IS NOT AN ADMIN, AND THIS CONSOLE IS NOT THEIRS (migration 176).
+      // support_only exists so somebody answering a builder's question sees that builder's
+      // portal the way its OWNER does. This console is the opposite of that: it is
+      // cross-tenant and it is ours — `delete_client` lives here, so do `set_billing`,
+      // `wallet_credit` and `get_billing_overview`, which reads every tenant's revenue.
+      // Nothing in "mirror the owner" grants any of it.
+      //
+      // ENFORCED HERE RATHER THAN IN THE BROWSER, and that distinction is the whole point.
+      // 12-shell hides the Admin tab and ssClampTab refuses the route for a support account,
+      // but this repo has written the lesson down more than once: the UI hiding a tab is a
+      // COURTESY, NOT A CONTROL (portal-commissions' 403 carries the same note). The function
+      // is directly callable with nothing but a session, so the refusal has to live at the
+      // gate. Audited like the non-operator case below, because a support account reaching
+      // for the admin console is worth being able to see after the fact.
+      //
+      // The PASSWORD path is deliberately untouched: it is the break-glass route and carries
+      // no operator row at all. A support operator is not expected to hold ADMIN_PASSWORD.
+      if (op && op.support_only) {
+        await auditNote(
+          admin,
+          "admin_auth_support_operator_denied",
+          `user=${op.email || user.email || user.id} action=${attemptedAction}`,
+        );
+        return { ok: false, status: 403, body: { error: "Operator access required." } };
+      }
 
       if (op) {
         return {

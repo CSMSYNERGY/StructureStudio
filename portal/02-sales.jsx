@@ -1181,11 +1181,20 @@ const CRM_SECTIONS = [
 // actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
 // missing tab reads as "not built", a greyed one reads as "next", and she is showing this
 // at a trade show.
+// Why a THIRD reason a tab can be off, beside "not built" and "not your permission": the
+// account has not bought the CRM. Blaming the reader's permissions for a billing state sends
+// an owner — who has every permission there is — off to Team looking for a switch that is not
+// there. Worded to match the 403 portal-settings returns for the same prefix, so the greyed
+// hint and any refusal that reaches the browser tell one story.
+const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
+
 const CRM_TABS = [
   // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
   // a tab that is merely out of this person's reach — it is built, they just cannot write.
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit, hint: "You don't have permission to log activities." },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
+  { key: "activity", label: "Activity", enabled: (c) => c.canEdit,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to log activities.") },
+  { key: "note", label: "Notes", enabled: (c) => c.canEdit,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to add notes.") },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
   // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
@@ -1217,7 +1226,9 @@ const CRM_TABS = [
   {
     key: "sms", label: "SMS",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready),
-    hint: (c) => (!c.canEdit
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : !c.canEdit
       ? "You don't have permission to text contacts."
       : !(c.contact && c.contact.phone)
         ? "This contact has no phone number on file."
@@ -1240,7 +1251,9 @@ const CRM_TABS = [
   {
     key: "email", label: "Email",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.email),
-    hint: (c) => (c.canEdit
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : c.canEdit
       ? "This contact has no email address on file."
       : "You don't have permission to email contacts."),
   },
@@ -1259,7 +1272,9 @@ const CRM_TABS = [
   {
     key: "files", label: "Customer Uploads",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.id),
-    hint: (c) => (c.canEdit
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : c.canEdit
       ? "This design has no contact record yet, so there is nowhere to file an upload."
       : "You don't have permission to add files to contacts."),
   },
@@ -1422,7 +1437,25 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+  // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
+  // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
+  // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
+  // crm_record_consent, crm_file_* — and portal-settings refuses the whole prefix without the
+  // CRM (index.ts, the crmGated guard). The one exception is the READ, `crm_record` with
+  // kind "design", which is deliberately exempt so the free Pipeline list's own rows still
+  // open. The result before this line existed: on a tenant without the CRM the design record
+  // rendered in full, every control looked live, and the first click returned a 403 — Carolyn
+  // 2026-09-01, "I don't want them, if they are not paying for the CRM part in the billing,
+  // to be able to make these notes in any of this stuff here."
+  //
+  // Folding it into canEdit rather than adding a seventh predicate is what keeps the browser
+  // and the server agreeing by construction: `enabled: (c) => c.canEdit` already names the
+  // exact set of tabs the prefix refuses, and Invoice — which is send_invoice, NOT a crm_
+  // action, and belongs to Simple Layout — reads c.isAdmin and correctly stays live.
+  // `crmUnlocked` defaults TRUE so a caller that has not been taught about it (the contact
+  // record route, which is gated a level up) behaves exactly as it did.
+  const canEdit = canEditProp && crmUnlocked;
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
@@ -1483,7 +1516,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   if (!data) return <div style={S.card}>Loading…</div>;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
-  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
+  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -2146,6 +2179,28 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 );
               })}
             </div>
+
+            {/* NOT ONLY A TOOLTIP. A greyed tab explains itself on hover, which is no
+                explanation on a touch screen and none at all to someone who never hovers —
+                and with every writable tab off, the panel below is an empty card. Say what is
+                missing, and say what still works: the design, its quotes and its schedule are
+                Simple Layout and are NOT affected, which is the half a reader assumes is gone
+                the moment a page tells them something is locked. */}
+            {!crmUnlocked && (
+              <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+                Notes, activities, email, texts and customer files are part of the <strong>built-in CRM</strong>,
+                which isn&rsquo;t on this subscription yet. This design, its quotes, its documents and its
+                build and delivery schedule are unaffected.
+                {onSeeBilling ? (
+                  <>{" "}
+                    <button onClick={onSeeBilling}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+                      See Billing
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            )}
 
             {tab === "sms" && canEdit && data.contact && data.contact.phone && (
               <div style={{ marginBottom: 12 }}>
