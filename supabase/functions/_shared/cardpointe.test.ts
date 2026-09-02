@@ -280,8 +280,12 @@ Deno.test("the tokenizer is tall enough for its rail's full field set", () => {
   // Not cosmetic: the card set is number + expiry + CVV, and at the original 132px the CVV
   // was below the fold of a non-scrolling frame — the form could not be completed and
   // nothing errored. A floor, not an exact value.
-  check("card fits three fields", cp.cpTokenizerHeight("card") >= 190, String(cp.cpTokenizerHeight("card")));
-  check("ach fits one field plus its label", cp.cpTokenizerHeight("ach") >= 90, String(cp.cpTokenizerHeight("ach")));
+  // 357px of content with the CVV's bottom edge at 367, MEASURED against the live
+  // tokenizer — the card rail renders FOUR inputs (number, expiry month, expiry year, cvv),
+  // each its own block. An earlier 210 passed a >=190 assertion and was still a dead form,
+  // which is why this floor is anchored to the measurement rather than to a guess.
+  check("card clears the measured 367px content", cp.cpTokenizerHeight("card") >= 380, String(cp.cpTokenizerHeight("card")));
+  check("ach fits its field plus label", cp.cpTokenizerHeight("ach") >= 120, String(cp.cpTokenizerHeight("ach")));
   check("card is taller than ach", cp.cpTokenizerHeight("card") > cp.cpTokenizerHeight("ach"));
 });
 

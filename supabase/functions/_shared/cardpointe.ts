@@ -539,7 +539,13 @@ export function cpTokenizerUrl(rail: "card" | "ach"): string {
  * Generous on purpose: an over-tall frame is whitespace, an under-tall one is a dead form.
  */
 export function cpTokenizerHeight(rail: "card" | "ach"): number {
-  return rail === "ach" ? 104 : 210;
+  // MEASURED against the live tokenizer, not estimated — the first guess (210) was still a
+  // dead form. Reading its DOM showed the card rail renders FOUR inputs, not three:
+  // ccnumfield, ccexpiryfieldMONTH, ccexpiryfieldYEAR and cccvvfield, each in its own block
+  // with its own label, and month/year stack no matter what width they are given (they are
+  // not in a shared row, so no CSS on the allow-list makes them sit side by side). Measured
+  // content height was 357px with the CVV's bottom edge at 367.
+  return rail === "ach" ? 150 : 400;
 }
 
 /** The origin the browser must check every postMessage against. */
