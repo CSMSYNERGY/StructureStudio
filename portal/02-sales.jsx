@@ -2228,10 +2228,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
-                  placeholder="Subject" style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                  placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
                 <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
                   placeholder="Write to this customer…"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
@@ -2269,10 +2269,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 </div>
                 <input value={act.subject} onChange={(e) => setAct((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="What needs doing? e.g. Call back about the loft"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <input type="date" value={act.dueAt} onChange={(e) => setAct((p) => ({ ...p, dueAt: e.target.value }))}
-                    style={{ ...S.sel, width: "auto" }} />
+                    style={{ ...S.input, width: "auto" }} />
                   <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Leave the date blank for an undated task.</span>
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !act.subject.trim()} onClick={saveActivity}>
                     {busy ? "Saving…" : "Save activity"}
@@ -2332,11 +2332,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               </div>
             )}
 
+            {/* S.input, not a bare control. These five composers (email subject + body,
+                activity subject + date, and the note box below) spread `S.sel` — a token
+                that has never existed in S. The spread of `undefined` is silent, so they
+                rendered with the BROWSER's default field: a near-black 2px border in a
+                platform whose every other input is a 1px #CBD5E1 hairline. Carolyn,
+                2026-09-02: "this black outline ... is sooo annoying." The SMS composer a
+                few lines up was written later against the real token, which is why that
+                one alone looked right. */}
             {tab === "note" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
                   placeholder="Click here to add a note…"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                 <button style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 5 }} disabled={busy || !draft.trim()} onClick={saveNote}>
                   {busy ? "Saving…" : "Save note"}
                 </button>
