@@ -985,15 +985,26 @@ function insulationOffered(C) {
   const l = C && C.insulation;
   return Array.isArray(l) ? l : [];
 }
-function insulationTypes(C) {
+// `internalOnly` follows the wall-height rule exactly: offered in the REP designer (embedded),
+// hidden on the customer-facing page. VISIBILITY only — the pricing path below deliberately
+// does NOT filter on it, so an area a rep selected still costs what it costs. Filtering there
+// would let a rep pick an internal-only insulation and have the estimate drop the charge.
+function insulationTypes(C, includeInternal) {
   const seen = [];
-  insulationOffered(C).forEach((o) => { if (o && o.type && seen.indexOf(o.type) === -1) seen.push(o.type); });
+  insulationOffered(C).forEach((o) => {
+    if (!o || !o.type) return;
+    if (o.internalOnly && !includeInternal) return;
+    if (seen.indexOf(o.type) === -1) seen.push(o.type);
+  });
   return seen;
 }
-function insulationAreasFor(C, type) {
+function insulationAreasFor(C, type, includeInternal) {
   if (!type) return [];
-  const areas = insulationOffered(C).filter((o) => o.type === type).map((o) => o.area);
-  // Keep floor/walls/roof order rather than whatever the payload happened to sort to.
+  const areas = insulationOffered(C)
+    .filter((o) => o.type === type && (includeInternal || !o.internalOnly))
+    .map((o) => o.area);
+  // Keep floor/walls/roof order rather than whatever the payload happened to sort to —
+  // get_config sorts alphabetically, which puts roof before walls.
   return INSULATION_AREAS.filter((a) => areas.indexOf(a) !== -1);
 }
 
@@ -11600,13 +11611,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // One type for the whole building, then the areas — which is how it is sold. The data
           // model keeps a type PER AREA so a mixed job stays expressible, but offering that in
           // the UI would mean three type pickers in one grid cell.
-          const insTypes = insulationTypes(C);
+          const insTypes = insulationTypes(C, embedded);
           const insSelNow = Array.isArray(sel.insulation) ? sel.insulation : [];
           // The chosen TYPE is its own selection, not something derived from the ticked areas.
           // Deriving it meant picking a type before ticking anything silently did nothing —
           // there were no rows to re-stamp, so the fallback kept winning.
           const insType = sel.insulationType || (insSelNow[0] && insSelNow[0].type) || insTypes[0] || null;
-          const insAreas = insulationAreasFor(C, insType);
+          const insAreas = insulationAreasFor(C, insType, embedded);
           const insHas = (a) => insSelNow.some((s) => s && s.area === a);
           const insToggle = (a) => setSel((p) => {
             const cur = Array.isArray(p.insulation) ? p.insulation : [];
@@ -11615,7 +11626,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Switching type re-stamps the areas already ticked; an area the new type does not
           // offer is dropped rather than silently re-priced as something it is not.
           const insSetType = (t) => setSel((p) => {
-            const keep = insulationAreasFor(C, t);
+            const keep = insulationAreasFor(C, t, embedded);
             const cur = Array.isArray(p.insulation) ? p.insulation : [];
             return { ...p, insulationType: t, insulation: cur.filter((s) => keep.indexOf(s.area) !== -1).map((s) => ({ ...s, type: t })) };
           });

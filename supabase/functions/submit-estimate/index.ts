@@ -674,6 +674,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (!styleRowId) {
       return json({ error: `Cannot price insulation: the style "${style}" is not in your catalog.` }, 400);
     }
+    // The master switch is checked HERE too, not just in get_config. A tenant who turned
+    // insulation off should not be billable for it by a stale browser tab or a forged body.
+    const insOn = await supabase.from("client_settings").select("insulation_enabled").eq("client_id", clientId).maybeSingle();
+    if (insOn.error || !insOn.data || insOn.data.insulation_enabled !== true) {
+      return json({ error: "Insulation isn't switched on for this account. Turn it on in the portal under Settings → Options → Insulation, then resubmit." }, 400);
+    }
     const ioRes = await supabase.from("insulation_offerings")
       .select("ins_type, area, rate_per_sqft, taxable, active").eq("client_id", clientId);
     // Refuse rather than price nothing: a read failure here would otherwise drop a real charge

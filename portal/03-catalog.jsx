@@ -2780,6 +2780,7 @@ function Insulation({ viewingLabel = null, clientId = null }) {
   const AREAS = [["floor", "Floor"], ["walls", "Walls"], ["roof", "Roof"]];
   const [cat, setCat] = useState(null);
   const [cells, setCells] = useState({});
+  const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -2790,19 +2791,26 @@ function Insulation({ viewingLabel = null, clientId = null }) {
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
     setCat(data);
+    setEnabled(data.insulationEnabled === true);
     const m = {};
     (data.insulation || []).forEach((r) => {
       m[r.ins_type + "|" + r.area] = {
         ratePerSqft: r.rate_per_sqft != null ? String(r.rate_per_sqft) : "",
         taxable: r.taxable !== false,
         active: r.active !== false,
+        internalOnly: r.internal_only === true,
       };
     });
     setCells(m);
   };
   useEffect(() => { load(); }, []);
 
-  const cellOf = (t, a) => cells[t + "|" + a] || { ratePerSqft: "", taxable: true, active: true };
+  const cellOf = (t, a) => cells[t + "|" + a] || { ratePerSqft: "", taxable: true, active: true, internalOnly: false };
+  // Offer / Taxable / Internal only are per TYPE, so a tick writes the same value to all three
+  // of that type's areas — the matrix stays one row per type, which is how a builder thinks
+  // about it ("we do batt, we don't do spray foam").
+  const setType = (t, field, val) => AREAS.forEach(([a]) => setCell(t, a, field, val));
+  const typeFlag = (t, field, dflt) => AREAS.every(([a]) => (cellOf(t, a)[field] !== undefined ? cellOf(t, a)[field] : dflt));
   const setCell = (t, a, field, val) =>
     setCells((p) => ({ ...p, [t + "|" + a]: { ...cellOf(t, a), [field]: val } }));
 
@@ -2812,12 +2820,12 @@ function Insulation({ viewingLabel = null, clientId = null }) {
       const rows = [];
       TYPES.forEach(([t]) => AREAS.forEach(([a]) => {
         const c = cellOf(t, a);
-        rows.push({ type: t, area: a, ratePerSqft: String(c.ratePerSqft ?? "").trim(), taxable: c.taxable, active: c.active });
+        rows.push({ type: t, area: a, ratePerSqft: String(c.ratePerSqft ?? "").trim(), taxable: c.taxable, active: c.active, internalOnly: c.internalOnly });
       }));
       // Refuse, never coerce -- a silently-zeroed rate would insulate a whole building free.
       const bad = rows.filter((r) => r.ratePerSqft !== "" && (!Number.isFinite(Number(r.ratePerSqft)) || Number(r.ratePerSqft) < 0));
       if (bad.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + bad.map((r) => r.type + "/" + r.area).join(", ") + ".");
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_insulation", rows }) });
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_insulation", enabled, rows }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
       const skipped = data.skipped || [];
@@ -2836,6 +2844,12 @@ function Insulation({ viewingLabel = null, clientId = null }) {
         offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
         each one lands as its own line on the quote.
       </p>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}
+          style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+        Offer insulation to customers
+        <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off hides it entirely without clearing your rates</span>
+      </label>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" \u00b7 ")}</div>}</div>}
       {!cat ? <SkelBar /> : (
@@ -2843,13 +2857,19 @@ function Insulation({ viewingLabel = null, clientId = null }) {
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 640 }}>
             <thead><tr>
               <th style={S.th}></th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick a type you don't offer at all. Its rates are kept, but customers never see it.">Offer</th>
               {AREAS.map(([a, lbl]) => <th key={a} style={S.th} title="Dollars per square foot. Blank = not offered.">{lbl} ($/sq ft)</th>)}
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected area still prices normally.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on insulation.">Taxable</th>
             </tr></thead>
             <tbody>
               {TYPES.map(([t, tLbl]) => (
                 <tr key={t}>
                   <td style={{ ...S.td, fontWeight: 700 }}>{tLbl}</td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={typeFlag(t, "active", true)} onChange={(e) => setType(t, "active", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
                   {AREAS.map(([a]) => (
                     <td key={a} style={S.td}>
                       <input type="number" min="0" step="0.01" value={cellOf(t, a).ratePerSqft} placeholder="not offered"
@@ -2857,8 +2877,11 @@ function Insulation({ viewingLabel = null, clientId = null }) {
                     </td>
                   ))}
                   <td style={{ ...S.td, textAlign: "center" }}>
-                    <input type="checkbox" checked={AREAS.every(([a]) => cellOf(t, a).taxable)}
-                      onChange={(e) => AREAS.forEach(([a]) => setCell(t, a, "taxable", e.target.checked))}
+                    <input type="checkbox" checked={typeFlag(t, "internalOnly", false)} onChange={(e) => setType(t, "internalOnly", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={typeFlag(t, "taxable", true)} onChange={(e) => setType(t, "taxable", e.target.checked)}
                       style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
                   </td>
                 </tr>

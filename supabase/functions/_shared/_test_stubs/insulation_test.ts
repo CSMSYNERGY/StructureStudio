@@ -30,8 +30,8 @@ const { insulationSqft, insulationTypes, insulationAreasFor } = new Function(
   `${BLOCK}; return { insulationSqft, insulationOffered, insulationTypes, insulationAreasFor };`,
 )() as {
   insulationSqft: (area: string, w: number, l: number, h: number) => number;
-  insulationTypes: (C: unknown) => string[];
-  insulationAreasFor: (C: unknown, t: string) => string[];
+  insulationTypes: (C: unknown, includeInternal?: boolean) => string[];
+  insulationAreasFor: (C: unknown, t: string, includeInternal?: boolean) => string[];
 };
 
 // get_config's shape after 177: offered combinations only, and NO rate — Carolyn chose no
@@ -110,4 +110,54 @@ Deno.test("a tenant offering nothing gets an empty list, not a crash", () => {
   assertEquals(insulationTypes({}), []);
   assertEquals(insulationTypes({ insulation: [] }), []);
   assertEquals(insulationAreasFor({}, "batt"), []);
+});
+
+// ── The switches (178) ───────────────────────────────────────────────────────
+
+Deno.test("a tenant who has not switched insulation on offers nothing", () => {
+  // get_config emits [] when client_settings.insulation_enabled is false, so the designer's
+  // whole insulation cell disappears without any browser-side flag. Pinning the browser half:
+  // an empty list must produce no types rather than an empty-but-present control.
+  assertEquals(insulationTypes({ insulation: [] }), []);
+  assertEquals(insulationTypes({}), []);
+  assertEquals(insulationAreasFor({ insulation: [] }, "batt"), []);
+});
+
+Deno.test("a type the builder does not offer is simply absent", () => {
+  // "Batt or spray foam or both" is expressed by insulation_offerings.active, filtered in
+  // get_config — so by the time the browser sees the payload, an unoffered type has no rows.
+  const battOnly = { insulation: [{ type: "batt", area: "floor" }, { type: "batt", area: "walls" }] };
+  assertEquals(insulationTypes(battOnly), ["batt"]);
+  assertEquals(insulationAreasFor(battOnly, "spray_foam"), []);
+});
+
+Deno.test("internal-only is hidden from the customer and shown to the rep", () => {
+  // Same rule as style_wall_heights.internal_only: the REP designer (embedded) sees it, the
+  // customer-facing page does not.
+  const C2 = {
+    insulation: [
+      { type: "batt", area: "floor" },
+      { type: "batt", area: "walls" },
+      { type: "spray_foam", area: "walls", internalOnly: true },
+    ],
+  };
+  assertEquals(insulationTypes(C2), ["batt"]);
+  assertEquals(insulationTypes(C2, true), ["batt", "spray_foam"]);
+  assertEquals(insulationAreasFor(C2, "spray_foam"), []);
+  assertEquals(insulationAreasFor(C2, "spray_foam", true), ["walls"]);
+});
+
+Deno.test("internal-only hides ONE area without hiding its type", () => {
+  // A builder can sell batt publicly but keep the roof internal. The type stays visible;
+  // only that area drops out of the customer's choices.
+  const C3 = {
+    insulation: [
+      { type: "batt", area: "floor" },
+      { type: "batt", area: "walls" },
+      { type: "batt", area: "roof", internalOnly: true },
+    ],
+  };
+  assertEquals(insulationTypes(C3), ["batt"]);
+  assertEquals(insulationAreasFor(C3, "batt"), ["floor", "walls"]);
+  assertEquals(insulationAreasFor(C3, "batt", true), ["floor", "walls", "roof"]);
 });

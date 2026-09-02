@@ -1256,13 +1256,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
       admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
-      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
       admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only").eq("client_id", clientId).order("delta_in"),
       // Insulation rates (177) for the Options tab matrix.
-      admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active").eq("client_id", clientId),
+      admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
@@ -1310,7 +1310,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       };
     } catch (_) { wallet = null; }
 
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], insulation: insulationRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], insulation: insulationRes.data ?? [],
+      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -2803,6 +2804,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
     const TYPES = new Set(["batt", "spray_foam"]);
     const AREAS = new Set(["floor", "walls", "roof"]);
+
+    // The master switch, presence-guarded so a save that does not mention it cannot flip it.
+    // It lives on client_settings (the ramp_enabled precedent) rather than on the rate rows,
+    // because turning insulation off must not touch the rates a builder spent time entering.
+    if (Object.prototype.hasOwnProperty.call(payload, "enabled")) {
+      const up = await admin.from("client_settings")
+        .update({ insulation_enabled: payload.enabled === true })
+        .eq("client_id", clientId);
+      if (up.error) return dbFail(req, clientId, "save your insulation switch", up.error);
+    }
+
     let saved = 0, cleared = 0; const skipped: string[] = [];
     for (const raw of payload.rows) {
       const row = raw as Record<string, unknown>;
@@ -2827,7 +2839,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         client_id: clientId, ins_type: insType, area,
         rate_per_sqft: rate,
         taxable: row?.taxable !== false,
+        // `active` is the per-TYPE "do we offer this at all" switch — the portal writes the
+        // same value to all three areas of a type, which is how "batt or spray foam or both"
+        // is expressed without a second table.
         active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
         updated_at: new Date().toISOString(),
       }, { onConflict: "client_id,ins_type,area" });
       if (res.error) { skipped.push(`${insType}/${area}: ${res.error.message}`); continue; }
