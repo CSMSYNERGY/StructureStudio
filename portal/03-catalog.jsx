@@ -2818,6 +2818,8 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         return !Number.isInteger(d) || d <= 0 || d > 48;
       });
       if (bad.length) throw new Error("Nothing was saved \u2014 every increase must be a whole number of inches between 1 and 48. Check: " + bad.map((r) => '"' + r.deltaIn + '"').join(", ") + ".");
+      const noWidths = rows.filter((r) => Array.isArray(r.widthsFt) && r.widthsFt.length === 0);
+      if (noWidths.length) throw new Error(`Nothing was saved — an increase with no widths ticked would never be offered to anyone. Tick at least one width, or untick Active to retire it: ${noWidths.map((r) => "+" + r.deltaIn + " in").join(", ")}.`);
       const badRate = rows.filter((r) => {
         const t = String(r.ratePerLf == null ? "" : r.ratePerLf).trim();
         return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
@@ -2877,7 +2879,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             <thead><tr>
               <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
-              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. All ticked = every width, including any you add later.">Offered on widths</th>
+              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={{ ...S.th, textAlign: "center" }}>Active</th>
               <th style={S.th}></th>
@@ -2927,8 +2929,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
         lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
         offering it yet. Tick the <b>widths</b> each increase can be hauled at — a wider building
-        already has a taller roof, so a narrow one can take more; all ticked means every width,
-        including any you add later.
+        already has a taller roof, so a narrow one can take more. A width you add to a style
+        later arrives <b>unticked</b> here, so nothing is ever offered on a new size until you
+        say so.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}

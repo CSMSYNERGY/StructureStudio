@@ -2731,20 +2731,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${rateRaw}" is not a usable dollar amount${unchanged}`); i++; continue; }
         ratePerLf = n;
       }
-      // Widths this increase is hauled at. ABSENT / null = every width, and it stays a LIVING
-      // default: a width added to the style later is offered automatically instead of silently
-      // dropping out because nobody re-ticked it. Ticking them ALL collapses back to null for
-      // the same reason — the fixture window-colour contract, migration 119.
-      let widthsFt: number[] | null = null;
+      // Widths this increase is hauled at, written EXPLICITLY — never collapsed back to null
+      // (174). 173 borrowed the window-colour "null = all, including widths added later"
+      // contract, and the direction is what makes that wrong here: taller walls LOSE headroom
+      // as buildings get wider, so a living default auto-offers every unrestricted increase on
+      // each newly added width — usually the widest, i.e. exactly the case this refuses.
+      // Carolyn chose (asked directly): a new width arrives unticked, always.
+      // A row that ticks nothing at all falls back to this style's current widths rather than
+      // storing '{}', which would read as "offered on nothing" and silently retire the row.
+      let widthsFt: number[] | null = allWidths.length ? allWidths : null;
       if (Array.isArray(row?.widthsFt)) {
         const cleaned = (row.widthsFt as unknown[])
           .map((w) => Number(w))
           .filter((w) => Number.isFinite(w) && w > 0);
         const picked = [...new Set(cleaned)].sort((x, y) => x - y);
-        // All of this style's widths ticked = back to the living default (null), so a width
-        // added to the style later is offered automatically rather than needing a re-tick.
-        widthsFt = (allWidths.length && picked.length === allWidths.length && allWidths.every((w) => picked.includes(w)))
-          ? null : picked;
+        if (picked.length) widthsFt = picked;
       }
       const patch = {
         delta_in: deltaIn,
