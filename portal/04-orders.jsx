@@ -1205,9 +1205,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const links = schedLinks || {};
     const sale = (links.saleDesigns || {})[r.o.short_code];   // set = this order sold a LOT building
     const job = (links.byDesign || {})[r.o.short_code];       // set = already on the build board
-    // SOLD = INVOICED. Before that there is nothing to schedule, and the server refuses too.
+    // SOLD = the customer SIGNED the bill. Since migration 136 `status: 'invoiced'` means
+    // exactly that — sign_invoice is its only writer and send_invoice stopped flipping it —
+    // so the gate below is right. Only the old label was wrong: it said "Invoice first" at
+    // a builder who had already sent the invoice and was waiting on the customer, pointing
+    // them at a job that was done. Same split, and the same words, as stateOf's chip.
     const sold = r.d && (normStatus(r.d.status) === "invoiced" || normStatus(r.d.status) === "delivered");
-    if (!sold) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Invoice first</span>;
+    if (!sold) {
+      const waiting = r.d && r.d.ss_invoice_sent_at;
+      return (
+        <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}
+          title={waiting
+            ? "The invoice is out — this can be scheduled once the customer signs it."
+            : "Send the invoice; scheduling unlocks when the customer signs it."}>
+          {waiting ? "Awaiting signature" : "Invoice first"}
+        </span>
+      );
+    }
 
     if (sale) {
       // Already built and sitting on a lot — it never touches the build board, it just
@@ -1684,7 +1698,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       {cos === null && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Loading…</p>}
       {cos && cos.length === 0 && !formOpen && (
         <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>
-          None. If this order changes after the customer signed, record it here — they
+          None. If this order changes after the customer accepted, record it here — they
           acknowledge it with a signature, or you record their verbal OK.
         </p>
       )}
@@ -1982,12 +1996,18 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
   const anyBusy = busy || busyExt;
 
-  // The amendment trail: signed total + acknowledged CO snapshots — never re-summed line
+  // The amendment trail: accepted total + acknowledged CO snapshots — never re-summed line
   // items, so double-counting is structurally impossible.
+  //
+  // The base row says ACCEPTED, not "Signed". `acceptance` is the row with subject 'quote',
+  // and since migration 136 a quote is accepted with a CLICK — the binding signature is on
+  // the INVOICE and lives in a different row entirely. "Signed" here asserted a signature
+  // that does not exist for every quote accepted under the current ladder. "Accepted" is
+  // true of both shapes: a legacy drawn/typed quote row was also, necessarily, accepted.
   const trail = [];
   if (acceptance && acceptance.total != null) {
     let running = Number(acceptance.total);
-    trail.push({ label: `Signed ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
+    trail.push({ label: `Accepted ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
     for (const c of ackedCos) {
       if (c.total_after_cents == null) {
         trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
@@ -2764,7 +2784,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   </div>
                 ))}
                 <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
-                  Set by the signed quote and acknowledged change orders — no hand editing.
+                  Set by the accepted quote and acknowledged change orders — no hand editing.
                 </div>
               </div>
             )}

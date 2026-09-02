@@ -778,6 +778,19 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var sgnDate = fmtDate(inv.signedAt);
       sgn.textContent = "Invoice signed ✓" + (sgnDate ? " · " + sgnDate : "");
       card.appendChild(sgn);
+      // The signed invoice is the ONE document that carries their signature certificate, so
+      // the link has to OUTLIVE the signature rather than disappear along with invoiceBlock.
+      // It is the same file it was before signing — customer-accept appends the certificate
+      // page to it in place — so `inv.pdfUrl` stays correct here.
+      var signedPdf = safeUrl(inv.pdfUrl);
+      if (signedPdf) {
+        var sLink = document.createElement("a");
+        sLink.className = "btn btn-secondary";
+        sLink.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px;display:inline-block";
+        sLink.href = signedPdf; sLink.target = "_blank"; sLink.rel = "noopener";
+        sLink.textContent = "Invoice " + (inv.number ? String(inv.number) + " " : "") + "(PDF)";
+        card.appendChild(sLink);
+      }
       // ...and this is where the road used to end. A signed invoice with money outstanding
       // is the open action, so it takes the position invoiceBlock had.
       card.appendChild(payBlock(q));

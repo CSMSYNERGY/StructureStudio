@@ -376,7 +376,7 @@ const TAB_META = {
   // do more than one quote for one deal, so let's leave it on the deals side right now."
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
   leads: ["Contacts", "Everyone who has enquired, and their activity"],
-  orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
+  orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
   releases: ["What's New", "Latest features and fixes"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
