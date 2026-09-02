@@ -1342,7 +1342,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     else if (it.type === "ramp") { if (it.fixtureItemId && it.price != null) customRamps.push(it); else simpleRamps.push(it); }
   }
   loftSqft = Math.round(loftSqft);
-  const totalWorkbenchFt = workbenchFt.reduce((s, f) => s + f, 0);
+  // Slabs resize continuously now (the whole-foot rounding went with Carolyn's 2026-09-02
+  // "not snap to anything"), so a summed run is a real fraction and floating point makes it
+  // an ugly one — 3.3699999999999997 ft on a quote line. Round the REPORTED length, never the
+  // stored position: the geometry stays exactly where the builder put it, and the money is
+  // unaffected either way because lineal_ft has always been continuous rate * lengthFt.
+  // 2 dp is a quarter-inch, finer than anyone frames to.
+  const ft2 = (n) => Math.round(n * 100) / 100;
+  const totalWorkbenchFt = ft2(workbenchFt.reduce((s, f) => s + f, 0));
   const measures = {
     singleDoor: { count: singleDoors },
     doubleDoor: { count: doubleDoors },
@@ -1350,8 +1357,8 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     workbench:  { count: workbenchFt.length, lengthFt: totalWorkbenchFt },
     // Shelves aggregate like the workbench — every placed run summed into ONE lineal_ft line,
     // so a size inclusion nets once rather than once per shelf. Mirrors submit-estimate.
-    shelf:       { count: shelfFt.length, lengthFt: shelfFt.reduce((s, f) => s + f, 0) },
-    doubleShelf: { count: doubleShelfFt.length, lengthFt: doubleShelfFt.reduce((s, f) => s + f, 0) },
+    shelf:       { count: shelfFt.length, lengthFt: ft2(shelfFt.reduce((s, f) => s + f, 0)) },
+    doubleShelf: { count: doubleShelfFt.length, lengthFt: ft2(doubleShelfFt.reduce((s, f) => s + f, 0)) },
     loft:       { count: lofts, optionSqft: loftSqft },
     // Legacy layout "ramp" row applies only to simple ramps that AREN'T priced by the new ramp
     // settings — otherwise ramps price below (custom by snapshot, simple by ramp settings).
@@ -5597,8 +5604,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const wFt = it.widthFt || c.width || 6, hFt = it.heightFt || c.height || 4;
             const halfW = wFt / 2, halfH = hFt / 2;
             const snapFt = 1;
-            let cxFt = Math.round(p.x + bldgW / 2);
-            let cyFt = Math.round(p.z + bldgH / 2);
+            // No whole-foot grid, matching the 2D handler. The wall and loft-to-loft magnets
+            // below stay, because checkLoftAttached still demands real contact.
+            let cxFt = p.x + bldgW / 2;
+            let cyFt = p.z + bldgH / 2;
             if (cxFt - halfW < snapFt) cxFt = halfW;
             else if (cxFt + halfW > bldgW - snapFt) cxFt = bldgW - halfW;
             if (cyFt - halfH < snapFt) cyFt = halfH;
@@ -5637,17 +5646,27 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // allowed to overlap each other — a bike leaning over a mower is a real shed, and
             // refusing the drop would read as the app being broken rather than tidy.
             //
-            // HALF-FOOT steps, not the loft's whole feet: a lawnmower is 2 ft wide and whole
-            // feet make it jump past the spot the customer is aiming at.
+            // ⚠️ SET THE PLANE. It is one mutable THREE.Plane shared by every drag branch in
+            // this handler, and this branch was the only one that never set it — so it read
+            // whatever the last drag left behind, or, on a fresh viewer, the constructor's
+            // default of normal (1,0,0) constant 0: a VERTICAL plane at x = 0. p.x was then
+            // pinned to 0, cxFt never left bldgW/2, and the mower slid north-south down the
+            // centre of the building and nowhere else. Carolyn, 2026-09-02: "it's just going
+            // into one direction", and "turn it completely where you're looking in ... it
+            // does, but it's very jerky" — looking down makes the camera ray nearly parallel
+            // to that vertical plane, so the intersection flies off or misses outright.
+            dragPlane.set(new THREE.Vector3(0, 1, 0), 0);
             const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
             if (!p) return;
             const spec = d3PropSpec(it.propKind);
             const rotSwap = it.rotation === 90 || it.rotation === 270;
             const halfW = (rotSwap ? (it.heightFt || spec.d) : (it.widthFt || spec.w)) / 2;
             const halfH = (rotSwap ? (it.widthFt || spec.w) : (it.heightFt || spec.d)) / 2;
-            const q = (v) => Math.round(v * 2) / 2;
-            const cxFt = Math.max(halfW, Math.min(q(p.x + bldgW / 2), bldgW - halfW));
-            const cyFt = Math.max(halfH, Math.min(q(p.z + bldgH / 2), bldgH - halfH));
+            // No quantisation. Carolyn: "I want them to be able to drag it exactly where they
+            // want it and to not snap to anything." The clamp stays — it holds the item
+            // inside the building, which is a wall, not a grid.
+            const cxFt = Math.max(halfW, Math.min(p.x + bldgW / 2, bldgW - halfW));
+            const cyFt = Math.max(halfH, Math.min(p.z + bldgH / 2, bldgH - halfH));
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
           }
@@ -8934,14 +8953,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const isHoriz = it.wall === "north" || it.wall === "south";
       const isRO = it.type === "roughOpening";
 
-      // Mouse position in feet along the wall axis
+      // Mouse position in feet along the wall axis.
+      //
+      // ⚠️ THIS IS THE ONE CAROLYN DEMONSTRATED, and it is a resize, not a drag: "click on
+      // this here to drag it, you drag, yes, but also THE END, click the end to drag. It is
+      // required to drag to a foot, they can't go halfway in between." A workbench or shelf
+      // used to round its edges to whole feet while a rough opening beside it resized
+      // smoothly — same handle, same gesture, two different behaviours, and only one of them
+      // was the one she wanted. Every slab now takes the path the rough opening already took,
+      // which is why this reads as deleting a branch rather than adding one.
+      //
+      // The lineal-foot PRICE is unaffected: it has always been rate * lengthFt, continuous
+      // arithmetic. It just stops being a whole number, so itemSummary rounds the reported
+      // length to 2 dp for the quote line.
       const mouseFt = isHoriz ? (pt.x - mgX) / scale : (pt.y - mgY) / scale;
-      const mouseFtVal = isRO ? mouseFt : Math.round(mouseFt);
+      const mouseFtVal = mouseFt;
 
       const origCenterFt = isHoriz ? (resizing.origX - mgX) / scale : (resizing.origY - mgY) / scale;
-      const origLeft = isRO
-        ? (origCenterFt - resizing.origWidthFt / 2)
-        : Math.round(origCenterFt - resizing.origWidthFt / 2);
+      const origLeft = origCenterFt - resizing.origWidthFt / 2;
       const origRight = origLeft + resizing.origWidthFt;
 
       const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
@@ -8950,10 +8979,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const minWidth = isRO ? 0.5 : 2;
 
       let newLeft = origLeft, newRight = origRight;
+      // The floor/ceil on the non-RO bounds went with the rounding: they existed to keep a
+      // whole-foot edge inside a fractional bound, and with no whole-foot edge left they only
+      // cost the slab up to a foot of the wall it can legitimately reach.
       if (resizing.handle === "max") {
-        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, isRO ? maxEdge : Math.floor(maxEdge)));
+        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, maxEdge));
       } else {
-        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, isRO ? minEdge : Math.ceil(minEdge)));
+        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, minEdge));
       }
 
       const newWidthFt = newRight - newLeft;
@@ -9045,21 +9077,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // numbers either way and this change cannot move it.
       const rotSwap = it.rotation === 90 || it.rotation === 270;
       const halfW = (rotSwap ? iHeightFt : iWidthFt) / 2, halfH = (rotSwap ? iWidthFt : iHeightFt) / 2;
-      const snapFt = 1; // snap threshold in feet
+      const snapFt = 1; // magnet threshold in feet — LOFTS ONLY, see below
 
       // Convert desired position to feet
       let cxFt = (rx - mgX) / scale;
       let cyFt = (ry - mgY) / scale;
 
-      // Round to integer feet
-      cxFt = Math.round(cxFt);
-      cyFt = Math.round(cyFt);
-
-      // Snap edges to walls
-      if (cxFt - halfW < snapFt) cxFt = halfW;
-      else if (cxFt + halfW > bldgW - snapFt) cxFt = bldgW - halfW;
-      if (cyFt - halfH < snapFt) cyFt = halfH;
-      else if (cyFt + halfH > bldgH - snapFt) cyFt = bldgH - halfH;
+      // NO GRID. There used to be a Math.round to whole feet here, and it is the reason
+      // Carolyn could not place anything: "It is required to drag to a foot, they can't go
+      // halfway in between ... I want them to be able to drag it exactly where they want it
+      // and to not snap to anything." Continuous placement is already this file's posture
+      // everywhere else — reflowItems searches in 0.25 ft steps and rescales free-floaters
+      // with no rounding at all — so the round was the outlier, not the rule.
+      //
+      // ⚠️ THE MAGNETS BELOW SURVIVE FOR LOFTS AND ONLY FOR LOFTS, deliberately. A loft is
+      // structural: checkLoftAttached refuses to treat it as attached unless both ends of one
+      // axis touch a wall or another loft (tol 0.3 ft), so without a magnet a builder would
+      // be aiming at a 3.6-inch window by hand and the loft would read as floating. A mower
+      // has no such rule — nothing downstream cares where it sits, it is not even priced —
+      // which is exactly why the grid was pure cost on props and is gone for them.
+      if (it.type === "loft") {
+        // Snap edges to walls
+        if (cxFt - halfW < snapFt) cxFt = halfW;
+        else if (cxFt + halfW > bldgW - snapFt) cxFt = bldgW - halfW;
+        if (cyFt - halfH < snapFt) cyFt = halfH;
+        else if (cyFt + halfH > bldgH - snapFt) cyFt = bldgH - halfH;
+      }
 
       // Snap edges to other lofts
       if (it.type === "loft") {
