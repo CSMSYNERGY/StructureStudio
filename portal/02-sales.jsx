@@ -1188,13 +1188,35 @@ const CRM_SECTIONS = [
 // hint and any refusal that reaches the browser tell one story.
 const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
 
+// The reason a tab is greyed on a CONTACT record with no deal picked yet. Carolyn,
+// 2026-09-02, looking at a contact holding four quotes: "Which one the heck is it when I'm
+// in a contact? ... you have to have one of these selected for anything to show up here ...
+// Right now, it's Greek, you have no idea."
+//
+// It says WHY rather than just "pick one": every one of these five writes carries a
+// short_code, and filed against the wrong deal a note about one customer's building lands
+// in another's history. Deliberately placed beside CRM_LOCKED_HINT so it falls inside the
+// block crmRecordGate_test already slices — no test anchor moves.
+const CRM_PICK_HINT = (what) =>
+  `Pick a deal or order on the left first, so the ${what} is filed against the right one.`;
+
 const CRM_TABS = [
   // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
   // a tab that is merely out of this person's reach — it is built, they just cannot write.
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit,
-    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to log activities.") },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit,
-    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT : "You don't have permission to add notes.") },
+  //
+  // ⚠️ HINT ORDER IS SUBSCRIPTION → PERMISSION → THE TAB'S OWN DATA NEED → needsPick, and
+  // needsPick goes LAST everywhere. If a contact has no email address, picking a deal still
+  // leaves Email disabled, so leading with "pick a deal" would be a lie by omission and send
+  // the reader off doing something that changes nothing. Ordered this way the hint always
+  // names a reason that is STILL TRUE once the reader has acted on every reason above it.
+  { key: "activity", label: "Activity", enabled: (c) => c.canEdit && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canEdit ? "You don't have permission to log activities."
+      : CRM_PICK_HINT("activity")) },
+  { key: "note", label: "Notes", enabled: (c) => c.canEdit && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canEdit ? "You don't have permission to add notes."
+      : CRM_PICK_HINT("note")) },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
   // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
@@ -1225,7 +1247,7 @@ const CRM_TABS = [
   // the phone number this very tab renders. Same rule, same words as the Person panel.
   {
     key: "sms", label: "SMS",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
       : !c.canEdit
@@ -1234,7 +1256,9 @@ const CRM_TABS = [
         ? "This contact has no phone number on file."
         : !(c.contact && c.contact.id)
           ? "This design predates contact records, so there is no contact to text yet. It gets its own contact the next time this customer submits."
-          : "Texting switches on once this account's number clears carrier registration."),
+          : !(c.sms && c.sms.ready)
+            ? "Texting switches on once this account's number clears carrier registration."
+            : CRM_PICK_HINT("text")),
   },
   // Conversations were email ONLY, until the tab above. Email remains the channel that
   // carries a document — a quote, an invoice, anything with a link — and needs an address to
@@ -1250,12 +1274,14 @@ const CRM_TABS = [
   // the data for a permissions problem sends someone off editing a contact that is fine.
   {
     key: "email", label: "Email",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
-      : c.canEdit
-      ? "This contact has no email address on file."
-      : "You don't have permission to email contacts."),
+      : !c.canEdit
+      ? "You don't have permission to email contacts."
+      : !(c.contact && c.contact.email)
+        ? "This contact has no email address on file."
+        : CRM_PICK_HINT("email")),
   },
   // TWO NAMES THAT SAY WHOSE FILES THEY ARE. Carolyn spent the longest stretch of the
   // 2026-08-26 call on this (20:08–26:45): "documents is what we create ... customer files
@@ -1271,12 +1297,14 @@ const CRM_TABS = [
   // design's uploads belong to the person, not to one of their quotes.
   {
     key: "files", label: "Customer Uploads",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
-      : c.canEdit
-      ? "This design has no contact record yet, so there is nowhere to file an upload."
-      : "You don't have permission to add files to contacts."),
+      : !c.canEdit
+      ? "You don't have permission to add files to contacts."
+      : !(c.contact && c.contact.id)
+        ? "This design has no contact record yet, so there is nowhere to file an upload."
+        : CRM_PICK_HINT("upload")),
   },
   // NO "Design Documents" TAB. Carolyn, 2026-08-26 24:01, having found the same documents
   // listed both here and in History: "the top part is about things to do. The bottom part is
@@ -1337,6 +1365,35 @@ const CRM_STAGES = [
 const CRM_STAGE_FOR_STATUS = {
   draft: "new", sent: "quoted", accepted: "won", invoiced: "invoiced", delivered: "delivered",
 };
+
+// ── HAS THIS DEAL BEEN INVOICED? ────────────────────────────────────────────────────
+// Carolyn, 2026-09-02, on a record with no invoice: "can we make this like hide this if it
+// doesn't have an invoice?" This is that test, and BOTH halves are load-bearing — I checked
+// the live data rather than reasoning about it.
+//
+// ss_invoice_sent_at alone is WRONG. Its only writer in the repo is send_invoice, so it
+// marks a StructureStudio-issued invoice and nothing else; sync-design-status, which is what
+// flips a GHL-quoted design to 'invoiced', writes {status, updated_at} and never touches it,
+// and migration 136's backfill was narrowed to issued_by='structurestudio'. A design
+// invoiced in GoHighLevel therefore has it NULL forever — on live that is FOURTEEN of
+// junior-barns' buildings, every one physically on the build board. Since invoice_in_ghl
+// defaults true, this half alone would hide the rails on most real tenants' sold work.
+//
+// status alone is also wrong, in the other direction. Since 136, send_invoice deliberately
+// stopped flipping status, so an SS invoice that is OUT BUT UNSIGNED reads 'accepted' with
+// only the column set. One such row on structure-studio today. Carolyn said "if it doesn't
+// HAVE an invoice" — one sitting in the customer's inbox is one they have.
+//
+// Not invoice_sends: RLS with zero policies, so the browser cannot read it, and it covers
+// only SS-issued invoices anyway — the same blind spot plus a round trip.
+//
+// ⚠️ normStatus is `STATUS_LABELS[s] ? s : "sent"`, NOT a lowercaser. 'inventory',
+// undefined and 'INVOICED' all fall through to "sent" and read false. That is correct here.
+const crmHasInvoice = (d) => !!d && (
+  !!d.ss_invoice_sent_at ||
+  normStatus(d.status) === "invoiced" ||
+  normStatus(d.status) === "delivered"
+);
 
 // ⚠️ THE ROWS ARE CHEVRON RAILS NOW, NOT DOTS. Ahsan, 2026-09-02, looking at the shipped
 // screen: "instead of the dotted pipeline stages for build and delivery can you do similar
@@ -1495,6 +1552,14 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // section they serve; only the hook has to live up here.
   const [edit, setEdit] = useState(null);              // { name, phone, email } | null — null = not editing
   const [personOpen, setPersonOpen] = useState(false); // the Person card's drop-down, on a DEAL
+  // WHICH of this contact's deals the page is about. NULL on purpose — Carolyn, 2026-09-02:
+  // "you have to have one of these selected for anything to show up here". The old behaviour
+  // picked designs[0] silently, which is exactly what she was reading when she said "Right
+  // now, it's Greek, you have no idea." ⚠️ This must be the LAST hook and stay ABOVE the
+  // early returns below, same as the two above it — and it is the ONLY new one: activeCode
+  // is derived, not stored, because a useMemo would be a second hook that would have to sit
+  // above the `!data` guard where `data` does not exist yet.
+  const [selCode, setSelCode] = useState(null);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1516,7 +1581,32 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   if (!data) return <div style={S.card}>Loading…</div>;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
-  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
+
+  // THE SELECTED DEAL. Below the early returns on purpose — none of this is a hook.
+  //
+  // The membership re-check is not defensive padding: load() re-runs after every write, and
+  // a selCode left pointing at a design that has since moved contact would make every filter
+  // below return [] with no error anywhere — the "quietly always empty" failure the orders
+  // and delivery cards each have a comment about.
+  //
+  // activeCode can be set while activeDeal is null: orders join on short_code as a SOFT link
+  // with no FK, so an order can name a code whose design this read did not return. Every
+  // consumer has to tolerate that, and the rails do by construction.
+  const knownCodes = new Set([
+    ...(data.designs || []).map((d) => d.short_code),
+    ...(data.orders || []).map((o) => o.short_code),
+  ]);
+  const activeCode = kind === "design" ? recordId
+    : (selCode && knownCodes.has(selCode) ? selCode : null);
+  const activeDeal = activeCode
+    ? ((data.designs || []).find((d) => d.short_code === activeCode) || null)
+    : null;
+
+  // needsPick is derived and redundant, and that is the point: it puts the `kind ===
+  // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
+  // — which would break the free Pipeline list that opens design records without a CRM.
+  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -1535,7 +1625,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       body: {
         action: "crm_save_note", body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1608,7 +1698,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         // screens use: UTC midnight renders as the PREVIOUS day for every US timezone.
         dueAt: act.dueAt ? new Date(act.dueAt + "T12:00:00").toISOString() : null,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1663,7 +1753,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           body: {
             action: "crm_file_attach",
             contactId: (data.contact && data.contact.id) || null,
-            shortCode: kind === "design" ? recordId : null,
+            shortCode: activeCode,
             path: signed.path, name: file.name, size: file.size, mime: file.type || null,
           },
         });
@@ -1727,7 +1817,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       body: {
         action: "crm_send_sms", body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1749,7 +1839,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         to: data.contact && data.contact.email,
         subject, body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1842,15 +1932,43 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       return (
         <div>
           <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({(data.designs || []).length})</div>
-          {(data.designs || []).map((d) => (
-            <button key={d.short_code} onClick={() => onNavigate("design", d.short_code)}
-              style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: "pointer" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+          {/* Shown only until something is picked, so it stops nagging the moment it has
+              been acted on. Without it the page is a contact whose stages, build, delivery
+              and every write tab are all silently off with nothing saying why. */}
+          {kind === "contact" && !activeCode && (data.designs || []).length > 0 && (
+            <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>
+              Pick a deal to see its stages, build and delivery.
+            </div>
+          )}
+          {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
+              and the same warning: a button inside a button is invalid HTML and React will
+              not render it. THE ROW SELECTS; THE ARROW LEAVES. This does convert a list that
+              used to navigate on click into one that selects, which is a real change for
+              anyone who learned the old behaviour — the › keeps the destination one click
+              away. The glyph is there because colour alone is not a state indicator. */}
+          {(data.designs || []).map((d) => {
+            const sel = activeCode === d.short_code;
+            return (
+              <div key={d.short_code}
+                style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
+                <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                  title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                    padding: "7px 9px", cursor: "pointer" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                    {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                </button>
+                <button onClick={() => onNavigate("design", d.short_code)}
+                  title="Open this deal's own record"
+                  style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                    padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
               </div>
-              <div style={{ fontSize: 11, color: "#64748B" }}>{fmtDate(d.created_at)}</div>
-            </button>
-          ))}
+            );
+          })}
           {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
         </div>
       );
@@ -1864,13 +1982,33 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     //   []         -> they can see it and there genuinely is nothing.
     // The orders card carries the same distinction for the same reason; this is that rule
     // applied three more times rather than a new idea.
+    // ⚠️ TWO MORE STATES, AND THEIR ORDER MATTERS. Both go BELOW the undefined guard and
+    // BELOW the non-empty case, so a real row always beats a story about why there is none:
+    //   "pick a deal"   -> the reader has not chosen which building this is about. Worded
+    //                      DIFFERENTLY from the [] sentence on purpose, so "you haven't
+    //                      picked" can never be misread as "there is nothing".
+    //   "invoice first" -> chosen, but nobody has billed it. Carolyn's own vocabulary from
+    //                      the Orders tab ("Needs invoice" / "Invoice first"), reused rather
+    //                      than reinvented, so one concept does not grow two names.
+    // The cards THEMSELVES stay — she settled that on 2026-08-28 ("the card just is going to
+    // be blank. It'll say build schedule. And it just is nothing"), and hiding the Build card
+    // would remove the place a builder goes to SCHEDULE the build. Only the rails hide.
+    const pickFirst = (what) => (
+      <div style={{ fontSize: 12, color: "#94A3B8" }}>Pick a deal or order above to see its {what}.</div>
+    );
+    const railSubject = kind === "contact" ? activeDeal : record;
     if (key === "build") {
       if (!data.build) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.build.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not on the build schedule yet.</div>;
+      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : data.build;
+      if (!bJobs.length && ctx.needsPick) return pickFirst("build schedule");
+      if (!bJobs.length && !crmHasInvoice(railSubject)) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
+      }
+      if (!bJobs.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not on the build schedule yet.</div>;
       const stageById = new Map((data.stages || []).map((s) => [s.id, s]));
       return (
         <div>
-          {data.build.map((j) => {
+          {bJobs.map((j) => {
             const st = stageById.get(j.stage_id);
             return (
               <div key={j.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
@@ -1888,10 +2026,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     }
     if (key === "delivery") {
       if (!data.delivery) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.delivery.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not scheduled for delivery yet.</div>;
+      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : data.delivery;
+      if (!dStops.length && ctx.needsPick) return pickFirst("deliveries");
+      if (!dStops.length && !crmHasInvoice(railSubject)) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
+      }
+      if (!dStops.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not scheduled for delivery yet.</div>;
       return (
         <div>
-          {data.delivery.map((s) => {
+          {dStops.map((s) => {
             const L = s.load || null;
             const label = s.delivered_at ? "Delivered" : L ? (CRM_LOAD_LABEL[L.status] || L.status) : "On a load";
             return (
@@ -1908,10 +2051,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     }
     if (key === "repairs") {
       if (!data.repairs) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.repairs.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
+      // Scoped to the pick like its siblings, but ⚠️ NO INVOICE GATE. A repair is not
+      // gated on billing — repairs key on design_short_code and have no invoice
+      // relationship at all, so "invoice first" would be a sentence that never becomes true.
+      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : data.repairs;
+      if (!reps.length && ctx.needsPick) return pickFirst("repairs");
+      if (!reps.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
       return (
         <div>
-          {data.repairs.map((r) => (
+          {reps.map((r) => (
             <div key={r.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>#{r.repair_no} · {r.status}</div>
               <div style={{ fontSize: 11, color: "#64748B" }}>
@@ -1946,18 +2094,36 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
             // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
             // to" -- which was true until the order detail got its own URL in this change.
-            const Tag = onOpenOrder ? "button" : "div";
+            // SELECTING AN ORDER AND SELECTING ITS DEAL ARE THE SAME SELECTION, which is
+            // why selCode holds a SHORT CODE and not an order id. Carolyn asked for "a deal,
+            // or an order"; pick the order and its deal lights up in the card above, because
+            // they are the same building. Two independent selections could disagree, and
+            // "which one am I looking at" is the entire problem being fixed here.
+            const sel = !!o.short_code && activeCode === o.short_code;
             return (
-              <Tag key={o.id} onClick={onOpenOrder ? () => onOpenOrder(o.id) : undefined}
-                style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: onOpenOrder ? "pointer" : "default" }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: onOpenOrder ? ACCENT : "#1E293B" }}>
-                  #{o.order_no}{what ? ` · ${what}` : ""}
-                </div>
-                <div style={{ fontSize: 11, color: "#64748B" }}>
-                  {fmtDate(o.ordered_at)}
-                  {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
-                </div>
-              </Tag>
+              <div key={o.id}
+                style={{ display: "flex", alignItems: "stretch", background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
+                <button onClick={() => { if (o.short_code) setSelCode(sel ? null : o.short_code); }}
+                  aria-pressed={sel} disabled={!o.short_code}
+                  title={o.short_code ? (sel ? "Showing this order — click to clear" : "Show this order's stages, build and delivery") : ""}
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                    padding: "7px 9px", cursor: o.short_code ? "pointer" : "default" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                    #{o.order_no}{what ? ` · ${what}` : ""}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>
+                    {fmtDate(o.ordered_at)}
+                    {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
+                  </div>
+                </button>
+                {onOpenOrder && (
+                  <button onClick={() => onOpenOrder(o.id)} title="Open this order"
+                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                      padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
+                )}
+              </div>
             );
           })}
           {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
@@ -2121,32 +2287,63 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       </div>
       {kind === "design" && <CrmStageBar status={record.status} />}
       {(() => {
-        // SALES: on a contact only (the deal already has its chevron rail above). A contact
-        // can hold several deals, so the ladder shown is the one the NEWEST deal is on --
-        // designs come back newest-first from crm_record.
-        const newest = (data.designs || [])[0];
-        const salesIdx = newest
-          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(newest.status)] || "new")))
+        // The design these rails are about: the record itself on a deal, the PICKED deal on
+        // a contact. Null on a contact with nothing picked, which reads as "no invoice" and
+        // hides Build/Delivery — correct, and the sales row is gone for the same reason.
+        const railDesign = kind === "contact" ? activeDeal : record;
+
+        // SALES: on a contact only (the deal already has its chevron rail above), and only
+        // once a deal is PICKED.
+        //
+        // ⚠️ THIS USED TO AUTO-PICK designs[0], "the newest deal", and that auto-pick IS the
+        // bug. Carolyn, 2026-09-02, on a contact holding four quotes: "there's three, four
+        // quotes in here. Which one the heck is it when I'm in a contact? ... what is it
+        // displaying up here? ... this should not show up here, unless one of these is
+        // selected, so you know which one you're seeing." A ladder drawn for a deal the
+        // reader did not choose and cannot identify is worse than no ladder: it looks like
+        // an answer. Defaulting to the newest would be the same bug with a nicer comment.
+        const salesIdx = activeDeal
+          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(activeDeal.status)] || "new")))
           : null;
+
+        // Scope build/delivery to the picked deal. crm_record computes both over EVERY code
+        // this contact owns, so without this the rails would mix four buildings into one
+        // ladder — the same "what am I looking at" problem one level down. Every row carries
+        // its own design_short_code, so this is pure client-side filtering, no server change.
+        const forDeal = (rows) => (activeCode ? (rows || []).filter((r) => r.design_short_code === activeCode) : (rows || []));
+
         // BUILD: the tenant's OWN stages, in their own order. Names are editable, so the
         // ladder is whatever this builder configured, never a hard-coded list.
         const bStages = (data.stages || []).map((s) => ({ name: s.name }));
-        const firstJob = (data.build || [])[0];
+        const firstJob = forDeal(data.build)[0];
         const bIdx = firstJob
           ? (() => { const i = (data.stages || []).findIndex((s) => s.id === firstJob.stage_id); return i < 0 ? null : i; })()
           : null;
         // DELIVERY: the fixed three-value ladder on delivery_loads. A stop with a
         // delivered_at is delivered even if its load has not been closed out.
-        const stop = (data.delivery || [])[0];
+        const stop = forDeal(data.delivery)[0];
         const dIdx = !stop ? null
           : stop.delivered_at ? 2
           : stop.load ? Math.max(0, ["planned", "out", "delivered"].indexOf(stop.load.status))
           : 0;
+
+        // ⚠️ THE ROW MUST BE CONDITIONAL, NOT THE INDEX. Setting bIdx = null does NOT drop
+        // the row — CrmChevronRail renders an all-idle rail for idx == null deliberately
+        // ("not started is not stage zero"), and CrmStageDots only filters rows with no
+        // stages. Nulling the whole row object is the only thing that removes it.
+        //
+        // Carolyn: "can we make this like hide this if it doesn't have an invoice?" Build and
+        // Delivery only — the Sales rail is what a pipeline IS for, and hiding it on an
+        // un-invoiced quote would remove the ladder from every deal still being sold. Six
+        // idle chevrons on an un-invoiced deal claim there is a ladder to be on; that is what
+        // reads as broken. The permission check stays FIRST, so a reader without
+        // build_schedule:view keeps their own reason and the invoice rule never speaks for it.
+        const invoiced = crmHasInvoice(railDesign);
         return (
           <CrmStageDots rows={[
-            kind === "contact" ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
-            data.build ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
-            data.delivery ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
+            kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
+            data.build && invoiced ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
+            data.delivery && invoiced ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
           ].filter(Boolean)} />
         );
       })()}
@@ -2457,6 +2654,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     }} />
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{f.subject}</span>
                     <span style={{ fontSize: 11, color: "#94A3B8" }}>{f.due_at ? fmtDate(f.due_at) : "no due date"}</span>
+                    {/* WHICH building this is about. crm_record has always selected
+                        short_code here and thrown it away; on a contact with four deals
+                        "Call about the door" tells you nothing without it. The History feed
+                        already prints the code the same way — this is that, one list up. */}
+                    {f.short_code && <span style={{ fontSize: 11, color: "#CBD5E1" }}>· {f.short_code}</span>}
                   </div>
                 ))}
               </div>

@@ -51,11 +51,11 @@ type Tab = {
 // sliced in: Invoice is send_invoice, NOT a crm_ action, and this test asserts it stays live.
 const factory = new Function(
   "normStatus",
-  `${BLOCK}; return { CRM_TABS, CRM_LOCKED_HINT };`,
+  `${BLOCK}; return { CRM_TABS, CRM_LOCKED_HINT, CRM_PICK_HINT };`,
 );
-const { CRM_TABS, CRM_LOCKED_HINT } = factory(
+const { CRM_TABS, CRM_LOCKED_HINT, CRM_PICK_HINT } = factory(
   (s: string) => String(s || "").toLowerCase(),
-) as { CRM_TABS: Tab[]; CRM_LOCKED_HINT: string };
+) as { CRM_TABS: Tab[]; CRM_LOCKED_HINT: string; CRM_PICK_HINT: (w: string) => string };
 
 const ctxFor = (over: Ctx = {}): Ctx => ({
   kind: "design",
@@ -69,7 +69,17 @@ const ctxFor = (over: Ctx = {}): Ctx => ({
   contact: { id: "c1", email: "a@b.com", phone: "+15555550123" },
   designs: [],
   sms: { ready: true, consented: true, optedOut: false },
+  // A DESIGN record never needs a pick — it IS the deal. This default keeps every case above
+  // testing exactly what it tested before the picker existed.
+  selectedCode: "SS-AAAA1111",
+  needsPick: false,
   ...over,
+});
+
+// A CONTACT record with nothing picked yet: everything held, everything permitted, and the
+// five writable tabs still off because nobody has said WHICH building this is about.
+const unpicked = (over: Ctx = {}) => ctxFor({
+  kind: "contact", record: { id: "c1" }, selectedCode: null, needsPick: true, ...over,
 });
 
 const locked = () => ctxFor({ canEdit: false, crmUnlocked: false });
@@ -160,4 +170,96 @@ Deno.test("SMS still distinguishes its four other reasons when the CRM is held",
   assert(/no phone number/i.test(held({ contact: { id: "c1", email: "a@b.com" } })));
   assert(/predates contact records/i.test(held({ contact: { email: "a@b.com", phone: "+15555550123" } })));
   assert(/carrier registration/i.test(held({ sms: { ready: false } })));
+});
+
+// ── THE DEAL PICKER (Carolyn, 2026-09-02) ──────────────────────────────────────────────
+// "there's three, four quotes in here. Which one the heck is it when I'm in a contact? ...
+// you have to have one of these selected for anything to show up here ... Right now, it's
+// Greek, you have no idea."
+//
+// Every one of these five writes carries a short_code. Filed against the wrong deal, a note
+// about one customer's building lands in another's history — which is why the tab closes
+// rather than the code being quietly sent as null, as it was before.
+
+Deno.test("on a contact with no deal picked, exactly the five writable tabs close", () => {
+  const c = unpicked();
+  for (const key of CRM_ONLY) {
+    assertEquals(tab(key).enabled(c), false, `${key} must be disabled until a deal is picked`);
+  }
+  // Nothing ELSE moves. scheduler/call were already off for their own reasons, and invoice is
+  // a design-only tab that never sees a contact — a picker must not quietly change either.
+  for (const t of tabsFor(c)) {
+    if (CRM_ONLY.indexOf(t.key) === -1) {
+      assertEquals(t.enabled(c), false, `${t.key} unexpectedly enabled on a contact`);
+    }
+  }
+  assert(!tabsFor(c).some((t) => t.key === "invoice"), "invoice should not be offered on a contact");
+});
+
+Deno.test("picking a deal re-opens all five — the guard against over-gating", () => {
+  const c = unpicked({ selectedCode: "SS-AAAA1111", needsPick: false });
+  for (const key of CRM_ONLY) {
+    assertEquals(tab(key).enabled(c), true, `${key} should re-enable once a deal is picked`);
+  }
+});
+
+Deno.test("each closed tab says to pick a deal, and says why", () => {
+  const c = unpicked();
+  for (const key of CRM_ONLY) {
+    const h = hintOf(tab(key), c);
+    assert(/pick a deal or order/i.test(h), `${key} hint should ask for a pick, got: ${h}`);
+    assert(h !== CRM_LOCKED_HINT, `${key} must not claim a subscription problem`);
+    assert(!/permission/i.test(h), `${key} must not blame permissions`);
+    // It names the consequence, not just the instruction. "Pick one" without "so it is filed
+    // against the right one" reads as busywork.
+    assert(/filed against the right one/i.test(h), `${key} hint should say why it matters`);
+  }
+});
+
+Deno.test("HINT PRECEDENCE: subscription, then permission, then the tab's own data, then the pick", () => {
+  // ⚠️ THE ORDER IS THE POINT, and it is exactly the sort of thing a later edit inverts
+  // without noticing. needsPick goes LAST everywhere: if a contact has no email address,
+  // picking a deal still leaves Email disabled, so leading with "pick a deal" would be a lie
+  // by omission — it sends the reader off doing something that changes nothing. Every hint
+  // must name a reason that is STILL TRUE after the reader acts on every reason above it.
+  assertEquals(
+    hintOf(tab("note"), unpicked({ canEdit: false, crmUnlocked: false })),
+    CRM_LOCKED_HINT,
+    "a locked tenant hears about the subscription, not the pick",
+  );
+  assert(
+    /permission/i.test(hintOf(tab("note"), unpicked({ canEdit: false }))),
+    "a reader without permission hears about permission, not the pick",
+  );
+  assert(
+    /email address/i.test(hintOf(tab("email"), unpicked({ contact: { id: "c1", phone: "+15555550123" } }))),
+    "a contact with no email hears about the address, not the pick",
+  );
+  assert(
+    /phone number/i.test(hintOf(tab("sms"), unpicked({ contact: { id: "c1", email: "a@b.com" } }))),
+    "a contact with no phone hears about the number, not the pick",
+  );
+  assert(
+    /carrier registration/i.test(hintOf(tab("sms"), unpicked({ sms: { ready: false } }))),
+    "an unregistered number is still its own reason, ahead of the pick",
+  );
+});
+
+Deno.test("a DESIGN record is untouched by the picker", () => {
+  // The free Pipeline list opens design records on tenants without the CRM. If a design
+  // record could ever read needsPick true, this change would close tabs on a surface the
+  // picker has nothing to do with.
+  const c = ctxFor();
+  assertEquals(c.needsPick, false);
+  for (const key of CRM_ONLY) {
+    assertEquals(tab(key).enabled(c), true, `${key} should be unaffected on a design record`);
+  }
+});
+
+Deno.test("the pick hint names the thing being filed", () => {
+  // One shared builder, five nouns — so the five cannot drift into five hand-written
+  // sentences that slowly stop agreeing.
+  assert(/\bnote\b/.test(CRM_PICK_HINT("note")));
+  assert(/\btext\b/.test(CRM_PICK_HINT("text")));
+  assert(/\bupload\b/.test(CRM_PICK_HINT("upload")));
 });

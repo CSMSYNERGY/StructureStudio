@@ -3964,13 +3964,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!c) return json({ error: "That contact no longer exists." }, 404);
       contact = c;
       const { data: ds } = await admin.from("designs")
-        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        // ss_invoice_sent_at drives whether the record page draws the Build and Delivery
+        // rails (Carolyn 2026-09-02: "can we make this like hide this if it doesn't have an
+        // invoice?"). ⚠️ It is HALF the answer, not the whole one — see the note on the
+        // design branch below.
+        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("contact_id", id).order("created_at", { ascending: false });
       designs = ds ?? [];
       codes = designs.map((d: any) => d.short_code);
     } else {
       const { data: d } = await admin.from("designs")
-        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        // ⚠️ ss_invoice_sent_at IS NOT ON ITS OWN A TEST FOR "HAS AN INVOICE", and the
+        // browser must not treat it as one. It has exactly ONE writer in this repo —
+        // send_invoice, below — so it marks a StructureStudio-issued invoice and nothing
+        // else. sync-design-status, which is what flips a GHL-quoted design to 'invoiced',
+        // writes {status, updated_at} and never touches this column; migration 136's
+        // backfill was narrowed to issued_by='structurestudio' for the same reason. So a
+        // design invoiced in GoHighLevel has this NULL forever, and on live that is 14 of
+        // junior-barns' buildings — every one of them physically on the build board.
+        //
+        // The pair is what answers the question: this column catches an SS invoice that is
+        // OUT BUT UNSIGNED (a state `status` cannot express, because send_invoice
+        // deliberately stopped flipping it), and `status` catches the GHL path. Neither
+        // half is redundant. crmHasInvoice in portal/02-sales.jsx is the union.
+        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("short_code", id).maybeSingle();
       if (!d) return json({ error: "That design no longer exists." }, 404);
       designs = [d];
@@ -4215,6 +4232,37 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, path, token: signed?.token, signedUrl: signed?.signedUrl });
   }
 
+  // ── THE CONTACT AND THE DEAL MUST BE THE SAME CUSTOMER'S ───────────────────────────
+  // Returns a refusal Response, or null to carry on.
+  //
+  // WHY THIS ONLY MATTERS NOW. Until the record page grew a deal picker (Carolyn
+  // 2026-09-02: "you have to select a deal, or an order, in order for anything to show up
+  // here, so you know what you're talking about"), a contact-scoped write ALWAYS sent
+  // shortCode: null — the two ids were never both present, so there was no pair to
+  // disagree. Now every note, activity, text, email and upload made from a contact record
+  // carries the deal it is about, and a wrong code would file a note about customer A onto
+  // customer B's deal: a cross-record leak inside one tenant, visible in the other
+  // customer's history.
+  //
+  // It is deliberately NOT a requirement that a shortCode be present. Migration 131's own
+  // CHECK is "contact_id OR short_code", other callers legitimately send one or the other,
+  // and crm_save_note's edit path sends neither. Requiring one here would refuse writes
+  // that are correct. The rule is only: if you send both, they must agree.
+  //
+  // 400 rather than text_sign_link's 409 — that one means "the state is wrong", this means
+  // "these two arguments contradict each other".
+  const mismatchedPair = async (
+    contactId: string | null,
+    shortCode: string | null,
+  ): Promise<Response | null> => {
+    if (!contactId || !shortCode) return null;
+    const { data, error } = await admin.from("designs").select("short_code")
+      .eq("client_id", clientId).eq("short_code", shortCode).eq("contact_id", contactId).maybeSingle();
+    if (error) return dbFail(req, clientId, "check that deal", error);
+    if (!data) return json({ error: "That deal doesn't belong to this contact." }, 400);
+    return null;
+  };
+
   if (action === "crm_file_attach") {
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const path = String(payload.path ?? "");
@@ -4223,10 +4271,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!contactId || !path.startsWith(`${clientId}/${contactId}/`)) {
       return json({ error: "That file does not belong to this contact." }, 400);
     }
+    const attachCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    { const bad = await mismatchedPair(contactId, attachCode); if (bad) return bad; }
     const row = {
       client_id: clientId,
       contact_id: contactId,
-      short_code: payload.shortCode ? String(payload.shortCode).slice(0, 32) : null,
+      short_code: attachCode,
       path,
       name: String(payload.name ?? "file").trim().slice(0, 200),
       size_bytes: Math.max(0, Math.min(Number(payload.size) || 0, STORAGE_MAX_FILE)),
@@ -4348,6 +4398,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId) return json({ error: "A text has to be addressed to a contact." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
 
     const { data: c, error: cErr } = await admin.from("crm_contacts")
       .select("phone").eq("client_id", clientId).eq("id", contactId).maybeSingle();
@@ -4446,6 +4497,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
 
     // REPLY-TO FALLBACK ONLY: the staff member who wrote it. There is no `business_email`
     // column to default a reply address from (emailSend.ts says so in as many words), and the
@@ -4514,6 +4566,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "A note must attach to a contact or a design." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
     const row: Record<string, unknown> = { client_id: clientId, body, created_by: userId ?? null };
     if (contactId) row.contact_id = contactId;
     if (shortCode) row.short_code = shortCode;
@@ -4545,6 +4598,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
     const row: Record<string, unknown> = {
       client_id: clientId, kind, subject,
       due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
