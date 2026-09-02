@@ -962,12 +962,23 @@ function ssAllowedOrigin(origin) {
 // on a style that offers no increases. The two are mutually exclusive — picking one clears the
 // other — so "last thing the customer touched" always wins instead of one silently shadowing
 // the other. Clamped to the same 5-14 ft band _shared/styleD3.ts enforces server-side.
+// The style's STANDARD wall height, before any customer increase — the fallback chain the spec
+// resolver already walked, lifted out because the 3D footer needs the SAME number to turn a
+// delta back into the absolute height the engine renders at. Two copies would drift.
+function d3BaseWallHeightFt(C, styleCfg) {
+  const o = (styleCfg && styleCfg.d3) || {};
+  return Number(o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || (C && C.wallHeightFt) || 8) || 8;
+}
+// Delta inches -> absolute feet, clamped to the range styleD3.ts enforces on the column. ONE
+// clamp: the footer and the spec resolver must agree to the inch, or the 3D renders a height
+// the estimate did not price.
+function d3WallHeightFromDelta(baseFt, deltaIn) {
+  return Math.max(5, Math.min(14, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
+}
 function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
   const d = Number(sel && sel.wallHeightDeltaIn) || 0;
   if (d > 0 && resolveWallHeight(C, styleKey, d, widthFt)) {
-    const o = (styleCfg && styleCfg.d3) || {};
-    const base = Number(o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || (C && C.wallHeightFt) || 8) || 8;
-    return Math.max(5, Math.min(14, base + d / 12));
+    return d3WallHeightFromDelta(d3BaseWallHeightFt(C, styleCfg), d);
   }
   return (sel && sel.wallHeight) || 0;
 }
@@ -4711,7 +4722,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, perimeterFt, showPricing, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -4748,17 +4759,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
   // Paint picker selection; labels flow into paintColors (same free-text
   // semantics as the 2D paint inputs).
   const [paintSel, setPaintSel] = useState({ body: painted ? (paintBody || "") : "", trim: painted ? (paintTrim || "") : "" });
-  // Customer wall-height pick (IdeaRoom's wall-raise, per Carolyn 2026-07-02).
-  // Rebuilds the model live and commits to sel.wallHeight via onWallHeight.
-  const [wallHSel, setWallHSel] = useState((style3d && style3d.wallHeightFt) || D3.WALL_H);
-  const pickWallHeight = (h) => {
-    setWallHSel(h);
-    const e = engineRef.current;
-    if (e && e.setWallHeight) e.setWallHeight(h);
-    if (onWallHeight) onWallHeight(h);
-    capturedRef.current = false; // height change makes any earlier shot stale
-    setShotTaken(false);
-  };
+  // Customer wall-height pick (IdeaRoom's wall-raise, per Carolyn 2026-07-02) lives in the
+  // footer below and commits a DELTA, not an absolute height — see the picker for why. There
+  // is deliberately no wallHSel state any more: the highlight reads wallHeightDeltaIn, the
+  // engine holds the rendered height, and a third copy could only ever disagree with them.
   const pickColor = (kind, label) => {
     const next = kind === "none" ? { body: "", trim: "" } : { ...paintSel, [kind]: label };
     setPaintSel(next);
@@ -5955,16 +5959,60 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             </button>
           )}
         </div>
-        {/* Wall height — rebuilds live; the pick rides into the saved design + estimate */}
-        <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
-          <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Wall height</span>
-          {[6, 7, 8, 9, 10].map((h) => (
-            <button key={h} onClick={() => pickWallHeight(h)} disabled={phase !== "ready"}
-              style={{ background: wallHSel === h ? accent : "#1E293B", color: wallHSel === h ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
-              {h} ft
-            </button>
-          ))}
-        </div>
+        {/* WALL HEIGHT — the SAME priced increases the 2D picker offers, and for one reason.
+            This row used to be a fixed 6/7/8/9/10 ft writing sel.wallHeight, the UNPRICED
+            legacy field, while clearing sel.wallHeightDeltaIn. The two were "mutually
+            exclusive, last touched wins", which is harmless until a builder actually
+            configures increases. Carolyn did, on junior-barns (Econo +6 in at $5/lf), and then
+            the hole is real: a customer picks the paid upgrade in the designer, opens 3D,
+            touches this row, and the charge is silently zeroed while the building stays tall.
+            Nothing errors. One vocabulary, one field, and that cannot happen.
+
+            A style offering no increase shows NO picker, matching the 2D rule — hauling limits
+            are per style and most styles have none. That does remove the old free 6-10 ft
+            choice there; it was unpriced, and an unpriced structural change is precisely what
+            the increases exist to stop. */}
+        {(() => {
+          const whOpts = Array.isArray(wallHeightOptions) ? wallHeightOptions : [];
+          if (!whOpts.length) return null;
+          const baseFt = Number(wallHeightBaseFt) || D3.WALL_H;
+          const curDelta = Number(wallHeightDeltaIn) || 0;
+          // A design saved before this carries an absolute height and no delta. Highlighting
+          // "Standard" then would misdescribe what is on screen, so nothing is highlighted
+          // until they choose — and choosing normalises the design onto the priced field.
+          const legacy = !curDelta && Number(wallHeightLegacyFt) > 0;
+          const perim = Number(perimeterFt) || 0;
+          const pickDelta = (d) => {
+            const abs = d > 0 ? d3WallHeightFromDelta(baseFt, d) : baseFt;
+            const e = engineRef.current;
+            if (e && e.setWallHeight) e.setWallHeight(abs);
+            if (onWallHeight) onWallHeight(d);
+            capturedRef.current = false;   // a height change makes any earlier shot stale
+            setShotTaken(false);
+          };
+          const cell = (on) => ({
+            background: on ? accent : "#1E293B", color: on ? "#FFF" : "#CBD5E1",
+            border: "1px solid #334155", borderRadius: 7, padding: "6px 10px",
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            opacity: phase === "ready" ? 1 : 0.5,
+          });
+          return (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+              <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Wall height</span>
+              <button onClick={() => pickDelta(0)} disabled={phase !== "ready"} style={cell(!curDelta && !legacy)}>Standard</button>
+              {whOpts.map((o) => {
+                const rate = Number(o.ratePerLf) || 0;
+                const add = showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
+                return (
+                  <button key={o.deltaIn} onClick={() => pickDelta(Number(o.deltaIn))} disabled={phase !== "ready"}
+                    style={cell(curDelta === Number(o.deltaIn))}>
+                    +{o.deltaIn}&Prime;{add != null ? ` +${fmtMoney2(add)}` : ""}
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })()}
         {/* Paint colors: labels land in paintColors (and the estimate); swatch hex drives the 3D */}
         {paintEnabled && (
           <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -13280,9 +13328,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             setPaintColors({ body: pc.body, trim: pc.trim });
             setSel((p) => ({ ...p, paint: (pc.body || pc.trim) ? "Painted" : "No Paint" }));
           }}
-          // Clears the 2D increase: the two pickers are mutually exclusive, so a height chosen
-          // here is not silently shadowed by an increase chosen there.
-          onWallHeight={(h) => setSel((p) => ({ ...p, wallHeight: h, wallHeightDeltaIn: 0 }))}
+          // ONE FIELD, BOTH PICKERS. This used to write sel.wallHeight (unpriced) and clear the
+          // increase, so opening 3D and touching that row silently dropped a paid upgrade. It
+          // now commits the same wallHeightDeltaIn the 2D picker does; clearing the legacy
+          // absolute is what normalises a design saved before the increases existed.
+          wallHeightOptions={wallHeightOptionsFor(C, sel.style, bldgW, embedded)}
+          wallHeightDeltaIn={sel.wallHeightDeltaIn}
+          wallHeightBaseFt={d3BaseWallHeightFt(C, selectedStyle)}
+          wallHeightLegacyFt={sel.wallHeight}
+          perimeterFt={2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0))}
+          showPricing={C.showPricing}
+          onWallHeight={(d) => setSel((p) => ({ ...p, wallHeightDeltaIn: Number(d) || 0, wallHeight: 0 }))}
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}

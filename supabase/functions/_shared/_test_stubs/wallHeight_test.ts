@@ -16,7 +16,10 @@ const SRC = await Deno.readTextFile(
   new URL("../../../../structure-studio.component.js", import.meta.url),
 );
 
-const START = "function wallHeightFitsWidth(opt, widthFt) {";
+// Widened 2026-09-02 to take in d3BaseWallHeightFt / d3WallHeightFromDelta as well: the 3D
+// footer now turns a delta back into an absolute height with those, so they have to agree with
+// the spec resolver or the viewer renders a height the estimate never priced.
+const START = "function d3BaseWallHeightFt(C, styleCfg) {";
 const END = "function computeSelectionRows(";
 const i = SRC.indexOf(START);
 const j = SRC.indexOf(END, i);
@@ -27,13 +30,17 @@ if (i < 0 || j < 0) {
   );
 }
 const BLOCK = SRC.slice(i, j);
-for (const name of ["wallHeightFitsWidth", "wallHeightOptionsFor", "resolveWallHeight"]) {
+for (const name of ["wallHeightFitsWidth", "wallHeightOptionsFor", "resolveWallHeight", "d3BaseWallHeightFt", "d3WallHeightFromDelta", "d3CustomerWallHeightFt"]) {
   assert(BLOCK.includes(name), `extracted block is missing ${name}`);
 }
 
-const { wallHeightOptionsFor, resolveWallHeight } = new Function(
-  `${BLOCK}; return { wallHeightFitsWidth, wallHeightOptionsFor, resolveWallHeight };`,
+const { wallHeightOptionsFor, resolveWallHeight, d3BaseWallHeightFt, d3WallHeightFromDelta, d3CustomerWallHeightFt } = new Function(
+  `${BLOCK}; return { wallHeightFitsWidth, wallHeightOptionsFor, resolveWallHeight, d3BaseWallHeightFt, d3WallHeightFromDelta, d3CustomerWallHeightFt };`,
 )() as {
+  d3BaseWallHeightFt: (C: unknown, styleCfg: unknown) => number;
+  d3WallHeightFromDelta: (baseFt: unknown, deltaIn: unknown) => number;
+  // deno-lint-ignore no-explicit-any
+  d3CustomerWallHeightFt: (C: unknown, styleCfg: any, styleKey: string, sel: any, widthFt?: number) => number;
   wallHeightOptionsFor: (C: unknown, k: string, w?: number, includeInternal?: boolean) => { deltaIn: number; ratePerLf: number | null }[];
   resolveWallHeight: (C: unknown, k: string, d: unknown, w?: number) => { deltaIn: number; ratePerLf: number | null } | null;
 };
@@ -154,4 +161,66 @@ Deno.test("an internal-only increase a rep chose STILL PRICES", () => {
   // way an already-placed internal-only layout item keeps its price — otherwise a rep could
   // select one, see a total, and have the estimate silently drop the charge.
   assertEquals(resolveWallHeight(C, "econo", 6, 8)?.ratePerLf, 5);
+});
+
+
+// ── The 3D footer and the 2D picker must be ONE control (2026-09-02) ──────────────────
+// The footer used to be a fixed 6/7/8/9/10 ft writing sel.wallHeight — the UNPRICED legacy
+// field — while clearing sel.wallHeightDeltaIn. Harmless until a builder configured increases.
+// Carolyn did, on junior-barns (Econo +6in at $5/lf), and the hole became real: pick the paid
+// upgrade in the designer, open 3D, touch that row, and the charge is silently zeroed while the
+// building stays tall. Nothing errors. The footer now commits the same delta, and these pin the
+// arithmetic both sides share — a viewer rendering a height the estimate did not price is the
+// failure nobody sees until a quote goes out wrong.
+
+const STYLE_8FT = { d3: { wallHeightFt: 8 } };
+
+Deno.test("the footer's arithmetic IS the spec resolver's, to the inch", () => {
+  // Same delta, two code paths, one answer. Diverge and the 3D shows one building while the
+  // estimate prices another.
+  for (const d of [6, 12]) {
+    const viaFooter = d3WallHeightFromDelta(d3BaseWallHeightFt(C, STYLE_8FT), d);
+    const viaResolver = d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", { wallHeightDeltaIn: d }, 8);
+    assertEquals(viaFooter, viaResolver, `+${d}in`);
+  }
+});
+
+Deno.test("+6in on an 8 ft style is 8.5 ft, not a rounded 9", () => {
+  assertEquals(d3WallHeightFromDelta(8, 6), 8.5);
+  assertEquals(d3WallHeightFromDelta(8, 12), 9);
+  assertEquals(d3WallHeightFromDelta(8, 0), 8, "Standard is the base, untouched");
+});
+
+Deno.test("the base walks the same fallback chain the spec resolver walks", () => {
+  assertEquals(d3BaseWallHeightFt(C, { d3: { wallHeightFt: 7 } }), 7, "the style's own 3D spec wins");
+  assertEquals(d3BaseWallHeightFt(C, { wallHeightFt: 9 }), 9, "then the style's top-level height");
+  assertEquals(d3BaseWallHeightFt({ wallHeightFt: 10 }, {}), 10, "then the tenant default");
+  assertEquals(d3BaseWallHeightFt({}, {}), 8, "then 8 ft");
+  assertEquals(d3BaseWallHeightFt({}, null), 8, "a missing style is not a crash");
+});
+
+Deno.test("the clamp matches styleD3's column range, so the 3D cannot leave it", () => {
+  assertEquals(d3WallHeightFromDelta(14, 12), 14, "clamped at the top");
+  assertEquals(d3WallHeightFromDelta(4, 0), 5, "clamped at the bottom");
+});
+
+Deno.test("an increase that does not FIT the width prices nothing, and is not offered", () => {
+  // +12in is hauled only on 8 and 10 wide. On a 12 wide the resolver refuses AND the footer
+  // never lists it — the two agreeing is what stops a 3D preview of an unbillable choice.
+  assertEquals(d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", { wallHeightDeltaIn: 12 }, 12), 0);
+  assertFalse(wallHeightOptionsFor(C, "lofted", 12).some((o) => Number(o.deltaIn) === 12));
+});
+
+Deno.test("a LEGACY absolute height still renders, and is not mistaken for a delta", () => {
+  // Designs saved before the increases carry only sel.wallHeight and must keep rendering at the
+  // height they were saved at — which is why the footer highlights nothing for them rather than
+  // claiming "Standard".
+  assertEquals(d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", { wallHeight: 10 }, 12), 10);
+  assertEquals(d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", {}, 12), 0, "no pick at all is no override");
+});
+
+Deno.test("a delta BEATS a stale legacy absolute on the same design", () => {
+  // Committing a delta clears sel.wallHeight, but a design mid-migration can carry both. The
+  // PRICED field has to win, or the customer is charged for one height and shown another.
+  assertEquals(d3CustomerWallHeightFt(C, STYLE_8FT, "lofted", { wallHeightDeltaIn: 6, wallHeight: 10 }, 8), 8.5);
 });
