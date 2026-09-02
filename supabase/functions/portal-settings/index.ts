@@ -232,6 +232,10 @@ const GATES: GateTable = {
   // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
   // email to the design's own customer.
   resend_quote_email: { area: "designs", level: "edit" },
+  // Texts the customer the deep link to sign their invoice. Sends no money and creates no
+  // paperwork — it re-delivers a document they already have — but it does spend the
+  // tenant's A2P campaign, so it sits at the same altitude as sending the invoice itself.
+  text_sign_link:   { area: "orders", level: "edit" },
   // Emails a pending change order to the customer for signature (migration 126). Same
   // altitude as raising one from the order card: Orders edit.
   send_change_order: { area: "orders", level: "edit" },
@@ -4158,6 +4162,85 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // server-side and normalized there (see smsSend). A number in the request body would be
   // an open relay: anyone with a portal login could text any handset from the tenant's
   // registered number, on the shared A2P campaign every other builder depends on.
+  // ── text_sign_link: put the signing link on the customer's own phone ───────────────
+  //
+  // Carolyn 2026-09-01: "when we are sitting with a customer we want to be able to send
+  // them a text message and they click on the link, for them to sign on their phone."
+  //
+  // Re-delivery ONLY. It mints no invoice, allocates no number and changes no state — the
+  // worst case is a duplicate text to the design's own customer, which is why it is safe
+  // at orders/edit. The link carries `?q=<short_code>`, which my-quotes.html reads to land
+  // them on this invoice; it grants nothing on its own, because signing still needs the
+  // texted code and customer-quotes only returns designs matching that verified phone.
+  //
+  // ⚠️ SAME RULE AS crm_send_sms: the number is read HERE, from the design's own contact.
+  // Accepting one from the browser would be an open relay on the tenant's A2P campaign.
+  if (action === "text_sign_link") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, contact, status, ss_quote_number, ss_invoice_sent_at")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("invoice_in_ghl, business_name")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (!cs || cs.invoice_in_ghl !== false) {
+      return json({ error: "This account invoices through the CRM — send it from there." }, 400);
+    }
+
+    // There must be something to sign. Texting "sign your invoice" at someone who has no
+    // invoice, or who already signed, is worse than refusing.
+    const { data: inv, error: iErr } = await admin.from("invoice_sends")
+      .select("invoice_number, status, issued_by, signed_at")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (iErr) return dbFail(req, clientId, "load that invoice", iErr);
+    if (!inv || inv.issued_by !== "structurestudio" || !["created", "sent"].includes(String(inv.status))) {
+      return json({ error: "There's no StructureStudio invoice on this order yet." }, 409);
+    }
+    if (inv.signed_at) return json({ error: "They've already signed this invoice." }, 409);
+
+    const to = String((d.contact as Record<string, unknown> | null)?.phone ?? "").trim();
+    if (!to) return json({ ok: true, sent: false, reason: "no phone number on this design" });
+
+    const link = `${myQuotesUrl(clientId, req)}&q=${encodeURIComponent(shortCode)}`;
+    const who = String(cs.business_name || "").trim();
+    const body = `${who ? who + ": " : ""}your invoice ${inv.invoice_number ?? ""} is ready to sign. `
+      + `Open ${link} and we'll text you a code to confirm it's you.`;
+
+    const secret = Deno.env.get("SMS_INBOUND_SECRET") ?? "";
+    const statusCallback = secret
+      ? `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
+      : null;
+
+    const out = await sendTenantSms(admin, clientId, {
+      toPhone: to,
+      body,
+      shortCode,
+      sentBy: userId ?? null,
+      statusCallback,
+      // A rep pressing this with the customer in front of them is not what quiet hours
+      // exist to stop — it is the same "a human hitting send" case smsSend documents.
+      bypassQuietHours: true,
+    });
+    if (!out.sent) {
+      // `not_active` is the product being off, not a fault: it is where EVERY tenant sits
+      // until their A2P campaign clears. The portal turns this into "show them the QR
+      // code instead", which is a real answer rather than a dead end.
+      return json({
+        ok: true, sent: false,
+        reason: out.reason === "not_active"
+          ? (out.error ?? "texting isn't switched on for this account yet")
+          : (out.error ?? "the text could not be sent"),
+      });
+    }
+    return json({ ok: true, sent: true, to, id: out.id, invoiceNumber: inv.invoice_number ?? null });
+  }
+
   if (action === "crm_send_sms") {
     const body = String(payload.body ?? "").trim().slice(0, 1600);
     if (!body) return json({ error: "The message is empty." }, 400);

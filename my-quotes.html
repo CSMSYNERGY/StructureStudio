@@ -64,6 +64,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 .consent-row{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;color:#334155;margin:12px 0}
 .consent-row input{width:auto;margin-top:2px}
 .accepted-line{margin-top:10px;font-size:13px;font-weight:600;color:#15803D}
+/* The deep-linked card, so a customer arriving from a texted link can see WHICH quote
+   the link meant even when they have several. Fades out on its own. */
+.quote-card.is-linked{box-shadow:0 0 0 3px rgba(61,54,114,.35);transition:box-shadow .5s ease}
 </style>
 </head>
 <body>
@@ -227,8 +230,33 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     else { el.textContent = ""; el.hidden = true; }
   }
 
+  /**
+   * The DEEP-LINK target: which quote/invoice this link was built for (`?q=SS-…`).
+   *
+   * Carolyn 2026-09-01: sitting across the table from a customer, the rep sends them a
+   * link and they sign on their own phone. Landing them on a sign-in page and asking them
+   * to find their own quote is the friction that made that not work.
+   *
+   * IT GRANTS NOTHING. The code is only a pointer — the customer still signs in with the
+   * texted code, and `customer-quotes` only ever returns designs whose contact phone
+   * matches the verified session. Open someone else's link on your own number and no card
+   * matches: the page renders your quotes exactly as it always did. That is the same
+   * posture the short code already has in the floor-plan URL.
+   */
+  function readDeepRef() {
+    try {
+      var v = new URLSearchParams(location.search).get("q");
+      if (v && /^[A-Za-z0-9_-]{4,32}$/.test(v.trim())) return v.trim();
+    } catch (e) { /* very old browser — no deep link, everything else still works */ }
+    return null;
+  }
+
   // ── State ──
   var clientId = resolveTenant();
+  // Survives the whole sign-in journey by being page-level: this is a single page that
+  // never navigates, so a customer who arrives cold still lands on their invoice after
+  // the code. Cleared once used so a later re-render does not yank the page around.
+  var deepRef = readDeepRef();
   var tokenKey = clientId ? "ssq_token_" + clientId : null;
   var nameKey = clientId ? "ssq_name_" + clientId : null;
   var bizKey = clientId ? "ssq_biz_" + clientId : null;
@@ -642,11 +670,42 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     for (var i = 0; i < quotes.length; i++) {
       list.appendChild(quoteCard(quotes[i] || {}));
     }
+
+    applyDeepLink(list);
+  }
+
+  /**
+   * Land the customer ON the invoice the link was built for, with the sign panel already
+   * open. Runs after the cards exist, and only once — `deepRef` is cleared here so a later
+   * re-render (signing, a change order) never scrolls the page out from under them.
+   *
+   * Silent when it does not match. A link opened on a different number, or after the
+   * quote is gone, simply renders the normal list: no error, and nothing is revealed
+   * about whether that code exists.
+   */
+  function applyDeepLink(list) {
+    if (!deepRef) return;
+    var want = deepRef;
+    deepRef = null;
+
+    var card = list.querySelector('[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(want) : want) + '"]');
+    if (!card) return;
+
+    card.classList.add("is-linked");
+    setTimeout(function () { card.classList.remove("is-linked"); }, 2600);
+    try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { card.scrollIntoView(); }
+
+    // Open the signature panel for them. Only when there IS one — a signed or not-yet
+    // invoiced quote just gets the highlight, never a panel that cannot do anything.
+    var signBtn = card.querySelector("[data-sign-invoice]");
+    if (signBtn) setTimeout(function () { signBtn.click(); }, 420);
   }
 
   function quoteCard(q) {
     var card = document.createElement("div");
     card.className = "quote-card";
+    // The deep link finds its card by this, not by index — the list order is the server's.
+    if (q.quoteRef) card.setAttribute("data-ref", String(q.quoteRef));
 
     // Top row: estimate number + status chip
     var top = document.createElement("div");
@@ -1168,6 +1227,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       btn.className = "btn btn-primary";
       btn.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px";
       btn.textContent = "Review & Sign Invoice";
+      // Marked so a deep link can open this panel without guessing at button text.
+      btn.setAttribute("data-sign-invoice", "1");
       btn.addEventListener("click", function () { toggleSignPanel(box, q, btn, null, inv); });
       box.appendChild(btn);
     }

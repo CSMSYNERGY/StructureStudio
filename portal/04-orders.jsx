@@ -1,3 +1,271 @@
+// ─── QR: the sign-link, on the customer's own phone ───
+//
+// Carolyn 2026-09-01: "when we are sitting with a customer we want to be able to send them
+// a text message and they click on the link, for them to sign on their phone." SMS is not
+// available yet (no tenant has an active A2P campaign), so the same link is offered as a
+// QR the customer scans off the rep's screen — which for the sitting-across-the-table case
+// needs no carrier, no number and no A2P at all.
+//
+// WHY THIS IS HAND-ROLLED RATHER THAN A LIBRARY. preflight enforces that index.html,
+// portal.html and admin.html reference the SAME three /vendor/ files, so a fourth browser
+// dependency cannot be added without breaking that lock, and a CDN script is the exact
+// blank-page failure mode vendor/README.md exists to document. So it is app code.
+//
+// IT IS NOT TRUSTED BLIND. It was verified bit-for-bit against the `qrcode` npm package
+// (11/11 cases: both real link shapes, a long tenant slug, UTF-8, and lengths spanning
+// versions 1-9). Two bugs were found and fixed that way, and the second is the one worth
+// knowing: the format word is written MSB-FIRST along row 8 — (8,0) carries bit 14, not
+// bit 0 — which is an 8-module error that still LOOKS like a QR code and still fails to
+// scan. Re-verify the same way before changing anything below.
+//
+// Byte mode only, EC level M, versions 1-10 (up to 213 bytes; a sign link is ~90). The
+// reference optimises numeric/alphanumeric segments and we deliberately do not: byte mode
+// is always valid, occasionally one version larger, and a great deal simpler to keep right.
+// Returns boolean[][] (true = dark), or null when the text does not fit.
+function ssQrMatrix(text) {
+  var CAP = [0, 14, 26, 42, 62, 84, 106, 122, 152, 180, 213];
+  var EC = {
+    1: [10, [[1, 16]]], 2: [16, [[1, 28]]], 3: [26, [[1, 44]]], 4: [18, [[2, 32]]],
+    5: [24, [[2, 43]]], 6: [16, [[4, 27]]], 7: [18, [[4, 31]]],
+    8: [22, [[2, 38], [2, 39]]], 9: [22, [[3, 36], [2, 37]]], 10: [26, [[4, 43], [1, 44]]],
+  };
+  var ALIGN = {
+    1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34],
+    7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50],
+  };
+  var i, j, k, q, r, c;
+
+  var data = [];
+  for (i = 0; i < text.length; i++) {
+    var cp = text.charCodeAt(i);
+    if (cp < 128) data.push(cp);
+    else {
+      var u = unescape(encodeURIComponent(text.charAt(i)));
+      for (j = 0; j < u.length; j++) data.push(u.charCodeAt(j));
+    }
+  }
+  var ver = 0;
+  for (i = 1; i <= 10; i++) if (data.length <= CAP[i]) { ver = i; break; }
+  if (!ver) return null;
+
+  var EXP = new Array(512), LOG = new Array(256), xv = 1;
+  for (i = 0; i < 255; i++) { EXP[i] = xv; LOG[xv] = i; xv <<= 1; if (xv & 256) xv ^= 0x11D; }
+  for (i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  function mul(a, b) { return (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]]; }
+  function gen(n) {
+    var p = [1];
+    for (var g = 0; g < n; g++) {
+      var np = [];
+      for (k = 0; k <= p.length; k++) np.push(0);
+      for (k = 0; k < p.length; k++) { np[k] ^= p[k]; np[k + 1] ^= mul(p[k], EXP[g]); }
+      p = np;
+    }
+    return p;
+  }
+  function ecOf(block, n) {
+    var g = gen(n), res = block.slice();
+    for (k = 0; k < n; k++) res.push(0);
+    for (k = 0; k < block.length; k++) {
+      var f = res[k];
+      if (!f) continue;
+      for (var w = 0; w < g.length; w++) res[k + w] ^= mul(g[w], f);
+    }
+    return res.slice(block.length);
+  }
+
+  var info = EC[ver], ecLen = info[0], groups = info[1], totalData = 0;
+  for (i = 0; i < groups.length; i++) totalData += groups[i][0] * groups[i][1];
+
+  var bits = [];
+  function put(v, n) { for (var w = n - 1; w >= 0; w--) bits.push((v >> w) & 1); }
+  put(4, 4);
+  put(data.length, ver < 10 ? 8 : 16);
+  for (i = 0; i < data.length; i++) put(data[i], 8);
+  for (i = 0; i < 4 && bits.length < totalData * 8; i++) bits.push(0);
+  while (bits.length % 8) bits.push(0);
+  var cw = [];
+  for (i = 0; i < bits.length; i += 8) {
+    var b = 0;
+    for (j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    cw.push(b);
+  }
+  var padv = [0xEC, 0x11], pi = 0;
+  while (cw.length < totalData) cw.push(padv[pi++ % 2]);
+
+  var blocks = [], eccs = [], off = 0;
+  for (i = 0; i < groups.length; i++) {
+    for (j = 0; j < groups[i][0]; j++) {
+      var blk = cw.slice(off, off + groups[i][1]);
+      off += groups[i][1];
+      blocks.push(blk);
+      eccs.push(ecOf(blk, ecLen));
+    }
+  }
+  var maxD = 0;
+  for (i = 0; i < blocks.length; i++) if (blocks[i].length > maxD) maxD = blocks[i].length;
+  var out = [];
+  for (i = 0; i < maxD; i++) for (j = 0; j < blocks.length; j++) if (i < blocks[j].length) out.push(blocks[j][i]);
+  for (i = 0; i < ecLen; i++) for (j = 0; j < eccs.length; j++) out.push(eccs[j][i]);
+
+  var size = 17 + ver * 4;
+  var m = [], rz = [];
+  for (i = 0; i < size; i++) {
+    var ra = [], rb = [];
+    for (j = 0; j < size; j++) { ra.push(0); rb.push(0); }
+    m.push(ra); rz.push(rb);
+  }
+  function setF(rr, cc, v) {
+    if (rr < 0 || cc < 0 || rr >= size || cc >= size) return;
+    m[rr][cc] = v; rz[rr][cc] = 1;
+  }
+  function finder(r0, c0) {
+    for (var dr = -1; dr <= 7; dr++) for (var dc = -1; dc <= 7; dc++) {
+      var on = (dr >= 0 && dr <= 6 && (dc === 0 || dc === 6)) ||
+        (dc >= 0 && dc <= 6 && (dr === 0 || dr === 6)) ||
+        (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4);
+      setF(r0 + dr, c0 + dc, on ? 1 : 0);
+    }
+  }
+  finder(0, 0); finder(0, size - 7); finder(size - 7, 0);
+  for (i = 8; i < size - 8; i++) {
+    setF(6, i, i % 2 === 0 ? 1 : 0);
+    setF(i, 6, i % 2 === 0 ? 1 : 0);
+  }
+  var ap = ALIGN[ver];
+  for (i = 0; i < ap.length; i++) for (j = 0; j < ap.length; j++) {
+    r = ap[i]; c = ap[j];
+    if ((r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8)) continue;
+    for (var dr2 = -2; dr2 <= 2; dr2++) for (var dc2 = -2; dc2 <= 2; dc2++) {
+      setF(r + dr2, c + dc2, (Math.abs(dr2) === 2 || Math.abs(dc2) === 2 || (dr2 === 0 && dc2 === 0)) ? 1 : 0);
+    }
+  }
+  for (i = 0; i <= 8; i++) { if (i !== 6) { rz[8][i] = 1; rz[i][8] = 1; } }
+  for (i = 0; i < 8; i++) { rz[8][size - 1 - i] = 1; rz[size - 1 - i][8] = 1; }
+  setF(size - 8, 8, 1);
+  if (ver >= 7) {
+    for (i = 0; i < 6; i++) for (j = 0; j < 3; j++) {
+      rz[i][size - 11 + j] = 1;
+      rz[size - 11 + j][i] = 1;
+    }
+  }
+
+  var bi = 0, up = true;
+  for (var col = size - 1; col > 0; col -= 2) {
+    if (col === 6) col--;
+    for (var n = 0; n < size; n++) {
+      var row = up ? size - 1 - n : n;
+      for (k = 0; k < 2; k++) {
+        var cc2 = col - k;
+        if (rz[row][cc2]) continue;
+        var bit = 0;
+        if ((bi >> 3) < out.length) bit = (out[bi >> 3] >> (7 - (bi & 7))) & 1;
+        bi++;
+        m[row][cc2] = bit;
+      }
+    }
+    up = !up;
+  }
+
+  function maskAt(kk, rr, cc) {
+    switch (kk) {
+      case 0: return (rr + cc) % 2 === 0;
+      case 1: return rr % 2 === 0;
+      case 2: return cc % 3 === 0;
+      case 3: return (rr + cc) % 3 === 0;
+      case 4: return (Math.floor(rr / 2) + Math.floor(cc / 3)) % 2 === 0;
+      case 5: return ((rr * cc) % 2) + ((rr * cc) % 3) === 0;
+      case 6: return (((rr * cc) % 2) + ((rr * cc) % 3)) % 2 === 0;
+      default: return (((rr + cc) % 2) + ((rr * cc) % 3)) % 2 === 0;
+    }
+  }
+  function stampFormat(g, mask) {
+    var d = (0 << 3) | mask, rem = d << 10;
+    for (q = 14; q >= 10; q--) if (rem & (1 << q)) rem ^= 0x537 << (q - 10);
+    var fmt = (((d << 10) | rem) ^ 0x5412) & 0x7FFF;
+    function fb(w) { return (fmt >> w) & 1; }
+    // The format word is written MSB-FIRST along row 8: (8,0) carries bit 14, not bit 0.
+    for (q = 0; q <= 5; q++) g[8][q] = fb(14 - q);
+    g[8][7] = fb(8); g[8][8] = fb(7); g[7][8] = fb(6);
+    for (q = 9; q <= 14; q++) g[14 - q][8] = fb(14 - q);
+    for (q = 0; q <= 6; q++) g[size - 1 - q][8] = fb(14 - q);
+    for (q = 7; q <= 14; q++) g[8][size - 15 + q] = fb(14 - q);
+    g[size - 8][8] = 1;
+    if (ver >= 7) {
+      var vrem = ver << 12;
+      for (q = 17; q >= 12; q--) if (vrem & (1 << q)) vrem ^= 0x1F25 << (q - 12);
+      var vi = ((ver << 12) | vrem) & 0x3FFFF;
+      for (q = 0; q < 18; q++) {
+        var vb = (vi >> q) & 1;
+        g[Math.floor(q / 3)][size - 11 + (q % 3)] = vb;
+        g[size - 11 + (q % 3)][Math.floor(q / 3)] = vb;
+      }
+    }
+  }
+  function penalty(g) {
+    var p = 0, run, prev, a, b2;
+    for (a = 0; a < size; a++) {
+      run = 1; prev = g[a][0];
+      for (b2 = 1; b2 < size; b2++) {
+        if (g[a][b2] === prev) run++;
+        else { if (run >= 5) p += 3 + (run - 5); run = 1; prev = g[a][b2]; }
+      }
+      if (run >= 5) p += 3 + (run - 5);
+    }
+    for (b2 = 0; b2 < size; b2++) {
+      run = 1; prev = g[0][b2];
+      for (a = 1; a < size; a++) {
+        if (g[a][b2] === prev) run++;
+        else { if (run >= 5) p += 3 + (run - 5); run = 1; prev = g[a][b2]; }
+      }
+      if (run >= 5) p += 3 + (run - 5);
+    }
+    for (a = 0; a < size - 1; a++) for (b2 = 0; b2 < size - 1; b2++) {
+      var s = g[a][b2] + g[a][b2 + 1] + g[a + 1][b2] + g[a + 1][b2 + 1];
+      if (s === 0 || s === 4) p += 3;
+    }
+    var P1 = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0], P2 = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+    function scan(arr) {
+      var hits = 0;
+      for (var w = 0; w + 11 <= arr.length; w++) {
+        var ok1 = true, ok2 = true;
+        for (var z = 0; z < 11; z++) {
+          if (arr[w + z] !== P1[z]) ok1 = false;
+          if (arr[w + z] !== P2[z]) ok2 = false;
+        }
+        if (ok1 || ok2) hits++;
+      }
+      return hits;
+    }
+    for (a = 0; a < size; a++) p += 40 * scan(g[a]);
+    for (b2 = 0; b2 < size; b2++) {
+      var colA = [];
+      for (a = 0; a < size; a++) colA.push(g[a][b2]);
+      p += 40 * scan(colA);
+    }
+    var dark = 0;
+    for (a = 0; a < size; a++) for (b2 = 0; b2 < size; b2++) dark += g[a][b2];
+    p += 10 * Math.floor(Math.abs(dark * 100 / (size * size) - 50) / 5);
+    return p;
+  }
+
+  var best = null, bestP = Infinity;
+  for (var mk = 0; mk < 8; mk++) {
+    var g4 = [];
+    for (i = 0; i < size; i++) g4.push(m[i].slice());
+    for (i = 0; i < size; i++) for (j = 0; j < size; j++) if (!rz[i][j] && maskAt(mk, i, j)) g4[i][j] ^= 1;
+    stampFormat(g4, mk);
+    var sc = penalty(g4);
+    if (sc < bestP) { bestP = sc; best = g4; }
+  }
+  var res = [];
+  for (i = 0; i < size; i++) {
+    var rowo = [];
+    for (j = 0; j < size; j++) rowo.push(!!best[i][j]);
+    res.push(rowo);
+  }
+  return res;
+}
+
 // ─── Feedback: bug reports + feature requests ───
 // Submissions are filed into Monday (Bugs Queue / Feature Requests (Intake)) by the
 // `portal-feedback` edge function, which ALSO records them in `feedback_submissions`
@@ -1810,6 +2078,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [phoneOpen, setPhoneOpen] = useState(false);   // the "sign on their phone" sheet
+  const [smsMsg, setSmsMsg] = useState(null);
   const debounceRef = useRef(null);
 
   // A sub-read failed: say so, in place of the WHOLE body. Rendering off partial data
@@ -2224,7 +2494,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
               <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
               <div style={{ marginTop: 4, color: "#854D0E" }}>
-                They sign it from their quote page. The build schedule unlocks once they do.
+                Send the link to their phone, or they sign it from their quote page. The build schedule unlocks once they do.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
                 {/* One offer, never both: a plain resend rebuilds nothing, but it still bumps
@@ -2232,6 +2502,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                     the acknowledged CO. That single click clears this warning, the stale badge
                     on the customer's quote page and customer-accept's refusal at once, and the
                     customer can then sign a PDF showing the old amount. */}
+                {/* Carolyn 2026-09-01: the customer is often sitting right there, and
+                    "they sign it from their quote page" is not a thing you can say out
+                    loud to someone across a desk. This puts the link on THEIR phone. */}
+                <button type="button" onClick={() => { setSmsMsg(null); setPhoneOpen(true); }}
+                  style={{ ...S.btn("#3D3672", "#FFF"), padding: "8px 14px", fontSize: 12.5 }}>
+                  Sign on their phone
+                </button>
                 {(ackedAfterInvoice ? [["Regenerate & resend", true]] : [["Resend invoice", false]]).map(([label, regen]) => (
                   <button key={label} type="button" disabled={anyBusy}
                     onClick={async () => {
@@ -2333,7 +2610,120 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           This order is invoiced — its options are frozen. Changes go through a manual change order below.
         </div>
       )}
+
+      {phoneOpen && (
+        <SignOnPhoneModal
+          clientId={clientId} shortCode={o.short_code} design={design} invoice={invoice}
+          msg={smsMsg} setMsg={setSmsMsg} onClose={() => setPhoneOpen(false)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * "Sign on their phone" — the same signing link, three ways to hand it over.
+ *
+ * The link is built HERE, in the browser, from the origin the operator is already on:
+ * a link generated on beta must stay on beta, and that is exactly what window.origin
+ * gives without a round trip. `?q=` is the deep link my-quotes.html reads — it points at
+ * one invoice, and grants nothing on its own: the customer still signs in with their
+ * texted code, and customer-quotes only ever returns designs matching that verified
+ * phone. Opening someone else's link on your own number shows you your own quotes.
+ */
+function SignOnPhoneModal({ clientId, shortCode, design, invoice, msg, setMsg, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}&q=${encodeURIComponent(shortCode)}`;
+  const phone = (design && design.contact && design.contact.phone) || "";
+
+  // The matrix is derived once per link, not per render — it is ~200 lines of bit work.
+  const qr = useMemo(() => { try { return ssQrMatrix(link); } catch (e) { return null; } }, [link]);
+
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+    else { window.prompt("Copy the signing link:", link); done(); }
+  };
+
+  const textIt = async () => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "text_sign_link", shortCode },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) { setMsg({ err: (data && data.error) || error.message }); return; }
+    setMsg(data && data.sent
+      ? { ok: `Texted to ${data.to || "the customer"} — they can sign from the link now.` }
+      : { err: `Not texted${data && data.reason ? ` — ${data.reason}` : ""}. Show them the QR code instead.` });
+  };
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, zIndex: 1200 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 400, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ fontSize: 15.5, fontWeight: 800 }}>Sign on their phone</div>
+          <button type="button" onClick={onClose}
+            style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: "17px 18px" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+            Have them scan this with their phone camera. It opens invoice{" "}
+            <b>{(invoice && invoice.invoice_number) || ""}</b> ready to sign — they still enter
+            the code we text them, so only they can sign it.
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", margin: "15px 0 4px" }}>
+            {qr
+              ? <QrSvg matrix={qr} size={212} />
+              : <div style={{ fontSize: 12, color: "#B45309", textAlign: "center", padding: "18px 8px" }}>
+                  This link is too long to show as a QR code — copy it instead.
+                </div>}
+          </div>
+
+          <div style={{ fontSize: 10.5, color: "#94A3B8", textAlign: "center", wordBreak: "break-all", marginBottom: 13 }}>{link}</div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={copy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), flex: 1, border: "1px solid #E2E8F0" }}>
+              {copied ? "Copied ✓" : "Copy link"}
+            </button>
+            <button type="button" onClick={textIt} disabled={busy || !phone}
+              title={phone ? `Text it to ${phone}` : "This customer has no phone number on their design"}
+              style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !phone ? 0.55 : 1 }}>
+              {busy ? "Texting…" : "Text it to them"}
+            </button>
+          </div>
+
+          {msg && (
+            <div style={{ marginTop: 11, fontSize: 12, lineHeight: 1.45, color: msg.err ? "#9F1239" : "#047857" }}>
+              {msg.err || msg.ok}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The matrix as an SVG. One <rect> per dark module — a sign link is at most 53x53, so
+ *  this stays small, and an SVG prints and scales without a canvas or a data URI. */
+function QrSvg({ matrix, size = 200 }) {
+  const n = matrix.length;
+  const quiet = 4;                       // the spec's quiet zone; scanners need it
+  const span = n + quiet * 2;
+  const rects = [];
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (matrix[r][c]) rects.push(<rect key={`${r}-${c}`} x={c + quiet} y={r + quiet} width={1} height={1} fill="#0F172A" />);
+    }
+  }
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${span} ${span}`} shapeRendering="crispEdges"
+      style={{ display: "block", borderRadius: 8 }} role="img" aria-label="Signing link QR code">
+      <rect x={0} y={0} width={span} height={span} fill="#FFF" />
+      {rects}
+    </svg>
   );
 }
 
