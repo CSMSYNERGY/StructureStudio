@@ -973,6 +973,45 @@ function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
 // ABSENT widthsFt means every width, and it is a LIVING default: a width added to the style
 // later is offered automatically, rather than silently dropping out because nobody re-ticked
 // it. Same contract as a fixture's window colours.
+// ── Insulation (177) ────────────────────────────────────────────────────────────────────────
+// Offered combinations only — get_config emits a row per (type, area) that has a rate, so an
+// unpriced combination simply is not in the list. NO rate reaches the browser at all: Carolyn
+// chose "no price until the quote" for this one, so the toggles read like the tool buttons
+// beside them and the cost appears on the estimate.
+const INSULATION_AREAS = ["floor", "walls", "roof"];
+const INSULATION_AREA_LABEL = { floor: "Floor", walls: "Walls", roof: "Roof" };
+const INSULATION_TYPE_LABEL = { batt: "Batt", spray_foam: "Spray Foam" };
+function insulationOffered(C) {
+  const l = C && C.insulation;
+  return Array.isArray(l) ? l : [];
+}
+function insulationTypes(C) {
+  const seen = [];
+  insulationOffered(C).forEach((o) => { if (o && o.type && seen.indexOf(o.type) === -1) seen.push(o.type); });
+  return seen;
+}
+function insulationAreasFor(C, type) {
+  if (!type) return [];
+  const areas = insulationOffered(C).filter((o) => o.type === type).map((o) => o.area);
+  // Keep floor/walls/roof order rather than whatever the payload happened to sort to.
+  return INSULATION_AREAS.filter((a) => areas.indexOf(a) !== -1);
+}
+
+// Square footage per area. THE SERVER COMPUTES THIS TOO, from the same rules — submit-estimate
+// is authoritative and re-derives every number, so these two must agree or the preview and the
+// quote disagree.
+//
+// roof == floor is a deliberate v1 simplification: the builder's $/sq ft absorbs the pitch. A
+// pitch factor would have to come from the style's 3D spec, which not every style has.
+// Walls are GROSS — perimeter x wall height, no deduction for doors or windows. That is how
+// insulation is quoted, and subtracting openings would couple this to the opening catalog.
+function insulationSqft(area, widthFt, lengthFt, wallHeightFt) {
+  const w = Number(widthFt) || 0, l = Number(lengthFt) || 0, h = Number(wallHeightFt) || 0;
+  if (area === "floor" || area === "roof") return Math.round(w * l);
+  if (area === "walls") return Math.round(2 * (w + l) * h);
+  return 0;
+}
+
 function wallHeightFitsWidth(opt, widthFt) {
   if (!opt) return false;
   const w = Number(widthFt) || 0;
@@ -1141,6 +1180,9 @@ function computeSelectionRows(sel, paintColors, C, items) {
   rows.push({ key: "building", label: styleSize, detail: buildingDetail, total: showP ? Math.max(0, buildingPrice - declinedTotal) : null });
   // Taller walls sit directly under the building because that is what they change. A selection
   // charge, so it is NOT in LAYOUT_PRICE_ORDER and never touches the inclusion machinery.
+  // Insulation — one line per ticked area, the same shape the estimate emits. Priced from the
+  // resolved wall height, so a taller-wall upgrade grows the wall area with it.
+  const insSel = Array.isArray(sel && sel.insulation) ? sel.insulation : [];
   const whOpt = resolveWallHeight(C, styleKey, sel && sel.wallHeightDeltaIn, bW);
   if (whOpt) {
     const whRate = Number(whOpt.ratePerLf) || 0;
@@ -1151,6 +1193,31 @@ function computeSelectionRows(sel, paintColors, C, items) {
       unit: fmtMoney2(whRate) + " / ft",
       total: showP ? Math.round(whRate * buildingPerimeter * 100) / 100 : null,
       method: "lineal_ft",
+    });
+  }
+  if (insSel.length) {
+    const offered = insulationOffered(C);
+    // The wall height the customer actually gets, so wall square footage tracks the upgrade.
+    const stEntry0 = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
+    const wallH = d3CustomerWallHeightFt(C, stEntry0, styleKey, sel, bW) ||
+      Number(((stEntry0 && stEntry0.d3) || {}).wallHeightFt) || Number(C && C.wallHeightFt) || 8;
+    INSULATION_AREAS.forEach((area) => {
+      const pick = insSel.find((s) => s && s.area === area);
+      if (!pick) return;
+      // Only price what is actually offered — the server refuses anything else outright.
+      if (!offered.some((o) => o.type === pick.type && o.area === area)) return;
+      const sqft = insulationSqft(area, bW, bL, wallH);
+      if (sqft <= 0) return;
+      rows.push({
+        key: "insul:" + area,
+        label: `${INSULATION_TYPE_LABEL[pick.type] || pick.type} Insulation — ${INSULATION_AREA_LABEL[area]}`,
+        qty: sqft,
+        unit: "sq ft",
+        // The rate never reaches the browser (Carolyn: no price until the quote), so the
+        // preview shows the measurement and leaves the money to the estimate.
+        total: null,
+        method: "sqft",
+      });
     });
   }
   const painted = sel && sel.paint === "Painted";
@@ -10008,6 +10075,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // The DELTA is what the server prices — it re-reads the rate from the catalog, so a
           // forged body cannot invent its own upgrade. wallHeightFt stays alongside it as the
           // resolved absolute the 3D model was built at, and is still priced by nobody.
+          // Selections only — the server owns every rate and re-derives the square footage.
+          ...(Array.isArray(sel.insulation) && sel.insulation.length
+            ? { insulation: sel.insulation.map((s) => ({ type: s.type, area: s.area })) } : {}),
           ...(sel.wallHeightDeltaIn ? { wallHeightDeltaIn: Number(sel.wallHeightDeltaIn) } : {}),
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
@@ -11522,6 +11592,56 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           //
           // A GRID, not a flex row, because the rule has to span every row: it is one element at
           // column 2 with gridRow "1 / -1". Cells name their own column and let rows auto-flow.
+          // One type for the whole building, then the areas — which is how it is sold. The data
+          // model keeps a type PER AREA so a mixed job stays expressible, but offering that in
+          // the UI would mean three type pickers in one grid cell.
+          const insTypes = insulationTypes(C);
+          const insSelNow = Array.isArray(sel.insulation) ? sel.insulation : [];
+          // The chosen TYPE is its own selection, not something derived from the ticked areas.
+          // Deriving it meant picking a type before ticking anything silently did nothing —
+          // there were no rows to re-stamp, so the fallback kept winning.
+          const insType = sel.insulationType || (insSelNow[0] && insSelNow[0].type) || insTypes[0] || null;
+          const insAreas = insulationAreasFor(C, insType);
+          const insHas = (a) => insSelNow.some((s) => s && s.area === a);
+          const insToggle = (a) => setSel((p) => {
+            const cur = Array.isArray(p.insulation) ? p.insulation : [];
+            return { ...p, insulation: cur.some((s) => s.area === a) ? cur.filter((s) => s.area !== a) : [...cur, { type: insType, area: a }] };
+          });
+          // Switching type re-stamps the areas already ticked; an area the new type does not
+          // offer is dropped rather than silently re-priced as something it is not.
+          const insSetType = (t) => setSel((p) => {
+            const keep = insulationAreasFor(C, t);
+            const cur = Array.isArray(p.insulation) ? p.insulation : [];
+            return { ...p, insulationType: t, insulation: cur.filter((s) => keep.indexOf(s.area) !== -1).map((s) => ({ ...s, type: t })) };
+          });
+          const insAll = insAreas.length > 1 && insAreas.every(insHas);
+          const insCell = insAreas.length ? (
+            <div>
+              <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>Insulation</span>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                {insTypes.length > 1 && insTypes.map((t) => (
+                  <button key={t} onClick={() => insSetType(t)}
+                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      background: insType === t ? "#0F766E" : "#F8FAFC", color: insType === t ? "#FFF" : "#334155",
+                      border: `2px solid ${insType === t ? "#0F766E" : "#E2E8F0"}` }}>{INSULATION_TYPE_LABEL[t] || t}</button>
+                ))}
+                {insTypes.length > 1 && <span style={{ width: 1, height: 18, background: "#CBD5E1", margin: "0 2px" }} />}
+                {insAreas.map((a) => (
+                  <button key={a} onClick={() => insToggle(a)}
+                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      background: insHas(a) ? "#14B8A6" : "#F8FAFC", color: insHas(a) ? "#FFF" : "#334155",
+                      border: `2px solid ${insHas(a) ? "#14B8A6" : "#E2E8F0"}` }}>{INSULATION_AREA_LABEL[a]}</button>
+                ))}
+                {insAreas.length > 1 && (
+                  <button onClick={() => setSel((p) => ({ ...p, insulation: insAll ? [] : insAreas.map((a) => ({ type: insType, area: a })) }))}
+                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      background: "#F8FAFC", color: "#334155", border: "2px dashed #CBD5E1" }}>
+                    {insAll ? "Clear" : "Entire building"}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : null;
           const renderAddl = () => {
             const secs = sectionsOf(addl);
             // No groups at all — every tenant whose config predates palette groups. Unchanged.
@@ -11542,10 +11662,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
               );
             }
+            // Insulation joins the grid as another cell (Carolyn: "in with all the options").
+            // It is a SELECTION, not a placeable tool, so it is appended here rather than routed
+            // through ITEMS — but it renders as the same toggle buttons, which is what makes it
+            // read as one of the options rather than a stray control.
+            const cells = secs.map(cellOf);
+            if (insCell) cells.push(React.cloneElement(insCell, { key: "ss-insulation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
             return (
               <div key="ss-split" style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", columnGap: 18, rowGap: 12, alignItems: "start", width: "100%" }}>
                 <div style={{ gridColumn: 2, gridRow: "1 / -1", background: "#CBD5E1", width: 1 }} />
-                {secs.map(cellOf)}
+                {cells}
               </div>
             );
           };

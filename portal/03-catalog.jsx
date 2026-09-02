@@ -2769,6 +2769,111 @@ const LP_METHODS = [
 //
 // renderSection is a plain function and NOT a component, deliberately: as a component React
 // remounts it on every keystroke and the input loses focus. Same note as ColorsView.
+// -- Insulation (177) -------------------------------------------------------------------
+// A fixed 2x3 matrix: batt / spray foam across floor / walls / roof. Blank a cell and that
+// combination stops being offered -- the row is deleted, get_config stops emitting it, and the
+// customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
+// fourth row here: a stored fourth rate would be a second place for the price to live.
+function Insulation({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"]];
+  const AREAS = [["floor", "Floor"], ["walls", "Walls"], ["roof", "Roof"]];
+  const [cat, setCat] = useState(null);
+  const [cells, setCells] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const m = {};
+    (data.insulation || []).forEach((r) => {
+      m[r.ins_type + "|" + r.area] = {
+        ratePerSqft: r.rate_per_sqft != null ? String(r.rate_per_sqft) : "",
+        taxable: r.taxable !== false,
+        active: r.active !== false,
+      };
+    });
+    setCells(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const cellOf = (t, a) => cells[t + "|" + a] || { ratePerSqft: "", taxable: true, active: true };
+  const setCell = (t, a, field, val) =>
+    setCells((p) => ({ ...p, [t + "|" + a]: { ...cellOf(t, a), [field]: val } }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const rows = [];
+      TYPES.forEach(([t]) => AREAS.forEach(([a]) => {
+        const c = cellOf(t, a);
+        rows.push({ type: t, area: a, ratePerSqft: String(c.ratePerSqft ?? "").trim(), taxable: c.taxable, active: c.active });
+      }));
+      // Refuse, never coerce -- a silently-zeroed rate would insulate a whole building free.
+      const bad = rows.filter((r) => r.ratePerSqft !== "" && (!Number.isFinite(Number(r.ratePerSqft)) || Number(r.ratePerSqft) < 0));
+      if (bad.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + bad.map((r) => r.type + "/" + r.area).join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_insulation", rows }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: "Saved " + (data.saved || 0) + " rate(s)" + (data.cleared ? ", " + data.cleared + " no longer offered" : "") + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Insulation</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Priced <b>per square foot</b>, worked out from the building the customer designed. Floor and
+        roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
+        upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
+        offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
+        each one lands as its own line on the quote.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" \u00b7 ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (
+        <>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 640 }}>
+            <thead><tr>
+              <th style={S.th}></th>
+              {AREAS.map(([a, lbl]) => <th key={a} style={S.th} title="Dollars per square foot. Blank = not offered.">{lbl} ($/sq ft)</th>)}
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on insulation.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {TYPES.map(([t, tLbl]) => (
+                <tr key={t}>
+                  <td style={{ ...S.td, fontWeight: 700 }}>{tLbl}</td>
+                  {AREAS.map(([a]) => (
+                    <td key={a} style={S.td}>
+                      <input type="number" min="0" step="0.01" value={cellOf(t, a).ratePerSqft} placeholder="not offered"
+                        onChange={(e) => setCell(t, a, "ratePerSqft", e.target.value)} style={{ ...S.input, width: 110 }} />
+                    </td>
+                  ))}
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={AREAS.every(([a]) => cellOf(t, a).taxable)}
+                      onChange={(e) => AREAS.forEach(([a]) => setCell(t, a, "taxable", e.target.checked))}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 14 }}>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save insulation"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function WallHeights({ viewingLabel = null, clientId = null }) {
   // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);

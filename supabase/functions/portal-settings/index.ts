@@ -115,6 +115,7 @@ const GATES: GateTable = {
   save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
   save_wall_heights:              { area: "settings_options", level: "edit" },
+  save_insulation:                { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
@@ -1223,7 +1224,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
@@ -1246,13 +1247,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
       admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only").eq("client_id", clientId).order("delta_in"),
+      // Insulation rates (177) for the Options tab matrix.
+      admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active").eq("client_id", clientId),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -1293,7 +1296,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       };
     } catch (_) { wallet = null; }
 
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], insulation: insulationRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -2776,6 +2779,47 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       deleted = sweep.length;
     }
     return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Insulation rates (177). A fixed 2x3 matrix rather than a free row list, so this is an
+  // UPSERT per supplied cell plus a delete for any cell the builder cleared — there is no
+  // sweep, because the shape is fixed and a missing cell means "not sent", not "removed".
+  if (action === "save_insulation") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+    const TYPES = new Set(["batt", "spray_foam"]);
+    const AREAS = new Set(["floor", "walls", "roof"]);
+    let saved = 0, cleared = 0; const skipped: string[] = [];
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      const insType = String(row?.type ?? "").trim();
+      const area = String(row?.area ?? "").trim();
+      if (!TYPES.has(insType) || !AREAS.has(area)) { skipped.push(`${insType}/${area}: not a known type or area`); continue; }
+
+      // Refuse, never coerce — the posture everywhere in this file. A blank rate is the
+      // deliberate "not offered": the row is REMOVED so get_config stops emitting it, which is
+      // what makes the customer's toggle disappear.
+      const rateRaw = String(row?.ratePerSqft ?? "").trim();
+      if (rateRaw === "") {
+        const del = await admin.from("insulation_offerings").delete()
+          .eq("client_id", clientId).eq("ins_type", insType).eq("area", area);
+        if (del.error) { skipped.push(`${insType}/${area}: ${del.error.message}`); continue; }
+        cleared++; continue;
+      }
+      const rate = Number(rateRaw);
+      if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${insType}/${area}: "${rateRaw}" is not a usable dollar amount`); continue; }
+
+      const res = await admin.from("insulation_offerings").upsert({
+        client_id: clientId, ins_type: insType, area,
+        rate_per_sqft: rate,
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "client_id,ins_type,area" });
+      if (res.error) { skipped.push(`${insType}/${area}: ${res.error.message}`); continue; }
+      saved++;
+    }
+    return json({ ok: true, saved, cleared, skipped });
   }
 
   if (action === "save_colors") {

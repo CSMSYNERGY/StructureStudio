@@ -623,6 +623,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // upgrade. An increase that is not offered, not active, or not priced is a hard 400 — the
   // same posture as an unpriced size above, and for the same reason: emailing a quote that
   // silently charged $0 for a real structural change is worse than refusing to send one.
+  // Resolved wall height in feet — the style's standard plus whatever increase was chosen.
+  // Insulation's WALL area depends on it, which is why taller walls had to land first.
+  let resolvedWallHeightFt = 8;
   const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
   if (wallHeightDeltaIn > 0) {
     if (!styleRowId) {
@@ -643,6 +646,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't available on a ${buildingWidthFt} ft wide "${styleLabel}" — taller walls are limited by width for hauling. Choose standard height or a narrower building.` }, 400);
     }
     const whRate = Number(wh.rate_per_lf) || 0;
+    resolvedWallHeightFt = Math.max(5, Math.min(14, resolvedWallHeightFt + wallHeightDeltaIn / 12));
     targetItems.push(tagLine({
       name: `Taller Walls (+${wallHeightDeltaIn} in)`,
       qty: buildingPerimeter,
@@ -654,6 +658,63 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: `${buildingPerimeter} ft of wall at $${whRate.toFixed(2)} per foot`,
     }, { kind: "wall_height", nonTaxable: wh.taxable === false }));
+  }
+
+  // ── Insulation (177) ────────────────────────────────────────────────────────────────────
+  // The second SELECTION charge, and it copies the wall-height shape exactly: nothing is placed
+  // on the plan, so it sits outside pushItem and outside the inclusion / declined-item
+  // machinery. One line per area, which is what makes "entire building" a UI shortcut rather
+  // than a stored fourth rate — three ticks produce three lines here either way.
+  //
+  // Every rate is re-read from the catalog and every square footage is re-derived. The browser
+  // never sees a rate at all for insulation, so there is nothing to forge; but the AREAS come
+  // from the payload, and an area that is not offered is a hard 400 rather than a silent skip.
+  const insSel = Array.isArray(selections.insulation) ? selections.insulation : [];
+  if (insSel.length) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price insulation: the style "${style}" is not in your catalog.` }, 400);
+    }
+    const ioRes = await supabase.from("insulation_offerings")
+      .select("ins_type, area, rate_per_sqft, taxable, active").eq("client_id", clientId);
+    // Refuse rather than price nothing: a read failure here would otherwise drop a real charge
+    // off the quote silently, which is the same hazard the unpriced-size 400 exists for.
+    if (ioRes.error) return json({ error: "Could not read your insulation rates just now. Try resubmitting in a moment." }, 400);
+    const offers = (ioRes.data ?? []) as { ins_type: string; area: string; rate_per_sqft: number | null; taxable: boolean | null; active: boolean }[];
+    const AREA_LABEL: Record<string, string> = { floor: "Floor", walls: "Walls", roof: "Roof" };
+    const TYPE_LABEL: Record<string, string> = { batt: "Batt", spray_foam: "Spray Foam" };
+    // roof == floor is the v1 simplification the builder's rate absorbs; walls are GROSS
+    // (perimeter x height, no opening deduction). The browser's insulationSqft is the same
+    // three lines — they must agree or the preview and the quote disagree.
+    const sqftOf = (area: string) =>
+      area === "walls" ? Math.round(buildingPerimeter * resolvedWallHeightFt) : Math.round(buildingArea);
+    // Deduplicate by AREA: one area cannot be insulated twice, and a duplicated entry would
+    // otherwise bill it twice over.
+    const seenAreas = new Set<string>();
+    for (const raw of insSel) {
+      const pick = raw as { type?: unknown; area?: unknown };
+      const type = String(pick?.type ?? "").trim();
+      const area = String(pick?.area ?? "").trim();
+      if (!type || !area || seenAreas.has(area)) continue;
+      seenAreas.add(area);
+      const off = offers.find((o) => o.ins_type === type && o.area === area);
+      if (!off || !off.active || off.rate_per_sqft == null) {
+        return json({ error: `${TYPE_LABEL[type] || type} insulation isn't offered for the ${AREA_LABEL[area] || area}. Set it in the portal under Settings → Options → Insulation, then resubmit.` }, 400);
+      }
+      const sqft = sqftOf(area);
+      if (sqft <= 0) continue;
+      const rate = Number(off.rate_per_sqft) || 0;
+      targetItems.push(tagLine({
+        name: `${TYPE_LABEL[type] || type} Insulation — ${AREA_LABEL[area] || area}`,
+        qty: sqft,
+        amount: rate,
+        priceId: "",
+        productId: "",
+        attachments: [],
+        currency: "USD",
+        type: "one_time",
+        description: `${sqft} sq ft at $${rate.toFixed(2)} per sq ft`,
+      }, { kind: "insulation", nonTaxable: off.taxable === false }));
+    }
   }
 
   // Resolve a layout add-on to a GHL line item using its configured pricing_method. `amount`
