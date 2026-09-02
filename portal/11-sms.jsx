@@ -170,7 +170,7 @@ function smsCopyProblems(copy) {
   if (f.length < 40) out.push("Describe where customers agree to be texted. Leaving this blank is one of the most common rejection reasons.");
   if (s.length < 2) out.push("Two example messages are required.");
   if (s.some((x) => x.length < 20)) out.push("Write each example out the way you would really send it.");
-  if (s.length && !s.some((x) => /STOP/i.test(x))) out.push("At least one example must show how to stop — keep “Reply STOP to opt out” in it.");
+  if (s.length && !s.some((x) => /\bSTOP\b/i.test(x))) out.push("At least one example must show how to stop — keep “Reply STOP to opt out” in it.");
   return out;
 }
 
