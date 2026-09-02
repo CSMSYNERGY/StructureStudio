@@ -598,6 +598,64 @@ function ShelfPicker({ items, itemTypes, rates, showPricing, onPick, onCancel })
     </div>
   );
 }
+// The builder's own electrical items. A pseudo-tool like the door/window pickers: clicking it
+// opens this modal, and picking a card arms the tool for THAT item.
+const ELEC_ITEM_PICKER_CFG = { label: "Electrical Items", color: "#7C3AED", icon: "\u26a1", isElecItemPicker: true, group: "electrical" };
+
+// Which price applies is decided by ONE thing: whether the customer has the package. Carolyn:
+// "One is for this additional item to be added TO the existing package and the other is that
+// there is no package and they are selling this item individually." A builder charges less
+// when an electrician is already on site, so these are independent numbers.
+//
+// NULL in a mode means NOT OFFERED in that mode, never "use the other one" — falling back
+// would charge a price the builder never agreed to. `withPackage`/`standalone` arrive as their
+// own booleans precisely so this still works when show_pricing has nulled the numbers.
+function elecItemsOffered(C, hasPackage, includeInternal) {
+  const list = (C && Array.isArray(C.electricalItems)) ? C.electricalItems : [];
+  return list.filter((it) => it && (includeInternal || !it.internalOnly) && (hasPackage ? it.withPackage : it.standalone));
+}
+function elecItemPrice(it, hasPackage) {
+  if (!it) return null;
+  const p = hasPackage ? it.priceWithPackage : it.priceStandalone;
+  return p == null ? null : Number(p);
+}
+
+function ElectricalItemPicker({ items, hasPackage, showPricing, onPick, onCancel }) {
+  const money2 = (n) => "$" + Number(n).toFixed(2);
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Add an electrical item</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>
+          Pick one, then click {items.some((i) => i.mount === "wall") ? "a wall (or anywhere inside, for ceiling fittings)" : "inside the building"} to place it.
+          {hasPackage ? " Priced as an addition to your electrical package." : ""}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {items.map((it) => {
+            const price = elecItemPrice(it, hasPackage);
+            const bits = [
+              it.mount === "ceiling" ? "ceiling" : "wall mounted",
+              it.heightOffFloorIn != null ? `${Math.round(Number(it.heightOffFloorIn))}\u2033 up` : null,
+              showPricing && price != null ? money2(price) : null,
+            ].filter(Boolean);
+            return (
+              <div key={it.id} onClick={() => onPick(it.id)} style={{ border: "2px solid #E2E8F0", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>{it.icon || "\u26a1"}</div>
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{it.name}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{bits.join(" \u00b7 ") || "\u00a0"}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+          <button onClick={onCancel} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";
@@ -1421,6 +1479,28 @@ function computeSelectionRows(sel, paintColors, C, items) {
       // Null when the tenant hides pricing — get_config already nulled it, so this reads
       // whatever arrived rather than deciding the policy a second time.
       total: showP && elecCfg.price != null ? Number(elecCfg.price) : null,
+    });
+  }
+  // Builder-catalog electrical items, priced by WHICH MODE the customer is in. Always charged
+  // in full — these are extras by definition, so unlike the standard devices there is nothing
+  // to net them against.
+  {
+    const hasPkg = !!(sel && sel.electrical);
+    const offered = elecItemsOffered(C, hasPkg, true);
+    const counts = {};
+    (items || []).forEach((it) => { if (it && it.electricalItemId) counts[it.electricalItemId] = (counts[it.electricalItemId] || 0) + 1; });
+    offered.forEach((ei) => {
+      const n = counts[ei.id] || 0;
+      if (!n) return;
+      const price = elecItemPrice(ei, hasPkg);
+      rows.push({
+        key: "elecItem:" + ei.id,
+        label: ei.name,
+        qty: n,
+        unit: price != null ? fmtMoney2(price) + " each" : "",
+        total: showP && price != null ? Math.round(price * n * 100) / 100 : null,
+        method: "each",
+      });
     });
   }
   const painted = sel && sel.paint === "Painted";
@@ -7249,7 +7329,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
     shelvingRates[k] = Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
   });
+  // A tool per offered electrical item, keyed by its id exactly as includedFixtureTools keys
+  // by fixture id — so placement, rendering, dragging and delete all work with no new branch.
+  // Which items exist depends on whether the package is taken, because the two prices are two
+  // independent offers: an item priced only with_package disappears without one.
+  const elecItemTools = (() => {
+    const out = {};
+    elecItemsOffered(C, !!(sel && sel.electrical), embedded).forEach((it) => {
+      out[it.id] = {
+        label: it.name, icon: it.icon || "\u26a1", color: "#7C3AED",
+        shortLabel: (it.name || "ITEM").toUpperCase().slice(0, 5),
+        // Two mounts, and both already exist: against a wall (never blocks a door - it carries
+        // no slab model), or free inside the footprint like a ceiling light.
+        wallSnap: it.mount !== "ceiling",
+        width: it.mount === "ceiling" ? 0.8 : 0.5,
+        height: it.mount === "ceiling" ? 0.8 : 0.3,
+        heightOffFloorIn: it.heightOffFloorIn,
+        noPalette: true,          // reached through the picker, never its own button
+        electricalItemId: it.id,
+      };
+    });
+    return out;
+  })();
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
+    ...elecItemTools,
+    ...(Object.keys(elecItemTools).length ? { elecItemPicker: ELEC_ITEM_PICKER_CFG } : {}),
     ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
@@ -7272,6 +7376,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
   const [shelfPick, setShelfPick] = useState(false);    // true while the shelving picker modal is open
+  const [elecItemPick, setElecItemPick] = useState(false);  // true while the electrical-item picker is open
   // A PLACED item is "archived" (option retired) if: a catalog fixture whose fixture is no longer
   // in the active list (get_fixtures drops archived), or a built-in whose layoutItems cfg is flagged
   // archived (get_config keeps it, noPalette+archived). Archived items still render on the design;
@@ -8671,6 +8776,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const candidate = { id: idCounter, type: activeTool, ...sn, widthFt: cfg.width,
         heightFt: slabDepthFt(cfg),
         ...(cfg.depthIn != null ? { depthIn: cfg.depthIn } : {}),
+        // Named explicitly rather than inferred from `type` later: the catalog row can be
+        // renamed or retired, and a saved design must still say what was actually placed.
+        ...(cfg.electricalItemId ? { electricalItemId: cfg.electricalItemId } : {}),
         ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
       const others = items.filter((i) => i.id !== candidate.id);
       if (checkDoorCollision(candidate, cfg, others, ITEMS, scale)) {
@@ -8724,7 +8832,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     } else {
       const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
       const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
-      ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height };
+      // The same two stamps the wallSnap branch makes. A ceiling-mounted electrical item lands
+      // HERE, not there, and without its catalog id it would render on the plan and reach the
+      // quote as nothing at all — placed, visible, and free.
+      ni = { id: idCounter++, type: activeTool, x, y, rotation: 0, wall: null, widthFt: cfg.width, heightFt: cfg.height,
+        ...(cfg.electricalItemId ? { electricalItemId: cfg.electricalItemId } : {}),
+        ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
     }
     setItems((p) => [...p, ni]);
     setActiveTool(null);
@@ -10643,6 +10756,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             lightFixture: items.filter((i) => i.type === "lightFixture").length,
             lightSwitch: items.filter((i) => i.type === "lightSwitch").length,
           },
+          // Counts by catalog id. The SERVER re-reads the price from electrical_items and
+          // picks the column from the package state, so nothing here is a price.
+          electricalItems: (function () {
+            const m = {};
+            items.forEach((i) => { if (i && i.electricalItemId) m[i.electricalItemId] = (m[i.electricalItemId] || 0) + 1; });
+            return Object.keys(m).map((id) => ({ id: id, qty: m[id] }));
+          })(),
           lofts: items.filter((i) => i.type === "loft").length,
           loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
           ramp: items.filter((i) => i.type === "ramp").length,   // count — ramp is priced "each" (one per door)
@@ -11636,6 +11756,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
       {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {elecItemPick && createPortal(
+        <ElectricalItemPicker
+          items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
+          hasPackage={!!(sel && sel.electrical)}
+          showPricing={!!C.showPricing}
+          onPick={(id) => { setActiveTool(id); setElecItemPick(false); }}
+          onCancel={() => setElecItemPick(false)} />, document.body)}
       {shelfPick && createPortal(<ShelfPicker items={shelvingKeys} itemTypes={ITEMS} rates={shelvingRates} showPricing={!!C.showPricing}
         onCancel={() => setShelfPick(false)}
         onPick={(k) => { setShelfPick(false); setActiveTool(k); setSelectedId(null); }} />, document.body)}
@@ -11928,11 +12055,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // LOOK armed and say which one — otherwise you pick Single Shelf and the button you
           // just used goes back to looking untouched.
           const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
+          const armedElecItem = (cfg) => (cfg.isElecItemPicker && ITEMS[activeTool] && ITEMS[activeTool].electricalItemId) ? activeTool : null;
           const btn = ([key, cfg]) => (
             <button key={key} onClick={() => {
                 if (gateRequired) { setGateOpen(true); return; }
                 // Shelving opens its popup instead of arming; choosing there arms the real tool.
                 // Clicking it again while a slab is armed disarms, like every other tool.
+                if (cfg.isElecItemPicker) { setElecItemPick(true); return; }
                 if (cfg.isShelfPicker) {
                   if (armedShelf(cfg)) { setActiveTool(null); setSelectedId(null); return; }
                   setShelfPick(true); setSelectedId(null); return;
@@ -11941,12 +12070,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               }}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
-                background: (activeTool === key || armedShelf(cfg)) ? cfg.color : "#F8FAFC",
-                color: (activeTool === key || armedShelf(cfg)) ? "#FFF" : "#334155",
-                border: `2px solid ${(activeTool === key || armedShelf(cfg)) ? cfg.color : "#E2E8F0"}`,
+                background: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#F8FAFC",
+                color: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? "#FFF" : "#334155",
+                border: `2px solid ${(activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#E2E8F0"}`,
               }}>
               <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>
-              {armedShelf(cfg) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
+              {(armedShelf(cfg) || armedElecItem(cfg)) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
               {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );

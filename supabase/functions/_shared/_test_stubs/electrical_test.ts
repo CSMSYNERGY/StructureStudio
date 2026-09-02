@@ -227,3 +227,92 @@ Deno.test("the server refuses a package the tenant has not switched on or priced
     "the standard counts must be recomputed server-side, never taken from the body",
   );
 });
+
+// ── The builder's own electrical items, and the TWO prices (migration 181) ───
+// Carolyn: "there should be 2 pricing options. One is for this additional item to be added TO
+// the existing package and the other is that there is no package and they are selling this
+// item individually." The rule that needs holding down is that a NULL in one column means NOT
+// OFFERED THAT WAY — never a fallback to the other number, which would charge a price the
+// builder never set.
+const IT_START = "function elecItemsOffered(";
+const IT_END = "function ElectricalItemPicker(";
+const ii = SRC.indexOf(IT_START), ij = SRC.indexOf(IT_END, ii);
+if (ii < 0 || ij < 0) {
+  throw new Error(`electrical_test: could not find the item helpers (${ii}, ${ij}). Re-point, don't delete.`);
+}
+const { elecItemsOffered, elecItemPrice } = new Function(
+  `${SRC.slice(ii, ij)}; return { elecItemsOffered, elecItemPrice };`,
+)() as {
+  elecItemsOffered: (C: unknown, hasPackage: boolean, includeInternal?: boolean) => { id: string }[];
+  elecItemPrice: (it: unknown, hasPackage: boolean) => number | null;
+};
+
+const BOTH = { id: "fan", name: "Ceiling Fan", mount: "ceiling", withPackage: true, standalone: true, priceWithPackage: 285, priceStandalone: 395 };
+const PKG_ONLY = { id: "brk", name: "Extra Breaker", mount: "wall", withPackage: true, standalone: false, priceWithPackage: 45, priceStandalone: null };
+const ALONE_ONLY = { id: "svc", name: "Service Call", mount: "wall", withPackage: false, standalone: true, priceWithPackage: null, priceStandalone: 120 };
+const ITEMS_C = { electricalItems: [BOTH, PKG_ONLY, ALONE_ONLY] };
+
+Deno.test("the package decides WHICH of the two prices applies", () => {
+  assertEquals(elecItemPrice(BOTH, true), 285, "with the package, the add-on price");
+  assertEquals(elecItemPrice(BOTH, false), 395, "without it, the standalone price");
+  // The add-on price being lower is the whole reason there are two: an electrician is already
+  // on site. Nothing enforces that ordering, but the two must not be the same number by accident.
+  assert(elecItemPrice(BOTH, true)! < elecItemPrice(BOTH, false)!);
+});
+
+Deno.test("a blank price means NOT OFFERED that way, and never falls back", () => {
+  // The failure this prevents: quietly charging the standalone price for a package add-on the
+  // builder only ever priced one way.
+  assertEquals(elecItemPrice(PKG_ONLY, false), null);
+  assertEquals(elecItemPrice(ALONE_ONLY, true), null);
+  assertEquals(elecItemPrice(PKG_ONLY, true), 45);
+  assertEquals(elecItemPrice(ALONE_ONLY, false), 120);
+});
+
+Deno.test("the offered list changes with the package, in both directions", () => {
+  const withPkg = elecItemsOffered(ITEMS_C, true).map((i) => i.id);
+  const without = elecItemsOffered(ITEMS_C, false).map((i) => i.id);
+  assertEquals(withPkg, ["fan", "brk"], "a standalone-only item disappears once the package is taken");
+  assertEquals(without, ["fan", "svc"], "a package-only item is not offered on its own");
+});
+
+Deno.test("a hide-prices tenant still gets the items, just not the numbers", () => {
+  // get_config nulls the PRICES but always emits withPackage/standalone as their own booleans,
+  // precisely so "no price" cannot be mistaken for "not offered". Without that split, every
+  // item would vanish for a tenant who hides pricing.
+  const hidden = { electricalItems: [{ ...BOTH, priceWithPackage: null, priceStandalone: null }] };
+  assertEquals(elecItemsOffered(hidden, true).length, 1);
+  assertEquals(elecItemsOffered(hidden, false).length, 1);
+  assertEquals(elecItemPrice(hidden.electricalItems[0], true), null);
+});
+
+Deno.test("internal-only items are hidden from the customer, shown to the rep", () => {
+  const C2 = { electricalItems: [BOTH, { ...PKG_ONLY, internalOnly: true }] };
+  assertEquals(elecItemsOffered(C2, true).map((i) => i.id), ["fan"]);
+  assertEquals(elecItemsOffered(C2, true, true).map((i) => i.id), ["fan", "brk"]);
+});
+
+Deno.test("no catalog at all is empty, not a crash", () => {
+  assertEquals(elecItemsOffered({}, true), []);
+  assertEquals(elecItemsOffered({ electricalItems: null }, false), []);
+  assertEquals(elecItemPrice(null, true), null);
+});
+
+Deno.test("the server prices items itself and refuses an unoffered mode", () => {
+  const SERVER = Deno.readTextFileSync(new URL("../../submit-estimate/index.ts", import.meta.url));
+  assert(/from\("electrical_items"\)/.test(SERVER), "the server must read the catalog itself");
+  // The price must come from the ROW, never from the request body.
+  assert(
+    /const price = hasPkg \? ei\.price_with_package : ei\.price_standalone/.test(SERVER),
+    "the server must pick the column from the package state",
+  );
+  assert(
+    /if \(price == null\)[\s\S]{0,600}?\}, 400\)/.test(SERVER),
+    "an item with no price in the current mode must be refused, not silently re-priced",
+  );
+  // And there must be no fallback between the two columns anywhere.
+  assert(
+    !/price_with_package\s*\?\?\s*.*price_standalone|price_standalone\s*\?\?\s*.*price_with_package/.test(SERVER),
+    "the two prices must never fall back to one another",
+  );
+});

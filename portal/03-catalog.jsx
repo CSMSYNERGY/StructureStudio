@@ -2777,6 +2777,7 @@ const LP_METHODS = [
 function Electrical({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [f, setF] = useState(null);
+  const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -2799,7 +2800,16 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       lightSpacingFt: String(e.light_spacing_ft == null ? 10 : e.light_spacing_ft),
       switchHeightIn: String(e.switch_height_in == null ? 48 : e.switch_height_in),
       includePanel: e.include_panel !== false,
+      panelHeightIn: String(e.panel_height_in == null ? 60 : e.panel_height_in),
     });
+    setItems((data.electricalItems || []).map((r) => ({
+      id: r.id, name: r.name, icon: r.icon || "\u26a1", mount: r.mount || "wall",
+      heightOffFloorIn: r.height_off_floor_in != null ? String(r.height_off_floor_in) : "",
+      priceWithPackage: r.price_with_package != null ? String(r.price_with_package) : "",
+      priceStandalone: r.price_standalone != null ? String(r.price_standalone) : "",
+      taxable: r.taxable !== false, active: r.active !== false,
+      internalOnly: r.internal_only === true, sortOrder: r.sort_order || 0,
+    })));
   };
   useEffect(() => { load(); }, [clientId]);
 
@@ -2809,6 +2819,8 @@ function Electrical({ viewingLabel = null, clientId = null }) {
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical", ...f }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical_items", rows: items }) });
+      if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
       await load();
       setMsg({ ok: "Saved." });
     } catch (e) { setMsg({ err: e.message }); }
@@ -2866,14 +2878,25 @@ function Electrical({ viewingLabel = null, clientId = null }) {
         {num("outletAboveBenchIn", "Above a workbench", "in", "used where a bench is in the way")}
         {num("lightSpacingFt", "Light every", "ft", "down the length of the building")}
         {num("switchHeightIn", "Switch height", "in", "one switch, by the door")}
+        {/* The panel sits with the other measurements because it has one too. The checkbox
+            rides alongside its height rather than in the row of unrelated toggles below. */}
+        <label style={{ display: "block", minWidth: 170 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>Panel height</span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <input type="number" min="0" step="0.5" value={f.panelHeightIn} disabled={!f.includePanel}
+              onChange={(e) => set("panelHeightIn", e.target.value)}
+              style={{ ...S.input, width: 90, opacity: f.includePanel ? 1 : 0.5 }} />
+            <span style={{ fontSize: 12, color: "#64748B" }}>in</span>
+          </span>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 5, cursor: "pointer", fontSize: 12, color: "#475569" }}>
+            <input type="checkbox" checked={f.includePanel} onChange={(e) => set("includePanel", e.target.checked)}
+              style={{ width: 15, height: 15, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Include a panel
+          </label>
+        </label>
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", marginBottom: 14 }}>
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
-          <input type="checkbox" checked={f.includePanel} onChange={(e) => set("includePanel", e.target.checked)}
-            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
-          Include an electrical panel
-        </label>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
           title="Available in the rep designer only - hidden from the customer-facing page. A rep-selected package still prices normally.">
           <input type="checkbox" checked={f.internalOnly} onChange={(e) => set("internalOnly", e.target.checked)}
@@ -2887,11 +2910,69 @@ function Electrical({ viewingLabel = null, clientId = null }) {
         </label>
       </div>
 
-      <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 12px", maxWidth: 680 }}>
+      <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 18px", maxWidth: 680 }}>
         Extras are only offered once you price them: set a rate for <b>Outlet</b>, <b>Light</b> and{" "}
         <b>Light Switch</b> in Layout Pricing above. Until then the package still lays out the
         standard, and the customer simply has no way to add more.
       </p>
+
+      <div style={{ ...S.lbl, marginBottom: 6 }}>Your electrical items</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 680 }}>
+        Anything else you wire &mdash; a ceiling fan, a flood light, a 220V outlet. Each one has{" "}
+        <b>two prices</b>, because they really are two different jobs: what you charge to add it{" "}
+        <b>to the package</b> while an electrician is already on site, and what you charge to fit
+        it <b>on its own</b> when there is no package. <b>Leave a price blank and you don&rsquo;t
+        offer it that way</b> &mdash; blank is not free, and it never falls back to the other price.
+      </p>
+      <div style={{ overflowX: "auto", marginBottom: 12 }}>
+        <table style={{ ...S.table, minWidth: 760 }}>
+          <thead>
+            <tr>
+              <th style={S.th}>Item</th>
+              <th style={S.th}>Icon</th>
+              <th style={S.th}>Mounts</th>
+              <th style={S.th} title="Inches off the floor. Blank for ceiling fittings that hang at the default height.">Height (in)</th>
+              <th style={S.th} title="Charged when the customer HAS the electrical package. Blank = can't be added to a package.">With package ($)</th>
+              <th style={S.th} title="Charged when there is NO package. Blank = only sold as part of a package.">On its own ($)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Rep designer only - hidden from the customer-facing page.">Internal</th>
+              <th style={{ ...S.th, textAlign: "center" }}>Taxable</th>
+              <th style={S.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((r, i) => {
+              const upd = (k, v) => setItems((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+              return (
+                <tr key={r.id || ("new-" + i)}>
+                  <td style={S.td}><input value={r.name} onChange={(e) => upd("name", e.target.value)} maxLength={60} style={{ ...S.input, width: 150 }} /></td>
+                  <td style={S.td}><input value={r.icon} onChange={(e) => upd("icon", e.target.value)} maxLength={4} style={{ ...S.input, width: 48, textAlign: "center" }} /></td>
+                  <td style={S.td}>
+                    <select value={r.mount} onChange={(e) => upd("mount", e.target.value)} style={{ ...S.input, width: 100 }}>
+                      <option value="wall">On a wall</option>
+                      <option value="ceiling">Ceiling</option>
+                    </select>
+                  </td>
+                  <td style={S.td}><input type="number" min="0" value={r.heightOffFloorIn} onChange={(e) => upd("heightOffFloorIn", e.target.value)} style={{ ...S.input, width: 80 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={r.priceWithPackage} onChange={(e) => upd("priceWithPackage", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={r.priceStandalone} onChange={(e) => upd("priceStandalone", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.internalOnly} onChange={(e) => upd("internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => upd("taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={S.td}>
+                    <button onClick={() => setItems((p) => p.filter((_, j) => j !== i))}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#B91C1C", fontWeight: 700, fontSize: 13 }}>Remove</button>
+                  </td>
+                </tr>
+              );
+            })}
+            {!items.length && (
+              <tr><td colSpan={9} style={{ ...S.td, color: "#94A3B8", fontSize: 12.5 }}>No extra items yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={() => setItems((p) => p.concat([{ id: "", name: "", icon: "\u26a1", mount: "wall", heightOffFloorIn: "", priceWithPackage: "", priceStandalone: "", taxable: true, active: true, internalOnly: false, sortOrder: (p.length + 1) * 10 }]))}
+        style={{ ...S.btn("#F1F5F9", "#334155"), marginBottom: 14 }}>+ Add an item</button>
+
 
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save electrical"}</button>

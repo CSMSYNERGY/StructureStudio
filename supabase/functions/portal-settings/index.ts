@@ -121,6 +121,7 @@ const GATES: GateTable = {
   save_wall_heights:              { area: "settings_options", level: "edit" },
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
+  save_electrical_items:          { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
@@ -1251,7 +1252,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
@@ -1277,13 +1278,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Insulation rates (177) for the Options tab matrix.
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
+      admin.from("electrical_items").select("*").eq("client_id", clientId).order("sort_order").order("name"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes, elecItemsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -1328,6 +1330,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Null for a tenant who has never opened the card — the portal falls back to the same
       // defaults the table declares, so the form is never blank.
       electrical: electricalRes.data ?? null,
+      electricalItems: elecItemsRes.data ?? [],
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
@@ -2831,6 +2834,60 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Insulation rates (177). A fixed 2x3 matrix rather than a free row list, so this is an
   // UPSERT per supplied cell plus a delete for any cell the builder cleared — there is no
   // sweep, because the shape is fixed and a missing cell means "not sent", not "removed".
+  if (action === "save_electrical_items") {
+    const rows = Array.isArray((payload as Record<string, unknown>).rows)
+      ? (payload as Record<string, unknown>).rows as Record<string, unknown>[] : [];
+    if (rows.length > MAX_BULK_ROWS) return json({ error: `That's more than ${MAX_BULK_ROWS} items in one save.` }, 400);
+    const MOUNTS = new Set(["wall", "ceiling"]);
+    // A price is EITHER a number >= 0 or genuinely absent. "" means "not offered in this mode",
+    // which is a real state and must reach the column as NULL rather than as 0 — zero is a
+    // FREE item, and the two must never be confused.
+    const priceOf = (v: unknown): number | null | undefined => {
+      const t = String(v ?? "").trim();
+      if (t === "") return null;
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;   // undefined = reject
+    };
+    const keep: string[] = [];
+    let saved = 0;
+    for (const r of rows) {
+      const name = String(r?.name ?? "").trim().slice(0, 60);
+      if (!name) continue;
+      const withPkg = priceOf(r?.priceWithPackage);
+      const alone = priceOf(r?.priceStandalone);
+      if (withPkg === undefined || alone === undefined) {
+        return json({ error: `"${name}" has a price that isn't a number. Leave a price blank to mean you don't offer it that way.` }, 400);
+      }
+      const mount = MOUNTS.has(String(r?.mount ?? "")) ? String(r?.mount) : "wall";
+      const row: Record<string, unknown> = {
+        client_id: clientId,
+        name,
+        icon: String(r?.icon ?? "\u26a1").slice(0, 8) || "\u26a1",
+        mount,
+        height_off_floor_in: String(r?.heightOffFloorIn ?? "").trim() === "" ? null : Number(r?.heightOffFloorIn),
+        price_with_package: withPkg,
+        price_standalone: alone,
+        taxable: r?.taxable !== false,
+        active: r?.active !== false,
+        internal_only: r?.internalOnly === true,
+        sort_order: Number(r?.sortOrder) || 0,
+        updated_at: new Date().toISOString(),
+      };
+      const id = String(r?.id ?? "").trim();
+      if (id) row.id = id;
+      const up = await admin.from("electrical_items").upsert(row, { onConflict: "client_id,name" }).select("id").single();
+      if (up.error) return dbFail(req, clientId, "save your electrical items", up.error);
+      keep.push(String(up.data?.id));
+      saved++;
+    }
+    // Anything the editor did not send back was removed in the UI. Delete rather than
+    // deactivate: this is the builder's own list and they expect a removed row to be gone.
+    const del = await admin.from("electrical_items").delete().eq("client_id", clientId)
+      .not("id", "in", `(${keep.length ? keep.map((k) => `"${k}"`).join(",") : '"00000000-0000-0000-0000-000000000000"'})`);
+    if (del.error) return dbFail(req, clientId, "tidy up your electrical items", del.error);
+    return json({ ok: true, saved });
+  }
+
   if (action === "save_electrical") {
     // One row per tenant, upserted whole. Unlike the rate grids there is nothing here to
     // partially clear: every field has a value, and the price is the one nullable.
@@ -2858,6 +2915,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       outlet_height_in: numOr((payload as Record<string, unknown>).outletHeightIn, 24, 0),
       outlet_above_bench_in: numOr((payload as Record<string, unknown>).outletAboveBenchIn, 42, 0),
       switch_height_in: numOr((payload as Record<string, unknown>).switchHeightIn, 48, 0),
+      panel_height_in: numOr((payload as Record<string, unknown>).panelHeightIn, 60, 0),
       include_panel: (payload as Record<string, unknown>).includePanel !== false,
       updated_at: new Date().toISOString(),
     };

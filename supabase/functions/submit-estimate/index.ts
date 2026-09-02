@@ -625,10 +625,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // from pushItem exactly as they do for a size inclusion. That is the whole reason this rule
   // needed no new pricing code: max(0, placed - included) already IS "removing never discounts".
   let electricalPkg: { label: string; price: number; taxable: boolean; includePanel: boolean;
-                       outletSpacingFt: number; lightSpacingFt: number } | null = null;
+                       panelHeightIn: number; outletSpacingFt: number; lightSpacingFt: number } | null = null;
   if (selections?.electrical === true) {
     const esRes = await supabase.from("electrical_settings")
-      .select("enabled, package_price, package_label, taxable, include_panel, outlet_spacing_ft, light_spacing_ft")
+      .select("enabled, package_price, package_label, taxable, include_panel, panel_height_in, outlet_spacing_ft, light_spacing_ft")
       .eq("client_id", clientId).maybeSingle();
     // Refuse rather than silently price nothing — the same posture as an unpriced size.
     if (esRes.error) {
@@ -636,7 +636,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
     const es = esRes.data as {
       enabled: boolean; package_price: number | null; package_label: string | null;
-      taxable: boolean | null; include_panel: boolean | null;
+      taxable: boolean | null; include_panel: boolean | null; panel_height_in: number | null;
       outlet_spacing_ft: number | null; light_spacing_ft: number | null } | null;
     if (!es || es.enabled !== true) {
       return json({ error: "The electrical package isn't switched on for this account. Turn it on in the portal under Settings → Options → Electrical, then resubmit." }, 400);
@@ -662,6 +662,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       price: Number(es.package_price),
       taxable: es.taxable !== false,
       includePanel: es.include_panel !== false,
+      panelHeightIn: Number(es.panel_height_in) || 60,
       outletSpacingFt: outletSp,
       lightSpacingFt: lightSp,
     };
@@ -1123,7 +1124,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         `${autoOut} outlet${autoOut === 1 ? "" : "s"} at ${electricalPkg.outletSpacingFt} ft spacing`,
         `${autoLight} light${autoLight === 1 ? "" : "s"} at ${electricalPkg.lightSpacingFt} ft spacing`,
         "1 switch",
-        electricalPkg.includePanel ? "electrical panel included" : "no electrical panel",
+        electricalPkg.includePanel ? `electrical panel included, ${electricalPkg.panelHeightIn}" off the floor` : "no electrical panel",
       ].join(", "),
     }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false }));
   }
@@ -1139,6 +1140,55 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     ] as [string, string[]][]) {
       const n = Number(dev?.[key]) || 0;
       if (n > 0) pushItem(names, key, "", { count: n });
+    }
+  }
+  // ── The builder's own electrical items ─────────────────────────────────────
+  // Priced SERVER-SIDE from electrical_items by id — the body sends counts, never money (the
+  // 2026-08-20 audit finding on fixture doors: a snapshot price used to be trusted verbatim).
+  //
+  // WHICH price applies is decided by whether the package was taken, and a NULL in that column
+  // means the item is not offered that way at all. It is deliberately NOT a fallback to the
+  // other column: a builder who priced a fan only as a package add-on has not agreed to sell it
+  // on its own, and quietly charging the other number would invent a price they never set.
+  {
+    const rawItems = Array.isArray((summary as Record<string, unknown>).electricalItems)
+      ? (summary as Record<string, unknown>).electricalItems as { id?: unknown; qty?: unknown }[]
+      : [];
+    if (rawItems.length > 0) {
+      const wanted = [...new Set(rawItems.map((r) => String(r?.id ?? "")).filter(Boolean))];
+      const eiRes = await supabase.from("electrical_items")
+        .select("id, name, price_with_package, price_standalone, taxable, active, internal_only")
+        .eq("client_id", clientId).in("id", wanted);
+      // Refuse rather than silently drop a real charge — the unpriced-size posture.
+      if (eiRes.error) {
+        return json({ error: "Could not read your electrical items just now. Try resubmitting in a moment." }, 400);
+      }
+      const byId = new Map(((eiRes.data ?? []) as {
+        id: string; name: string; price_with_package: number | null; price_standalone: number | null;
+        taxable: boolean | null; active: boolean; internal_only: boolean }[]).map((r) => [String(r.id), r]));
+      const hasPkg = electricalPkg != null;
+      for (const raw of rawItems) {
+        const id = String(raw?.id ?? "");
+        const qty = Math.max(0, Math.floor(Number(raw?.qty) || 0));
+        if (!id || qty <= 0) continue;
+        const ei = byId.get(id);
+        if (!ei || !ei.active) {
+          return json({ error: "One of the electrical items on this design is no longer in your catalog. Remove it from the layout, or re-add it in the portal under Settings → Options → Electrical." }, 400);
+        }
+        const price = hasPkg ? ei.price_with_package : ei.price_standalone;
+        if (price == null) {
+          return json({ error: hasPkg
+            ? `"${ei.name}" has no price set for adding to the electrical package. Set one in the portal under Settings → Options → Electrical, then resubmit.`
+            : `"${ei.name}" is only sold as part of the electrical package. Add the package to this design, or set a standalone price for it in the portal.` }, 400);
+        }
+        targetItems.push(tagLine({
+          name: ei.name,
+          qty,
+          amount: Number(price),
+          priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+          description: hasPkg ? "Added to the electrical package" : "Electrical item",
+        }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
+      }
     }
   }
   if (summary.lofts > 0) {
