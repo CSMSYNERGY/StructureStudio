@@ -21,6 +21,14 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F6F9FE}
+/* PLACEHOLDERS RECEDE. Carolyn, 2026-09-02: "I want it VERY light and barely
+   readable" — a placeholder is a hint, not content, and the UA default (#757575,
+   and inheriting the field's 600 weight) reads as heavily as a real value. Set
+   here rather than in S.input because ::placeholder is not reachable from an
+   inline style object. `opacity:1` is load-bearing for Firefox, which applies its
+   own placeholder opacity on top of the colour. TYPED TEXT IS UNTOUCHED — S.input
+   keeps #1E293B, so what someone actually writes stays fully legible. */
+input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500}
 /* Dashboard shell: fluid, full-width sidebar layout. The sidebar sticks to the viewport
    while the page scrolls; below 900px it collapses to an icon rail. Logged-out views
    center themselves (PortalApp wraps them in a 920px container). */
@@ -166,7 +174,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
 <script defer src="/structure-studio.component.compiled.js?v=356dac05"></script>
-<script defer src="/portal.app.compiled.js?v=9262dad1"></script>
+<script defer src="/portal.app.compiled.js?v=3cdded9f"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

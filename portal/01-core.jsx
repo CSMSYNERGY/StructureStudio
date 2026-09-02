@@ -567,7 +567,11 @@ const S = {
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
   h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
   lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
-  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
+  // fontFamily is NOT decoration here: a bare <textarea> defaults to MONOSPACE in
+  // every browser, so the ten textareas that render through this token wrote notes and
+  // emails in a typeface that appears nowhere else in the product. `inherit` takes the
+  // body font for both tag types, so a field finally looks like the page it sits on.
+  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
   btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
   err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
