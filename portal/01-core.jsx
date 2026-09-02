@@ -375,7 +375,7 @@ const TAB_META = {
   // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
   // do more than one quote for one deal, so let's leave it on the deals side right now."
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
-  leads: ["Contacts", "Everyone who has enquired, and their activity"],
+  contacts: ["Contacts", "Everyone who has enquired, and their activity"],
   orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
   releases: ["What's New", "Latest features and fixes"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
@@ -406,11 +406,20 @@ const TAB_META = {
 // `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
 // static server ignores _redirects, so deep links only work on beta/production — locally
 // the app still runs, it just always boots at /portal.html.
+const SS_TAB_ALIASES = { leads: "contacts" };
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
   if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
-  return { page: parts[1] || null, sub: parts[2] || null };
+  // Old tab ids that must keep resolving. `leads` was renamed to `contacts` on 2026-09-02 so
+  // the URL matches the label and the server-side permission area, both already "contacts".
+  // Three live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid>
+  // (record deep links and browser history), and /portal/designs/people (the merged-era alias).
+  // Without it every caller does `TAB_META[p.page] ? p.page : "designs"`, so a stale link would
+  // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
+  // existing replaceState then rewrites the address bar to the new path, with no history entry.
+  const page = parts[1] || null;
+  return { page: (page && SS_TAB_ALIASES[page]) || page, sub: parts[2] || null };
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -445,7 +454,7 @@ function ssPagePath(page, sub) {
 // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
@@ -461,7 +470,7 @@ const TAB_AREA = {
   // tab needed EITHER because it showed both; a rep granted only contacts must not get the
   // customer-designs list back through a tab that no longer contains it.
   designs: "designs",
-  leads: "contacts",
+  contacts: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",

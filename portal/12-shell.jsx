@@ -1,19 +1,19 @@
 // The merged Contacts & Designs era (2026-08-24 → 08-26, commit 4a54dad) published two
 // sub-view URLs: /portal/designs/people and /portal/designs/deals. The 08-26 split makes
 // each of those views a whole tab again, so the two legacy subs rewrite themselves —
-// "people" is now /portal/leads, "deals" is now plain /portal/designs.
+// "people" is now /portal/contacts, "deals" is now plain /portal/designs.
 //
 // `replace` so an alias never sits in history and traps the back button on itself.
 //
 // ⚠️ RECORD SUBS (c-…/d-…) ARE DELIBERATELY NOT TOUCHED HERE. The record dispatch below
 // accepts them under either tab, and rewriting one across tabs would be actively harmful:
 // the URL-normalising effect nulls a refused tab's sub, so sending a designs-only user's
-// /portal/designs/c-<id> over to `leads` would bounce off the clamp and lose the record
+// /portal/designs/c-<id> over to `contacts` would bounce off the clamp and lose the record
 // they were looking at. A legacy record URL renders the record; only the two list views
 // need correcting, because only they stopped existing.
 function DesignsLegacySub({ sub, navigate }) {
   useEffect(() => {
-    if (sub === "people") navigate("leads", null, true);
+    if (sub === "people") navigate("contacts", null, true);
     else if (sub === "deals") navigate("designs", null, true);
   }, [sub]);
   return null;
@@ -740,7 +740,7 @@ function Dashboard({ session }) {
     // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
     // took that glyph in the same week, and two column icons in one rail read as one thing.
     projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
-    leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+    contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
     orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
     pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
     "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
@@ -882,7 +882,7 @@ function Dashboard({ session }) {
               rather have more tabs and one specific name on it." Contacts first — a person,
               then what they are quoting. The List | Pipeline board toggle stays INSIDE
               Pipeline (02-sales); it is the section, not a third nav item. */}
-          {navItem("leads", "Contacts")}
+          {navItem("contacts", "Contacts")}
           {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -1161,7 +1161,7 @@ function Dashboard({ session }) {
                 an opportunity and the view of being in a person are different, but they're
                 the same."
 
-                Routed on the `sub` segment: /portal/leads/c-<uuid> for a contact and
+                Routed on the `sub` segment: /portal/contacts/c-<uuid> for a contact and
                 /portal/designs/d-<code> for a design. The prefix (c-/d-) is what tells the
                 two record kinds apart, so ONE shell serves both.
 
@@ -1183,7 +1183,7 @@ function Dashboard({ session }) {
                 is not — it is what opens from the free Pipeline list, and its server branch
                 reads `designs` only. Same split the portal-settings gate makes, and the two
                 must agree or one of them produces a 403 the other never predicted. */}
-            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^c-/.test(sub) && !crmUnlocked ? (
+            {!gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^c-/.test(sub) && !crmUnlocked ? (
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
@@ -1196,7 +1196,7 @@ function Dashboard({ session }) {
                 cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
                 available
               />
-            ) : !gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+            ) : !gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
@@ -1205,7 +1205,7 @@ function Dashboard({ session }) {
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
                 /* Back goes to the list this record belongs to, which after the split is a
                    whole tab rather than a sub-view. */
-                onBack={() => navigate(sub.charAt(0) === "c" ? "leads" : "designs")}
+                onBack={() => navigate(sub.charAt(0) === "c" ? "contacts" : "designs")}
                 /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
                    record shell above serves EITHER kind under EITHER tab, so the tab here is
                    cosmetic — which nav item highlights — and switching to one the clamp
@@ -1218,7 +1218,7 @@ function Dashboard({ session }) {
                    `any: [contacts view, designs view]`). Asked through ssClampTab so this
                    can never drift from what the router will actually do. */
                 onNavigate={(k, id) => {
-                  const kindTab = k === "contact" ? "leads" : "designs";
+                  const kindTab = k === "contact" ? "contacts" : "designs";
                   const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess) === kindTab ? kindTab : activeTab;
                   navigate(dest, (k === "contact" ? "c-" : "d-") + id);
                 }}
@@ -1255,14 +1255,14 @@ function Dashboard({ session }) {
                 onViewChange={(v) => navigate("designs", v)}
                 onOpenDesign={openInDesigner} />
             )}
-            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads.
+            {/* CONTACTS — its own tab again, at /portal/contacts (was /portal/leads; aliased).
                 Behind the built-in CRM subscription since migration 160; the nav item stays
                 visible (like Build Schedule) so the locked card can do the selling. */}
-            {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
+            {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               crmUnlocked ? (
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                   fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                  onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
+                  onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
                   onOpenDesign={openInDesigner} />
               ) : (
                 <ComingSoon

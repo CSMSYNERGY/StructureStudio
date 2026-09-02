@@ -7525,6 +7525,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Which calibration input has focus, so the elevation can highlight the dimension that
   // input drives. This IS the answer to "I couldn't figure out which numbers to change".
   const [calFocus, setCalFocus] = useState(null);
+  const [calDraft, setCalDraft] = useState("");
+  // One shape for every calibration number field. `<input type="number">` reports value === ""
+  // for an INCOMPLETE number, and "4." is incomplete, so `parseFloat(e.target.value) || 0`
+  // committed 0, React re-rendered the field as "0", and the decimal point vanished as it was
+  // typed. Worst on pitch, where step="0.5" means every real value needs one. Keeping the raw
+  // keystrokes in a draft while the field has focus is what lets a half-typed number exist.
+  // A per-field copy of this is how twelve fields all carried the same bug.
+  const calNumProps = (key, current, commit) => ({
+    value: calFocus === key ? calDraft : String(current),
+    onChange: (e) => {
+      const raw = e.target.value;
+      setCalDraft(raw);
+      const n = parseFloat(raw);
+      if (raw !== "" && isFinite(n)) commit(n);
+    },
+    onFocus: (e) => { setCalFocus(key); setCalDraft(e.target.value); },
+    onBlur: () => { setCalFocus(null); setCalDraft(""); },
+  });
   const [adminCalBusy, setAdminCalBusy] = useState(false);
   const [adminCalPreview, setAdminCalPreview] = useState(false);
   // Walk-around video → shape. `urls` caches the uploaded frames so a re-draft re-spends
@@ -10878,16 +10896,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     Rounded for display because 10/12 round-trips to 9.999999999999998, and
                     a field that shows that after you typed 10 reads as broken. */}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Pitch (rise, as in 6 for 6:12)
-                  <input type="number" step="0.5" min="0" max="12" value={Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100} onChange={(e) => calSetRoof({ pitch: (parseFloat(e.target.value) || 0) / 12 })} onFocus={() => setCalFocus("pitch")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" min="0" max="12" {...calNumProps("pitch", Math.round((adminCal.spec.roof.pitch != null ? adminCal.spec.roof.pitch : 0.4) * 1200) / 100, (n) => calSetRoof({ pitch: n / 12 }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6} onChange={(e) => calSetRoof({ overhang: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("overhang")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
-                  <input type="number" step="0.05" value={adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0} onChange={(e) => calSetRoof({ ridgeOffset: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeOffset")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height (ft)
-                  <input type="number" step="0.5" value={adminCal.spec.wallHeightFt || 8} onChange={(e) => calSet({ wallHeightFt: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("wallHeightFt")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" {...calNumProps("wallHeightFt", adminCal.spec.wallHeightFt || 8, (n) => calSet({ wallHeightFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {/* The empty "plain" option is gone (2026-08-25). It was the LABEL FOR null,
                     which the renderer draws as panel siding -- so it named a thing the
@@ -10942,11 +10960,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   should not have to read four controls to establish that. */}
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to width (ft, 0 = none)
-                  <input type="number" step="0.5" min="0" value={adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0} onChange={(e) => calSetRoof({ leanToWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  <input type="number" step="0.5" min="0" {...calNumProps("leanToWidthFt", adminCal.spec.roof.leanToWidthFt != null ? adminCal.spec.roof.leanToWidthFt : 0, (n) => calSetRoof({ leanToWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>
                 {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Lean-to drop (ft)
-                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.leanToDropFt != null ? adminCal.spec.roof.leanToDropFt : 1} onChange={(e) => calSetRoof({ leanToDropFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.25" min="0" {...calNumProps("leanToDropFt", adminCal.spec.roof.leanToDropFt != null ? adminCal.spec.roof.leanToDropFt : 1, (n) => calSetRoof({ leanToDropFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
                 {(adminCal.spec.roof.leanToWidthFt || 0) > 0.5 && (
@@ -10959,7 +10977,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 )}
                 {adminCal.spec.roof.type !== "shed" && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer width (ft, 0 = none)
-                    <input type="number" step="0.5" min="0" value={adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0} onChange={(e) => calSetRoof({ dormerWidthFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.5" min="0" {...calNumProps("dormerWidthFt", adminCal.spec.roof.dormerWidthFt != null ? adminCal.spec.roof.dormerWidthFt : 0, (n) => calSetRoof({ dormerWidthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
                 {/* Shape, not size, so it sits with the other dormer fields and only once
@@ -10975,25 +10993,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
-                    <input type="number" step="0.25" min="0" value={adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5} onChange={(e) => calSetRoof({ dormerRiseFt: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer position (&minus;1 &hellip; 1)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45} onChange={(e) => calSetRoof({ dormerOffsetU: parseFloat(e.target.value) || 0 })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" {...calNumProps("dormerOffsetU", adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45, (n) => calSetRoof({ dormerOffsetU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
               </div>
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Gambrel knee position (0–1)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55} onChange={(e) => calSetRoof({ kneeU: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeU")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" {...calNumProps("kneeU", adminCal.spec.roof.kneeU != null ? adminCal.spec.roof.kneeU : 0.55, (n) => calSetRoof({ kneeU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Knee rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55} onChange={(e) => calSetRoof({ kneeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("kneeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" {...calNumProps("kneeRise", adminCal.spec.roof.kneeRise != null ? adminCal.spec.roof.kneeRise : 0.55, (n) => calSetRoof({ kneeRise: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge rise (× half-span)
-                    <input type="number" step="0.05" value={adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8} onChange={(e) => calSetRoof({ ridgeRise: parseFloat(e.target.value) || 0 })} onFocus={() => setCalFocus("ridgeRise")} onBlur={() => setCalFocus(null)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    <input type="number" step="0.05" {...calNumProps("ridgeRise", adminCal.spec.roof.ridgeRise != null ? adminCal.spec.roof.ridgeRise : 0.8, (n) => calSetRoof({ ridgeRise: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 </div>
               )}
