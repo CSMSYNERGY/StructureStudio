@@ -11750,6 +11750,45 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       </div>
     );
   }
+  // ── Tool buttons ────────────────────────────────────────────────────────────
+  // Hoisted out of the palette's IIFE because TWO places render tool buttons now: the options
+  // grid, and the bottom row, which carries Note and Line beside the wall height. A second copy
+  // of this markup would drift the moment one of them changed.
+  //
+  // The Shelving button stands in for whichever slab tool the popup armed, so it has to LOOK
+  // armed and say which one — otherwise you pick Single Shelf and the button you just used goes
+  // back to looking untouched. Same for the electrical-item picker.
+  const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
+  const armedElecItem = (cfg) => (cfg.isElecItemPicker && ITEMS[activeTool] && ITEMS[activeTool].electricalItemId) ? activeTool : null;
+  const ssToolBtn = ([key, cfg]) => (
+    <button key={key} onClick={() => {
+        if (gateRequired) { setGateOpen(true); return; }
+        // Shelving opens its popup instead of arming; choosing there arms the real tool.
+        // Clicking it again while a slab is armed disarms, like every other tool.
+        if (cfg.isElecItemPicker) { setElecItemPick(true); return; }
+        if (cfg.isShelfPicker) {
+          if (armedShelf(cfg)) { setActiveTool(null); setSelectedId(null); return; }
+          setShelfPick(true); setSelectedId(null); return;
+        }
+        setActiveTool(activeTool === key ? null : key); setSelectedId(null);
+      }}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
+        background: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#F8FAFC",
+        color: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? "#FFF" : "#334155",
+        border: `2px solid ${(activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#E2E8F0"}`,
+      }}>
+      <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>
+      {(armedShelf(cfg) || armedElecItem(cfg)) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
+      {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
+    </button>
+  );
+  // Note and Line moved OUT of the options grid onto the bottom row (Carolyn 2026-09-02). They
+  // annotate the drawing; they are not things you buy, so nothing about them belongs beside
+  // doors and windows. Moving them also takes a whole cell out of the grid and retires the
+  // "Annotate" heading, which only ever existed because a split cell needs one.
+  const ANNOTATE_KEYS = ["textNote", "line"];
+
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
       {gateEl && createPortal(gateEl, document.body)}
@@ -12051,39 +12090,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           plan is locked (hiding the whole row took Export with it). */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {!planLocked && (() => {
-          // The Shelving button stands in for whichever slab tool the popup armed, so it has to
-          // LOOK armed and say which one — otherwise you pick Single Shelf and the button you
-          // just used goes back to looking untouched.
-          const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
-          const armedElecItem = (cfg) => (cfg.isElecItemPicker && ITEMS[activeTool] && ITEMS[activeTool].electricalItemId) ? activeTool : null;
-          const btn = ([key, cfg]) => (
-            <button key={key} onClick={() => {
-                if (gateRequired) { setGateOpen(true); return; }
-                // Shelving opens its popup instead of arming; choosing there arms the real tool.
-                // Clicking it again while a slab is armed disarms, like every other tool.
-                if (cfg.isElecItemPicker) { setElecItemPick(true); return; }
-                if (cfg.isShelfPicker) {
-                  if (armedShelf(cfg)) { setActiveTool(null); setSelectedId(null); return; }
-                  setShelfPick(true); setSelectedId(null); return;
-                }
-                setActiveTool(activeTool === key ? null : key); setSelectedId(null);
-              }}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
-                background: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#F8FAFC",
-                color: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? "#FFF" : "#334155",
-                border: `2px solid ${(activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#E2E8F0"}`,
-              }}>
-              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>
-              {(armedShelf(cfg) || armedElecItem(cfg)) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
-              {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
-            </button>
-          );
+          const btn = ssToolBtn;
           // `entries` is the PALETTE (its own tool button); `incl` is the included row, which is
           // built from actionableIncludedKeys instead so it still offers items that carry
           // noPalette — a retired built-in, or a shelf collapsed behind the shelving picker. See
           // the note on actionableIncludedKeys for why the two lists must not share a filter.
-          const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette && (embedded || !c.internalOnly));
+          const entries = Object.entries(ITEMS).filter(([k, c]) =>
+            c && !c.noPalette && (embedded || !c.internalOnly) && ANNOTATE_KEYS.indexOf(k) === -1);
           const inclSet = new Set(actionableIncludedKeys);
           const incl = actionableIncludedKeys.length
             ? Object.entries(ITEMS).filter(([k]) => inclSet.has(k))   // ITEMS order, not inclusion-map order
@@ -12263,9 +12276,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 background: elecOn ? "#7C3AED" : "#F8FAFC", color: elecOn ? "#FFF" : "#334155",
                 border: `2px solid ${elecOn ? "#7C3AED" : "#E2E8F0"}`, opacity: elecAutoN ? 1 : 0.5 }}>
               {elecOn ? "✓ " : ""}{elecCfg.label || "Electrical Package"}
-              {C.showPricing && elecCfg.price != null && (
-                <span style={{ fontWeight: 600, opacity: 0.85 }}>{fmtMoney2(Number(elecCfg.price))}</span>
-              )}
             </button>
           ) : null;
           const renderAddl = () => {
@@ -12352,7 +12362,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // styles have none.
             const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
             if (!whList.length) return null;
-            const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
             const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
             const cur = Number(sel.wallHeightDeltaIn) || 0;
             // Metrics are S.btn's, EXACTLY — that is what makes this the same height as the 3D
@@ -12370,19 +12379,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <span style={{ ...S.lbl, fontSize: 10 }}>Wall Height</span>
               <div style={{ display: "inline-flex", borderRadius: 6, overflow: "hidden" }}>
                 <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
-                {whList.map((o, i) => {
-                  const rate = Number(o.ratePerLf) || 0;
-                  const add = C.showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
-                  return (
-                    <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
-                      style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
-                      +{o.deltaIn}&Prime;{add != null ? ` +${fmtMoney2(add)}` : ""}
-                    </button>
-                  );
-                })}
+                {whList.map((o, i) => (
+                  <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
+                    style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
+                    +{o.deltaIn}&Prime;
+                  </button>
+                ))}
               </div>
             </>);
           })()}
+          {/* Sibling of the wall-height block above, never inside it: that one returns null
+              for a style with no height increases, and Note/Line must not vanish with it. */}
+          {!planLocked && ANNOTATE_KEYS.filter((k) => ITEMS[k]).map((k) => ssToolBtn([k, ITEMS[k]]))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
