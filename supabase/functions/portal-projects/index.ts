@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { loginTenant } from "../_shared/internalTenant.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -246,11 +247,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
-    .select("user_id, email, can_write, display_name")
+    .select("user_id, email, can_write, display_name, support_only")
     .eq("user_id", user.id)
     .maybeSingle();
   if (opErr) return json({ error: opErr.message }, 500);
   if (!op) return json({ error: "Operator access required." }, 403);
+  // A SUPPORT operator is refused here, at the door.
+  //
+  // Migration 176's note further down this file already claimed "the Admin + Projects
+  // consoles refused". Half of that was true: adminAuth.ts really does deny the Admin
+  // console outright. Projects was only ever HIDDEN — ssClampTab drops the tab and
+  // 12-shell.jsx will not route to it — and a hidden tab is a courtesy, not a control.
+  // Anyone holding the session could POST here directly and read every builder's setup
+  // state. Zero support operators exist today, so nothing has leaked; the moment the
+  // first one is flagged it would, which is why this lands before that switch is used.
+  if (op.support_only) {
+    return json({ error: "Support accounts can't open Projects — that console is for platform operators." }, 403);
+  }
 
   // deno-lint-ignore no-explicit-any
   let payload: any;
@@ -289,6 +302,31 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     const { data, error } = await admin.from("pm_people").select("id").eq("active", true);
     if (error) throw error;
     return new Set((data || []).map((r: { id: string }) => r.id));
+  };
+  // ⚠️ THE GUARD THAT WAS MISSING. Returns a refusal sentence, or null to proceed.
+  //
+  // pm_find_user_by_email searches ALL of auth.users with no tenant filter — it has to,
+  // because an operator legitimately need not belong to any tenant. But nothing downstream
+  // ever asked WHOSE login came back. So an operator could type a builder's sales rep's
+  // address into the people editor, get a linked profile, tick "operator", and hand that
+  // builder's employee read access to every OTHER builder's account.
+  //
+  // portal-commissions closes the mirror image of this at its own door — "an operator login
+  // can never be adopted into a tenant" — and has since it was written. This is the same
+  // rule pointed the other way, and it was never written down: a TENANT login can never be
+  // adopted into the operator roster.
+  //
+  // Three outcomes, and the middle one is the whole reason this is a helper and not a
+  // one-line `if`:
+  //   * no client_users row  -> ALLOWED. This is the ordinary platform operator, who
+  //     belongs to no tenant at all. resolveTenant supports exactly this and a test pins
+  //     it; refusing here would lock out the people this console exists for.
+  //   * an INTERNAL tenant   -> ALLOWED. Carolyn and Ahsan are on structure-studio.
+  //   * a customer's tenant  -> REFUSED, by name, so the reason is obvious on screen.
+  const foreignLoginRefusal = async (userId: string, who: string): Promise<string | null> => {
+    const { clientId, internal } = await loginTenant(admin, userId);
+    if (!clientId || internal) return null;
+    return `${who} signs in as a member of the "${clientId}" account, so they cannot be given operator access — that would let one builder's staff open every other builder's account. Give them a separate CSM Synergy login first.`;
   };
   // deno-lint-ignore no-explicit-any
   const getItem = async (id: string): Promise<any> => {
@@ -931,6 +969,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           if (hit) {
             const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
             if (taken) return json({ error: "Someone with that login is already on the list." }, 409);
+            // Refuse the LINK, not the person. They can still be added and assigned work
+            // by name — it is only the login (and the operator access it would make
+            // grantable) that is withheld.
+            const refusal = await foreignLoginRefusal(hit.id, name);
+            if (refusal) return json({ error: refusal }, 403);
             userId = hit.id;
           }
         }
@@ -964,7 +1007,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             const hit = Array.isArray(found) ? found[0] : found;
             if (hit) {
               const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
-              if (!taken) patch.user_id = hit.id;
+              // Same rule as add_person: a builder's own login never becomes a linked
+              // profile. The email is still saved — it is a contact detail — but the
+              // link, and the operator grant it would unlock, is not made.
+              const refusal = taken ? "taken" : await foreignLoginRefusal(hit.id, String(patch.name || row.name));
+              if (!taken && !refusal) patch.user_id = hit.id;
             }
           }
         }
@@ -1002,6 +1049,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           return json({ error: "You cannot remove your own access." }, 400);
         }
         if (enabled) {
+          // The load-bearing check. A profile can be linked to a builder's login by data
+          // that predates the guard above, so the grant itself has to ask again rather
+          // than trusting that the link was made under the new rule.
+          const refusal = await foreignLoginRefusal(row.user_id, row.name);
+          if (refusal) return json({ error: refusal }, 403);
           const { data: has } = await admin.from("app_operators").select("user_id").eq("user_id", row.user_id).maybeSingle();
           if (!has) {
             // New access starts READ-ONLY. Seeing builders' accounts is the small grant;
@@ -1042,6 +1094,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (row.user_id === user.id) {
           return json({ error: "You cannot put your own account into support mode — you would lose this screen." }, 400);
         }
+        // Defence in depth: if a foreign login somehow already holds an operator row
+        // (granted before the guard existed), do not let this screen keep tuning it.
+        const supRefusal = await foreignLoginRefusal(row.user_id, row.name);
+        if (supRefusal) return json({ error: supRefusal }, 403);
         const { error } = await admin.from("app_operators").update({ support_only: supportOnly }).eq("user_id", row.user_id);
         if (error) throw error;
         const { error: aErr } = await admin.from("admin_audit").insert({
@@ -1057,6 +1113,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const canWrite = payload.canWrite === true;
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row || !row.user_id) return json({ error: "That person does not have operator access." }, 400);
+        // Same reasoning as set_operator_support: never widen a grant this screen would
+        // now refuse to create.
+        const wrRefusal = await foreignLoginRefusal(row.user_id, row.name);
+        if (wrRefusal) return json({ error: wrRefusal }, 403);
         const { error } = await admin.from("app_operators").update({ can_write: canWrite }).eq("user_id", row.user_id);
         if (error) throw error;
         const { error: aErr } = await admin.from("admin_audit").insert({
