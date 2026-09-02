@@ -1323,45 +1323,72 @@ const CRM_STAGE_FOR_STATUS = {
   draft: "new", sent: "quoted", accepted: "won", invoiced: "invoiced", delivered: "delivered",
 };
 
-// ── THE COMPACT MULTI-PIPELINE BAR ───────────────────────────────────────────────────
-// Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
-// three rows there" (2026-08-28 @24:48). Ahsan pushed back on the shape, not the idea:
-// "three rows, similar to these, it wouldn't look good", then proposed this at @29:25 --
-// "if we are on third stage, we can add a dot, a dot, and then the third stage is name, and
-// then a dot, a dot, a dot ... instead of using the names of which stages they are not in."
-// She took it: "I like that. Yes, I like that a lot."
+// ⚠️ THE ROWS ARE CHEVRON RAILS NOW, NOT DOTS. Ahsan, 2026-09-02, looking at the shipped
+// screen: "instead of the dotted pipeline stages for build and delivery can you do similar
+// to the main pipeline stage with the same style and length but different color?" The dots
+// won the argument on the call because three rails of stage NAMES read as eighteen words;
+// what he saw was that a 7px dot beside a full-width chevron rail reads as a lesser thing,
+// not a compact one. So the ladders share one geometry and differ only in hue.
 //
-// So one row per ladder: dots for what is behind, the NAME of where it is now, dots ahead.
-// Three chevron rails would be roughly 18 words of stage names; this is three.
+// The rail below is the single source of that geometry -- CrmStageBar renders it too, so
+// "the same style" cannot drift the next time one of them is touched.
+const CRM_RAIL_TONES = {
+  // Sales keeps ACCENT on purpose. The rail on a deal IS the sales ladder; giving the
+  // contact's sales row a second colour would say the two were different things.
+  sales:    { on: ACCENT,    past: "#DDD6FE" },
+  // Build and delivery are drawn from the palette the app already owns -- #1B7895 is the
+  // header gradient's other stop, not a new colour. An amber delivery row was tried first and
+  // it OUT-SHOUTED the sales stage it sits under: at this lightness orange carries far more
+  // chroma than the brand purple, so the least important rail read as the loudest.
+  build:    { on: "#1B7895", past: "#CFFAFE" },  // brand blue
+  delivery: { on: "#15803D", past: "#DCFCE7" },  // green -- the ladder ends in "Delivered"
+};
+const CRM_RAIL_IDLE = { bg: "#F1F5F9", fg: "#94A3B8" };
+
+// ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
+// rather than filling the first one, because filling it would claim the building is in it.
+// A building that has never been scheduled is not "in the first stage".
+function CrmChevronRail({ stages, idx = null, tone, title = null }) {
+  const t = tone || CRM_RAIL_TONES.sales;
+  return (
+    <div style={{ display: "flex", gap: 2, flexWrap: "wrap", flex: "1 1 auto", minWidth: 0 }}>
+      {stages.map((s, i) => (
+        <div key={i}
+          title={idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}
+          style={{
+            flex: "1 1 90px", minWidth: 0, padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
+            background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
+            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
+            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
+          }}>
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// -- THE MULTI-PIPELINE BAR ----------------------------------------------------------
+// Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
+// three rows there" (2026-08-28 @24:48). That is now literally what this is: one rail per
+// ladder, same chevrons, same height, same right edge, coloured per ladder.
 //
 // ⚠️ The chevron rail on a DEAL stays exactly as it was. She said plainly "I like this
 // pipeline up here", and this bar carries the ladders it does not already show rather than
 // replacing something she praised. A contact has no chevron -- it may have several deals --
 // so there it carries all three.
+//
+// The name is kept from the dot era so every caller and every grep still finds it.
 function CrmStageDots({ rows }) {
   const live = (rows || []).filter((r) => r && r.stages && r.stages.length);
   if (!live.length) return null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
       {live.map((r) => (
-        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11 }}>
-          <span style={{ width: 58, flexShrink: 0, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
-          {r.idx == null ? (
-            // Not started is its own state, not stage zero: a building that has never been
-            // scheduled is not "in the first stage", and colouring a dot would say it was.
-            <span style={{ color: "#CBD5E1", fontWeight: 600 }}>{r.emptyLabel || "Not started"}</span>
-          ) : (
-            <span style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-              {r.stages.map((s, i) => (
-                i === r.idx
-                  ? <span key={i} title={s.name}
-                      style={{ fontWeight: 800, color: "#FFF", background: ACCENT, borderRadius: 20, padding: "2px 9px", whiteSpace: "nowrap" }}>{s.name}</span>
-                  : <span key={i} title={s.name}
-                      style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-                               background: i < r.idx ? "#C4B5FD" : "#E2E8F0" }} />
-              ))}
-            </span>
-          )}
+        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 58, flexShrink: 0, fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
+          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]}
+            title={r.idx == null ? (r.emptyLabel || "Not started") : null} />
         </div>
       ))}
     </div>
@@ -1372,18 +1399,8 @@ function CrmStageBar({ status }) {
   const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
   const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
   return (
-    <div style={{ display: "flex", gap: 2, marginBottom: 12, flexWrap: "wrap" }}>
-      {CRM_STAGES.map((s, i) => (
-        <div key={s.kind} title={i <= idx ? "Reached" : "Not yet"}
-          style={{
-            flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
-            background: i < idx ? "#DDD6FE" : i === idx ? ACCENT : "#F1F5F9",
-            color: i === idx ? "#FFF" : i < idx ? ACCENT : "#94A3B8",
-            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
-          }}>
-          {s.name}
-        </div>
-      ))}
+    <div style={{ display: "flex", marginBottom: 12 }}>
+      <CrmChevronRail stages={CRM_STAGES} idx={idx} tone={CRM_RAIL_TONES.sales} />
     </div>
   );
 }
