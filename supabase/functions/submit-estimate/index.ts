@@ -613,6 +613,60 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const buildingArea = buildingWidthFt * buildingDepthFt;             // sqft_building
   const buildingPerimeter = 2 * (buildingWidthFt + buildingDepthFt);  // perimeter_building
 
+  // ── Electrical package ─────────────────────────────────────────────────────
+  // Carolyn's rule: "removing one doesn't discount it, extras charged per device."
+  //     charge = package + SUM over device types of max(0, placed - auto) * rate
+  // The auto counts are RECOMPUTED here from this building's dimensions and the tenant's own
+  // stored standards — never taken from the body, which sends only a boolean. Trusting a count
+  // from the browser would let a forged payload claim a huge standard layout and make every
+  // extra device free.
+  //
+  // They are then merged into includedMap, so the netting and the "(included)" $0 line come
+  // from pushItem exactly as they do for a size inclusion. That is the whole reason this rule
+  // needed no new pricing code: max(0, placed - included) already IS "removing never discounts".
+  let electricalPkg: { label: string; price: number; taxable: boolean; includePanel: boolean;
+                       outletSpacingFt: number; lightSpacingFt: number } | null = null;
+  if (selections?.electrical === true) {
+    const esRes = await supabase.from("electrical_settings")
+      .select("enabled, package_price, package_label, taxable, include_panel, outlet_spacing_ft, light_spacing_ft")
+      .eq("client_id", clientId).maybeSingle();
+    // Refuse rather than silently price nothing — the same posture as an unpriced size.
+    if (esRes.error) {
+      return json({ error: "Could not read your electrical settings just now. Try resubmitting in a moment." }, 400);
+    }
+    const es = esRes.data as {
+      enabled: boolean; package_price: number | null; package_label: string | null;
+      taxable: boolean | null; include_panel: boolean | null;
+      outlet_spacing_ft: number | null; light_spacing_ft: number | null } | null;
+    if (!es || es.enabled !== true) {
+      return json({ error: "The electrical package isn't switched on for this account. Turn it on in the portal under Settings → Options → Electrical, then resubmit." }, 400);
+    }
+    if (es.package_price == null) {
+      return json({ error: "The electrical package has no price set, so it can't be quoted. Set it in the portal under Settings → Options → Electrical." }, 400);
+    }
+    const outletSp = Number(es.outlet_spacing_ft) > 0 ? Number(es.outlet_spacing_ft) : 6;
+    const lightSp = Number(es.light_spacing_ft) > 0 ? Number(es.light_spacing_ft) : 10;
+    // MIRRORS electricalAutoCounts in the designer twins, line for line — floor for outlets
+    // around the perimeter, round for lights along the length, exactly one switch. If one side
+    // is ever changed, change both: a mismatch shows the customer one number and bills another.
+    const autoCounts: Record<string, number> = {
+      outlet: Math.max(1, Math.floor(buildingPerimeter / outletSp)),
+      lightFixture: Math.max(1, Math.round(buildingDepthFt / lightSp)),
+      lightSwitch: 1,
+    };
+    for (const k of Object.keys(autoCounts)) {
+      includedMap.set(k, (includedMap.get(k) || 0) + autoCounts[k]);
+    }
+    electricalPkg = {
+      label: es.package_label || "Electrical Package",
+      price: Number(es.package_price),
+      taxable: es.taxable !== false,
+      includePanel: es.include_panel !== false,
+      outletSpacingFt: outletSp,
+      lightSpacingFt: lightSp,
+    };
+  }
+
   // ── Taller walls (172) ──────────────────────────────────────────────────────────────────
   // A SELECTION charge, not a placed item: nothing is on the floor plan, so this deliberately
   // sits outside pushItem and outside the inclusion / declined-item machinery entirely. The
@@ -1051,6 +1105,41 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const totalShelfFt = rows.reduce((s: number, r: any) => s + (Number(r.lengthFt) || 1), 0);
     const shelfDesc = rows.map((r: any) => `${r.wall ? r.wall + " wall " : ""}${r.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
     pushItem(names, key, shelfDesc, { count: rows.length, lengthFt: totalShelfFt });
+  }
+  // ── Electrical ─────────────────────────────────────────────────────────────
+  // The package first, then the devices. The devices net against the standard counts merged
+  // into includedMap above, so a plan holding exactly the standard layout produces three
+  // "(included)" $0 lines under the package — which is what the customer should see: the
+  // package covers them, and the quote says so item by item.
+  if (electricalPkg) {
+    const autoOut = Math.max(1, Math.floor(buildingPerimeter / electricalPkg.outletSpacingFt));
+    const autoLight = Math.max(1, Math.round(buildingDepthFt / electricalPkg.lightSpacingFt));
+    targetItems.push(tagLine({
+      name: electricalPkg.label,
+      qty: 1,
+      amount: electricalPkg.price,
+      priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+      description: [
+        `${autoOut} outlet${autoOut === 1 ? "" : "s"} at ${electricalPkg.outletSpacingFt} ft spacing`,
+        `${autoLight} light${autoLight === 1 ? "" : "s"} at ${electricalPkg.lightSpacingFt} ft spacing`,
+        "1 switch",
+        electricalPkg.includePanel ? "electrical panel included" : "no electrical panel",
+      ].join(", "),
+    }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false }));
+  }
+  {
+    // Counted whether or not the package was taken: without it every device is simply charged,
+    // because includedMap holds nothing for them. That is the a-la-carte case and it needs no
+    // rule of its own.
+    const dev = (summary as Record<string, unknown>).electricalDevices as Record<string, number> | undefined;
+    for (const [key, names] of [
+      ["outlet", ["Outlet", "Receptacle", "Plug"]],
+      ["lightFixture", ["Light", "Light Fixture", "Lighting"]],
+      ["lightSwitch", ["Light Switch", "Switch"]],
+    ] as [string, string[]][]) {
+      const n = Number(dev?.[key]) || 0;
+      if (n > 0) pushItem(names, key, "", { count: n });
+    }
   }
   if (summary.lofts > 0) {
     // qty/amount are derived from the loft's configured method inside pushItem: per-unit (each)

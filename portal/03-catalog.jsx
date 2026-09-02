@@ -2774,6 +2774,133 @@ const LP_METHODS = [
 // combination stops being offered -- the row is deleted, get_config stops emitting it, and the
 // customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
 // fourth row here: a stored fourth rate would be a second place for the price to live.
+function Electrical({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [f, setF] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    const e = data.electrical || {};
+    setF({
+      enabled: e.enabled === true,
+      packagePrice: e.package_price != null ? String(e.package_price) : "",
+      packageLabel: e.package_label || "Electrical Package",
+      taxable: e.taxable !== false,
+      internalOnly: e.internal_only === true,
+      outletSpacingFt: String(e.outlet_spacing_ft == null ? 6 : e.outlet_spacing_ft),
+      outletHeightIn: String(e.outlet_height_in == null ? 24 : e.outlet_height_in),
+      outletAboveBenchIn: String(e.outlet_above_bench_in == null ? 42 : e.outlet_above_bench_in),
+      lightSpacingFt: String(e.light_spacing_ft == null ? 10 : e.light_spacing_ft),
+      switchHeightIn: String(e.switch_height_in == null ? 48 : e.switch_height_in),
+      includePanel: e.include_panel !== false,
+    });
+  };
+  useEffect(() => { load(); }, [clientId]);
+
+  const set = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical", ...f }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      setMsg({ ok: "Saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  if (!f) return null;
+  const num = (k, label, unit, hint) => (
+    <label style={{ display: "block", minWidth: 160 }}>
+      <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <input type="number" min="0" step="0.5" value={f[k]} onChange={(e) => set(k, e.target.value)}
+          style={{ ...S.input, width: 90 }} />
+        <span style={{ fontSize: 12, color: "#64748B" }}>{unit}</span>
+      </span>
+      {hint && <span style={{ display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{hint}</span>}
+    </label>
+  );
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Electrical</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Set your wiring standards once and the designer lays them out on the customer&rsquo;s
+        building &mdash; a plug every so many feet, lights down the middle, a switch by the door.
+        The package is <b>one fixed price</b> covering that standard layout.{" "}
+        <b>Removing a device never reduces it</b>; only devices added <i>beyond</i> the standard
+        are charged, at the per-device rates in the Layout Pricing list above.
+      </p>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        <input type="checkbox" checked={f.enabled} onChange={(e) => set("enabled", e.target.checked)}
+          style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+        Offer an electrical package
+        <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off hides it entirely without clearing your standards</span>
+      </label>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
+        <label style={{ display: "block", minWidth: 200 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>What the customer sees</span>
+          <input value={f.packageLabel} onChange={(e) => set("packageLabel", e.target.value)} maxLength={60}
+            style={{ ...S.input, width: 200 }} />
+        </label>
+        <label style={{ display: "block", minWidth: 160 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>Package price</span>
+          <input type="number" min="0" step="1" value={f.packagePrice} placeholder="not offered"
+            onChange={(e) => set("packagePrice", e.target.value)} style={{ ...S.input, width: 120 }} />
+          <span style={{ display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 }}>Blank = not offered yet</span>
+        </label>
+      </div>
+
+      <div style={{ ...S.lbl, marginBottom: 8 }}>Your standards</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+        {num("outletSpacingFt", "Outlet every", "ft", "measured around the walls")}
+        {num("outletHeightIn", "Outlet height", "in", "off the floor")}
+        {num("outletAboveBenchIn", "Above a workbench", "in", "used where a bench is in the way")}
+        {num("lightSpacingFt", "Light every", "ft", "down the length of the building")}
+        {num("switchHeightIn", "Switch height", "in", "one switch, by the door")}
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", marginBottom: 14 }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={f.includePanel} onChange={(e) => set("includePanel", e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+          Include an electrical panel
+        </label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
+          title="Available in the rep designer only - hidden from the customer-facing page. A rep-selected package still prices normally.">
+          <input type="checkbox" checked={f.internalOnly} onChange={(e) => set("internalOnly", e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+          Internal only
+        </label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={f.taxable} onChange={(e) => set("taxable", e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+          Taxable
+        </label>
+      </div>
+
+      <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 12px", maxWidth: 680 }}>
+        Extras are only offered once you price them: set a rate for <b>Outlet</b>, <b>Light</b> and{" "}
+        <b>Light Switch</b> in Layout Pricing above. Until then the package still lays out the
+        standard, and the customer simply has no way to add more.
+      </p>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save electrical"}</button>
+        {msg && <span style={{ fontSize: 12.5, color: msg.err ? "#B91C1C" : "#047857" }}>{msg.err || msg.ok}</span>}
+      </div>
+    </div>
+  );
+}
+
 function Insulation({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"]];

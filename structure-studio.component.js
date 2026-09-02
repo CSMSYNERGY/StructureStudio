@@ -930,7 +930,12 @@ function rampPlacementForDoor(door, rampDepthFt, pW, pH, mgX, mgY, scale) {
 // the emailed estimate to the penny. Needs C.layoutPricing ({key:{rate,method,byStyle}})
 // and C.sizePricing ({styleKey:{sizeLabel:{basePrice,widthFt,lengthFt}}}) — both are
 // present only when the tenant's show_pricing is on (else {} → returns no rows).
-const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "shelf", "doubleShelf", "loft", "ramp"];
+const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "shelf", "doubleShelf", "loft", "ramp",
+  // Electrical devices price as ordinary "each" layout items. What makes the package work is
+  // that its standard counts join the SAME inclusion netting below — placed minus included,
+  // floored at zero — so "removing one doesn't discount, extras charged per device" needs no
+  // special case anywhere in this file.
+  "outlet", "lightFixture", "lightSwitch"];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
 function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? "−" + s : s; }
 // Building / Paint Colors / Roof summary for the "Details" section, in the SAME order they appear
@@ -1040,6 +1045,154 @@ function insulationSqft(area, widthFt, lengthFt, wallHeightFt) {
   if (area === "floor" || area === "roof") return Math.round(w * l);
   if (area === "walls") return Math.round(2 * (w + l) * h);
   return 0;
+}
+
+// ── Electrical ───────────────────────────────────────────────────────────────
+// The builder sets their wiring standards once; turning the package on lays the devices out at
+// those spacings, and only devices placed BEYOND the standard layout are charged.
+//
+// THE PRICING RULE (Carolyn, 2026-09-02): "removing one doesn't discount it, extras charged per
+// device."  charge = package + SUM over device types of max(0, placed - auto) * rate
+// The max(0, …) IS the "removing doesn't discount" half — it is not a second rule, it falls out
+// of flooring at zero. It is also the same netting a size inclusion already does.
+//
+// electricalAutoCounts is therefore a PRICING INPUT, and submit-estimate recomputes it from the
+// building's dimensions and the tenant's stored standards rather than trusting the browser —
+// the wall-height and insulation lesson. A forged auto=999 would make every extra device free.
+const ELECTRICAL_DEVICES = ["outlet", "lightFixture", "lightSwitch"];
+const ELECTRICAL_DEVICE_LABEL = { outlet: "Outlet", lightFixture: "Light", lightSwitch: "Light switch" };
+
+function electricalOffered(C) {
+  const e = C && C.electrical;
+  return e && typeof e === "object" ? e : null;
+}
+
+// The standard layout's counts. Deliberately arithmetic on the building and the standards only —
+// nothing about what is currently on the plan — so the browser and the server cannot diverge.
+function electricalAutoCounts(cfg, widthFt, lengthFt) {
+  if (!cfg) return null;
+  const W = Number(widthFt) || 0, L = Number(lengthFt) || 0;
+  if (!(W > 0 && L > 0)) return null;
+  const outletSp = Number(cfg.outletSpacingFt) > 0 ? Number(cfg.outletSpacingFt) : 6;
+  const lightSp = Number(cfg.lightSpacingFt) > 0 ? Number(cfg.lightSpacingFt) : 10;
+  return {
+    // "a plug every 6 feet" measured around the walls. FLOOR, not ceil: a builder quoting one
+    // plug per 6 ft of wall means full 6 ft intervals, and rounding up would hand out a free
+    // device on every building whose perimeter is not an exact multiple.
+    outlet: Math.max(1, Math.floor((2 * (W + L)) / outletSp)),
+    // Lights run down the length, so they space along L rather than the perimeter. ROUND, so a
+    // 24 ft building at 10 ft spacing gets 2 rather than the 2 a floor would give and the 3 a
+    // ceil would — the nearest whole number to the builder's own spacing.
+    lightFixture: Math.max(1, Math.round(L / lightSp)),
+    // One switch by the door. Always exactly one: a second switch is an extra, and that is
+    // precisely what the per-device rate is for.
+    lightSwitch: 1,
+  };
+}
+
+// Distance d clockwise around the interior perimeter from the north-west corner → a wall and a
+// point on it. Shared by the auto-layout so outlet spacing is measured the same way the count
+// assumed it would be; a count that walks the perimeter and a layout that walks the walls
+// separately would drift apart on the first non-square building.
+function elecPerimeterPoint(d, W, L) {
+  const per = 2 * (W + L);
+  if (!(per > 0)) return { wall: "north", xFt: 0, yFt: 0 };
+  let t = ((d % per) + per) % per;
+  if (t < W) return { wall: "north", xFt: t, yFt: 0 };
+  t -= W;
+  if (t < L) return { wall: "east", xFt: W, yFt: t };
+  t -= L;
+  if (t < W) return { wall: "south", xFt: W - t, yFt: L };
+  t -= W;
+  return { wall: "west", xFt: 0, yFt: L - t };
+}
+
+// Build the standard layout as real, editable items. Everything it produces is an ordinary
+// placed item — draggable, deletable, priced by the same rows — carrying `elecAuto` only so
+// switching the package back off can remove exactly what switching it on added. `elecAuto` is
+// NOT what pricing keys on: the charge nets placed against the RECOMPUTED count, so deleting an
+// auto outlet and adding a manual one costs nothing, which is the intent.
+//
+// A position that would land in a doorway or on top of a bench is SKIPPED rather than forced.
+// That lays out fewer devices than the count, and it deliberately does not reduce the charge:
+// max(0, placed - auto) is already zero there. The alternative — stacking an outlet inside a
+// door opening — puts a drawing in front of a shop that cannot be built.
+function electricalAutoItems(cfg, o) {
+  const counts = electricalAutoCounts(cfg, o.widthFt, o.lengthFt);
+  if (!counts) return [];
+  const W = Number(o.widthFt), L = Number(o.lengthFt), sc = o.scale;
+  const T = o.itemTypes || {};
+  const out = [];
+  let id = o.startId;
+  const placed = () => (o.existing || []).concat(out);
+
+  const tryWall = (type, xFt, yFt, wall, heightOffFloorIn) => {
+    const c = T[type];
+    if (!c) return false;
+    const sn = snapToWallInterior(wall, o.mgX + xFt * sc, o.mgY + yFt * sc,
+      c.width * sc, slabDepthFt(c) * sc, o.pW, o.pH, o.mgX, o.mgY);
+    const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
+      ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
+      heightOffFloorIn: heightOffFloorIn != null ? heightOffFloorIn : c.heightOffFloorIn,
+      elecAuto: true };
+    const others = placed();
+    if (checkDoorCollision(cand, c, others, T, sc)) return false;
+    if (checkWallSlabOverlap(sn, c.width * sc, others, T, sc, cand)) return false;
+    out.push(cand); id++;
+    return true;
+  };
+
+  // Outlets, evenly around the perimeter. The half-step offset keeps the first one off the
+  // corner, where a plug cannot physically go.
+  const per = 2 * (W + L), n = counts.outlet;
+  for (let i = 0; i < n; i++) {
+    const p = elecPerimeterPoint((i + 0.5) * (per / n), W, L);
+    // "with a workbench they go above the workbench" — the bench does not move the outlet
+    // along the wall, it raises it. Height only, so it can never change a count or a price.
+    const overBench = electricalBenchWall(placed(), T, p.wall, p.xFt, p.yFt, o);
+    tryWall("outlet", p.xFt, p.yFt, p.wall,
+      overBench && cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : (cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null));
+  }
+
+  // Lights down the centre of the length. Free-floating: both attachment guards key on
+  // `type === "loft"`, so an unflagged item places anywhere inside the footprint.
+  const lc = T.lightFixture;
+  if (lc) {
+    for (let i = 0; i < counts.lightFixture; i++) {
+      const yFt = L * (i + 0.5) / counts.lightFixture;
+      out.push({ id: id++, type: "lightFixture", x: o.mgX + (W / 2) * sc, y: o.mgY + yFt * sc,
+        widthFt: lc.width, heightFt: lc.height, rotation: 0,
+        heightOffFloorIn: lc.heightOffFloorIn, elecAuto: true });
+    }
+  }
+
+  // One switch, on the FRONT wall — the wall the doors decided, so it follows the building's
+  // real entrance rather than a fixed compass direction. Offset from the corner, not centred,
+  // because the centre of the front wall is where the door usually is.
+  const fw = o.frontWall || "south";
+  const along = (fw === "north" || fw === "south") ? W : L;
+  for (const frac of [0.12, 0.88, 0.3, 0.7, 0.5]) {   // first spot that is not blocked
+    const d = along * frac;
+    const pt = fw === "north" ? { xFt: d, yFt: 0 } : fw === "south" ? { xFt: d, yFt: L }
+      : fw === "west" ? { xFt: 0, yFt: d } : { xFt: W, yFt: d };
+    if (tryWall("lightSwitch", pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? Number(cfg.switchHeightIn) : null)) break;
+  }
+  return out;
+}
+
+// Is this point on a wall span already occupied by a workbench (or any slab)? Used ONLY to pick
+// an outlet's mount height, never its position and never a count.
+function electricalBenchWall(existing, itemTypes, wall, xFt, yFt, o) {
+  const sc = o.scale;
+  const px = (wall === "north" || wall === "south") ? o.mgX + xFt * sc : o.mgY + yFt * sc;
+  for (const it of existing || []) {
+    if (it.wall !== wall) continue;
+    if (ssSlabModel(it.type, itemTypes) == null) continue;
+    const half = ((it.widthFt || 0) * sc) / 2;
+    const c = (wall === "north" || wall === "south") ? it.x : it.y;
+    if (px >= c - half && px <= c + half) return true;
+  }
+  return false;
 }
 
 function wallHeightFitsWidth(opt, widthFt) {
@@ -1250,6 +1403,26 @@ function computeSelectionRows(sel, paintColors, C, items) {
       });
     });
   }
+  // The electrical package: one fixed line. A SELECTION charge like taller walls, so it is not
+  // in LAYOUT_PRICE_ORDER — the devices it lays out are priced there, and net to nothing.
+  const elecCfg = electricalOffered(C);
+  if (elecCfg && sel && sel.electrical) {
+    const autoN = electricalAutoCounts(elecCfg, bW, bL);
+    const detail = autoN
+      ? [`${autoN.outlet} outlet${autoN.outlet === 1 ? "" : "s"} @ ${elecCfg.outletSpacingFt} ft`,
+         `${autoN.lightFixture} light${autoN.lightFixture === 1 ? "" : "s"} @ ${elecCfg.lightSpacingFt} ft`,
+         `${autoN.lightSwitch} switch`,
+         elecCfg.includePanel ? "panel included" : "no panel"].join(" · ")
+      : "";
+    rows.push({
+      key: "electrical",
+      label: elecCfg.label || "Electrical Package",
+      detail: detail,
+      // Null when the tenant hides pricing — get_config already nulled it, so this reads
+      // whatever arrived rather than deciding the policy a second time.
+      total: showP && elecCfg.price != null ? Number(elecCfg.price) : null,
+    });
+  }
   const painted = sel && sel.paint === "Painted";
   let pDetail = "Unpainted", pTotal = 0;
   if (painted) {
@@ -1389,6 +1562,14 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
     const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) o[k] = 1; return o;
   })();
+  // The electrical package covers its standard layout, so those counts join the very same
+  // netting a size inclusion uses: the loop below already charges only (placed - included) and
+  // already floors at zero. ADDED to any size inclusion rather than replacing it — a builder
+  // who includes outlets in the base price AND sells the package includes both.
+  if (sel && sel.electrical && electricalOffered(C)) {
+    const auto = electricalAutoCounts(electricalOffered(C), bW, bL);
+    if (auto) for (const k in auto) incForRows[k] = (Number(incForRows[k]) || 0) + auto[k];
+  }
 
   const rows = [];
   const deferred = [];
@@ -10324,6 +10505,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ...(Array.isArray(sel.insulation) && sel.insulation.length
             ? { insulation: sel.insulation.map((s) => ({ type: s.type, area: s.area })) } : {}),
           ...(sel.wallHeightDeltaIn ? { wallHeightDeltaIn: Number(sel.wallHeightDeltaIn) } : {}),
+          // A BOOLEAN, deliberately: the package price and every device count are re-derived
+          // server-side from the tenant's own standards. Sending the counts would let a forged
+          // body claim a bigger standard layout and make every extra device free.
+          ...(sel.electrical ? { electrical: true } : {}),
           ...(sel.wallHeight ? { wallHeightFt: sel.wallHeight } : {}),
           // Send roof fields whenever the tenant offers roofs (any shingle/metal color), even if
           // unselected, so the estimate always shows the Roof line in order.
@@ -10451,6 +10636,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const lbl = getDisplayLabel(i.wall, frontWall);
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
+          // Electrical devices: plain counts. The server nets these against the standard
+          // layout it recomputes itself, so what matters here is only how many are on the plan.
+          electricalDevices: {
+            outlet: items.filter((i) => i.type === "outlet").length,
+            lightFixture: items.filter((i) => i.type === "lightFixture").length,
+            lightSwitch: items.filter((i) => i.type === "lightSwitch").length,
+          },
           lofts: items.filter((i) => i.type === "loft").length,
           loftSqft: Math.round(items.filter((i) => i.type === "loft").reduce((s, i) => s + (i.widthFt || 0) * (i.heightFt || 0), 0)),
           ramp: items.filter((i) => i.type === "ramp").length,   // count — ramp is priced "each" (one per door)
@@ -11846,7 +12038,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               (by[k] = by[k] || []).push(e);
             });
             const out = [];
-            PALETTE_GROUP_ORDER.forEach((g) => { if (by[g] && by[g].length) out.push([PALETTE_GROUP_LABEL[g], by[g]]); });
+            // The group KEY rides along with the label so a cell can be recognised without
+            // string-matching its display text — the Monday label-rename lesson, in miniature.
+            PALETTE_GROUP_ORDER.forEach((g) => { if (by[g] && by[g].length) out.push([PALETTE_GROUP_LABEL[g], by[g], g]); });
             // In the split every cell carries a heading, so the ungrouped tail (Note, Line) gets
             // one too rather than sitting under a blank space.
             if (by[""] && by[""].length) out.push(["Annotate", by[""]]);
@@ -11908,14 +12102,56 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </div>
           ) : null;
+          // ── The electrical package ────────────────────────────────────────────────
+          // One toggle. Turning it ON lays out the builder's standard at their own spacings;
+          // turning it OFF removes exactly what it added and leaves anything hand-placed alone.
+          const elecCfg = (embedded || !(C.electrical && C.electrical.internalOnly)) ? electricalOffered(C) : null;
+          const elecOn = !!(sel && sel.electrical);
+          const elecAutoN = elecCfg ? electricalAutoCounts(elecCfg, bldgW, bldgH) : null;
+          const toggleElectrical = () => {
+            if (elecOn) {
+              // Only the auto-placed ones. A device the customer added themselves is theirs.
+              setItems((its) => its.filter((i) => !i.elecAuto));
+              setSel((p) => ({ ...p, electrical: false }));
+              return;
+            }
+            setItems((its) => {
+              const add = electricalAutoItems(elecCfg, {
+                widthFt: bldgW, lengthFt: bldgH, scale: scale, mgX: mgX, mgY: mgY, pW: pW, pH: pH,
+                itemTypes: ITEMS, existing: its, frontWall: getFrontWall(its), startId: idCounter,
+              });
+              idCounter += add.length + 1;
+              return its.concat(add);
+            });
+            setSel((p) => ({ ...p, electrical: true }));
+          };
+          const elecBtn = elecCfg ? (
+            <button key="ss-elec-pkg" onClick={toggleElectrical}
+              title={elecAutoN ? `Lays out ${elecAutoN.outlet} outlets every ${elecCfg.outletSpacingFt} ft, ${elecAutoN.lightFixture} light(s) every ${elecCfg.lightSpacingFt} ft, and a switch by the door` : "Choose a size first"}
+              disabled={!elecAutoN}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7,
+                fontSize: 12, fontWeight: 700, cursor: elecAutoN ? "pointer" : "not-allowed",
+                background: elecOn ? "#7C3AED" : "#F8FAFC", color: elecOn ? "#FFF" : "#334155",
+                border: `2px solid ${elecOn ? "#7C3AED" : "#E2E8F0"}`, opacity: elecAutoN ? 1 : 0.5 }}>
+              {elecOn ? "✓ " : ""}{elecCfg.label || "Electrical Package"}
+              {C.showPricing && elecCfg.price != null && (
+                <span style={{ fontWeight: 600, opacity: 0.85 }}>{fmtMoney2(Number(elecCfg.price))}</span>
+              )}
+            </button>
+          ) : null;
           const renderAddl = () => {
             const secs = sectionsOf(addl);
             // No groups at all — every tenant whose config predates palette groups. Unchanged.
             if (!secs) return addl.map(btn);
-            const cellOf = ([label, list], i) => (
+            const cellOf = ([label, list, gkey], i) => (
               <div key={label || ("ss-ungrouped-" + i)} style={{ gridColumn: i % 2 === 0 ? 1 : 3, minWidth: 0 }}>
                 {label && <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>{label}</span>}
-                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>{list.map(btn)}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                  {/* The package sits with the devices it lays out, under one heading, rather
+                      than as a second cell also called Electrical. */}
+                  {gkey === "electrical" && elecBtn}
+                  {list.map(btn)}
+                </div>
               </div>
             );
             // One group has nothing to pair with; a lone cell beside an empty column and half a
@@ -11933,6 +12169,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // through ITEMS — but it renders as the same toggle buttons, which is what makes it
             // read as one of the options rather than a stray control.
             const cells = secs.map(cellOf);
+            // A builder can price the PACKAGE without pricing any individual device — extras
+            // are simply not offered then (hidden_until_priced). That leaves no electrical
+            // group for the button to live in, so it gets its own cell.
+            if (elecBtn && !secs.some((s) => s[2] === "electrical")) {
+              cells.push(
+                <div key="ss-electrical" style={{ gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 }}>
+                  <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>{PALETTE_GROUP_LABEL.electrical}</span>
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>{elecBtn}</div>
+                </div>
+              );
+            }
             if (insCell) cells.push(React.cloneElement(insCell, { key: "ss-insulation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
             return (
               <div key="ss-split" style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", columnGap: 18, rowGap: 12, alignItems: "start", width: "100%" }}>
