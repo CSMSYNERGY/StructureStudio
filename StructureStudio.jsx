@@ -905,18 +905,27 @@ function wallHeightFitsWidth(opt, widthFt) {
   if (!Array.isArray(opt.widthsFt)) return true;
   return opt.widthsFt.some((x) => Number(x) === w);
 }
-function wallHeightOptionsFor(C, styleKey, widthFt) {
+function wallHeightOptionsFor(C, styleKey, widthFt, includeInternal) {
   const m = (C && C.wallHeightOptions) || {};
   const list = styleKey ? m[styleKey] : null;
   if (!Array.isArray(list)) return [];
   // widthFt omitted = "what does this style offer at all", which is what the portal and the
   // tests ask. A designer always passes the building's real width.
-  return widthFt === undefined ? list : list.filter((o) => wallHeightFitsWidth(o, widthFt));
+  // `internalOnly` follows the layout-item rule exactly: offered in the REP designer (embedded)
+  // and hidden from the customer-facing page. Visibility only — resolveWallHeight below does
+  // NOT filter on it, so an increase a rep selected still prices, the same way an
+  // already-placed internal-only item still prices.
+  return list.filter((o) =>
+    (includeInternal || !o.internalOnly) &&
+    (widthFt === undefined || wallHeightFitsWidth(o, widthFt)));
 }
 function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
   const d = Number(deltaIn) || 0;
   if (d <= 0) return null;
-  const hit = wallHeightOptionsFor(C, styleKey).find((o) => Number(o.deltaIn) === d) || null;
+  // includeInternal TRUE on purpose: this resolves a PRICE, and an increase a rep selected must
+  // still cost what it costs. Filtering here would let a rep pick an internal-only upgrade, see
+  // a total, and have the estimate silently drop the charge. Visibility is the picker's job.
+  const hit = wallHeightOptionsFor(C, styleKey, undefined, true).find((o) => Number(o.deltaIn) === d) || null;
   if (!hit) return null;
   // A pick that no longer fits the building prices NOTHING, matching the server's refusal.
   return widthFt === undefined || wallHeightFitsWidth(hit, widthFt) ? hit : null;
@@ -11203,7 +11212,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // Wall height — only when THIS style offers increases (hauling limits differ per
                 // style, so the list is per-style and most styles have none). Standard is always
                 // the first choice and always re-selectable.
-                const whList = wallHeightOptionsFor(C, sel.style, bldgW);
+                const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
                 if (!whList.length) return null;
                 const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
                 const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));

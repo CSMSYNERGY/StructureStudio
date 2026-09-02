@@ -2793,6 +2793,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         ratePerLf: r.rate_per_lf != null ? String(r.rate_per_lf) : "",
         taxable: r.taxable !== false,
         active: r.active !== false,
+        internalOnly: r.internal_only === true,
         widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null,
       });
     });
@@ -2803,7 +2804,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   const setRow = (styleId, idx, field, val) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
   const addRow = (styleId) =>
-    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, widthsFt: null }] }));
+    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, internalOnly: false, widthsFt: null }] }));
   const delRow = (styleId, idx) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).filter((_, i) => i !== idx) }));
 
@@ -2835,6 +2836,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             ratePerLf: String(r.ratePerLf == null ? "" : r.ratePerLf).trim(),
             taxable: r.taxable,
             active: r.active,
+            internalOnly: r.internalOnly,
             widthsFt: r.widthsFt,
           })),
         }),
@@ -2875,11 +2877,12 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
           </p>
         ) : (
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 620, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "16%" }} /><col style={{ width: "18%" }} /><col style={{ width: "32%" }} /><col style={{ width: "12%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /></colgroup>
+            <colgroup><col style={{ width: "14%" }} /><col style={{ width: "16%" }} /><col style={{ width: "28%" }} /><col style={{ width: "13%" }} /><col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} /></colgroup>
             <thead><tr>
               <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
               <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={{ ...S.th, textAlign: "center" }}>Active</th>
               <th style={S.th}></th>
@@ -2904,6 +2907,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                       </div>
                     )}
                   </td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
@@ -3132,7 +3136,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
           <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Depth (in)</th><th style={S.th}>Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Depth (in)</th><th style={S.th}>Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal only</th><th style={S.th}></th>
               </tr></thead>
               <tbody><SkelRows cols={8} rows={6} widths={["58%", "80%", "60%", "40%", "40%", "50%", "24%", "44%"]} /></tbody>
             </table>
@@ -3147,7 +3151,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (

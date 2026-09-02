@@ -34,7 +34,7 @@ for (const name of ["wallHeightFitsWidth", "wallHeightOptionsFor", "resolveWallH
 const { wallHeightOptionsFor, resolveWallHeight } = new Function(
   `${BLOCK}; return { wallHeightFitsWidth, wallHeightOptionsFor, resolveWallHeight };`,
 )() as {
-  wallHeightOptionsFor: (C: unknown, k: string, w?: number) => { deltaIn: number; ratePerLf: number | null }[];
+  wallHeightOptionsFor: (C: unknown, k: string, w?: number, includeInternal?: boolean) => { deltaIn: number; ratePerLf: number | null }[];
   resolveWallHeight: (C: unknown, k: string, d: unknown, w?: number) => { deltaIn: number; ratePerLf: number | null } | null;
 };
 
@@ -46,6 +46,8 @@ const C = {
     // EVERY width and keeps meaning that when a new width is added to the style later.
     lofted: [{ deltaIn: 6, ratePerLf: 2 }, { deltaIn: 12, ratePerLf: 8, widthsFt: [8, 10] }],
     utility: [],
+    // An increase a REP can sell but a shopper never sees.
+    econo: [{ deltaIn: 6, ratePerLf: 5, internalOnly: true }, { deltaIn: 12, ratePerLf: 9 }],
   },
 };
 
@@ -138,4 +140,18 @@ Deno.test("omitting the width asks what the style offers AT ALL", () => {
   // The portal editor and the estimate-side lookup both want the full list, not a filtered one.
   assertEquals(wallHeightOptionsFor(C, "lofted").length, 2);
   assertEquals(resolveWallHeight(C, "lofted", 12)?.ratePerLf, 8);
+});
+
+Deno.test("internal-only increases are hidden from the customer, shown to the rep", () => {
+  // Matches client_layout_items.internal_only exactly: offered in the REP designer (embedded),
+  // hidden on the customer-facing page. The customer-facing call passes no includeInternal.
+  assertEquals(wallHeightOptionsFor(C, "econo", 8).map((o) => o.deltaIn), [12]);
+  assertEquals(wallHeightOptionsFor(C, "econo", 8, true).map((o) => o.deltaIn), [6, 12]);
+});
+
+Deno.test("an internal-only increase a rep chose STILL PRICES", () => {
+  // Visibility only. resolveWallHeight deliberately does not filter on internalOnly, the same
+  // way an already-placed internal-only layout item keeps its price — otherwise a rep could
+  // select one, see a total, and have the estimate silently drop the charge.
+  assertEquals(resolveWallHeight(C, "econo", 6, 8)?.ratePerLf, 5);
 });

@@ -1241,7 +1241,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
-      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft").eq("client_id", clientId).order("delta_in"),
+      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only").eq("client_id", clientId).order("delta_in"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
@@ -2752,6 +2752,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         rate_per_lf: ratePerLf,
         taxable: row?.taxable !== false,
         active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
         sort_order: i,
         widths_ft: widthsFt,
         updated_at: new Date().toISOString(),
