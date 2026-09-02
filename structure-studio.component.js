@@ -538,6 +538,58 @@ const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap
 // (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
 const FIXTURE_WINDOW_COLOR = "#0EA5E9";
 const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true, group: "windows" };
+// The single "Shelving" palette tool (Carolyn 2026-09-02) — the shelf family and the workbench
+// behind one button instead of three, so Interior stays two buttons wide however many kinds of
+// shelf a builder offers.
+//
+// It differs from the door/window pickers in WHEN it opens, deliberately. Those arm a tool and
+// pop up on the WALL click, because they must snapshot a size/swing/colour onto the item being
+// placed. Shelving has no such choices — the popup only decides which of the existing tools is
+// armed — so it opens on the BUTTON click and then hands straight over to the ordinary wallSnap
+// placement. That keeps ONE placement path for slabs: a second one is exactly how the snap/draw
+// depth mismatch got shipped, and it is not worth re-creating that risk for a cosmetic match.
+const SHELF_PICKER_CFG = { label: "Shelving", color: "#D97706", icon: "📚", wallSnap: true, width: 4, height: 1, shortLabel: "SHELF", isShelfPicker: true, group: "interior" };
+
+// The shelving popup. Same furniture as DoorPicker — scrim, card grid, 2px selected border —
+// but with no second step: these differ only by depth, mounting height and rate, so one click
+// on a card picks the tool and closes. `onPick` arms the ordinary tool; nothing here places
+// anything, which is what keeps slab placement on a single code path.
+function ShelfPicker({ items, itemTypes, rates, showPricing, onPick, onCancel }) {
+  const money2 = (n) => "$" + Number(n).toFixed(2);
+  const inches = (v) => (v == null ? null : `${Math.round(Number(v))}\u2033`);
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose shelving</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Pick one, then click a wall to place it.</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {items.map((k) => {
+            const c = itemTypes[k] || {};
+            const rate = rates && rates[k] != null ? Number(rates[k]) : null;
+            // Only the facts that actually differ between these three.
+            const bits = [
+              inches(c.depthIn) && `${inches(c.depthIn)} deep`,
+              inches(c.heightOffFloorIn) && `${inches(c.heightOffFloorIn)} up`,
+              showPricing && rate > 0 ? `${money2(rate)}/ft` : null,
+            ].filter(Boolean);
+            return (
+              <div key={k} onClick={() => onPick(k)} style={{ border: "2px solid #E2E8F0", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>{c.icon || "\uD83D\uDCDA"}</div>
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{c.label || k}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{bits.join(" \u00b7 ") || "\u00a0"}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+          <button onClick={onCancel} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 function fixtureInitialSwing(fx) {
   if (fx.swingIn && fx.swingOut) return fx.swingDefault || "in";
   if (fx.swingIn) return "in";
@@ -6749,6 +6801,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     return out;
   })();
+  // Which slabs would show as their own palette button — the palette's own visibility filter,
+  // narrowed to the workbench/shelf family by ssSlabModel. The loft is not a slab and is
+  // deliberately untouched: it floats free and resizes on four sides, nothing like a shelf.
+  const baseItems = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems };
+  const shelvingKeys = Object.keys(baseItems).filter((k) => {
+    const c = baseItems[k];
+    return c && !c.noPalette && (embedded || !c.internalOnly) && ssSlabModel(k, baseItems);
+  });
+  // Rate per lineal foot for the picker cards, read the same way computeLayoutPricingRows reads
+  // it — the per-style override beats the default, so a card never quotes a price the estimate
+  // would not charge. Absent when the tenant hides pricing; the card just omits the line.
+  const shelvingRates = {};
+  shelvingKeys.forEach((k) => {
+    const lp = (C.layoutPricing || {})[k];
+    if (!lp) return;
+    const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+    shelvingRates[k] = Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+  });
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
     ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
@@ -6758,12 +6828,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
     ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
+    // make. With a single one offered the popup would present one card, so the item keeps its
+    // own button under its own name (Carolyn's call, and the same thing the door picker does
+    // with a single door). With none, nothing appears — hidden_until_priced already saw to it.
+    ...(shelvingKeys.length > 1
+      ? { shelfPicker: SHELF_PICKER_CFG, ...Object.fromEntries(shelvingKeys.map((k) => [k, { ...baseItems[k], noPalette: true }])) }
+      : {}),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
   const [doorPick, setDoorPick] = useState(null);   // { wall, ptx, pty } while the door picker modal is open
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
+  const [shelfPick, setShelfPick] = useState(false);    // true while the shelving picker modal is open
   // A PLACED item is "archived" (option retired) if: a catalog fixture whose fixture is no longer
   // in the active list (get_fixtures drops archived), or a built-in whose layoutItems cfg is flagged
   // archived (get_config keeps it, noPalette+archived). Archived items still render on the design;
@@ -11051,6 +11129,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
       {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {shelfPick && createPortal(<ShelfPicker items={shelvingKeys} itemTypes={ITEMS} rates={shelvingRates} showPricing={!!C.showPricing}
+        onCancel={() => setShelfPick(false)}
+        onPick={(k) => { setShelfPick(false); setActiveTool(k); setSelectedId(null); }} />, document.body)}
       {/* Size change refused: something on the plan has nowhere to go in the smaller
           building. The size is ALREADY back to what it was (the reflow is computed before
           anything is committed), so this only has to explain and get out of the way. */}
@@ -11229,40 +11310,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </select>
                 </div>
               )}
-              {(() => {
-                // Wall height — only when THIS style offers increases (hauling limits differ per
-                // style, so the list is per-style and most styles have none). Standard is always
-                // the first choice and always re-selectable.
-                const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
-                if (!whList.length) return null;
-                const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
-                const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
-                const cur = Number(sel.wallHeightDeltaIn) || 0;
-                const cell = (on) => ({
-                  padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer",
-                  background: on ? accent : "#FFF", color: on ? "#FFF" : "#334155",
-                  border: "none", borderRight: "1px solid #CBD5E1", lineHeight: 1.25,
-                });
-                return (
-                  <div>
-                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Wall Height</span>
-                    <div style={{ display: "inline-flex", border: "1px solid #CBD5E1", borderRadius: 6, overflow: "hidden" }}>
-                      <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
-                      {whList.map((o, i) => {
-                        const rate = Number(o.ratePerLf) || 0;
-                        const add = C.showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
-                        return (
-                          <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
-                            style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
-                            +{o.deltaIn}&Prime;
-                            {add != null && <span style={{ display: "block", fontSize: 10, fontWeight: 600, opacity: 0.8 }}>+{fmtMoney2(add)}</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
               {roofTypes.length > 0 && (() => {
                 // Roof color list depends on the chosen type. Custom-color handling mirrors paint.
                 const roofList = roofColorsFor(sel.roofType);
@@ -11370,16 +11417,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           plan is locked (hiding the whole row took Export with it). */}
       <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {!planLocked && (() => {
+          // The Shelving button stands in for whichever slab tool the popup armed, so it has to
+          // LOOK armed and say which one — otherwise you pick Single Shelf and the button you
+          // just used goes back to looking untouched.
+          const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
           const btn = ([key, cfg]) => (
-            <button key={key} onClick={() => { if (gateRequired) { setGateOpen(true); return; } setActiveTool(activeTool === key ? null : key); setSelectedId(null); }}
+            <button key={key} onClick={() => {
+                if (gateRequired) { setGateOpen(true); return; }
+                // Shelving opens its popup instead of arming; choosing there arms the real tool.
+                // Clicking it again while a slab is armed disarms, like every other tool.
+                if (cfg.isShelfPicker) {
+                  if (armedShelf(cfg)) { setActiveTool(null); setSelectedId(null); return; }
+                  setShelfPick(true); setSelectedId(null); return;
+                }
+                setActiveTool(activeTool === key ? null : key); setSelectedId(null);
+              }}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
-                background: activeTool === key ? cfg.color : "#F8FAFC",
-                color: activeTool === key ? "#FFF" : "#334155",
-                border: `2px solid ${activeTool === key ? cfg.color : "#E2E8F0"}`,
+                background: (activeTool === key || armedShelf(cfg)) ? cfg.color : "#F8FAFC",
+                color: (activeTool === key || armedShelf(cfg)) ? "#FFF" : "#334155",
+                border: `2px solid ${(activeTool === key || armedShelf(cfg)) ? cfg.color : "#E2E8F0"}`,
               }}>
-              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>{cfg.label}
-              {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: activeTool === key ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
+              <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>
+              {armedShelf(cfg) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
+              {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
             </button>
           );
           const entries = Object.entries(ITEMS).filter(([, c]) => c && !c.noPalette && (embedded || !c.internalOnly));
@@ -11450,18 +11511,43 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             });
             const out = [];
             PALETTE_GROUP_ORDER.forEach((g) => { if (by[g] && by[g].length) out.push([PALETTE_GROUP_LABEL[g], by[g]]); });
-            if (by[""] && by[""].length) out.push([null, by[""]]);
+            // In the split every cell carries a heading, so the ungrouped tail (Note, Line) gets
+            // one too rather than sitting under a blank space.
+            if (by[""] && by[""].length) out.push(["Annotate", by[""]]);
             return out;
           };
+          // Groups pair up either side of a rule down the centre — Carolyn's shape, 2026-09-02:
+          // doors left, windows right, and so on. Four groups become two rows instead of four,
+          // and a fifth (Electrical) costs half a row rather than a whole one.
+          //
+          // A GRID, not a flex row, because the rule has to span every row: it is one element at
+          // column 2 with gridRow "1 / -1". Cells name their own column and let rows auto-flow.
           const renderAddl = () => {
             const secs = sectionsOf(addl);
+            // No groups at all — every tenant whose config predates palette groups. Unchanged.
             if (!secs) return addl.map(btn);
-            return secs.map(([label, list], i) => (
-              <div key={label || ("ss-ungrouped-" + i)} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
-                {label && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>{label}</span>}
-                {list.map(btn)}
+            const cellOf = ([label, list], i) => (
+              <div key={label || ("ss-ungrouped-" + i)} style={{ gridColumn: i % 2 === 0 ? 1 : 3, minWidth: 0 }}>
+                {label && <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>{label}</span>}
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>{list.map(btn)}</div>
               </div>
-            ));
+            );
+            // One group has nothing to pair with; a lone cell beside an empty column and half a
+            // rule reads as broken layout, so it renders flat.
+            if (secs.length === 1) {
+              return (
+                <div key="ss-one-group" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+                  {secs[0][0] && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>{secs[0][0]}</span>}
+                  {secs[0][1].map(btn)}
+                </div>
+              );
+            }
+            return (
+              <div key="ss-split" style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", columnGap: 18, rowGap: 12, alignItems: "start", width: "100%" }}>
+                <div style={{ gridColumn: 2, gridRow: "1 / -1", background: "#CBD5E1", width: 1 }} />
+                {secs.map(cellOf)}
+              </div>
+            );
           };
           if (incl.length === 0) {
             // With sections each carries its own heading, so the single "Place:" label would
@@ -11484,6 +11570,51 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
+        {/* The bottom line: wall height hard left, the action buttons hard right (Carolyn
+            2026-09-02). width:100% forces it onto a line of its own, so the two ends stay
+            opposite each other no matter how the tool buttons above happen to wrap — which is
+            what "same line as the 3D button" actually requires. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", marginTop: 4 }}>
+          {/* Wall height USED to sit in the top selection row, inside <fieldset disabled=
+              {planLocked}>, so the lock greyed it out for free. Out here it must gate itself —
+              and it follows its new neighbours (the tools, which vanish) rather than its old
+              ones. Export and 3D deliberately survive the lock; a pricing control must not. */}
+          {!planLocked && (() => {
+            // Only when THIS style offers increases — hauling limits differ per style and most
+            // styles have none.
+            const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
+            if (!whList.length) return null;
+            const perim = 2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0));
+            const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
+            const cur = Number(sel.wallHeightDeltaIn) || 0;
+            // Metrics are S.btn's, EXACTLY — that is what makes this the same height as the 3D
+            // button beside it. Two things would break the match and both are deliberate here:
+            // the container carries no border (a 1px one makes it 2px taller), and the price is
+            // INLINE rather than a second line, which alone would double the height.
+            const cell = (on) => ({
+              // NO lineHeight — S.btn does not set one, and 1.5 made this 2px taller than the
+              // 3D button beside it. Matching means matching what it omits as well.
+              padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              fontFamily: "inherit", border: "none", borderRight: "1px solid #CBD5E1",
+              background: on ? accent : "#F1F5F9", color: on ? "#FFF" : "#334155",
+            });
+            return (<>
+              <span style={{ ...S.lbl, fontSize: 10 }}>Wall Height</span>
+              <div style={{ display: "inline-flex", borderRadius: 6, overflow: "hidden" }}>
+                <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
+                {whList.map((o, i) => {
+                  const rate = Number(o.ratePerLf) || 0;
+                  const add = C.showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
+                  return (
+                    <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
+                      style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
+                      +{o.deltaIn}&Prime;{add != null ? ` +${fmtMoney2(add)}` : ""}
+                    </button>
+                  );
+                })}
+              </div>
+            </>);
+          })()}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
@@ -11553,6 +11684,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </button>
           )}
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
+        </div>
         </div>
       </div>
 
