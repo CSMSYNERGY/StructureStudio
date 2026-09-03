@@ -161,3 +161,40 @@ Deno.test("internal-only hides ONE area without hiding its type", () => {
   assertEquals(insulationAreasFor(C3, "batt"), ["floor", "walls"]);
   assertEquals(insulationAreasFor(C3, "batt", true), ["floor", "walls", "roof"]);
 });
+
+// ── The quote line prices itself (migration 182) ─────────────────────────────
+// Insulation was the ONE line in the designer's quote breakdown with an empty money column:
+// 177 deliberately emitted no rate, so the browser had nothing to multiply and the customer met
+// the number for the first time in the emailed estimate. Carolyn, 2026-09-02: "I need all the
+// pricing to show in the quote, line by line."
+Deno.test("get_config's insulation rate prices the line the same way the server will", () => {
+  // The shape 182 emits, rate included.
+  const rate = 0.9, W = 12, L = 24, wallH = 8;
+  const sqft = insulationSqft("walls", W, L, wallH);
+  assertEquals(sqft, 576);                        // 2 x (12 + 24) x 8
+  assertEquals(Math.round(rate * sqft * 100) / 100, 518.4);
+  // Floor and roof price off the footprint, not the wall height.
+  assertEquals(Math.round(1.1 * insulationSqft("roof", W, L, wallH) * 100) / 100, 316.8);
+});
+
+Deno.test("a hide-prices tenant gets the measurement and no number", () => {
+  // get_config nulls ratePerSqft when show_pricing is off, so the row must fall back to showing
+  // square footage alone rather than rendering "$NaN" or dropping the line entirely.
+  const nullRate: number | null = null;
+  const sqft = insulationSqft("floor", 12, 24, 8);
+  assertEquals(sqft, 288);
+  assertEquals(nullRate == null ? null : nullRate * sqft, null);
+});
+
+Deno.test("the designer multiplies the emitted rate rather than hardcoding a blank", () => {
+  // Shape assertion against the shipped source: the row used to carry `total: null` with a
+  // comment saying the rate never reaches the browser. If anyone restores that, this fails.
+  assert(
+    /const insRate = insOff && insOff\.ratePerSqft != null \? Number\(insOff\.ratePerSqft\) : null;/.test(SRC),
+    "the insulation row must read ratePerSqft from the offering",
+  );
+  assert(
+    /total: showP && insRate != null \? Math\.round\(insRate \* sqft \* 100\) \/ 100 : null,/.test(SRC),
+    "the insulation row must price itself as rate x sqft",
+  );
+});

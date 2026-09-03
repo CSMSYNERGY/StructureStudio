@@ -570,12 +570,13 @@ function ShelfPicker({ items, itemTypes, rates, showPricing, onPick, onCancel })
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
           {items.map((k) => {
             const c = itemTypes[k] || {};
-            const rate = rates && rates[k] != null ? Number(rates[k]) : null;
-            // Only the facts that actually differ between these three.
+            // No price on the card. Every number the customer is charged appears on the
+            // quote breakdown instead, line by line (Carolyn 2026-09-02) — a picker is for
+            // choosing WHICH one, and a price beside each option turns that into a
+            // negotiation with themselves before they have even seen the total.
             const bits = [
               inches(c.depthIn) && `${inches(c.depthIn)} deep`,
               inches(c.heightOffFloorIn) && `${inches(c.heightOffFloorIn)} up`,
-              showPricing && rate > 0 ? `${money2(rate)}/ft` : null,
             ].filter(Boolean);
             return (
               <div key={k} onClick={() => onPick(k)} style={{ border: "2px solid #E2E8F0", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
@@ -629,11 +630,9 @@ function ElectricalItemPicker({ items, hasPackage, showPricing, onPick, onCancel
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
           {items.map((it) => {
-            const price = elecItemPrice(it, hasPackage);
             const bits = [
               it.mount === "ceiling" ? "ceiling" : "wall mounted",
               it.heightOffFloorIn != null ? `${Math.round(Number(it.heightOffFloorIn))}\u2033 up` : null,
-              showPricing && price != null ? money2(price) : null,
             ].filter(Boolean);
             return (
               <div key={it.id} onClick={() => onPick(it.id)} style={{ border: "2px solid #E2E8F0", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
@@ -851,7 +850,7 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
     <div key={c.id} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
       border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, background: on ? "#FEF3C7" : "#FFF", color: on ? "#92400E" : "#334155" }}>
       <span style={{ width: 14, height: 14, borderRadius: "50%", background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.2)", flexShrink: 0 }} />
-      {c.label}{showPricing && Number(c.doorRate) > 0 ? ` · +${money(c.doorRate)}` : ""}
+      {c.label}
     </div>
   );
   return (
@@ -863,7 +862,7 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
           {styles.map((st) => {
             const on = style && style.name === st.name;
             const one = st.sizes.length === 1 ? st.sizes[0] : null;
-            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}` : `${st.sizes.length} sizes`;
             return (
               <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
                 {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
@@ -879,7 +878,7 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
         {style && style.sizes.length > 1 && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}`, () => setSel(d)))}</div>
           </div>
         )}
         {sel && swingOpts.length > 1 && (
@@ -1446,14 +1445,18 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (!offered.some((o) => o.type === pick.type && o.area === area)) return;
       const sqft = insulationSqft(area, bW, bL, wallH);
       if (sqft <= 0) return;
+      // Priced here since 182. Insulation used to be the ONE line in this breakdown with an
+      // empty money column, because no rate reached the browser at all — the customer met the
+      // number for the first time in the emailed estimate. The server still re-reads the rate
+      // and re-derives the square footage; this only shows the same arithmetic up front.
+      const insOff = offered.find((o) => o.type === pick.type && o.area === area);
+      const insRate = insOff && insOff.ratePerSqft != null ? Number(insOff.ratePerSqft) : null;
       rows.push({
         key: "insul:" + area,
         label: `${INSULATION_TYPE_LABEL[pick.type] || pick.type} Insulation — ${INSULATION_AREA_LABEL[area]}`,
         qty: sqft,
-        unit: "sq ft",
-        // The rate never reaches the browser (Carolyn: no price until the quote), so the
-        // preview shows the measurement and leaves the money to the estimate.
-        total: null,
+        unit: insRate != null ? fmtMoney2(insRate) + " / sq ft" : "sq ft",
+        total: showP && insRate != null ? Math.round(insRate * sqft * 100) / 100 : null,
         method: "sqft",
       });
     });
@@ -6281,12 +6284,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Wall height</span>
               <button onClick={() => pickDelta(0)} disabled={phase !== "ready"} style={cell(!curDelta && !legacy)}>Standard</button>
               {whOpts.map((o) => {
-                const rate = Number(o.ratePerLf) || 0;
-                const add = showPricing && rate > 0 && perim > 0 ? Math.round(rate * perim * 100) / 100 : null;
                 return (
                   <button key={o.deltaIn} onClick={() => pickDelta(Number(o.deltaIn))} disabled={phase !== "ready"}
                     style={cell(curDelta === Number(o.deltaIn))}>
-                    +{o.deltaIn}&Prime;{add != null ? ` +${fmtMoney2(add)}` : ""}
+                    +{o.deltaIn}&Prime;
                   </button>
                 );
               })}
@@ -6933,7 +6934,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
           {styles.map((st) => {
             const on = style && style.name === st.name;
             const one = st.sizes.length === 1 ? st.sizes[0] : null;
-            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}` : `${st.sizes.length} sizes`;
             return (
               <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_RAMP_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
                 {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
@@ -6949,7 +6950,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
         {style && style.sizes.length > 1 && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}`, () => setSel(d)))}</div>
           </div>
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
@@ -6994,7 +6995,7 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
     <div key={c.id} onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
       border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, background: on ? "#E0F2FE" : "#FFF", color: on ? "#075985" : "#334155" }}>
       <span style={{ width: 14, height: 14, borderRadius: "50%", background: c.hex || "#CCC", border: "1px solid rgba(0,0,0,0.2)", flexShrink: 0 }} />
-      {c.label}{showPricing && Number(c.rate) > 0 ? ` · +${money(c.rate)}` : ""}
+      {c.label}
     </div>
   );
   return (
@@ -7006,7 +7007,7 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
           {styles.map((st) => {
             const on = style && style.name === st.name;
             const one = st.sizes.length === 1 ? st.sizes[0] : null;
-            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}${showPricing && one.price != null ? ` · ${money(one.price)}` : ""}` : `${st.sizes.length} sizes`;
+            const sub = one ? `${fmtFtIn(one.widthIn)} × ${fmtFtIn(one.heightIn)}` : `${st.sizes.length} sizes`;
             return (
               <div key={st.name} onClick={() => pickStyle(st)} style={{ border: `2px solid ${on ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
                 {st.imageUrl ? <img src={st.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
@@ -7022,7 +7023,7 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
         {style && style.sizes.length > 1 && (
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6 }}>Size</div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}${showPricing && d.price != null ? ` · ${money(d.price)}` : ""}`, () => setSel(d)))}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{style.sizes.map((d) => chip(d.id, sel && sel.id === d.id, `${fmtFtIn(d.widthIn)} × ${fmtFtIn(d.heightIn)}`, () => setSel(d)))}</div>
           </div>
         )}
         {sel && colorOpts.length > 1 && (
