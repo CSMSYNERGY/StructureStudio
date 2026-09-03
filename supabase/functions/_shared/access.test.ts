@@ -21,6 +21,8 @@
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
   AREA_KEYS,
+  AREAS,
+  accessMetadata,
   canEdit,
   canRead,
   checkGate,
@@ -301,4 +303,65 @@ Deno.test("Team comes with the title and can never be granted as a switch", () =
   // And an owner can still create an admin: mayGrantMap must not refuse the resulting map.
   const owner = effectiveAccess("owner", "owner", null);
   assertEquals(mayGrantMap("owner", owner, effectiveAccess("admin", "admin", null)), null);
+});
+
+// ── PROJECTS: CSM SYNERGY'S OWN BOARDS, GRANTED FROM THE TEAM SCREEN ──────────────────
+// Carolyn, 2026-09-02: "I feel like THIS should be where we add them. And here we say ...
+// we give them access to projects."
+//
+// The area is the grant. What makes it safe is that it is omitted from every preset (so it
+// denies by default, property 2 above) AND that portal-projects establishes the tenant is
+// ours before it consults the area at all — every builder's OWNER resolves projects=edit,
+// because owners are absolute, so the area could never be the tenancy boundary.
+
+Deno.test("projects is denied by default to every staff title", () => {
+  for (const title of ["admin", "sales_rep", "crew_leader", "driver"] as const) {
+    const acc = effectiveAccess("user", title, null);
+    assertEquals(acc.projects, "none", `${title} must not get the internal board by title`);
+  }
+});
+
+Deno.test("an owner resolves projects=edit — including a BUILDER's owner", () => {
+  // Not a bug, and worth pinning so nobody "fixes" it: owners are absolute by construction.
+  // Junior Barns' owner holds projects=edit in their map and still cannot open the console,
+  // because the internal_account check runs first. If this ever asserted 'none' instead,
+  // somebody has moved the tenancy boundary into the area, where it does not belong.
+  assertEquals(effectiveAccess("owner", "owner", null).projects, "edit");
+});
+
+Deno.test("the Team switch actually grants it, at both levels", () => {
+  assertEquals(effectiveAccess("user", "sales_rep", { projects: "view" }).projects, "view");
+  assertEquals(effectiveAccess("user", "admin", { projects: "edit" }).projects, "edit");
+  // view/edit is the split portal-projects already has (READ_ACTIONS vs can_write), which is
+  // why an area was the right shape and a boolean was not.
+  assert(canRead(effectiveAccess("user", "sales_rep", { projects: "view" }), "projects"));
+  assertFalse(canEdit(effectiveAccess("user", "sales_rep", { projects: "view" }), "projects"));
+  assert(canEdit(effectiveAccess("user", "admin", { projects: "edit" }), "projects"));
+});
+
+Deno.test("nobody grants projects above what they hold", () => {
+  const viewer = effectiveAccess("user", "admin", { projects: "view" });
+  assertFalse(mayGrant("admin", viewer, "projects", "edit"), "cannot grant beyond your own level");
+  assert(mayGrant("admin", viewer, "projects", "view"));
+  assert(mayGrant("admin", viewer, "projects", "none"), "taking it away is always allowed");
+});
+
+Deno.test("accessMetadata HIDES internal-only areas by default", () => {
+  // ⚠️ This ships to every tenant's browser. The default has to be the answer that cannot
+  // leak, because a caller that has not thought about whose screen it is building will take
+  // it. A builder seeing a "Projects" switch would be told about an internal tool they can
+  // never reach, and would raise a support question about a permission that does nothing.
+  const shown = accessMetadata().areas.map((a) => a.key);
+  assertFalse(shown.includes("projects"), "a builder must not be offered the Projects switch");
+  assert(shown.includes("designs"), "ordinary areas are unaffected");
+
+  const ours = accessMetadata({ internal: true }).areas.map((a) => a.key);
+  assert(ours.includes("projects"), "our own tenant must be offered it");
+  assertEquals(ours.length, AREAS.length, "nothing else is filtered");
+  assertEquals(shown.length, AREAS.length - 1, "exactly one area is internal-only today");
+
+  // The filter is presentation, not resolution: the area still exists for everyone, which is
+  // what lets the server resolve a stored grant regardless of who asked for the grid.
+  assert(AREA_KEYS.includes("projects"));
+  assertEquals(accessMetadata({ internal: false }).areas.map((a) => a.key).includes("projects"), false);
 });

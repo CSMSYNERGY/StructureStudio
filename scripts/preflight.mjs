@@ -525,6 +525,79 @@ function run(files) {
     }
   }
 
+  // ── THE PERMISSION MODEL HAS TWO COPIES, AND THEY MUST AGREE ───────────────────────────
+  // _shared/access.ts is the TypeScript resolver every edge function runs; area_level_for()
+  // in SQL is its mirror, and migration 154's own header says "CHANGE THE TWO TOGETHER".
+  // Nothing enforced that, and it drifted twice without anyone noticing:
+  //
+  //   * `change_orders` was added to access.ts on 2026-09-01 and never reached the SQL, so
+  //     the mirror resolved it to 'none' for every non-owner.
+  //   * the sales_rep preset's `orders` went 'view' -> 'edit' in the same period, and the
+  //     mirror kept saying 'view'.
+  //
+  // Both were INERT — 154's restrictive policies key on designs/contacts/inventory only, and
+  // an unknown area returns 'none' rather than raising — which is precisely why they lasted.
+  // The day someone adds a policy for change_orders, every row vanishes for everyone and the
+  // cause is a two-day-old commit in a different language. This closes that gap: the two
+  // area lists must match on every push, in both directions.
+  //
+  // Deliberately compares KEYS and not the whole resolution logic. The logic is a hand
+  // translation that has to be read to be checked; the lists are mechanical, drift silently,
+  // and are what actually went wrong twice. A cheap check that fires is worth more than a
+  // thorough one nobody can maintain.
+  {
+    const accessSrc = readFileSync(join(root, "supabase", "functions", "_shared", "access.ts"), "utf8");
+    const areasStart = accessSrc.indexOf("export const AREAS: Area[] = [");
+    const areasEnd = areasStart < 0 ? -1 : accessSrc.indexOf("\n];", areasStart);
+    if (areasStart < 0 || areasEnd < 0) {
+      errors.push("_shared/access.ts: could not find the AREAS array — the areas/SQL mirror "
+        + "cross-check cannot run, so re-point it rather than leaving it silently disabled");
+    } else {
+      const tsAreas = new Set(
+        [...accessSrc.slice(areasStart, areasEnd).matchAll(/^\s*\{\s*key:\s*"([a-z0-9_]+)"/gm)].map((m) => m[1]),
+      );
+
+      // The mirror lives in whichever migration most recently re-issued the function, so find
+      // the highest-numbered file that defines it rather than pinning 154 — pinning it would
+      // make this check quietly test a superseded copy the first time it moves.
+      const migDir = join(root, "supabase", "migrations");
+      const owner = readdirSync(migDir)
+        .filter((f) => f.endsWith(".sql"))
+        .filter((f) => readFileSync(join(migDir, f), "utf8").includes("function public.area_level_for("))
+        .sort()
+        .pop();
+      if (!owner) {
+        errors.push("supabase/migrations: no migration defines area_level_for() — the SQL "
+          + "mirror of _shared/access.ts is missing");
+      } else {
+        const sql = readFileSync(join(migDir, owner), "utf8");
+        const kStart = sql.indexOf("k_areas constant jsonb");
+        const kEnd = kStart < 0 ? -1 : sql.indexOf("$j$::jsonb", kStart);
+        if (kStart < 0 || kEnd < 0) {
+          errors.push(`supabase/migrations/${owner}: could not find the k_areas block that `
+            + "mirrors AREAS — re-point this check rather than leaving it disabled");
+        } else {
+          const sqlAreas = new Set(
+            [...sql.slice(kStart, kEnd).matchAll(/^\s*"([a-z0-9_]+)"\s*:\s*\{/gm)].map((m) => m[1]),
+          );
+          for (const k of tsAreas) {
+            if (!sqlAreas.has(k)) {
+              errors.push(`area "${k}" is in _shared/access.ts but NOT in ${owner}'s k_areas. `
+                + "The SQL mirror resolves an unknown area to 'none' for every non-owner, so this "
+                + "denies it silently rather than erroring. Add it in this same commit.");
+            }
+          }
+          for (const k of sqlAreas) {
+            if (!tsAreas.has(k)) {
+              errors.push(`area "${k}" is in ${owner}'s k_areas but NOT in _shared/access.ts. `
+                + "A mirror describing an area that no longer exists is a claim nothing checks.");
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
   // artifact's real bytes is the compile drift gate's job (it recompiles and compares) —

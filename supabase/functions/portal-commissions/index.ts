@@ -2,7 +2,9 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
+import { isInternalTenant } from "../_shared/internalTenant.ts";
 import {
+  AREAS,
   accessMetadata,
   canEdit as accCanEdit,
   canRead as accCanRead,
@@ -167,6 +169,40 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   const canManageTeam = accCanEdit(myAccess, "settings_team");
   const canViewTeam = accCanRead(myAccess, "settings_team");
 
+  // Is this OUR OWN tenant? (migration 169's internal_account, read through the one shared
+  // helper.) Two things downstream need it, and both are about the internal Projects board:
+  // whether the Team grid is offered the Projects switch at all, and whether a change to it
+  // is honoured. Resolved once, here, because both must agree — a screen that shows a switch
+  // the save then drops is worse than not showing it.
+  //
+  // ⚠️ This function never accepts a targetClientId (it 403s on one, deliberately — Carolyn
+  // 2026-08-07), so `clientId` is always the caller's OWN tenant and this question can only
+  // ever be asked about them. That is what makes one lookup safe here.
+  let isInternal = false;
+  try { isInternal = await isInternalTenant(admin, clientId); }
+  catch (e) { return json({ error: (e as Error).message }, 500); }
+
+  // ⚠️ INTERNAL-ONLY AREAS NEVER LAND ON A BUILDER'S ROW. sanitizeAccess drops keys it does
+  // not KNOW, and `projects` is a perfectly well-known area — it exists for every tenant so
+  // that a stored grant resolves the same way everywhere. What makes it ours is
+  // internal_account, and that is a fact sanitizeAccess has no way to see: it takes a raw
+  // map and a title, not a tenant.
+  //
+  // So the drop happens here, at the one door that HAS the tenant. Without it a builder's
+  // owner could set projects:edit on their own sales rep with a crafted POST. That grant is
+  // inert today — portal-projects checks the tenant before the area — but it would sit in
+  // their access blob looking like a permission somebody deliberately gave, and the next
+  // person to add a projects-keyed policy would inherit it as a live grant.
+  //
+  // Silent rather than a 403: the switch is not on their screen to begin with (accessMetadata
+  // filters it), so any request carrying it is either a stale client or someone poking, and
+  // neither deserves a message explaining what they nearly reached.
+  const stripInternal = (m: Record<string, Level> | null | undefined): Record<string, Level> => {
+    const out = { ...(m || {}) } as Record<string, Level>;
+    if (!isInternal) for (const a of AREAS) if (a.internalOnly) delete out[a.key];
+    return out;
+  };
+
   // The caller's own grants. Owner always sees rates + all payouts regardless.
   const { data: myCm } = await admin
     .from("commission_members").select("full_access, sees_all_payouts").eq("client_id", clientId).eq("user_id", user.id).maybeSingle();
@@ -293,7 +329,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           // The grid is rendered from what the server sends, never from a hard-coded list in
           // portal.html — a second copy of the areas would drift the day one is added, and a
           // permission table that drifts is a permission table that lies.
-          meta: accessMetadata(),
+          // ⚠️ internal-only areas (Projects) are filtered OUT unless this is our own
+          // tenant. The grid renders from exactly this, so the filter is the whole reason a
+          // builder never sees a switch for CSM's internal boards.
+          meta: accessMetadata({ internal: isInternal }),
+          isInternal,
           canManageTeam,
           myAccess,
         });
@@ -348,7 +388,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         }
         // Title-aware so a billing seed survives only on an admin (owner-added, per the
         // gate two lines up) — anything else is dropped here and refused by mayGrantMap.
-        const seedAccess = sanitizeAccess(p.access, wantTitle);
+        const seedAccess = stripInternal(sanitizeAccess(p.access, wantTitle));
         const tooHigh = mayGrantMap(role, myAccess, effectiveAccess(wantRole, wantTitle, seedAccess));
         if (tooHigh) return json({ error: `You can't give someone access to ${tooHigh} that you don't have yourself.` }, 403);
         const fullName = typeof p.fullName === "string" ? p.fullName.trim().slice(0, 120) : null;
@@ -491,7 +531,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // 5. Store only real deviations, so the row never contains a claim the resolver
         //    ignores — what the owner sees on the grid is what is saved. Title-aware so an
         //    owner-granted area is stored only on a row whose title may hold it.
-        const nextAccess = p.access === undefined ? ((target.access as Record<string, Level> | null) || {}) : sanitizeAccess(p.access, nextTitle);
+        const nextAccess = p.access === undefined ? ((target.access as Record<string, Level> | null) || {}) : stripInternal(sanitizeAccess(p.access, nextTitle));
         const nextRole = roleForTitle(nextTitle);
 
         // 6. NOBODY GRANTS ABOVE THEMSELVES — checked against the RESOLVED result, not the

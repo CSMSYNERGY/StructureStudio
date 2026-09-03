@@ -49,6 +49,23 @@ export interface Area {
    * and the server agrees instead of trusting the screen.
    */
   byTitleOnly?: boolean;
+  /**
+   * Belongs to CSM Synergy's OWN tenants and must never appear on a builder's Team screen.
+   *
+   * The Projects board is one global internal system — no `pm_*` table has a `client_id` —
+   * so the switch is meaningless to a builder and, rendered on their screen, is worse than
+   * meaningless: it advertises an internal tool they can never reach and invites a support
+   * question about a permission that does nothing. accessMetadata() ships AREAS to every
+   * tenant's browser, so the filter has to live there rather than in the UI, and it defaults
+   * to EXCLUDING these — the safe direction for a caller that does not know whose screen it
+   * is building.
+   *
+   * It is NOT a security boundary on its own and must not be treated as one. The real gate
+   * is portal-projects checking `client_settings.internal_account` before it consults the
+   * area at all; this flag only decides who is offered the switch. Omission from every
+   * preset is what makes the area itself deny by default.
+   */
+  internalOnly?: boolean;
 }
 
 const RVE: Level[] = ["none", "view", "edit"];
@@ -79,6 +96,25 @@ export const AREAS: Area[] = [
   { key: "commissions",       label: "Commissions",        group: "workspace", hint: "Payouts — 'Own only' hides everyone else's",
     levels: ["none", "own", "edit"] },
   { key: "reports",           label: "Reports",            group: "workspace", hint: "Sales, leads, revenue",               levels: RVE },
+  // CSM SYNERGY'S OWN BOARDS — bugs, feature requests, roadmap, client setup. Internal only.
+  //
+  // Carolyn, 2026-09-02, with Settings → Team open beside the Projects people list: "I feel
+  // like THIS should be where we add them. And here we say ... we give them access to
+  // projects." Until now the two lists were not connected in any way — no trigger, no shared
+  // column, nothing — and the only way onto the board was the Projects-side roster, which
+  // also happens to be where operator access to every builder's account is handed out.
+  //
+  // An AREA rather than a per-person boolean, and the reason is that there is nowhere honest
+  // to put a boolean: sanitizeAccess drops unknown keys, so it cannot ride in
+  // client_users.access; a new client_users column is tenancy-backbone surgery for a value
+  // meaningful to one tenant; and storing it on pm_people puts the grant back in Projects,
+  // which is exactly what she is asking us to stop. An area also gives view/edit for free,
+  // and that split maps ONTO the one portal-projects already has (READ_ACTIONS vs
+  // can_write), so nothing new has to be invented to express "can look, cannot change".
+  //
+  // Omitted from every preset below, so it resolves to 'none' for every non-owner on every
+  // tenant. internalOnly keeps it off builders' Team screens entirely.
+  { key: "projects",          label: "Projects",           group: "workspace", hint: "CSM Synergy's internal boards — bugs, features, roadmap", levels: RVE, internalOnly: true },
 
   // ── Settings ─────────────────────────────────────────────────────────────
   { key: "settings_structures", label: "Structures",           group: "settings", hint: "Styles, sizes, base prices",          levels: RVE },
@@ -269,8 +305,18 @@ export function mayGrantMap(
 }
 
 /** Metadata the Team screen renders from, so the browser never hard-codes an area list. */
-export function accessMetadata() {
-  return { areas: AREAS, titles: TITLES, presets: PRESETS };
+/**
+ * The grid the Team screen renders itself from — areas, titles and presets, so the browser
+ * never hard-codes an area.
+ *
+ * ⚠️ DEFAULTS TO HIDING internalOnly AREAS, and the default is the point: this reaches every
+ * tenant's browser, and a caller that has not thought about whose screen it is building
+ * should get the answer that cannot leak. Pass `{ internal: true }` only once you have
+ * established that the tenant IS ours — `isInternalTenant`, not a slug comparison.
+ */
+export function accessMetadata(opts?: { internal?: boolean }) {
+  const areas = opts && opts.internal ? AREAS : AREAS.filter((a) => !a.internalOnly);
+  return { areas, titles: TITLES, presets: PRESETS };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
