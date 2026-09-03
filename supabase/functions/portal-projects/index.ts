@@ -1,8 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
-import { loginTenant } from "../_shared/internalTenant.ts";
-import { canEdit as accCanEdit, type Level } from "../_shared/access.ts";
+import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
+import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
@@ -357,6 +357,23 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   //     it; refusing here would lock out the people this console exists for.
   //   * an INTERNAL tenant   -> ALLOWED. Carolyn and Ahsan are on structure-studio.
   //   * a customer's tenant  -> REFUSED, by name, so the reason is obvious on screen.
+  // Is this roster row OWNED by Settings → Team? Returns the refusal sentence, or null.
+  //
+  // Since the mirror landed, a team member's name, email and membership are written from
+  // Settings → Team and re-applied on every change there. Editing them here would appear to
+  // work and then be quietly reverted by somebody else's unrelated save — the worst kind of
+  // bug, because the person who made the edit is never the person who sees it undone.
+  //
+  // ⚠️ Only rows on an INTERNAL tenant are team-managed. A row belonging to no tenant is the
+  // ordinary platform operator (or a login-less subcontractor) and stays fully editable, as
+  // it always was.
+  const teamManagedRefusal = async (userId: string | null, what: string): Promise<string | null> => {
+    if (!userId) return null;
+    const { clientId, internal } = await loginTenant(admin, userId);
+    if (!clientId || !internal) return null;
+    return `That person comes from Settings → Team, so ${what} there instead — a change here would be overwritten by their next team update.`;
+  };
+
   const foreignLoginRefusal = async (userId: string, who: string): Promise<string | null> => {
     const { clientId, internal } = await loginTenant(admin, userId);
     if (!clientId || internal) return null;
@@ -976,10 +993,46 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .select("user_id, can_write, can_bill, support_only");
         if (oErr) throw oErr;
         const byUser = new Map((ops || []).map((o) => [o.user_id, o]));
+
+        // WHERE DOES EACH PERSON COME FROM? Three shapes now, and the editor renders each
+        // differently because editing the wrong one silently does nothing:
+        //
+        //   teamManaged — their name, email and membership are owned by Settings → Team, so
+        //     changing them here would be overwritten by the next write over there. The
+        //     editor shows them read-only with a link; save_person and remove_person refuse.
+        //   foreignTenant — a login on a BUILDER's tenant. Should not exist (the guard added
+        //     2026-09-02 refuses to create one) but historic rows can, and an operator
+        //     needs to be able to SEE that rather than wonder why the toggles refuse.
+        //   neither — the manual row: a login-less subcontractor, or an operator who is on
+        //     no tenant at all. ⚠️ Fully editable, exactly as before. That last case is the
+        //     ordinary platform operator and must never be treated as a mistake.
+        const linkedIds = (people || []).map((pp) => pp.user_id).filter(Boolean);
+        const cuRows = linkedIds.length
+          ? (await admin.from("client_users").select("user_id, client_id, role, title, access").in("user_id", linkedIds)).data || []
+          : [];
+        const internalOf = new Map<string, boolean>();
+        for (const cid of new Set(cuRows.map((r: { client_id: string }) => r.client_id))) {
+          try { internalOf.set(cid, await isInternalTenant(admin, cid)); }
+          catch { internalOf.set(cid, false); }
+        }
+        // deno-lint-ignore no-explicit-any
+        const cuByUser = new Map<string, any>(cuRows.map((r: { user_id: string }) => [r.user_id, r]));
+
         return json({
           people: (people || []).map((pp) => {
             const o = pp.user_id ? byUser.get(pp.user_id) : null;
-            return { ...pp, isOperator: !!o, canWrite: !!(o && o.can_write), supportOnly: !!(o && o.support_only) };
+            const cu = pp.user_id ? cuByUser.get(pp.user_id) : null;
+            const internal = cu ? !!internalOf.get(cu.client_id) : false;
+            return {
+              ...pp,
+              isOperator: !!o, canWrite: !!(o && o.can_write), supportOnly: !!(o && o.support_only),
+              teamManaged: !!cu && internal,
+              foreignTenant: cu && !internal ? cu.client_id : null,
+              title: cu && internal ? cu.title : null,
+              projectsLevel: cu && internal
+                ? effectiveAccess(cu.role, cu.title, cu.access)["projects"] || "none"
+                : null,
+            };
           }),
           me: user.id,
         });
@@ -1025,6 +1078,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row) return json({ error: "That person is not on the list." }, 404);
+        // Name and email belong to Settings → Team for a team-managed row. `active` is NOT
+        // in that set and stays editable here: archiving somebody off the board is a Projects
+        // decision, and it is what remove_person does.
+        if (payload.name !== undefined || payload.email !== undefined) {
+          const refusal = await teamManagedRefusal(row.user_id, "rename or re-address them");
+          if (refusal) return json({ error: refusal }, 409);
+        }
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
         if (payload.name !== undefined) {
           const name = str(payload.name, 80);
@@ -1063,6 +1123,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row) return json({ ok: true });
+        // A team-managed person leaves the board by having Projects taken away on the Team
+        // screen — set_access deactivates them here for you. Removing them from this side
+        // would last exactly until their next team update re-synced them.
+        {
+          const refusal = await teamManagedRefusal(row.user_id, "remove their Projects access");
+          if (refusal) return json({ error: refusal }, 409);
+        }
         // Deactivate rather than delete: they leave every picker, but the work they were
         // already assigned keeps showing their name instead of a bare id.
         const { error } = await admin.from("pm_people")

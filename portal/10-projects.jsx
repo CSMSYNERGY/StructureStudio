@@ -672,14 +672,45 @@ function PMPeopleEditor({ onChanged }) {
           <span style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(o.id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             {pmInitials(o)}
           </span>
-          <input defaultValue={o.name} style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
-            onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.name) run({ action: "save_person", id: o.id, name: v }); }} />
-          <input defaultValue={o.email || ""} placeholder="no login" style={{ ...S.input, width: 170, padding: "3px 7px", fontSize: 12 }}
-            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.email || "")) run({ action: "save_person", id: o.id, email: v }); }} />
+          {/* ⚠️ THREE ROW SHAPES. A team-managed person's name and email are written from
+              Settings → Team and re-applied on every change there, so an edit here would
+              appear to work and then be quietly reverted by somebody else's unrelated save.
+              The server refuses it (409); this is that refusal made visible, so nobody types
+              into a box that was never going to keep what they typed.
+              A row with NO tenant — the ordinary platform operator, or a login-less
+              subcontractor — stays exactly as editable as it always was. */}
+          {o.teamManaged ? (
+            <>
+              <span style={{ width: 150, fontWeight: 700, color: "#334155" }}>{o.name}</span>
+              <span style={{ width: 170, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis" }}>{o.email || "—"}</span>
+            </>
+          ) : (
+            <>
+              <input defaultValue={o.name} style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.name) run({ action: "save_person", id: o.id, name: v }); }} />
+              <input defaultValue={o.email || ""} placeholder="no login" style={{ ...S.input, width: 170, padding: "3px 7px", fontSize: 12 }}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.email || "")) run({ action: "save_person", id: o.id, email: v }); }} />
+            </>
+          )}
+          {o.teamManaged && (
+            <span title={`${o.title || "team member"} · Projects: ${o.projectsLevel || "none"}`}
+              style={{ fontSize: 10.5, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px" }}>
+              Settings → Team
+            </span>
+          )}
+          {/* A login on a BUILDER's tenant. The guard added 2026-09-02 refuses to create one,
+              but historic rows exist — and an operator needs to SEE why the toggles refuse
+              rather than conclude the screen is broken. */}
+          {o.foreignTenant && (
+            <span title={`This login belongs to the "${o.foreignTenant}" account. It cannot be given operator access.`}
+              style={{ fontSize: 10.5, fontWeight: 800, color: "#B91C1C", background: "#FEF2F2", borderRadius: 999, padding: "2px 8px" }}>
+              builder login
+            </span>
+          )}
 
           <label style={{ fontSize: 11.5, fontWeight: 600, color: o.user_id ? "#334155" : "#94A3B8", display: "inline-flex", alignItems: "center", gap: 4 }}
-            title={o.user_id ? "Operator access — they can open ANY builder's account." : "Needs a StructureStudio login first."}>
-            <input type="checkbox" checked={!!o.isOperator} disabled={busy || !o.user_id}
+            title={o.foreignTenant ? `This login belongs to the "${o.foreignTenant}" account — it cannot be given operator access.` : o.user_id ? "Operator access — they can open ANY builder's account." : "Needs a StructureStudio login first."}>
+            <input type="checkbox" checked={!!o.isOperator} disabled={busy || !o.user_id || !!o.foreignTenant}
               onChange={(ev) => {
                 if (ev.target.checked) {
                   if (!window.confirm(`Give ${o.name} operator access? They will be able to open ANY builder's account (read-only until you tick "can edit"). This is separate from being assignable.`)) { load(); return; }
@@ -715,6 +746,9 @@ function PMPeopleEditor({ onChanged }) {
 
           {o.user_id === me
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
+            : o.teamManaged
+            ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}
+                title="Take Projects away on Settings → Team and they leave this list automatically.">Managed in Team</span>
             : (
               <button type="button" disabled={busy}
                 onClick={() => { if (window.confirm(`Remove ${o.name} from the assignable list? Work already assigned to them keeps their name, and this does not change their access to builder accounts.`)) run({ action: "remove_person", id: o.id }); }}

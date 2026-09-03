@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
+import { deactivateRosterMember, syncRosterMember, wantsRoster } from "../_shared/pmRoster.ts";
 import {
   AREAS,
   accessMetadata,
@@ -247,10 +248,12 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   // Confirm a userId is a member of THIS tenant before any write touches them.
   const requireMember = async (uid: unknown) => {
     if (!isUuid(uid)) throw new Error("Invalid user id.");
-    const { data, error } = await admin.from("client_users").select("user_id, role, title, access").eq("client_id", clientId).eq("user_id", uid).maybeSingle();
+    // full_name rides along for the Projects roster mirror: pm_people wants a display name,
+    // and client_users has no email column, so the address is resolved separately below.
+    const { data, error } = await admin.from("client_users").select("user_id, role, title, access, full_name").eq("client_id", clientId).eq("user_id", uid).maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("That person isn't on your team.");
-    return data as { user_id: string; role: string; title: string | null; access: Record<string, unknown> | null };
+    return data as { user_id: string; role: string; title: string | null; access: Record<string, unknown> | null; full_name: string | null };
   };
 
   try {
@@ -453,6 +456,24 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // Seed a commission_members row so the person shows up on the team with a blank rate.
         await admin.from("commission_members").upsert({ client_id: clientId, user_id: au.id }, { onConflict: "client_id,user_id", ignoreDuplicates: true });
 
+        // THE PROJECTS ROSTER, on our own tenant only. Carolyn: "a user will be added to the
+        // board if they are added in the structure studio subaccount."
+        //
+        // ⚠️ Placed BEFORE the setup-link block below, deliberately. That block is
+        // best-effort and swallows its own failures; putting the mirror after it would bury
+        // a roster failure behind a returned link and make the add look wholly successful.
+        //
+        // A conflict is reported as a WARNING, not a failure: the person genuinely was added
+        // to the team, and answering with an error would send an admin hunting for something
+        // that did not go wrong. Same judgement add_person makes with its own 409.
+        let rosterWarning = null;
+        if (isInternal && wantsRoster(effectiveAccess(wantRole, wantTitle, seedAccess))) {
+          const out = await syncRosterMember(admin, { userId: au.id, email, fullName });
+          if (out.kind === "conflict") {
+            rosterWarning = "They are on the team, but another Projects entry already claims that login — reconcile it in Projects → People.";
+          }
+        }
+
         // The setup link is a BEARER CREDENTIAL: whoever opens it first gets a session as
         // that person and sets their password. That is the right trade for a brand-new
         // passwordless account, where it is the only way in. It is the wrong trade for an
@@ -466,7 +487,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           try { const gl = await admin.auth.admin.generateLink({ type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL } }); if (!gl.error) setupLink = gl.data?.properties?.action_link || null; } catch { /* best-effort */ }
         }
         await audit(`add_user ${email} as ${wantTitle}`);
-        return json({ ok: true, userId: au.id, email, role: wantRole, title: wantTitle, created, emailSent, setupLink });
+        return json({ ok: true, userId: au.id, email, role: wantRole, title: wantTitle, created, emailSent, setupLink, rosterWarning });
       }
 
       // ── set one person's job title and per-area access (migration 100) ──────────
@@ -550,8 +571,35 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           .update({ title: nextTitle, role: nextRole, access: Object.keys(nextAccess).length ? nextAccess : null })
           .eq("client_id", clientId).eq("user_id", p.userId);
         if (upd.error) throw upd.error;
+
+        // The Projects grant is a SWITCH, so mirror it in both directions — granting adds
+        // them to the roster, revoking takes them off. Doing only the first would make the
+        // switch a one-way door and leave someone assignable on the board long after their
+        // access was withdrawn.
+        //
+        // A title change alone can move this: `projects` is omitted from every preset, so it
+        // only ever arrives as a stored override — but resolving through effectiveAccess
+        // rather than reading p.access means a demotion that DROPS the override (owner-granted
+        // rules, an invalid level) is honoured here too, instead of the roster believing a
+        // grant the resolver has already discarded.
+        let rosterWarning = null;
+        if (isInternal) {
+          if (wantsRoster(resulting)) {
+            // ⚠️ client_users has NO email column (migration 060 put full_name/phone there and
+            // nothing else), so the address comes from auth. Best-effort: a missing one only
+            // costs the roster row its email, and syncRosterMember falls back to the name.
+            let mail: string | null = null;
+            try { const g = await admin.auth.admin.getUserById(p.userId); mail = g.data?.user?.email ?? null; } catch { /* best-effort */ }
+            const out = await syncRosterMember(admin, { userId: p.userId, email: mail, fullName: target.full_name ?? null });
+            if (out.kind === "conflict") {
+              rosterWarning = "Access saved, but another Projects entry already claims that login — reconcile it in Projects → People.";
+            }
+          } else {
+            await deactivateRosterMember(admin, p.userId);
+          }
+        }
         await audit(`set_access ${p.userId} title=${nextTitle} areas=${Object.keys(nextAccess).length}`);
-        return json({ ok: true, userId: p.userId, title: nextTitle, role: nextRole, access: nextAccess, effective: resulting });
+        return json({ ok: true, userId: p.userId, title: nextTitle, role: nextRole, access: nextAccess, effective: resulting, rosterWarning });
       }
 
       // ── remove a teammate: unlink from this tenant, or fully deactivate the login ──
@@ -591,6 +639,13 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           await admin.from("build_crews").update({ member_user_ids: kept })
             .eq("id", (c as any).id).eq("client_id", clientId);
         }
+        //  * pm_people.user_id, since 2026-09-02. The Projects roster is now fed from this
+        //    screen, so leaving the row behind keeps a departed person in every assignee
+        //    picker on the internal board. ARCHIVED rather than deleted, for the same shape
+        //    of reason as driver_profiles above: assignments live in pm_items.values as a
+        //    bare array of pm_people.id with no foreign key, so deleting the row turns every
+        //    card they were ever assigned into a raw uuid.
+        if (isInternal) await deactivateRosterMember(admin, p.userId);
         await admin.from("commission_members").delete().eq("client_id", clientId).eq("user_id", p.userId);
         await admin.from("client_users").delete().eq("client_id", clientId).eq("user_id", p.userId);
         if (mode === "deactivate") {
