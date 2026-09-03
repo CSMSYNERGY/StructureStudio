@@ -189,7 +189,7 @@ function SettingsView({ section }) {
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
     setInvMsg({ ok: form.invoiceInGhl
       ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
-      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM." });
+      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -349,7 +349,7 @@ function SettingsView({ section }) {
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected yet. Estimates can't be sent until your CRM Location ID and API key are saved.</>}
+            : <>Not connected. Optional — connect one to mirror contacts and quotes into it. With no CRM, contacts stay in Structure Studio and quotes go out through Structure Studio paperwork (switch it on below).</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
@@ -381,8 +381,8 @@ function SettingsView({ section }) {
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
             : <><b>Off — StructureStudio issues your quotes and invoices.</b> Each quote is one document: the priced
                 estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
-                their quote page, and you invoice from the Orders tab. Contacts and opportunities still go to your
-                CRM exactly as before, so your pipeline keeps working.</>}
+                their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
+                opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
         {!form.invoiceInGhl && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
@@ -431,13 +431,16 @@ function SettingsView({ section }) {
           </div>
         )}
         {!form.invoiceInGhl && status && status.emailReady === false && (
-          /* Warn-but-allow (decision 5, 2026-08-23): in StructureStudio mode there is no
-             CRM fallback for sending, so until the sending domain is live, quotes and
-             invoices generate but nobody is emailed. Print / Copy-link still work. */
+          /* Was "nobody is emailed" (decision 5, 2026-08-23). Since 2026-09-02 a
+             paperwork-mode tenant sends from the PLATFORM address until their own domain
+             verifies — _shared/emailSend.ts opens its provider guard for exactly this case,
+             because nothing else can send their documents. So the notice states what now
+             happens (a working send under our name) rather than a failure that no longer
+             occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your email sending isn't verified yet (Settings → Email), so customers
-            won't receive quote or invoice emails — you can still print them or copy the
-            customer link. Emails start flowing once your sending domain is verified.
+            Heads up: your own sending domain isn't verified yet (Settings → Email), so quotes
+            and invoices go out from our address on your behalf, with your business name as the
+            sender. Verify your domain to send from your own address instead.
           </div>
         )}
         {invMsg && invMsg.err && <div style={{ ...S.err, marginTop: 10 }}>{invMsg.err}</div>}

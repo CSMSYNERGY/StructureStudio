@@ -245,6 +245,60 @@ Deno.test("domain pending + platform flag OFF → not_active, zero fetches", asy
   }
 });
 
+// ── The paperwork-mode opening (2026-09-02) ────────────────────────────────────────────────
+// A tenant who issues their OWN quotes and invoices (invoice_in_ghl = false) has no CRM
+// sender to fall back to, and `email_provider` cannot reach 'resend' until their domain
+// verifies — so the guard above made their documents unsendable rather than merely
+// unbranded. These three pin the opening and its edges.
+
+Deno.test("paperwork mode + provider 'ghl' + platform ready → sends from the platform address", async () => {
+  setup();
+  Deno.env.set("PLATFORM_EMAIL_DOMAIN_READY", "true");
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({
+      settings: { ...VERIFIED, email_provider: "ghl", email_domain_status: "not_configured", email_domain: null, invoice_in_ghl: false },
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(res.sent, "a paperwork-mode tenant must be able to send; nothing else can send for them");
+    const body = JSON.parse(fetches[0].body ?? "{}");
+    assertEquals(body.from, '"Example Barns LLC" <no-reply@mail.structurestudiosuite.com>');
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("paperwork mode + platform flag OFF → still not_active", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({
+      settings: { ...VERIFIED, email_provider: "ghl", email_domain_status: "not_configured", email_domain: null, invoice_in_ghl: false },
+    });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.reason === "not_active",
+      "the opening is in the PROVIDER guard only — the platform domain's own readiness flag still governs");
+    assertEquals(fetches.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("CRM mode is UNCHANGED: provider 'ghl' stays dark even with the platform flag on", async () => {
+  setup();
+  Deno.env.set("PLATFORM_EMAIL_DOMAIN_READY", "true");
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: { ...VERIFIED, email_provider: "ghl", invoice_in_ghl: true } });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assert(!res.sent && res.reason === "not_active",
+      "a CRM-mode tenant has GHL to send for them and must not be opted in behind their back");
+    assertEquals(fetches.length, 0);
+  } finally {
+    teardown();
+  }
+});
+
 // ── From resolution ────────────────────────────────────────────────────────────────────────
 
 Deno.test("pending + PLATFORM_EMAIL_DOMAIN_READY=true → platform From with the business name", async () => {

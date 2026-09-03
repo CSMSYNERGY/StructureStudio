@@ -143,10 +143,23 @@ export async function sendTenantEmail(
           "email_from_name, business_name, beta_mode, beta_email, " +
           // For the routing Reply-To below. Read here rather than by the caller so all ten
           // send paths get it from one place instead of one of them getting it by hand.
-          "inbound_domain, inbound_status",
+          "inbound_domain, inbound_status, " +
+          // Who issues the paperwork — see the guard below.
+          "invoice_in_ghl",
       )
       .eq("client_id", clientId).maybeSingle();
-    if (!s || s.email_provider !== "resend") return { sent: false, reason: "not_active" };
+    if (!s) return { sent: false, reason: "not_active" };
+    // THE PROVIDER GUARD, with one deliberate opening (Carolyn 2026-09-02). `email_provider`
+    // flips to 'resend' only through email_activate, which refuses until the tenant's own
+    // domain is verified — so the platform-domain fallback below was unreachable for EVERY
+    // tenant, and a paperwork-mode tenant (invoice_in_ghl = false) sent no customer email at
+    // all: that mode never falls back to the CRM's sender the way the GHL path does. Verified
+    // live on abc-builder: "Quote Created!" and "Not emailed — not_active", a quote nobody
+    // received. So a paperwork-mode tenant is treated as opted in — there is no other sender
+    // for their documents — and sends from the platform address until their domain verifies.
+    // CRM-mode tenants are unchanged: still dark until they activate their own domain.
+    const paperworkMode = s.invoice_in_ghl === false;
+    if (s.email_provider !== "resend" && !paperworkMode) return { sent: false, reason: "not_active" };
 
     // ── From resolution ─────────────────────────────────────────────────────────────
     const businessName = typeof s.business_name === "string" ? s.business_name : "";

@@ -115,11 +115,25 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy, ss_tax_rate, ss_tax_label, ss_tax_delivery")
     .eq("client_id", clientId)
     .single();
-  if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
-    return json({ error: `No GHL credentials configured for client "${clientId}". Ask an admin to set them via the admin panel.` }, 400);
+  if (settingsErr || !settings) {
+    // No settings row at all: the owner has not opened Settings yet, so there is neither a CRM
+    // nor a paperwork mode to issue the quote through. Shopper-facing wording, not an admin's.
+    return json({ error: `${clientId} hasn't finished setting up quotes yet — please try again later, or contact them directly.` }, 400);
   }
-  const locationId = settings.ghl_location_id;
-  const apiKey = settings.ghl_api_key;
+  // A CRM is OPTIONAL (Carolyn 2026-09-02: "a new builder that will not use GHL ... we just save
+  // the contact in our database"). The contact is already in crm_contacts before we run —
+  // save_design stamps designs.contact_id (migration 133) — so nothing about the customer is
+  // lost when there is no CRM to mirror them into. What a tenant DOES need is somewhere to issue
+  // the quote: either the CRM (invoice_in_ghl = true, the default) or StructureStudio's own
+  // paperwork (invoice_in_ghl = false). Neither → refuse, in words a shopper can act on.
+  const crmConnected: boolean = Boolean(settings.ghl_location_id && settings.ghl_api_key);
+  if (!crmConnected && settings.invoice_in_ghl !== false) {
+    return json({
+      error: `${clientId} isn't set up to send quotes yet. (For the business: connect your CRM, or switch quotes to Structure Studio paperwork, under Settings → CRM Connection.)`,
+    }, 400);
+  }
+  const locationId: string = settings.ghl_location_id || "";
+  const apiKey: string = settings.ghl_api_key || "";
   const pipelineId: string | null = settings.ghl_pipeline_id || null;
   const sendQuoteStageId: string | null = settings.ghl_stage_send_quote_id || null;
 
@@ -135,8 +149,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // WHO ISSUES THE PAPERWORK (migration 121). Default TRUE — and read as "anything but an
   // explicit false is the CRM", so a tenant whose row predates the column, or whose value is
   // null for any reason, gets today's GHL path rather than silently switching to a document
-  // StructureStudio has never sent for them. The credential check above is deliberately NOT
-  // relaxed for SS mode: the contact upsert and the opportunity still go to the CRM either way.
+  // StructureStudio has never sent for them. In SS mode the contact upsert and the opportunity
+  // still go to the CRM WHEN ONE IS CONNECTED (crmConnected above); without one they are simply
+  // skipped and the quote is issued from our own records.
   const invoiceInGhl: boolean = settings.invoice_in_ghl !== false;
 
   // Sales tax (migration 148) — SS mode only. In CRM mode GHL's own tax engine computes it from
@@ -294,9 +309,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     countryCode: contact?.country || "US",
   } : null;
 
-  // 3. Upsert contact
+  // 3. Upsert contact — into the CRM, when there is one. Without a CRM the contact already
+  //    lives in crm_contacts (save_design, migration 133) and contactId stays null, which is
+  //    exactly what every later step treats as "no CRM object to link".
   let contactId: string | null = existingDesign.ghl_contact_id || null;
-  try {
+  if (crmConnected) try {
     const r = await fetch("https://services.leadconnectorhq.com/contacts/upsert", {
       method: "POST",
       headers: ghlHeaders,
