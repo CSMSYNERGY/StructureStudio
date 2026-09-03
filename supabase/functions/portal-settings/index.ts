@@ -1274,7 +1274,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
-      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only").eq("client_id", clientId).order("delta_in"),
+      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only, build_on_site, bos_fee_basis, bos_fee_rate").eq("client_id", clientId).order("delta_in"),
       // Insulation rates (177) for the Options tab matrix.
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
@@ -2804,9 +2804,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         const picked = [...new Set(cleaned)].sort((x, y) => x - y);
         if (picked.length) widthsFt = picked;
       }
+      // Built on site (183). The flag is free-standing: a builder can mark an increase as
+      // on-site-only and charge nothing for it, which is why an absent fee is stored as NULL
+      // rather than refused. A fee that is PRESENT but unusable IS refused, the same posture
+      // as the rate above — a typo silently becoming $0 is the failure worth preventing.
+      const buildOnSite = row?.buildOnSite === true;
+      const bosRateRaw = String(row?.bosFeeRate ?? "").trim();
+      let bosFeeRate: number | null = null;
+      if (buildOnSite && bosRateRaw !== "") {
+        const n = Number(bosRateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${bosRateRaw}" is not a usable build-on-site fee${unchanged}`); i++; continue; }
+        bosFeeRate = n;
+      }
+      const BOS_BASES = ["each", "sqft_building", "perimeter_building"];
+      const bosBasisRaw = String(row?.bosFeeBasis ?? "").trim();
+      // An unrecognised basis is refused rather than defaulted: defaulting would price the fee
+      // by a rule the builder did not choose, and the three shapes differ by orders of
+      // magnitude on the same number.
+      if (buildOnSite && bosBasisRaw !== "" && !BOS_BASES.includes(bosBasisRaw)) {
+        skipped.push(`+${deltaIn} in: "${bosBasisRaw}" is not a build-on-site fee basis${unchanged}`); i++; continue;
+      }
+      const bosFeeBasis = buildOnSite ? (bosBasisRaw || "each") : null;
+
       const patch = {
         delta_in: deltaIn,
         rate_per_lf: ratePerLf,
+        build_on_site: buildOnSite,
+        bos_fee_basis: bosFeeBasis,
+        bos_fee_rate: buildOnSite ? bosFeeRate : null,
         taxable: row?.taxable !== false,
         active: row?.active !== false,
         internal_only: row?.internalOnly === true,

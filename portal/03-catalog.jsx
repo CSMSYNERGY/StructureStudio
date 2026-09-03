@@ -3190,6 +3190,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         active: r.active !== false,
         internalOnly: r.internal_only === true,
         widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null,
+        buildOnSite: r.build_on_site === true,
+        bosFeeBasis: r.bos_fee_basis || "each",
+        bosFeeRate: r.bos_fee_rate != null ? String(r.bos_fee_rate) : "",
       });
     });
     setByStyle(m);
@@ -3199,7 +3202,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   const setRow = (styleId, idx, field, val) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
   const addRow = (styleId) =>
-    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, internalOnly: false, widthsFt: null }] }));
+    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, internalOnly: false, widthsFt: null, buildOnSite: false, bosFeeBasis: "each", bosFeeRate: "" }] }));
   const delRow = (styleId, idx) =>
     setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).filter((_, i) => i !== idx) }));
 
@@ -3221,6 +3224,15 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
       });
       if (badRate.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + badRate.map((r) => "+" + r.deltaIn + " in (\"" + r.ratePerLf + "\")").join(", ") + ".");
+      // A build-on-site fee is OPTIONAL (a builder may absorb it) but must be usable if typed.
+      // Caught here as well as on the server so the message names the row rather than arriving
+      // as a "skipped" line after the save has already half-run.
+      const badBos = rows.filter((r) => {
+        if (!r.buildOnSite) return false;
+        const t = String(r.bosFeeRate == null ? "" : r.bosFeeRate).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badBos.length) throw new Error("Nothing was saved \u2014 fix these build-on-site fee(s) first: " + badBos.map((r) => "+" + r.deltaIn + " in (\"" + r.bosFeeRate + "\")").join(", ") + ".");
       const { data, error } = await sb.functions.invoke("portal-settings", {
         body: scoped({
           action: "save_wall_heights",
@@ -3233,6 +3245,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             active: r.active,
             internalOnly: r.internalOnly,
             widthsFt: r.widthsFt,
+            buildOnSite: r.buildOnSite,
+            bosFeeBasis: r.bosFeeBasis,
+            bosFeeRate: String(r.bosFeeRate == null ? "" : r.bosFeeRate).trim(),
           })),
         }),
       });
@@ -3271,20 +3286,21 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             No taller-wall option offered on this style — customers see no wall-height choice.
           </p>
         ) : (
-          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 620, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "14%" }} /><col style={{ width: "16%" }} /><col style={{ width: "28%" }} /><col style={{ width: "13%" }} /><col style={{ width: "11%" }} /><col style={{ width: "10%" }} /><col style={{ width: "8%" }} /></colgroup>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
             <thead><tr>
               <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
               <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={{ ...S.th, textAlign: "center" }}>Active</th>
               <th style={S.th}></th>
             </tr></thead>
             <tbody>
-              {rows.map((r, i) => (
-                <tr key={r.id || ("new-" + i)}>
+              {rows.map((r, i) => [
+                <tr key={(r.id || ("new-" + i)) + "-main"}>
                   <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
                   <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
                   <td style={S.td}>
@@ -3303,11 +3319,31 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                     )}
                   </td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
-                </tr>
-              ))}
+                </tr>,
+                r.buildOnSite ? (
+                  <tr key={(r.id || ("new-" + i)) + "-bos"}>
+                    <td colSpan={8} style={{ ...S.td, background: "#F8FAFC" }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+                        <span style={{ fontWeight: 700, color: "#0F766E" }}>Built on site — upcharge</span>
+                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 190 }}>
+                          <option value="each">Flat fee for the job</option>
+                          <option value="sqft_building">Per sq ft of floor</option>
+                          <option value="perimeter_building">Per lineal ft of perimeter</option>
+                        </select>
+                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="no upcharge"
+                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 130 }} />
+                        <span style={{ color: "#64748B" }}>
+                          Leave blank if you don’t charge extra — the building is still marked built on site.
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : null,
+              ])}
             </tbody>
           </table>
         )}
@@ -3330,7 +3366,9 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
         offering it yet. Tick the <b>widths</b> each increase can be hauled at — a wider building
         already has a taller roof, so a narrow one can take more. A width you add to a style
         later arrives <b>unticked</b> here, so nothing is ever offered on a new size until you
-        say so.
+        say so. Tick <b>Built on site</b> on an increase too tall to haul under a bridge: the
+        customer sees “on site” beside that choice, the building is marked as a site build
+        rather than a delivery, and you can add the upcharge for sending a crew out.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}

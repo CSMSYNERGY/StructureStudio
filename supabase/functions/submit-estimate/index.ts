@@ -8,6 +8,7 @@ import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
@@ -705,9 +706,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       return json({ error: `Cannot price a wall-height upgrade: the style "${style}" is not in your catalog.` }, 400);
     }
     const whRes = await supabase.from("style_wall_heights")
-      .select("delta_in, rate_per_lf, taxable, active, widths_ft")
+      .select("delta_in, rate_per_lf, taxable, active, widths_ft, build_on_site, bos_fee_basis, bos_fee_rate")
       .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn).maybeSingle();
-    const wh = whRes.data as { rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null } | null;
+    const wh = whRes.data as {
+      rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null;
+      build_on_site: boolean | null; bos_fee_basis: string | null; bos_fee_rate: number | null } | null;
     if (whRes.error || !wh || !wh.active || wh.rate_per_lf == null) {
       return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
     }
@@ -731,6 +734,51 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       type: "one_time",
       description: `${buildingPerimeter} ft of wall at $${whRate.toFixed(2)} per foot`,
     }, { kind: "wall_height", nonTaxable: wh.taxable === false }));
+
+    // ── Built on site (183) ───────────────────────────────────────────────────────────
+    // Not a product the customer shopped for — a CONSEQUENCE of asking for a wall too tall to
+    // haul. Carolyn, 2026-09-01: "if they build it on site, then they can tip it then ... but
+    // then it becomes a build on site building", and "they always charge more for a build on
+    // site ... because they're sending the crew out there to build."
+    //
+    // The flag and the fee both come off the row we JUST validated, so no second lookup and no
+    // second chance to disagree with it: if the increase is offered at this width, so is its
+    // consequence. One increase is ever selected, so exactly one fee can ever apply.
+    //
+    // ⚠️ A NULL FEE IS NOT AN ERROR, and this is the one place this block departs from the one
+    // above. An unpriced INCREASE is a hard 400, because a builder who forgot to price what
+    // they are selling must not have it quoted at $0. An unpriced build-on-site fee is a
+    // builder who absorbs the cost — Carolyn says they always charge, but that is her market,
+    // not a constraint. The building is still built on site; there is simply no line.
+    {
+      const bosRate = Number(wh.bos_fee_rate) || 0;
+      // Same vocabulary as layout_item_pricing, so all three already have geometry here.
+      const bosBasis = bosBasisOf(wh.bos_fee_basis);
+      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter);
+      const bosDesc = bosBasis === "sqft_building"
+        ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "perimeter_building"
+        ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+        : "Crew and equipment to build on your site";
+      if (bosCharges(wh.build_on_site, wh.bos_fee_rate, bosQty)) {
+        targetItems.push(tagLine({
+          // Named for what it IS, not for what triggered it: the customer is buying an
+          // on-site build, and the wall height is why. The line above already says the height.
+          name: "Built On Site",
+          qty: bosQty,
+          amount: bosRate,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: `${bosDesc} — walls this tall cannot be hauled`,
+          // Taxability is INHERITED from the increase that caused it rather than given its own
+          // column. They are one decision on one row, and a builder who marks taller walls
+          // non-taxable has already said what they think about this charge.
+        }, { kind: "build_on_site", nonTaxable: wh.taxable === false }));
+      }
+    }
   }
 
   // ── Insulation (177) ────────────────────────────────────────────────────────────────────

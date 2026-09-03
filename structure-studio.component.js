@@ -1459,6 +1459,30 @@ function computeSelectionRows(sel, paintColors, C, items) {
       total: showP ? Math.round(whRate * buildingPerimeter * 100) / 100 : null,
       method: "lineal_ft",
     });
+    // BUILT ON SITE (183) — MIRRORS submit-estimate line for line, because this preview and the
+    // estimate must agree to the penny. Walls this tall cannot go under a bridge, so the
+    // building is assembled on the customer's lot and the builder sends a crew. A flagged
+    // increase with NO fee still changes what is being bought, so it still gets a row — priced
+    // at nothing rather than hidden, which is what stops "why is this suddenly on site?" being
+    // a question the estimate answers for the first time.
+    if (whOpt.buildOnSite) {
+      const bosRate = Number(whOpt.bosFeeRate) || 0;
+      const bosBasis = String(whOpt.bosFeeBasis || "each");
+      const bosQty = bosBasis === "sqft_building" ? buildingArea
+                   : bosBasis === "perimeter_building" ? buildingPerimeter
+                   : 1;
+      rows.push({
+        key: "buildOnSite",
+        label: "Built On Site",
+        detail: "Walls this tall cannot be hauled, so this building is assembled on your site.",
+        qty: bosQty,
+        unit: bosRate > 0
+          ? fmtMoney2(bosRate) + (bosBasis === "sqft_building" ? " / sq ft" : bosBasis === "perimeter_building" ? " / ft" : "")
+          : "",
+        total: showP ? Math.round(bosRate * bosQty * 100) / 100 : null,
+        method: bosBasis,
+      });
+    }
   }
   if (insSel.length) {
     const offered = insulationOffered(C);
@@ -6305,7 +6329,6 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           // "Standard" then would misdescribe what is on screen, so nothing is highlighted
           // until they choose — and choosing normalises the design onto the priced field.
           const legacy = !curDelta && Number(wallHeightLegacyFt) > 0;
-          const perim = Number(perimeterFt) || 0;
           const pickDelta = (d) => {
             const abs = d > 0 ? d3WallHeightFromDelta(baseFt, d) : baseFt;
             const e = engineRef.current;
@@ -6327,8 +6350,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               {whOpts.map((o) => {
                 return (
                   <button key={o.deltaIn} onClick={() => pickDelta(Number(o.deltaIn))} disabled={phase !== "ready"}
-                    style={cell(curDelta === Number(o.deltaIn))}>
-                    +{o.deltaIn}&Prime;
+                    style={cell(curDelta === Number(o.deltaIn))}
+                    title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
+                    +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
                   </button>
                 );
               })}
@@ -12420,8 +12444,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
                 {whList.map((o, i) => (
                   <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
-                    style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}>
-                    +{o.deltaIn}&Prime;
+                    style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}
+                    title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
+                    +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
                   </button>
                 ))}
               </div>
