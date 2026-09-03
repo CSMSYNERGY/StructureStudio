@@ -171,6 +171,116 @@ function SmsErrorList({ errors }) {
   );
 }
 
+/** The pre-submission check: the things the carriers look at, graded before money is spent.
+ *
+ *  ⚠️ A WARNING NEVER STOPS ANYONE SUBMITTING, AND THAT IS THE WHOLE DESIGN. Most of these rows
+ *  come from fetching the builder's own website. About a quarter of the web sits behind bot
+ *  protection, policies get served as PDFs or drawn by JavaScript, and a cookie wall answers 200
+ *  with the wall. We cannot tell a non-compliant policy from an unreadable one — so a builder who
+ *  IS compliant must never be locked out of buying a registration by our failure to read their
+ *  page. Only the deterministic rows we compute from our own data may say `fail`, and even those
+ *  gate nothing here: they add a line to the confirmation on the paid press. Advice, bought with
+ *  three seconds, not a gate.
+ *
+ *  The three-way verdict cell is lifted from the Email Sending DNS table, where an advisory row
+ *  already had to be visibly different from a failing one. */
+const SMS_CHECK_MARK = {
+  pass: { glyph: "✓", color: "#16A34A", title: "Looks right" },
+  warn: { glyph: "★", color: "#B45309", title: "Worth a look — we could not confirm this" },
+  fail: { glyph: "✕", color: "#DC2626", title: "This will be refused" },
+};
+
+const SMS_CHECK_GROUP = {
+  policy: "Your privacy policy and terms",
+  optin: "Your opt-in",
+  consistency: "Do they all match?",
+};
+
+function SmsComplianceCard({ compliance, busy, onRun, readOnly, card }) {
+  const checks = (compliance && compliance.checks) || [];
+  const checkedAt = compliance && compliance.checkedAt;
+  const failures = checks.filter((c) => c.verdict === "fail").length;
+  const warnings = checks.filter((c) => c.verdict === "warn").length;
+  // Insertion order of the group map IS the display order — policies, then the opt-in, then the
+  // cross-checks. Grouping walks the map rather than the rows so an empty group renders nothing.
+  const groups = Object.keys(SMS_CHECK_GROUP)
+    .map((g) => [g, checks.filter((c) => c.group === g)])
+    .filter(([, rows]) => rows.length > 0);
+
+  return (
+    <div style={card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
+        <h4 style={{ margin: 0, fontSize: 14 }}>Check before you send</h4>
+        {!readOnly && (
+          <button type="button" disabled={busy} onClick={onRun}
+            style={{ background: "#fff", border: "1px solid #CBD5E1", borderRadius: 8, padding: "7px 14px", cursor: busy ? "default" : "pointer", fontWeight: 700, fontSize: 12.5, fontFamily: "inherit", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Checking…" : (checkedAt ? "Check again" : "Check my pages")}
+          </button>
+        )}
+      </div>
+
+      <p style={{ margin: "0 0 12px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
+        These are the things the phone carriers look at, and the usual reasons a registration
+        comes back rejected. We open your pages and read them the way a reviewer would.
+      </p>
+
+      {/* ⚠️ THE CROSS-CHECKS ARE ALWAYS HERE, EVEN BEFORE ANYONE PRESSES THE BUTTON. They cost
+          nothing — they compare fields we already hold — so withholding them behind a press
+          would be hiding an answer we already have. Only the rows that need us to open the
+          builder's website wait for the press. */}
+      <div style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>
+        {checkedAt
+          ? `Your pages were checked ${ssRelTime(checkedAt) || "just now"}`
+          : "Your pages have not been opened yet — that part takes a few seconds and costs nothing."}
+        {failures > 0 || warnings > 0
+          ? ` · ${failures ? `${failures} to fix` : ""}${failures && warnings ? " · " : ""}${warnings ? `${warnings} worth a look` : ""}`
+          : (checkedAt ? " · nothing to fix" : "")}
+      </div>
+
+      {groups.length > 0 && (
+        <>
+          {groups.map(([g, rows]) => (
+            <div key={g} style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>
+                {SMS_CHECK_GROUP[g]}
+              </div>
+              {rows.map((c) => {
+                const m = SMS_CHECK_MARK[c.verdict] || SMS_CHECK_MARK.warn;
+                return (
+                  <div key={c.key} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "7px 0", borderTop: "1px solid #F1F5F9" }}>
+                    <span title={m.title} aria-label={m.title}
+                      style={{ color: m.color, fontWeight: 800, fontSize: 13, lineHeight: "20px", flex: "0 0 14px", textAlign: "center" }}>
+                      {m.glyph}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, color: "#0F172A", lineHeight: 1.45 }}>{c.label}</div>
+                      {c.verdict !== "pass" && c.reason && (
+                        <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5, marginTop: 2 }}>{c.reason}</div>
+                      )}
+                      {c.verdict !== "pass" && c.hint && (
+                        <div style={{ fontSize: 12, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, padding: "6px 9px", lineHeight: 1.5, marginTop: 5 }}>
+                          {c.hint}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+          {warnings > 0 && (
+            <div style={{ fontSize: 12, color: "#64748B", lineHeight: 1.5, borderTop: "1px solid #F1F5F9", paddingTop: 8 }}>
+              A star does not stop you sending. It means we could not confirm something from
+              here — a page that blocks automated visitors reads the same to us as a page that is
+              missing the words, and the carriers may well see it fine.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /** The progress rail. Five steps, because a builder who can see where they are stops
  *  emailing to ask. `number_pending` and `active` both read as step 5 — from the outside
  *  they are "nearly there" and "there". */
@@ -509,30 +619,35 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
         )}
       </div>
 
-      {/* ── What they have to have ready ───────────────────────────────────── */}
+      {/* ── What they have to have ready ─────────────────────────────────────
+          ⚠️ THIS USED TO BE A HAND-WRITTEN LIST OF PROSE THAT NOTHING VERIFIED — five bullets
+          telling a builder what the carriers check, beside a product that then checked none of
+          it. It was also WRONG in a way that mattered: it told them to put "Message and data
+          rates may apply" in their privacy policy, when that sentence is required beside the
+          consent box and in the programme terms, and is explicitly not wanted buried in a
+          linked policy. Our own privacy page does not contain it and is right not to. The list
+          is now a projection of the same rules that grade it, so the advice and the enforcement
+          cannot drift apart again. */}
+      {status !== "off" && (
+        <SmsComplianceCard
+          compliance={data.compliance}
+          busy={busy}
+          readOnly={readOnly}
+          card={card}
+          onRun={() => act(() => call("compliance_check"))}
+        />
+      )}
+
       {["none", "intake", "aup_pending", "ready", "brand_failed"].includes(status) && (
         <div style={card}>
-          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Before you start</h4>
-          <p style={{ margin: "0 0 10px", fontSize: 13, color: "#475569", lineHeight: 1.55 }}>
-            The phone carriers check these themselves, and they are the usual reason a
-            registration comes back rejected. It is worth getting them right first.
-          </p>
+          <h4 style={{ margin: "0 0 8px", fontSize: 14 }}>Two things we cannot check for you</h4>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: "#334155", lineHeight: 1.7 }}>
-            <li><strong>A working website</strong> at your own domain. A Facebook page or a
-              &ldquo;coming soon&rdquo; page will not pass — someone screenshots it.</li>
-            <li><strong>A privacy policy page</strong> anyone can open without logging in,
-              saying you do not share phone numbers with anyone else, and containing the
-              sentence &ldquo;Message and data rates may apply.&rdquo;</li>
-            <li><strong>A terms page on the same website</strong> as your business site.</li>
             <li><strong>Your business name exactly as the IRS has it</strong> — off your EIN
-              letter, not your trading name.</li>
-            <li><strong>A company email address.</strong> A Gmail or Yahoo address is a
-              documented rejection reason.</li>
+              letter, not your trading name. Nobody can verify this but you, and a mismatch is
+              the most expensive one on the list: it fails the paid step.</li>
+            <li><strong>If your EIN was issued in the last 90 days, wait.</strong> It takes that
+              long to reach the databases the carriers check, and registering early just fails.</li>
           </ul>
-          <div style={{ marginTop: 10, fontSize: 12, color: "#64748B" }}>
-            One more: if your EIN was issued in the last 90 days, wait. It takes that long to
-            reach the databases the carriers check, and registering early just fails.
-          </div>
         </div>
       )}
 
@@ -770,10 +885,24 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           ) : (
             <button type="button" disabled={busy}
               onClick={() => {
+                // ⚠️ THE CHECKS WARN HERE; THEY DO NOT DISABLE THIS BUTTON, and that is the
+                // whole design. Almost every row comes from reading somebody's website, and a
+                // page behind bot protection is indistinguishable from a page missing the
+                // words — so a builder who IS compliant must never be locked out of buying a
+                // registration by our failure to read their site. What they get instead is the
+                // last word before the money leaves.
+                const bad = ((data.compliance && data.compliance.checks) || [])
+                  .filter((c) => c.verdict === "fail" || c.verdict === "warn");
+                const lead = bad.length
+                  ? `${bad.length} ${bad.length === 1 ? "check has" : "checks have"} not passed, including:\n`
+                    + `  • ${bad[0].label}\n\n`
+                  : "";
                 if (!window.confirm(
-                  "Register this business with the phone carriers?\n\n"
+                  lead
+                  + "Register this business with the phone carriers?\n\n"
                   + "This is the paid step. It cannot be undone or refunded, and it only needs "
-                  + "to be done once for this business.")) return;
+                  + "to be done once for this business."
+                  + (bad.length ? "\n\nThe items above are the usual reasons a registration is turned down." : ""))) return;
                 act(() => call("advance"));
               }}
               style={{ background: ACCENT, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", cursor: "pointer", fontWeight: 800, fontSize: 14, fontFamily: "inherit" }}>

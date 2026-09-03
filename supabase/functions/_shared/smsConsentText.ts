@@ -30,6 +30,18 @@ export function smsConsentSentence(companyName: string): string {
   );
 }
 
+/** The builder's own quote form — the page their customers actually tick the box on.
+ *
+ *  ⚠️ ONE HOST, AND IT IS NOT A SUBDOMAIN. Only `app.` and `beta.` structurestudiosuite.com
+ *  exist in DNS; the bare apex has no record and per-tenant subdomains are a RESOLVER feature,
+ *  not hostnames — a link built as `<client>.structurestudiosuite.com` resolves nowhere. The
+ *  tenant rides in `?client=`, exactly as `customerPortalUrl.ts` does it for the quote portal. */
+const CANONICAL_APP_HOST = "app.structurestudiosuite.com";
+
+export function designerUrl(clientId: string): string {
+  return `https://${CANONICAL_APP_HOST}/?client=${encodeURIComponent(clientId)}`;
+}
+
 /** Where the disclosure page for a tenant lives.
  *
  *  Served by the `sms-optin-disclosure` edge function rather than the marketing site, because

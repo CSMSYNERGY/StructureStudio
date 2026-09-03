@@ -2,7 +2,10 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
-import { optInDisclosureUrl } from "../_shared/smsConsentText.ts";
+import { optInDisclosureUrl, designerUrl } from "../_shared/smsConsentText.ts";
+import { fetchPage } from "../_shared/safeFetchText.ts";
+import { policyPageChecks, optInPageChecks, consistencyChecks } from "../_shared/smsComplianceCheck.ts";
+import type { Check } from "../_shared/smsComplianceCheck.ts";
 import type { GateTable } from "../_shared/access.ts";
 import {
   trustHubConfigured,
@@ -252,6 +255,27 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
   const p = (payload ?? {}) as Record<string, any>;
 
+  /** The two values the cross-checks need that do NOT live on the registration row.
+   *
+   *  ⚠️ BOTH ARE SECOND COPIES OF SOMETHING, WHICH IS EXACTLY WHY THEY ARE CHECKED.
+   *  `client_settings.business_website` and `sms_registrations.website_url` are the same fact
+   *  stored twice with nothing keeping them in step — on the first real tenant they already
+   *  disagreed (a pre-rebrand domain in one, the current one in the other), and a reviewer
+   *  comparing the registration against the quote a customer received would see both.
+   *  `client_configs.company_name` is the name the live consent box renders; when it is empty
+   *  the box reads "this builder may send you text messages", which reads as an automatic
+   *  refusal.
+   *
+   *  Two indexed single-row reads on every call. Deliberately unconditional: the cross-checks
+   *  are pure and free, so they are recomputed on every read rather than snapshotted, and a
+   *  field the builder has just corrected stops being reported as broken immediately. */
+  const [{ data: csRow }, { data: ccRow }] = await Promise.all([
+    admin.from("client_settings").select("business_website").eq("client_id", clientId).maybeSingle(),
+    admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+  ]);
+  const settingsWebsite = String(csRow?.business_website ?? "");
+  const consentCompanyName = String(ccRow?.company_name ?? "");
+
   /** Load the row, creating the empty one on first sight so every later write can assume it. */
   const load = async () => {
     const { data } = await admin.from("sms_registrations").select("*").eq("client_id", clientId).maybeSingle();
@@ -310,6 +334,28 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     // Derived from the client id rather than stored — there is nothing to keep in step, and a
     // column would only be a second copy to go stale.
     optInDisclosureUrl: optInDisclosureUrl(clientId),
+    // ⚠️ TWO SOURCES, ON PURPOSE. The page rows are SNAPSHOTTED (fetching someone's website
+    // takes seconds and cannot ride an action the portal polls every minute), while the
+    // cross-checks are RECOMPUTED every read because they are pure and instant. A stale
+    // "your two website fields disagree" left on screen after the builder has fixed one is
+    // how a checklist teaches people to stop reading it.
+    compliance: {
+      checkedAt: reg?.compliance_checked_at ?? null,
+      checks: [
+        ...(Array.isArray(reg?.compliance_result) ? reg.compliance_result : []),
+        ...consistencyChecks({
+          websiteUrl: String(reg?.website_url ?? ""),
+          privacyPolicyUrl: String(reg?.privacy_policy_url ?? ""),
+          termsUrl: String(reg?.terms_url ?? ""),
+          settingsWebsite,
+          legalBusinessName: String(reg?.legal_business_name ?? ""),
+          consentCompanyName,
+          messageSamples: Array.isArray(reg?.campaign_message_samples)
+            ? reg.campaign_message_samples.map((s: unknown) => String(s ?? "")) : [],
+          hasEmbeddedLinks: false,
+        }),
+      ],
+    },
   });
 
   const numbersOf = async () => {
@@ -467,6 +513,81 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       // `status: reg.aup_accepted_at ? "ready" : "aup_pending"`, so calling it from
       // `campaign_failed` would throw the registration back to the start of the chain and
       // strand a paid brand. This writes two columns and nothing else — no status, no poll.
+      // ── The pre-submission check ────────────────────────────────────────────────────────
+      //
+      // Opens the builder's own privacy policy and terms pages and grades the registration
+      // against what the carriers look at. It spends nothing and touches no Twilio endpoint.
+      //
+      // ⚠️ AN EXPLICIT PRESS, NEVER PART OF `status`. `status` is gated contacts:'view' and the
+      // portal polls it every sixty seconds while anything is pending — folding outbound page
+      // fetches into it would turn every open SMS tab into a crawler pointed at a builder's own
+      // website, fired by anyone who can open the Contacts tab. Same shape as the reason the
+      // lazy sweep refuses to advance `profile_pending`, and it deserves the same refusal.
+      //
+      // ⚠️ AND IT MUST NOT TAKE `advance_lock_until`. That lock is five minutes long and
+      // `advance` proceeds only if its conditional UPDATE returns a row, so a check that grabbed
+      // it would make "Register with the carriers" answer "already being worked on" for five
+      // minutes after every press.
+      case "compliance_check": {
+        const reg = await load();
+
+        // A cooldown, in the DATABASE rather than in memory. `throttle()` in twilioTrustHub is
+        // the cautionary tale: it writes its timestamp AFTER its own await, so concurrent
+        // callers all read the same stale value and fire together — an in-process limiter that
+        // does not limit. Two portal tabs are concurrent callers.
+        //
+        // Inside the window we return the stored result rather than a 409. A cooldown that
+        // looks like an error teaches people to press it again.
+        const last = reg.compliance_checked_at ? new Date(reg.compliance_checked_at).getTime() : 0;
+        if (last && Date.now() - last < 60_000) {
+          return json({ ok: true, fresh: false, ...view(reg, await numbersOf()) });
+        }
+
+        const privacy = String(reg.privacy_policy_url ?? "");
+        const terms = String(reg.terms_url ?? "");
+        const optIn = designerUrl(clientId);
+
+        // ⚠️ GROUPED BY ORIGIN, SEQUENTIAL WITHIN ONE. A builder's privacy policy and terms are
+        // almost always the same small shared host; three simultaneous requests to it is rude,
+        // gets us rate-limited, and makes their site look slow to whoever is browsing it. The
+        // waves idiom from portal-schedule: independent work in parallel, dependent work in order.
+        const originOf = (u: string) => { try { return new URL(u).origin; } catch { return u; } };
+        const wanted = [privacy, terms, optIn].filter(Boolean);
+        const byOrigin = new Map<string, string[]>();
+        for (const u of wanted) {
+          const k = originOf(u);
+          byOrigin.set(k, [...(byOrigin.get(k) ?? []), u]);
+        }
+        const fetched = new Map<string, Awaited<ReturnType<typeof fetchPage>>>();
+        await Promise.all([...byOrigin.values()].map(async (urls) => {
+          for (const u of urls) {
+            // fetchPage never rejects; it reports a refusal instead. Belt and braces anyway,
+            // because a check that 500s is a check nobody runs twice.
+            try { fetched.set(u, await fetchPage(u)); } catch { /* leaves it absent → a warn */ }
+          }
+        }));
+
+        const pageChecks: Check[] = [
+          ...policyPageChecks("privacy", privacy, fetched.get(privacy) ?? null),
+          ...policyPageChecks("terms", terms, fetched.get(terms) ?? null),
+          ...optInPageChecks(fetched.get(optIn) ?? null, consentCompanyName),
+        ];
+
+        // ⚠️ ONLY THE PAGE ROWS ARE STORED. The cross-checks are recomputed in `view()` on every
+        // read — see the comment there. Storing them would freeze a complaint about a field the
+        // builder is about to correct.
+        await admin.from("sms_registrations").update({
+          compliance_result: pageChecks,
+          compliance_checked_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("compliance_checked", {
+          fails: pageChecks.filter((c) => c.verdict === "fail").length,
+          warns: pageChecks.filter((c) => c.verdict === "warn").length,
+        });
+        return json({ ok: true, fresh: true, ...view(await load(), await numbersOf()) });
+      }
+
       case "save_policy_urls": {
         const reg = await load();
         const privacy = String(p.privacyPolicyUrl ?? "").trim();
