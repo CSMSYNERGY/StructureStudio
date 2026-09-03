@@ -233,9 +233,25 @@ resolution is a **third area flag, `ownerGranted`** (`_shared/access.ts`), which
 `sanitizeAccess(raw, title?)` is title-aware for the same reason; **calling it without a
 title drops owner-granted keys**, which is the safe direction for a caller that doesn't know
 whose map it is holding. `access.ts` is bundled per function, so a change here means
-redeploying **every** consumer (`portal-billing`, `portal-commissions`, `portal-schedule`,
-`portal-settings`, `qbo-oauth-connect`, `sync-design-status`) — leaving one behind means two
-copies of the permission model disagreeing, which is unobservable until it matters.
+redeploying **every** consumer — leaving one behind means two copies of the permission model
+disagreeing, which is unobservable until it matters. ⚠️ **Do not trust this list; derive it,**
+because it has been stale twice: `grep -rl "_shared/access.ts\|_shared/resolveTenant.ts" supabase/functions/*/index.ts`
+(resolveTenant imports access, so its importers count too). As of 2026-09-03 that is **12**:
+`portal-billing`, `portal-commissions`, `portal-feedback`, `portal-payments`,
+`portal-projects`, `portal-schedule`, `portal-settings`, `portal-setup`, `portal-sms`,
+`qbo-oauth-connect`, `submit-estimate`, `sync-design-status`. **`portal-projects` joined on
+2026-09-03** — it used to import only `logError.ts`, and now carries the permission model
+because Settings → Team grants Projects access.
+
+⚠️ **`access.ts` HAS A SECOND COPY IN SQL, and the two drifted twice without anyone noticing.**
+`area_level_for()` mirrors `effectiveAccess()` for the RLS policies (migration 154, re-issued
+by **183**). `change_orders` was added here on 2026-09-01 and never reached the SQL; the
+sales_rep preset's `orders` went view→edit the same week and the mirror kept saying view. Both
+were inert — 154's policies key on designs/contacts/inventory only, and an unknown area
+returns `'none'` rather than raising — which is exactly why they lasted. **`scripts/preflight.mjs`
+now cross-checks the two area lists on every push**, in both directions, against whichever
+migration most recently defines the function. If it fires, add the area to the SQL in the same
+commit rather than bypassing it.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
