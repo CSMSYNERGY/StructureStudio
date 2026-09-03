@@ -228,6 +228,16 @@ function AdminApp() {
   const [billFeat, setBillFeat] = useState([]);
   // Dated free period (059) — yyyy-mm-dd, blank = none.
   const [billUntil, setBillUntil] = useState("");
+  // Card payments (174): the tenant's master switch + the builder's OWN Fiserv/CardConnect
+  // merchant id. Read on demand (get_payments), never carried in the clients list — a MID
+  // names somebody else's bank account, so it loads only for the builder being looked at.
+  const [payOpen, setPayOpen] = useState(false);
+  const [payLoaded, setPayLoaded] = useState(null);   // null=unread · {paymentsEnabled,merchid} · {error}
+  const [payEnabled, setPayEnabled] = useState(false);
+  const [payMerchid, setPayMerchid] = useState("");
+  // Deliberate friction: switching payments ON requires ticking this first. The field is not
+  // a preference — it decides whose account a customer's card payment lands in.
+  const [payConfirm, setPayConfirm] = useState(false);
   // Billable features, from billing_plans via list_clients — never hardcoded here.
   const [features, setFeatures] = useState([]);
   const [linkOpen, setLinkOpen] = useState(false);
@@ -312,6 +322,10 @@ function AdminApp() {
     setNewStyleName(""); setNewStyleImg(null); setFileKey((k) => k + 1); // don't carry a half-filled create-style form to another client
     setDelOpen(false); setDelConfirm("");                                // close any open delete confirmation when switching clients
     setBillOpen(false);
+    // Close and BLANK the payments panel on every builder switch. Its two fields are read
+    // per-tenant, so leaving one builder's merchant id on screen under another builder's
+    // name is the one mistake this card must never make.
+    setPayOpen(false); setPayLoaded(null); setPayEnabled(false); setPayMerchid(""); setPayConfirm(false);
     // Seed the billing editor from the list row so it opens showing what is actually set.
     const row = (freshClients || clients).find((c) => c.client_id === cid);
     setBillPct(String(row?.discountPercent ?? 0)); setBillExempt(Boolean(row?.billingExempt));
@@ -388,6 +402,50 @@ function AdminApp() {
       const c = await api("list_clients", pwd); setClients(c.clients || []); setFeatures(c.features || []);
       setBillOpen(false);
       flash({ ok: `Billing saved for ${sel}. ${r.note || ""}`.trim() });
+    } catch (e) { flash({ err: e.message }); }
+    setBusy(false);
+  };
+
+  // ── Card payments (174) ───────────────────────────────────────────────────────────
+  // Read the tenant's live pair. Not folded into loadClient: the values only matter when
+  // somebody opens this card, and one builder's merchant id should not sit in the page's
+  // memory because an operator clicked through the builder list.
+  const loadPayments = async (cid) => {
+    setPayLoaded(null);
+    try {
+      const r = await api("get_payments", pwd, { clientId: cid });
+      setPayLoaded(r);
+      setPayEnabled(Boolean(r.paymentsEnabled));
+      setPayMerchid(String(r.merchid || ""));
+      setPayConfirm(false);
+    } catch (e) { setPayLoaded({ error: e.message }); }
+  };
+  const togglePayments = () => {
+    const next = !payOpen;
+    setPayOpen(next);
+    if (next && sel) loadPayments(sel);
+  };
+  // Every check here is duplicated server-side (admin-catalog set_payments) and the server's
+  // copy is the control — this one exists so the operator is told before the round trip,
+  // never so the server can trust the browser.
+  const savePayments = async () => {
+    if (!sel) return;
+    const mid = payMerchid.trim();
+    if (mid && !/^[0-9]{12,16}$/.test(mid)) {
+      flash({ err: `"${mid}" isn't a merchant id — 12–16 digits and nothing else. Copy it exactly from this builder's Fiserv boarding paperwork; don't retype it.` }); return;
+    }
+    if (payEnabled && !mid) {
+      flash({ err: "Add this builder's own merchant id before switching payments on — enabled with no id sends their customers' payments to the wrong account." }); return;
+    }
+    if (payEnabled && !payConfirm) {
+      flash({ err: "Tick the confirmation first. This decides whose bank account customer card payments land in." }); return;
+    }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api("set_payments", pwd, { clientId: sel, paymentsEnabled: payEnabled, merchid: mid });
+      setPayLoaded({ paymentsEnabled: r.paymentsEnabled, merchid: r.merchid });
+      setPayMerchid(String(r.merchid || "")); setPayConfirm(false);
+      flash({ ok: r.note || "Saved." });
     } catch (e) { flash({ err: e.message }); }
     setBusy(false);
   };
@@ -615,6 +673,7 @@ function AdminApp() {
           <button onClick={() => setNewOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{newOpen ? "Cancel" : "+ New builder"}</button>
           <button onClick={() => setLinkOpen((o) => !o)} style={S.btn("#F1F5F9", "#334155")}>{linkOpen ? "Cancel" : "Link owner"}</button>
           <button onClick={() => setBillOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8")} title={sel ? `Billing posture for ${sel}` : "Select a builder first"}>{billOpen ? "Cancel" : "Billing"}</button>
+          <button onClick={togglePayments} disabled={!sel} style={S.btn(sel ? "#FEF3C7" : "#F1F5F9", sel ? "#92400E" : "#94A3B8")} title={sel ? `Card payments + merchant id for ${sel}` : "Select a builder first"}>{payOpen ? "Cancel" : "Card payments"}</button>
           <button onClick={() => setDelOpen((o) => !o)} disabled={!sel} style={S.btn(sel ? "#FEE2E2" : "#F1F5F9", sel ? "#B91C1C" : "#94A3B8")} title={sel ? `Delete ${sel} and all its data` : "Select a builder first"}>{delOpen ? "Cancel" : "Delete builder"}</button>
           {/* GHL-subaccounts-style jump: opens the real owner portal focused on this
               client (portal.html auto-opens ?view= for logged-in operators). */}
@@ -742,6 +801,90 @@ function AdminApp() {
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Card payments (174). Amber, not the green of the Billing card, on purpose: this is
+            not our money and not a preference — it points a builder's customer card payments
+            at a bank account, and a wrong id here succeeds rather than fails. */}
+        {payOpen && (
+          <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
+            <div style={S.h2}>💳 Card payments — {sel}</div>
+            {!sel ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Select a builder above first.</div>
+            ) : payLoaded === null ? (
+              <div style={{ fontSize: 13, color: "#92400E" }}>Reading this builder's payment settings…</div>
+            ) : payLoaded.error ? (
+              <div style={{ fontSize: 13, color: "#B91C1C" }}>Couldn't read their payment settings: {payLoaded.error}</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: "#78350F", marginBottom: 12, lineHeight: 1.55 }}>
+                  <b>{sel} boards and underwrites directly with Fiserv.</b> The merchant id below is
+                  theirs — the money goes to <b>their</b> account and the chargeback liability is
+                  <b> theirs</b>. We only pass the card through and keep a token plus the last 4 digits.
+                  <div style={{ marginTop: 6 }}>
+                    Nothing here charges anybody. It is the switch the customer pay page, the card
+                    modal and the swipe reader all check before they will take a payment.
+                  </div>
+                </div>
+
+                {/* What is actually set right now, stated before anything is editable. */}
+                <div style={{ fontSize: 12.5, color: "#334155", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
+                  <b>Right now:</b>{" "}
+                  {payLoaded.paymentsEnabled
+                    ? <span style={{ color: "#15803D", fontWeight: 700 }}>ON</span>
+                    : <span style={{ color: "#B45309", fontWeight: 700 }}>OFF — this builder has no way to take a card</span>}
+                  {" · "}
+                  <b>Merchant id:</b>{" "}
+                  {payLoaded.merchid
+                    ? <code style={{ fontSize: 12.5 }}>{payLoaded.merchid}</code>
+                    : <span style={{ color: "#B45309" }}>none set</span>}
+                </div>
+
+                <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B" }}>
+                    <b>Their merchant id</b>
+                    <input value={payMerchid} onChange={(e) => { setPayMerchid(e.target.value); setPayConfirm(false); }}
+                      inputMode="numeric" autoComplete="off" spellCheck={false}
+                      placeholder="12–16 digits" title="Paste it from their Fiserv/CardConnect boarding paperwork — do not retype it"
+                      style={{ ...S.input, width: 200, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }} />
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+                    <input type="checkbox" checked={payEnabled} onChange={(e) => { setPayEnabled(e.target.checked); setPayConfirm(false); }} />
+                    <b>Take card payments for this builder</b>
+                  </label>
+                  <button onClick={savePayments} disabled={busy || (payEnabled && !payConfirm)}
+                    style={S.btn(busy || (payEnabled && !payConfirm) ? "#9CA3AF" : "#B45309", "#FFF")}>Save payment settings</button>
+                </div>
+                <div style={{ fontSize: 11.5, color: "#78350F", marginTop: 6 }}>
+                  Digits only — no spaces, dashes or letters. A mistyped id is not rejected by anyone
+                  downstream; it just sends the money somewhere else. Clearing the box removes the id.
+                </div>
+
+                {/* The tick is required only for switching ON. Turning payments off is a safe
+                    direction and should not need ceremony. */}
+                {payEnabled && (
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, color: "#7F1D1D", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}>
+                    <input type="checkbox" checked={payConfirm} onChange={(e) => setPayConfirm(e.target.checked)} style={{ marginTop: 2 }} />
+                    <span>
+                      I have checked this merchant id against <b>{sel}</b>'s own Fiserv boarding
+                      paperwork, character for character.
+                      <div style={{ fontSize: 11.5, marginTop: 2, lineHeight: 1.45 }}>
+                        Once this is on, their customers' cards are charged to whatever account this id
+                        names. Nothing in the payment path will tell us it was the wrong builder.
+                      </div>
+                    </span>
+                  </label>
+                )}
+
+                {payLoaded.paymentsEnabled && !payEnabled && (
+                  <div style={{ fontSize: 12, color: "#B45309", marginTop: 10, lineHeight: 1.5 }}>
+                    <b>Turning payments off.</b> Their customers' pay page and the card modal stop
+                    working as soon as this saves. Payments already taken are unaffected.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

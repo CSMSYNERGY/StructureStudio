@@ -18,6 +18,13 @@
 //        no-unreachable, no-dupe-else-if, no-self-assign, valid-typeof, use-isnan
 //      Plus: no road back to in-browser Babel — no type="text/babel" tags and no served
 //      babel-standalone tag on any page (the vendored Babel is the OFFLINE compiler now).
+//   1b. The hand-mirrored twins must not DRIFT. StructureStudio.jsx and
+//      structure-studio.component.js are the same designer maintained by hand in two
+//      dialects (CLAUDE.md: "any non-trivial edit must be mirrored in both files"). Linting
+//      them both — which is all this gate did — cannot see a one-sided edit: each half stays
+//      perfectly valid on its own, so the drift passes, compiles, and ships. Their bodies are
+//      compared line by line after normalising the three documented dialect differences, and
+//      the report NAMES the region on both sides. See the section comment in run().
 //   2. The vendored-dependency lock: all three pages must reference the SAME three /vendor/
 //      library files (React, ReactDOM, supabase-js), every one must exist in the repo, and
 //      none may be loaded from a CDN again.
@@ -139,6 +146,168 @@ function lint(label, code, lineOffset = 0) {
 // (babelBlocks() lived here until 2026-08-13 — the pages carry no inline app code now;
 // the extracted .jsx sources are linted as whole files instead.)
 
+// ── The hand-mirrored twins: normalise, then compare ──────────────────────────────────────
+//
+// StructureStudio.jsx (the ES-module canon) and structure-studio.component.js (the
+// browser/global dialect the pages actually ship) are the SAME ~14,000-line designer, kept in
+// step BY HAND — CLAUDE.md: "Any non-trivial edit must be mirrored in both files or the
+// browser deliverable will drift from the JSX source. There is no generator." Nothing checked
+// it. Both files have been LINTED here since this gate existed, and a lint cannot see this
+// class of bug: each half is perfectly valid on its own, so a one-sided edit passes every
+// rule, compiles cleanly and ships. The .js is what customers run; the .jsx is what the next
+// person reads and edits — so the drift is invisible until someone "fixes" something in the
+// copy that never ran, or mirrors a later change on top of a body that already disagreed.
+//
+// Only THREE differences are legitimate (CLAUDE.md), and all three are dialect, not behaviour:
+//   (1) the module top — `const {useState,…}=React;` / `= ReactDOM;` / `= window.supabase;`
+//       global destructures instead of `import … from "react"` and friends;
+//   (2) `export default function StructureStudio` in the .jsx, a plain declaration in the .js;
+//   (3) the module bottom — the .js publishes window.StructureStudio / window.ssAllowedOrigin
+//       (and has no createRoot; mounting belongs to the host pages).
+// Each is normalised BY SHAPE, never by position: the `= window.supabase` destructure already
+// sits 27 lines below its .jsx import, and line numbers move the moment anyone edits above
+// them. A positional rule that silently stops matching is this file's signature failure.
+//
+// COMMENTS AND BLANK LINES ARE DROPPED FROM BOTH SIDES, deliberately, and the choice is worth
+// stating because it is the difference between a rule people keep and a rule people delete:
+//   * The twins legitimately carry the SAME prose in DIFFERENT PLACES. The .jsx explains the
+//     removed feedback widget in its header; the .js explains it 13,900 lines lower, next to
+//     where the widget used to be. Comparing comments would fail on a clean tree, and the only
+//     way to pass would be the line-number special-casing this rule exists to avoid.
+//   * They also differ by one blank line (a double blank at StructureStudio.jsx:8098). Blank
+//     lines and comments compile to NOTHING — both twins produce identical artifacts across
+//     that difference — so failing a push over it would be this gate arguing about formatting,
+//     which its own header forbids, on a file 14,000 lines long. That is how a correctness
+//     gate gets switched off by the first person it annoys.
+// Dropping them costs this rule nothing it exists for: it removes no code, so every real body
+// edit still lands in the comparison. What it does not catch is a comment that drifts — which
+// ships no bug, and which the mirror rule's own author already treats as free to differ.
+const TWIN_DIALECT_LINES = [
+  // (1) The .jsx's imports, and the .js's global destructures that stand in for them. `import`
+  // anchored at column 0 with a following space: a dynamic `import(` has no space and is
+  // always indented inside a function, so nothing real is dropped.
+  /^import\s/,
+  /^const\s*\{[^}]*\}\s*=\s*(?:React|ReactDOM|window\.supabase)\s*;?\s*$/,
+  // (3) The two publishes the host pages' mount blocks read back off window.
+  /^window\.(?:StructureStudio|ssAllowedOrigin)\s*=\s*[A-Za-z_$][\w$]*\s*;?\s*$/,
+];
+
+// One twin reduced to its comparable body: { n: 1-based line in the ORIGINAL file, text }.
+// The original line number rides along so a failure can point at the real file.
+function twinBody(text) {
+  const out = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\s+$/, "");
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//")) continue;
+    if (TWIN_DIALECT_LINES.some((re) => re.test(line))) continue;
+    // (2) The export keyword, stripped rather than matched against a known line.
+    out.push({ n: i + 1, text: line.replace(/^export default (?=(?:async )?function\b)/, "") });
+  }
+  return out;
+}
+
+// How many consecutive equal lines count as "the two sides line up again", and how far to look
+// for that. Three lines is enough that a repeated `  }` or `  );` cannot fake a resync; 300 is
+// far more than any real one-sided edit and keeps the worst case at ~135k string compares.
+const TWIN_SYNC = 3;
+const TWIN_WINDOW = 300;
+
+// Walk the two bodies together and return every region where they disagree. The look-ahead
+// resync is the whole point of not using a plain index compare: ONE line inserted on one side
+// would otherwise renumber the remaining ~6,000 and report the entire rest of the file as
+// drifted, which tells a reader nothing and is exactly the kind of output people learn to skip.
+function twinRegions(a, b) {
+  const regions = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i].text === b[j].text) { i++; j++; continue; }
+    let sync = null;
+    // Smallest total edit first (d = di + dj), so the region reported is the smallest one that
+    // explains the difference — a changed line, not "everything until the next coincidence".
+    for (let d = 1; d <= TWIN_WINDOW && !sync; d++) {
+      for (let di = 0; di <= d; di++) {
+        const dj = d - di;
+        if (i + di + TWIN_SYNC > a.length || j + dj + TWIN_SYNC > b.length) continue;
+        let ok = true;
+        for (let k = 0; k < TWIN_SYNC; k++) {
+          if (a[i + di + k].text !== b[j + dj + k].text) { ok = false; break; }
+        }
+        if (ok) { sync = { di, dj }; break; }
+      }
+    }
+    regions.push({
+      jsx: a.slice(i, i + (sync ? sync.di : a.length - i)),
+      comp: b.slice(j, j + (sync ? sync.dj : b.length - j)),
+      jsxAt: a[i],
+      compAt: b[j],
+      resynced: !!sync,
+    });
+    if (!sync) return regions;   // no way back into step — everything after is one region
+    i += sync.di;
+    j += sync.dj;
+  }
+  // A tail on one side only: one twin ends while the other still has body left.
+  if (i < a.length || j < b.length) {
+    regions.push({
+      jsx: a.slice(i), comp: b.slice(j), jsxAt: a[i] ?? null, compAt: b[j] ?? null, resynced: false,
+    });
+  }
+  return regions;
+}
+
+// Takes the two texts as arguments (rather than reading the files) so --self-test can hand it
+// deliberately drifted variants and prove it fails — the my-quotes check's shape, same reason.
+const TWIN_JSX = "StructureStudio.jsx";
+const TWIN_COMP = "structure-studio.component.js";
+const TWIN_MAX_REPORTED = 5;
+
+function checkTwinDrift(jsxText, compText) {
+  const errors = [];
+  const a = twinBody(jsxText);
+  const b = twinBody(compText);
+
+  // Vacuity guard, the lesson this script keeps re-learning: a normaliser that has quietly
+  // stopped seeing the file compares two empty lists and reports two identical twins. Scaled
+  // to the file rather than a fixed number, so it cannot start crying wolf as the designer
+  // grows or shrinks — today each side keeps 10,301 of ~14,100 lines.
+  const rawA = jsxText.split("\n").length;
+  const rawB = compText.split("\n").length;
+  if (a.length * 4 < rawA || b.length * 4 < rawB) {
+    errors.push(`twin drift: the normaliser kept only ${a.length}/${rawA} line(s) of ${TWIN_JSX} `
+      + `and ${b.length}/${rawB} of ${TWIN_COMP} — it has stopped seeing most of the file, so `
+      + "this rule would pass because it is comparing almost nothing. Fix twinBody() in "
+      + "scripts/preflight.mjs rather than leaving a check that cannot fail.");
+    return errors;
+  }
+
+  const regions = twinRegions(a, b);
+  // Both sides get a real line number even when a region is empty on one of them: the anchor
+  // is the next line that side WOULD have had, which is where the missing code belongs.
+  const side = (file, own, anchor, lastLine) => (own.length
+    ? `${file}:${own[0].n}`
+    : `${file}:${anchor ? anchor.n : lastLine} (nothing here)`);
+  const excerpt = (own) => (own.length ? own[0].text.trim().slice(0, 110) : "(no line — this side is missing it)");
+  for (const r of regions.slice(0, TWIN_MAX_REPORTED)) {
+    errors.push(`twin drift — the hand-mirrored designer copies disagree here `
+      + `(${r.jsx.length} line(s) vs ${r.comp.length}`
+      + `${r.resynced ? "" : "; they never line up again after this point"}):`
+      + `\n      ${side(TWIN_JSX, r.jsx, r.jsxAt, rawA)}\n          ${excerpt(r.jsx)}`
+      + `\n      ${side(TWIN_COMP, r.comp, r.compAt, rawB)}\n          ${excerpt(r.comp)}`
+      + "\n      Mirror the edit into BOTH files (CLAUDE.md). Only the module top, the export-default "
+      + "keyword and the window.* publishes at the bottom may differ; comments and blank lines are "
+      + "ignored, so this is real code.");
+  }
+  if (regions.length > TWIN_MAX_REPORTED) {
+    errors.push(`twin drift: ${regions.length - TWIN_MAX_REPORTED} further drifting region(s) not `
+      + "listed. That many usually means an edit landed in one twin only and was never mirrored "
+      + `at all — diff the two files directly: git diff --no-index ${TWIN_JSX} ${TWIN_COMP}`);
+  }
+  return errors;
+}
+
 function run(files) {
   const errors = [];
 
@@ -175,6 +344,12 @@ function run(files) {
         + "`npm run compile` if a page or source changed, and commit the clean file.");
     }
   }
+
+  // ── The hand-mirrored twins must not drift ───────────────────────────────
+  // The rule itself, its normalisation and the reasoning behind every exemption live with
+  // checkTwinDrift() above. It runs on the in-memory map like every other rule here, which is
+  // what lets --self-test inject a one-sided edit and prove the gate fails on it.
+  errors.push(...checkTwinDrift(files[TWIN_JSX], files[TWIN_COMP]));
 
   // No going back to in-browser compilation. A text/babel tag on a page would
   // load-bearing-ly do NOTHING now (babel-standalone is not served), and a
@@ -1037,6 +1212,107 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: unresolved conflict hunks are refused, marker lookalikes are not");
+
+  // ── The twin-drift rule ────────────────────────────────────────────────────
+  // This rule is a NORMALISER wrapped around a compare, which gives it two ways to be useless
+  // and both are silent: normalise too much and it compares nothing, normalise too little and
+  // it fires on a clean tree until someone deletes it. So prove all four directions.
+  //
+  // QUIET on the pristine repo. Asserted explicitly rather than trusted to the overall run,
+  // because this is the direction that decides whether the rule survives its first month.
+  const twinNoise = run(load()).filter((e) => e.includes("twin drift"));
+  if (twinNoise.length) {
+    console.error("self-test FAILED: the pristine twins do not pass the drift check — the three "
+      + "legitimate dialect differences (or the blank-line/comment exemptions) are not being "
+      + "normalised:");
+    for (const e of twinNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  // FIRES on a changed line — the ordinary case: someone edits the .js and forgets the .jsx,
+  // or vice versa. A string literal, because that is a change no lint of either file can see.
+  const twinChanged = load();
+  const twinBanner = 'console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");';
+  if (!twinChanged[TWIN_COMP].includes(twinBanner)) {
+    console.error("self-test: twin-drift fixture line not found in " + TWIN_COMP + " — update the self-test");
+    process.exit(1);
+  }
+  twinChanged[TWIN_COMP] = twinChanged[TWIN_COMP].replace(twinBanner,
+    'console.log("[StructureStudio] single-tenant build");');
+  {
+    const hits = run(twinChanged).filter((e) => e.includes("twin drift"));
+    if (!hits.length) {
+      console.error("self-test FAILED: a changed line in " + TWIN_COMP + " was not caught — the two "
+        + "twins would ship different code with every lint and every artifact check passing");
+      process.exit(1);
+    }
+    // Naming the region is the rule's whole value: a 14,000-line "these files differ" is a
+    // second job for the reader, not a finding. Both files and both line numbers must be there.
+    if (!hits.some((e) => e.includes(TWIN_JSX + ":") && e.includes(TWIN_COMP + ":")
+        && e.includes("single-tenant build"))) {
+      console.error("self-test FAILED: the twin-drift report does not name both sides of the "
+        + "drifting region with line numbers and an excerpt. It said:");
+      for (const e of hits) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // FIRES on an INSERTION, and reports it as ONE region. A plain index compare would call every
+  // remaining line drifted; the look-ahead resync is what keeps the output readable, so assert
+  // the count rather than merely that something fired.
+  const twinInserted = load();
+  const twinAnchor = "const SUPABASE_URL = \"https://jzeamjbhdrsbygdnphbm.supabase.co\";";
+  if (!twinInserted[TWIN_JSX].includes(twinAnchor)) {
+    console.error("self-test: twin-drift insertion anchor not found in " + TWIN_JSX + " — update the self-test");
+    process.exit(1);
+  }
+  twinInserted[TWIN_JSX] = twinInserted[TWIN_JSX].replace(twinAnchor,
+    "const SS_TWIN_SELFTEST_ONLY = 1;\n" + twinAnchor);
+  {
+    const hits = run(twinInserted).filter((e) => e.includes("twin drift"));
+    if (!hits.length) {
+      console.error("self-test FAILED: a line added to " + TWIN_JSX + " only was not caught");
+      process.exit(1);
+    }
+    if (hits.length !== 1) {
+      console.error(`self-test FAILED: one inserted line produced ${hits.length} drift region(s) — `
+        + "the resync is not working, and a report that flags the rest of the file is a report "
+        + "nobody reads. It said:");
+      for (const e of hits) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // QUIET on each legitimate difference, exercised rather than merely present in the tree.
+  // A rule that flags the module top, the export keyword, a moved comment or a blank line
+  // fails on the first honest mirror edit and gets deleted; these are the shapes CLAUDE.md
+  // explicitly permits.
+  const twinLegit = load();
+  twinLegit[TWIN_JSX] = twinLegit[TWIN_JSX]
+    .replace("import { createPortal } from \"react-dom\";", "import { createPortal, flushSync } from \"react-dom\";")
+    .replace(twinAnchor, "// a fresh comment, on the .jsx side only\n\n\n" + twinAnchor);
+  twinLegit[TWIN_COMP] = twinLegit[TWIN_COMP]
+    .replace("const { createPortal } = ReactDOM;", "const { createPortal, flushSync } = ReactDOM;");
+  if (twinLegit[TWIN_JSX] === load()[TWIN_JSX] || twinLegit[TWIN_COMP] === load()[TWIN_COMP]) {
+    console.error("self-test: the legitimate-difference fixtures did not apply — update the self-test");
+    process.exit(1);
+  }
+  {
+    const noise = run(twinLegit).filter((e) => e.includes("twin drift"));
+    if (noise.length) {
+      console.error("self-test FAILED: a legitimate dialect difference (import vs global destructure) "
+        + "or a comment/blank-line-only edit tripped the twin-drift rule:");
+      for (const e of noise) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // And the vacuity direction, which is how this rule would fail SILENTLY: a normaliser that
+  // dropped everything would compare two empty lists and pass forever.
+  if (!checkTwinDrift("// only a comment\n", "// only a comment\n")
+      .some((e) => e.includes("stopped seeing most of the file"))) {
+    console.error("self-test FAILED: twinBody() reducing a file to nothing did not trip the vacuity "
+      + "guard — the drift check could compare zero lines and report two identical twins");
+    process.exit(1);
+  }
+  console.log("self-test passed: the twins must not drift — a changed line and a one-sided insertion "
+    + "are both caught and located, while the module top, comments and blank lines stay quiet");
 
   // ── The boot-guard lock ────────────────────────────────────────────────────
   // Two regexes that never match are indistinguishable from three healthy pages, and this rule

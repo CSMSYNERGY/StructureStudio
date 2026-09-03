@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 3f366c97a9ad)
+// GENERATED FILE — do not edit. Compiled from admin.app.jsx (sha256 e7537fea0242)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -430,12 +430,12 @@ function api(_x, _x2, _x3) {
   return _api.apply(this, arguments);
 } // ── CSV helpers (RFC-4180-ish) ──────────────────────────────────────────────
 function _api() {
-  _api = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee15(action, password, body) {
+  _api = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee17(action, password, body) {
     var _yield$sb$functions$i, data, error, msg, ctx, b;
-    return _regeneratorRuntime().wrap(function _callee15$(_context15) {
-      while (1) switch (_context15.prev = _context15.next) {
+    return _regeneratorRuntime().wrap(function _callee17$(_context17) {
+      while (1) switch (_context17.prev = _context17.next) {
         case 0:
-          _context15.next = 2;
+          _context17.next = 2;
           return sb.functions.invoke("admin-catalog", {
             body: _objectSpread({
               action: action,
@@ -443,11 +443,11 @@ function _api() {
             }, body || {})
           });
         case 2:
-          _yield$sb$functions$i = _context15.sent;
+          _yield$sb$functions$i = _context17.sent;
           data = _yield$sb$functions$i.data;
           error = _yield$sb$functions$i.error;
           if (!error) {
-            _context15.next = 19;
+            _context17.next = 19;
             break;
           }
           // supabase-js wraps any non-2xx response in a FunctionsHttpError whose .message is the
@@ -455,38 +455,38 @@ function _api() {
           // function sent is on error.context (the raw Response) — read it so the operator sees
           // the actual reason (e.g. "No Supabase user with email …. Create the login first").
           msg = error.message || "request failed";
-          _context15.prev = 7;
+          _context17.prev = 7;
           ctx = error.context;
           if (!(ctx && typeof ctx.json === "function")) {
-            _context15.next = 14;
+            _context17.next = 14;
             break;
           }
-          _context15.next = 12;
+          _context17.next = 12;
           return (typeof ctx.clone === "function" ? ctx.clone() : ctx).json();
         case 12:
-          b = _context15.sent;
+          b = _context17.sent;
           if (b && b.error) msg = b.error;
         case 14:
-          _context15.next = 18;
+          _context17.next = 18;
           break;
         case 16:
-          _context15.prev = 16;
-          _context15.t0 = _context15["catch"](7);
+          _context17.prev = 16;
+          _context17.t0 = _context17["catch"](7);
         case 18:
           throw new Error(msg);
         case 19:
           if (!(data && data.error)) {
-            _context15.next = 21;
+            _context17.next = 21;
             break;
           }
           throw new Error(data.error);
         case 21:
-          return _context15.abrupt("return", data);
+          return _context17.abrupt("return", data);
         case 22:
         case "end":
-          return _context15.stop();
+          return _context17.stop();
       }
-    }, _callee15, null, [[7, 16]]);
+    }, _callee17, null, [[7, 16]]);
   }));
   return _api.apply(this, arguments);
 }
@@ -678,75 +678,100 @@ function AdminApp() {
     _useState60 = _slicedToArray(_useState59, 2),
     billUntil = _useState60[0],
     setBillUntil = _useState60[1];
-  // Billable features, from billing_plans via list_clients — never hardcoded here.
-  var _useState61 = useState([]),
+  // Card payments (174): the tenant's master switch + the builder's OWN Fiserv/CardConnect
+  // merchant id. Read on demand (get_payments), never carried in the clients list — a MID
+  // names somebody else's bank account, so it loads only for the builder being looked at.
+  var _useState61 = useState(false),
     _useState62 = _slicedToArray(_useState61, 2),
-    features = _useState62[0],
-    setFeatures = _useState62[1];
-  var _useState63 = useState(false),
+    payOpen = _useState62[0],
+    setPayOpen = _useState62[1];
+  var _useState63 = useState(null),
     _useState64 = _slicedToArray(_useState63, 2),
-    linkOpen = _useState64[0],
-    setLinkOpen = _useState64[1];
-  var _useState65 = useState(""),
+    payLoaded = _useState64[0],
+    setPayLoaded = _useState64[1]; // null=unread · {paymentsEnabled,merchid} · {error}
+  var _useState65 = useState(false),
     _useState66 = _slicedToArray(_useState65, 2),
-    ownerEmail = _useState66[0],
-    setOwnerEmail = _useState66[1];
-  var _useState67 = useState("owner"),
+    payEnabled = _useState66[0],
+    setPayEnabled = _useState66[1];
+  var _useState67 = useState(""),
     _useState68 = _slicedToArray(_useState67, 2),
-    linkRole = _useState68[0],
-    setLinkRole = _useState68[1];
-  var _useState69 = useState(null),
+    payMerchid = _useState68[0],
+    setPayMerchid = _useState68[1];
+  // Deliberate friction: switching payments ON requires ticking this first. The field is not
+  // a preference — it decides whose account a customer's card payment lands in.
+  var _useState69 = useState(false),
     _useState70 = _slicedToArray(_useState69, 2),
-    linkResult = _useState70[0],
-    setLinkResult = _useState70[1]; // { email, client, roleLabel, created, emailSent, setupLink, movedFrom }
-  var _useState71 = useState(null),
+    payConfirm = _useState70[0],
+    setPayConfirm = _useState70[1];
+  // Billable features, from billing_plans via list_clients — never hardcoded here.
+  var _useState71 = useState([]),
     _useState72 = _slicedToArray(_useState71, 2),
-    reassignFrom = _useState72[0],
-    setReassignFrom = _useState72[1]; // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
-  var _useState73 = useState(function () {
-      return new Set();
-    }),
+    features = _useState72[0],
+    setFeatures = _useState72[1];
+  var _useState73 = useState(false),
     _useState74 = _slicedToArray(_useState73, 2),
-    itemSel = _useState74[0],
-    setItemSel = _useState74[1]; // staged layout-item picks (applied together on Save)
-  var itemsDirty = useRef(false); // true while itemSel holds unsaved ticks — see the re-sync effect below
-  var _useState75 = useState(false),
+    linkOpen = _useState74[0],
+    setLinkOpen = _useState74[1];
+  var _useState75 = useState(""),
     _useState76 = _slicedToArray(_useState75, 2),
-    delOpen = _useState76[0],
-    setDelOpen = _useState76[1];
-  var _useState77 = useState(""),
+    ownerEmail = _useState76[0],
+    setOwnerEmail = _useState76[1];
+  var _useState77 = useState("owner"),
     _useState78 = _slicedToArray(_useState77, 2),
-    delConfirm = _useState78[0],
-    setDelConfirm = _useState78[1];
-  // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
+    linkRole = _useState78[0],
+    setLinkRole = _useState78[1];
   var _useState79 = useState(null),
     _useState80 = _slicedToArray(_useState79, 2),
-    emailSender = _useState80[0],
-    setEmailSender = _useState80[1]; // null=unloaded · {connected,senderEmail} · {error}
-  var _useState81 = useState(false),
+    linkResult = _useState80[0],
+    setLinkResult = _useState80[1]; // { email, client, roleLabel, created, emailSent, setupLink, movedFrom }
+  var _useState81 = useState(null),
     _useState82 = _slicedToArray(_useState81, 2),
-    emailOpen = _useState82[0],
-    setEmailOpen = _useState82[1];
-  var _useState83 = useState("carolyn@csmsynergy.com"),
+    reassignFrom = _useState82[0],
+    setReassignFrom = _useState82[1]; // email already linked elsewhere: { email, role, fromClient } — drives the one-click Reassign prompt
+  var _useState83 = useState(function () {
+      return new Set();
+    }),
     _useState84 = _slicedToArray(_useState83, 2),
-    emailAddr = _useState84[0],
-    setEmailAddr = _useState84[1];
-  var _useState85 = useState(""),
+    itemSel = _useState84[0],
+    setItemSel = _useState84[1]; // staged layout-item picks (applied together on Save)
+  var itemsDirty = useRef(false); // true while itemSel holds unsaved ticks — see the re-sync effect below
+  var _useState85 = useState(false),
     _useState86 = _slicedToArray(_useState85, 2),
-    emailPwd = _useState86[0],
-    setEmailPwd = _useState86[1];
-  var _useState87 = useState(false),
+    delOpen = _useState86[0],
+    setDelOpen = _useState86[1];
+  var _useState87 = useState(""),
     _useState88 = _slicedToArray(_useState87, 2),
-    emailBusy = _useState88[0],
-    setEmailBusy = _useState88[1];
-  var _useState89 = useState(""),
+    delConfirm = _useState88[0],
+    setDelConfirm = _useState88[1];
+  // Operator-global email sender (Supabase Auth custom SMTP → a Google account).
+  var _useState89 = useState(null),
     _useState90 = _slicedToArray(_useState89, 2),
-    emailTestTo = _useState90[0],
-    setEmailTestTo = _useState90[1]; // recipient for the "Send test email" button (must be an existing login)
+    emailSender = _useState90[0],
+    setEmailSender = _useState90[1]; // null=unloaded · {connected,senderEmail} · {error}
   var _useState91 = useState(false),
     _useState92 = _slicedToArray(_useState91, 2),
-    emailTestBusy = _useState92[0],
-    setEmailTestBusy = _useState92[1];
+    emailOpen = _useState92[0],
+    setEmailOpen = _useState92[1];
+  var _useState93 = useState("carolyn@csmsynergy.com"),
+    _useState94 = _slicedToArray(_useState93, 2),
+    emailAddr = _useState94[0],
+    setEmailAddr = _useState94[1];
+  var _useState95 = useState(""),
+    _useState96 = _slicedToArray(_useState95, 2),
+    emailPwd = _useState96[0],
+    setEmailPwd = _useState96[1];
+  var _useState97 = useState(false),
+    _useState98 = _slicedToArray(_useState97, 2),
+    emailBusy = _useState98[0],
+    setEmailBusy = _useState98[1];
+  var _useState99 = useState(""),
+    _useState100 = _slicedToArray(_useState99, 2),
+    emailTestTo = _useState100[0],
+    setEmailTestTo = _useState100[1]; // recipient for the "Send test email" button (must be an existing login)
+  var _useState101 = useState(false),
+    _useState102 = _slicedToArray(_useState101, 2),
+    emailTestBusy = _useState102[0],
+    setEmailTestBusy = _useState102[1];
 
   // Auto-dismiss clears only the message it announced: the timer captures its own m and
   // the functional update checks identity, so a newer message flashed inside the 2.5s
@@ -998,6 +1023,14 @@ function AdminApp() {
             setDelOpen(false);
             setDelConfirm(""); // close any open delete confirmation when switching clients
             setBillOpen(false);
+            // Close and BLANK the payments panel on every builder switch. Its two fields are read
+            // per-tenant, so leaving one builder's merchant id on screen under another builder's
+            // name is the one mistake this card must never make.
+            setPayOpen(false);
+            setPayLoaded(null);
+            setPayEnabled(false);
+            setPayMerchid("");
+            setPayConfirm(false);
             // Seed the billing editor from the list row so it opens showing what is actually set.
             row = (freshClients || clients).find(function (c) {
               return c.client_id === cid;
@@ -1010,36 +1043,36 @@ function AdminApp() {
             setBillFeat(scoped);
             setBillUntil(row !== null && row !== void 0 && row.exemptUntil ? String(row.exemptUntil).slice(0, 10) : "");
             if (cid) {
-              _context6.next = 20;
+              _context6.next = 25;
               break;
             }
             return _context6.abrupt("return");
-          case 20:
+          case 25:
             setBusy(true);
-            _context6.prev = 21;
+            _context6.prev = 26;
             _context6.t0 = setCat;
-            _context6.next = 25;
+            _context6.next = 30;
             return api("get_client_catalog", pwd, {
               clientId: cid
             });
-          case 25:
+          case 30:
             _context6.t1 = _context6.sent;
             (0, _context6.t0)(_context6.t1);
-            _context6.next = 32;
+            _context6.next = 37;
             break;
-          case 29:
-            _context6.prev = 29;
-            _context6.t2 = _context6["catch"](21);
+          case 34:
+            _context6.prev = 34;
+            _context6.t2 = _context6["catch"](26);
             flash({
               err: _context6.t2.message
             });
-          case 32:
+          case 37:
             setBusy(false);
-          case 33:
+          case 38:
           case "end":
             return _context6.stop();
         }
-      }, _callee6, null, [[21, 29]]);
+      }, _callee6, null, [[26, 34]]);
     }));
     return function loadClient(_x4, _x5) {
       return _ref8.apply(this, arguments);
@@ -1276,10 +1309,139 @@ function AdminApp() {
       return _ref11.apply(this, arguments);
     };
   }();
+
+  // ── Card payments (174) ───────────────────────────────────────────────────────────
+  // Read the tenant's live pair. Not folded into loadClient: the values only matter when
+  // somebody opens this card, and one builder's merchant id should not sit in the page's
+  // memory because an operator clicked through the builder list.
+  var loadPayments = /*#__PURE__*/function () {
+    var _ref12 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee9(cid) {
+      var r;
+      return _regeneratorRuntime().wrap(function _callee9$(_context9) {
+        while (1) switch (_context9.prev = _context9.next) {
+          case 0:
+            setPayLoaded(null);
+            _context9.prev = 1;
+            _context9.next = 4;
+            return api("get_payments", pwd, {
+              clientId: cid
+            });
+          case 4:
+            r = _context9.sent;
+            setPayLoaded(r);
+            setPayEnabled(Boolean(r.paymentsEnabled));
+            setPayMerchid(String(r.merchid || ""));
+            setPayConfirm(false);
+            _context9.next = 14;
+            break;
+          case 11:
+            _context9.prev = 11;
+            _context9.t0 = _context9["catch"](1);
+            setPayLoaded({
+              error: _context9.t0.message
+            });
+          case 14:
+          case "end":
+            return _context9.stop();
+        }
+      }, _callee9, null, [[1, 11]]);
+    }));
+    return function loadPayments(_x6) {
+      return _ref12.apply(this, arguments);
+    };
+  }();
+  var togglePayments = function togglePayments() {
+    var next = !payOpen;
+    setPayOpen(next);
+    if (next && sel) loadPayments(sel);
+  };
+  // Every check here is duplicated server-side (admin-catalog set_payments) and the server's
+  // copy is the control — this one exists so the operator is told before the round trip,
+  // never so the server can trust the browser.
+  var savePayments = /*#__PURE__*/function () {
+    var _ref13 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee10() {
+      var mid, r;
+      return _regeneratorRuntime().wrap(function _callee10$(_context10) {
+        while (1) switch (_context10.prev = _context10.next) {
+          case 0:
+            if (sel) {
+              _context10.next = 2;
+              break;
+            }
+            return _context10.abrupt("return");
+          case 2:
+            mid = payMerchid.trim();
+            if (!(mid && !/^[0-9]{12,16}$/.test(mid))) {
+              _context10.next = 6;
+              break;
+            }
+            flash({
+              err: "\"".concat(mid, "\" isn't a merchant id \u2014 12\u201316 digits and nothing else. Copy it exactly from this builder's Fiserv boarding paperwork; don't retype it.")
+            });
+            return _context10.abrupt("return");
+          case 6:
+            if (!(payEnabled && !mid)) {
+              _context10.next = 9;
+              break;
+            }
+            flash({
+              err: "Add this builder's own merchant id before switching payments on — enabled with no id sends their customers' payments to the wrong account."
+            });
+            return _context10.abrupt("return");
+          case 9:
+            if (!(payEnabled && !payConfirm)) {
+              _context10.next = 12;
+              break;
+            }
+            flash({
+              err: "Tick the confirmation first. This decides whose bank account customer card payments land in."
+            });
+            return _context10.abrupt("return");
+          case 12:
+            setBusy(true);
+            setMsg(null);
+            _context10.prev = 14;
+            _context10.next = 17;
+            return api("set_payments", pwd, {
+              clientId: sel,
+              paymentsEnabled: payEnabled,
+              merchid: mid
+            });
+          case 17:
+            r = _context10.sent;
+            setPayLoaded({
+              paymentsEnabled: r.paymentsEnabled,
+              merchid: r.merchid
+            });
+            setPayMerchid(String(r.merchid || ""));
+            setPayConfirm(false);
+            flash({
+              ok: r.note || "Saved."
+            });
+            _context10.next = 27;
+            break;
+          case 24:
+            _context10.prev = 24;
+            _context10.t0 = _context10["catch"](14);
+            flash({
+              err: _context10.t0.message
+            });
+          case 27:
+            setBusy(false);
+          case 28:
+          case "end":
+            return _context10.stop();
+        }
+      }, _callee10, null, [[14, 24]]);
+    }));
+    return function savePayments() {
+      return _ref13.apply(this, arguments);
+    };
+  }();
   // reassign=false → normal link; reassign=true → move a login already mapped to another
   // client (the backend refuses to silently re-home one without this explicit flag).
   var linkOwner = /*#__PURE__*/function () {
-    var _ref12 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee9() {
+    var _ref14 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee11() {
       var reassign,
         email,
         r,
@@ -1287,23 +1449,23 @@ function AdminApp() {
         movedFrom,
         errMsg,
         m,
-        _args9 = arguments;
-      return _regeneratorRuntime().wrap(function _callee9$(_context9) {
-        while (1) switch (_context9.prev = _context9.next) {
+        _args11 = arguments;
+      return _regeneratorRuntime().wrap(function _callee11$(_context11) {
+        while (1) switch (_context11.prev = _context11.next) {
           case 0:
-            reassign = _args9.length > 0 && _args9[0] !== undefined ? _args9[0] : false;
+            reassign = _args11.length > 0 && _args11[0] !== undefined ? _args11[0] : false;
             if (!(!sel || !ownerEmail.trim())) {
-              _context9.next = 3;
+              _context11.next = 3;
               break;
             }
-            return _context9.abrupt("return");
+            return _context11.abrupt("return");
           case 3:
             setBusy(true);
             setMsg(null);
             setLinkResult(null);
-            _context9.prev = 6;
+            _context11.prev = 6;
             email = ownerEmail.trim();
-            _context9.next = 10;
+            _context11.next = 10;
             return api("link_owner", pwd, _objectSpread({
               clientId: sel,
               email: email,
@@ -1313,7 +1475,7 @@ function AdminApp() {
               reassign: true
             } : {}));
           case 10:
-            r = _context9.sent;
+            r = _context11.sent;
             roleLabel = r && r.role === "user" ? "team member (Designs & Leads only)" : "admin";
             movedFrom = reassign && reassignFrom ? reassignFrom.fromClient : null; // keep the panel open so the operator can copy the setup link
             setLinkResult({
@@ -1330,15 +1492,15 @@ function AdminApp() {
             flash({
               ok: "\"".concat(email, "\" ").concat(movedFrom ? "reassigned from \"".concat(movedFrom, "\" to") : "linked to", " \"").concat(sel, "\" as ").concat(roleLabel, ".")
             });
-            _context9.next = 24;
+            _context11.next = 24;
             break;
           case 19:
-            _context9.prev = 19;
-            _context9.t0 = _context9["catch"](6);
+            _context11.prev = 19;
+            _context11.t0 = _context11["catch"](6);
             // Email already belongs to another tenant: rather than dead-end on the error, offer a
             // one-click Reassign. We key off the backend's stable "reassign:true" instruction and
             // pull the current client out of its message so the prompt can name it.
-            errMsg = _context9.t0 && _context9.t0.message || String(_context9.t0);
+            errMsg = _context11.t0 && _context11.t0.message || String(_context11.t0);
             if (/reassign\s*:\s*true/i.test(errMsg)) {
               // Tolerates BOTH wordings: the server said "client" before the 2026-08-02
               // builder rename, and an operator's browser can be running a cached page
@@ -1360,142 +1522,142 @@ function AdminApp() {
             setBusy(false);
           case 25:
           case "end":
-            return _context9.stop();
+            return _context11.stop();
         }
-      }, _callee9, null, [[6, 19]]);
+      }, _callee11, null, [[6, 19]]);
     }));
     return function linkOwner() {
-      return _ref12.apply(this, arguments);
+      return _ref14.apply(this, arguments);
     };
   }();
   // Operator hard-delete: server wipes the tenant + all its data (catalog,
   // designs, settings, logins, storage). Guarded by typing the builder id.
   var deleteClient = /*#__PURE__*/function () {
-    var _ref13 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee10() {
+    var _ref15 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee12() {
       var id, r, c, parts;
-      return _regeneratorRuntime().wrap(function _callee10$(_context10) {
-        while (1) switch (_context10.prev = _context10.next) {
+      return _regeneratorRuntime().wrap(function _callee12$(_context12) {
+        while (1) switch (_context12.prev = _context12.next) {
           case 0:
             id = sel;
             if (!(!id || delConfirm.trim() !== id)) {
-              _context10.next = 3;
+              _context12.next = 3;
               break;
             }
-            return _context10.abrupt("return");
+            return _context12.abrupt("return");
           case 3:
             setBusy(true);
             setMsg(null);
-            _context10.prev = 5;
-            _context10.next = 8;
+            _context12.prev = 5;
+            _context12.next = 8;
             return api("delete_client", pwd, {
               clientId: id,
               confirmClientId: delConfirm.trim()
             });
           case 8:
-            r = _context10.sent;
-            _context10.next = 11;
+            r = _context12.sent;
+            _context12.next = 11;
             return api("list_clients", pwd);
           case 11:
-            c = _context10.sent;
+            c = _context12.sent;
             setClients(c.clients || []);
             setFeatures(c.features || []);
             setDelOpen(false);
             setDelConfirm("");
             setSel("");
             setCat(null);
-            parts = r && r.deleted ? Object.entries(r.deleted).filter(function (_ref14) {
-              var _ref15 = _slicedToArray(_ref14, 2),
-                v = _ref15[1];
-              return v;
-            }).map(function (_ref16) {
+            parts = r && r.deleted ? Object.entries(r.deleted).filter(function (_ref16) {
               var _ref17 = _slicedToArray(_ref16, 2),
-                k = _ref17[0],
                 v = _ref17[1];
+              return v;
+            }).map(function (_ref18) {
+              var _ref19 = _slicedToArray(_ref18, 2),
+                k = _ref19[0],
+                v = _ref19[1];
               return "".concat(v, " ").concat(k);
             }).join(", ") : "";
             flash({
               ok: "Builder \"".concat(id, "\" deleted").concat(parts ? " (".concat(parts, ")") : "", ".")
             });
-            _context10.next = 25;
+            _context12.next = 25;
             break;
           case 22:
-            _context10.prev = 22;
-            _context10.t0 = _context10["catch"](5);
+            _context12.prev = 22;
+            _context12.t0 = _context12["catch"](5);
             flash({
-              err: _context10.t0.message
+              err: _context12.t0.message
             });
           case 25:
             setBusy(false);
           case 26:
           case "end":
-            return _context10.stop();
+            return _context12.stop();
         }
-      }, _callee10, null, [[5, 22]]);
+      }, _callee12, null, [[5, 22]]);
     }));
     return function deleteClient() {
-      return _ref13.apply(this, arguments);
+      return _ref15.apply(this, arguments);
     };
   }();
   var act = /*#__PURE__*/function () {
-    var _ref18 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee11(action, body, ok) {
+    var _ref20 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee13(action, body, ok) {
       var m;
-      return _regeneratorRuntime().wrap(function _callee11$(_context11) {
-        while (1) switch (_context11.prev = _context11.next) {
+      return _regeneratorRuntime().wrap(function _callee13$(_context13) {
+        while (1) switch (_context13.prev = _context13.next) {
           case 0:
             setBusy(true);
             setMsg(null);
-            _context11.prev = 2;
-            _context11.next = 5;
+            _context13.prev = 2;
+            _context13.next = 5;
             return api(action, pwd, body);
           case 5:
-            _context11.next = 12;
+            _context13.next = 12;
             break;
           case 7:
-            _context11.prev = 7;
-            _context11.t0 = _context11["catch"](2);
+            _context13.prev = 7;
+            _context13.t0 = _context13["catch"](2);
             flash({
-              err: _context11.t0.message
+              err: _context13.t0.message
             });
             setBusy(false);
-            return _context11.abrupt("return");
+            return _context13.abrupt("return");
           case 12:
             flash({
               ok: ok || "Saved"
             }); // write succeeded — report it BEFORE refreshing
-            _context11.prev = 13;
+            _context13.prev = 13;
             if (!sel) {
-              _context11.next = 20;
+              _context13.next = 20;
               break;
             }
-            _context11.t1 = setCat;
-            _context11.next = 18;
+            _context13.t1 = setCat;
+            _context13.next = 18;
             return api("get_client_catalog", pwd, {
               clientId: sel
             });
           case 18:
-            _context11.t2 = _context11.sent;
-            (0, _context11.t1)(_context11.t2);
+            _context13.t2 = _context13.sent;
+            (0, _context13.t1)(_context13.t2);
           case 20:
-            _context11.next = 22;
+            _context13.next = 22;
             return api("get_master", pwd);
           case 22:
-            m = _context11.sent;
+            m = _context13.sent;
             setMaster(m); // corrupt the on-screen pill state
-            _context11.next = 28;
+            _context13.next = 28;
             break;
           case 26:
-            _context11.prev = 26;
-            _context11.t3 = _context11["catch"](13);
+            _context13.prev = 26;
+            _context13.t3 = _context13["catch"](13);
           case 28:
             setBusy(false);
           case 29:
           case "end":
-            return _context11.stop();
+            return _context13.stop();
         }
-      }, _callee11, null, [[2, 7], [13, 26]]);
+      }, _callee13, null, [[2, 7], [13, 26]]);
     }));
-    return function act(_x6, _x7, _x8) {
-      return _ref18.apply(this, arguments);
+    return function act(_x7, _x8, _x9) {
+      return _ref20.apply(this, arguments);
     };
   }();
 
@@ -1540,16 +1702,16 @@ function AdminApp() {
   // (enable newly-ticked, disable newly-unticked) and refresh once at the end — so the
   // operator ticks everything and clicks Save once instead of one request per pill.
   var saveItems = /*#__PURE__*/function () {
-    var _ref19 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee12() {
+    var _ref21 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee14() {
       var saved, keys, toEnable, toDisable, total, _iterator, _step, k, _iterator2, _step2, _k;
-      return _regeneratorRuntime().wrap(function _callee12$(_context12) {
-        while (1) switch (_context12.prev = _context12.next) {
+      return _regeneratorRuntime().wrap(function _callee14$(_context14) {
+        while (1) switch (_context14.prev = _context14.next) {
           case 0:
             if (!(!sel || !cat || !master)) {
-              _context12.next = 2;
+              _context14.next = 2;
               break;
             }
-            return _context12.abrupt("return");
+            return _context14.abrupt("return");
           case 2:
             saved = new Set((cat.clientLayoutItems || []).filter(function (i) {
               return i.active;
@@ -1568,88 +1730,88 @@ function AdminApp() {
             total = toEnable.length + toDisable.length; // Staged set matches what's saved (ticks toggled back, or none touched): nothing
             // unsaved left to protect, so let the next catalog refresh re-sync again.
             if (!(total === 0)) {
-              _context12.next = 11;
+              _context14.next = 11;
               break;
             }
             itemsDirty.current = false;
             flash({
               ok: "No changes to save."
             });
-            return _context12.abrupt("return");
+            return _context14.abrupt("return");
           case 11:
             setBusy(true);
             setMsg(null);
-            _context12.prev = 13;
+            _context14.prev = 13;
             _iterator = _createForOfIteratorHelper(toEnable);
-            _context12.prev = 15;
+            _context14.prev = 15;
             _iterator.s();
           case 17:
             if ((_step = _iterator.n()).done) {
-              _context12.next = 23;
+              _context14.next = 23;
               break;
             }
             k = _step.value;
-            _context12.next = 21;
+            _context14.next = 21;
             return api("toggle_item", pwd, {
               clientId: sel,
               itemKey: k,
               active: true
             });
           case 21:
-            _context12.next = 17;
+            _context14.next = 17;
             break;
           case 23:
-            _context12.next = 28;
+            _context14.next = 28;
             break;
           case 25:
-            _context12.prev = 25;
-            _context12.t0 = _context12["catch"](15);
-            _iterator.e(_context12.t0);
+            _context14.prev = 25;
+            _context14.t0 = _context14["catch"](15);
+            _iterator.e(_context14.t0);
           case 28:
-            _context12.prev = 28;
+            _context14.prev = 28;
             _iterator.f();
-            return _context12.finish(28);
+            return _context14.finish(28);
           case 31:
             _iterator2 = _createForOfIteratorHelper(toDisable);
-            _context12.prev = 32;
+            _context14.prev = 32;
             _iterator2.s();
           case 34:
             if ((_step2 = _iterator2.n()).done) {
-              _context12.next = 40;
+              _context14.next = 40;
               break;
             }
             _k = _step2.value;
-            _context12.next = 38;
+            _context14.next = 38;
             return api("toggle_item", pwd, {
               clientId: sel,
               itemKey: _k,
               active: false
             });
           case 38:
-            _context12.next = 34;
+            _context14.next = 34;
             break;
           case 40:
-            _context12.next = 45;
+            _context14.next = 45;
             break;
           case 42:
-            _context12.prev = 42;
-            _context12.t1 = _context12["catch"](32);
-            _iterator2.e(_context12.t1);
+            _context14.prev = 42;
+            _context14.t1 = _context14["catch"](32);
+            _iterator2.e(_context14.t1);
           case 45:
-            _context12.prev = 45;
+            _context14.prev = 45;
             _iterator2.f();
-            return _context12.finish(45);
+            return _context14.finish(45);
           case 48:
-            _context12.next = 55;
+            _context14.next = 55;
             break;
           case 50:
-            _context12.prev = 50;
-            _context12.t2 = _context12["catch"](13);
+            _context14.prev = 50;
+            _context14.t2 = _context14["catch"](13);
             flash({
-              err: _context12.t2.message
+              err: _context14.t2.message
             });
             setBusy(false);
-            return _context12.abrupt("return");
+            return _context14.abrupt("return");
           case 55:
             // Writes landed: the staging is no longer "unsaved", so clear the dirty flag BEFORE
             // the refresh below — that refresh is the one cat change that must re-sync itemSel.
@@ -1657,36 +1819,36 @@ function AdminApp() {
             flash({
               ok: "Saved ".concat(total, " change").concat(total === 1 ? "" : "s", ".")
             });
-            _context12.prev = 57;
-            _context12.t3 = setCat;
-            _context12.next = 61;
+            _context14.prev = 57;
+            _context14.t3 = setCat;
+            _context14.next = 61;
             return api("get_client_catalog", pwd, {
               clientId: sel
             });
           case 61:
-            _context12.t4 = _context12.sent;
-            (0, _context12.t3)(_context12.t4);
-            _context12.t5 = setMaster;
-            _context12.next = 66;
+            _context14.t4 = _context14.sent;
+            (0, _context14.t3)(_context14.t4);
+            _context14.t5 = setMaster;
+            _context14.next = 66;
             return api("get_master", pwd);
           case 66:
-            _context12.t6 = _context12.sent;
-            (0, _context12.t5)(_context12.t6);
-            _context12.next = 72;
+            _context14.t6 = _context14.sent;
+            (0, _context14.t5)(_context14.t6);
+            _context14.next = 72;
             break;
           case 70:
-            _context12.prev = 70;
-            _context12.t7 = _context12["catch"](57);
+            _context14.prev = 70;
+            _context14.t7 = _context14["catch"](57);
           case 72:
             setBusy(false);
           case 73:
           case "end":
-            return _context12.stop();
+            return _context14.stop();
         }
-      }, _callee12, null, [[13, 50], [15, 25, 28, 31], [32, 42, 45, 48], [57, 70]]);
+      }, _callee14, null, [[13, 50], [15, 25, 28, 31], [32, 42, 45, 48], [57, 70]]);
     }));
     return function saveItems() {
-      return _ref19.apply(this, arguments);
+      return _ref21.apply(this, arguments);
     };
   }();
   var ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
@@ -1728,36 +1890,36 @@ function AdminApp() {
     r.readAsDataURL(file);
   };
   var createStyle = /*#__PURE__*/function () {
-    var _ref20 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee13() {
+    var _ref22 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee15() {
       var imageUrl, up;
-      return _regeneratorRuntime().wrap(function _callee13$(_context13) {
-        while (1) switch (_context13.prev = _context13.next) {
+      return _regeneratorRuntime().wrap(function _callee15$(_context15) {
+        while (1) switch (_context15.prev = _context15.next) {
           case 0:
             if (!(!sel || !newStyleName.trim())) {
-              _context13.next = 2;
+              _context15.next = 2;
               break;
             }
-            return _context13.abrupt("return");
+            return _context15.abrupt("return");
           case 2:
             setBusy(true);
             setMsg(null);
-            _context13.prev = 4;
+            _context15.prev = 4;
             imageUrl = null;
             if (!newStyleImg) {
-              _context13.next = 11;
+              _context15.next = 11;
               break;
             }
-            _context13.next = 9;
+            _context15.next = 9;
             return api("upload_image", pwd, {
               clientId: sel,
               imageBase64: newStyleImg.base64,
               contentType: newStyleImg.contentType
             });
           case 9:
-            up = _context13.sent;
+            up = _context15.sent;
             imageUrl = up.url;
           case 11:
-            _context13.next = 13;
+            _context15.next = 13;
             return api("create_style", pwd, {
               clientId: sel,
               label: newStyleName.trim(),
@@ -1769,35 +1931,35 @@ function AdminApp() {
             setFileKey(function (k) {
               return k + 1;
             });
-            _context13.t0 = setCat;
-            _context13.next = 19;
+            _context15.t0 = setCat;
+            _context15.next = 19;
             return api("get_client_catalog", pwd, {
               clientId: sel
             });
           case 19:
-            _context13.t1 = _context13.sent;
-            (0, _context13.t0)(_context13.t1);
+            _context15.t1 = _context15.sent;
+            (0, _context15.t0)(_context15.t1);
             flash({
               ok: "Style created"
             });
-            _context13.next = 27;
+            _context15.next = 27;
             break;
           case 24:
-            _context13.prev = 24;
-            _context13.t2 = _context13["catch"](4);
+            _context15.prev = 24;
+            _context15.t2 = _context15["catch"](4);
             flash({
-              err: _context13.t2.message
+              err: _context15.t2.message
             });
           case 27:
             setBusy(false);
           case 28:
           case "end":
-            return _context13.stop();
+            return _context15.stop();
         }
-      }, _callee13, null, [[4, 24]]);
+      }, _callee15, null, [[4, 24]]);
     }));
     return function createStyle() {
-      return _ref20.apply(this, arguments);
+      return _ref22.apply(this, arguments);
     };
   }();
 
@@ -1850,35 +2012,35 @@ function AdminApp() {
     downloadFile("".concat(sel, "-pricing.csv"), toCSV(headers, rows));
   };
   var onUploadCsv = /*#__PURE__*/function () {
-    var _ref21 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee14(file) {
+    var _ref23 = _asyncToGenerator( /*#__PURE__*/_regeneratorRuntime().mark(function _callee16(file) {
       var matrix, header, lc, iStyle, iWidth, iLength, iPrice, iActive, reserved, labelToKey, colKey, rows, res, parts;
-      return _regeneratorRuntime().wrap(function _callee14$(_context14) {
-        while (1) switch (_context14.prev = _context14.next) {
+      return _regeneratorRuntime().wrap(function _callee16$(_context16) {
+        while (1) switch (_context16.prev = _context16.next) {
           case 0:
             if (!(!file || !sel)) {
-              _context14.next = 2;
+              _context16.next = 2;
               break;
             }
-            return _context14.abrupt("return");
+            return _context16.abrupt("return");
           case 2:
             setCsvBusy(true);
             setMsg(null);
             setCsvResult(null);
-            _context14.prev = 5;
+            _context16.prev = 5;
             if (!(file.size > 5000000)) {
-              _context14.next = 8;
+              _context16.next = 8;
               break;
             }
             throw new Error("CSV too large (max 5MB).");
           case 8:
-            _context14.t0 = parseCSV;
-            _context14.next = 11;
+            _context16.t0 = parseCSV;
+            _context16.next = 11;
             return file.text();
           case 11:
-            _context14.t1 = _context14.sent;
-            matrix = (0, _context14.t0)(_context14.t1);
+            _context16.t1 = _context16.sent;
+            matrix = (0, _context16.t0)(_context16.t1);
             if (!(matrix.length < 2)) {
-              _context14.next = 15;
+              _context16.next = 15;
               break;
             }
             throw new Error("CSV has no data rows.");
@@ -1891,7 +2053,7 @@ function AdminApp() {
             });
             iStyle = lc.indexOf("style"), iWidth = lc.indexOf("width"), iLength = lc.indexOf("length"), iPrice = lc.indexOf("price"), iActive = lc.indexOf("active");
             if (!(iStyle < 0 || iWidth < 0 || iLength < 0 || iPrice < 0)) {
-              _context14.next = 20;
+              _context16.next = 20;
               break;
             }
             throw new Error('CSV needs "style", "width", "length" and "price" columns.');
@@ -1919,46 +2081,46 @@ function AdminApp() {
                 inclusions: inclusions
               };
             });
-            _context14.next = 27;
+            _context16.next = 27;
             return api("import_pricing_csv", pwd, {
               clientId: sel,
               rows: rows
             });
           case 27:
-            res = _context14.sent;
+            res = _context16.sent;
             setCsvResult(res);
-            _context14.t2 = setCat;
-            _context14.next = 32;
+            _context16.t2 = setCat;
+            _context16.next = 32;
             return api("get_client_catalog", pwd, {
               clientId: sel
             });
           case 32:
-            _context14.t3 = _context14.sent;
-            (0, _context14.t2)(_context14.t3);
+            _context16.t3 = _context16.sent;
+            (0, _context16.t2)(_context16.t3);
             parts = [];
             if (res.created) parts.push("".concat(res.created, " added"));
             if (res.updated) parts.push("".concat(res.updated, " updated"));
             flash({
               ok: "Imported ".concat(res.imported || 0, " size(s)") + (parts.length ? " (".concat(parts.join(", "), ")") : "") + (res.skipped && res.skipped.length ? ", ".concat(res.skipped.length, " skipped") : "")
             });
-            _context14.next = 43;
+            _context16.next = 43;
             break;
           case 40:
-            _context14.prev = 40;
-            _context14.t4 = _context14["catch"](5);
+            _context16.prev = 40;
+            _context16.t4 = _context16["catch"](5);
             flash({
-              err: _context14.t4.message
+              err: _context16.t4.message
             });
           case 43:
             setCsvBusy(false);
           case 44:
           case "end":
-            return _context14.stop();
+            return _context16.stop();
         }
-      }, _callee14, null, [[5, 40]]);
+      }, _callee16, null, [[5, 40]]);
     }));
-    return function onUploadCsv(_x9) {
-      return _ref21.apply(this, arguments);
+    return function onUploadCsv(_x10) {
+      return _ref23.apply(this, arguments);
     };
   }();
   if (!authed) {
@@ -2073,6 +2235,11 @@ function AdminApp() {
     style: S.btn(sel ? "#F1F5F9" : "#F1F5F9", sel ? "#334155" : "#94A3B8"),
     title: sel ? "Billing posture for ".concat(sel) : "Select a builder first"
   }, billOpen ? "Cancel" : "Billing"), /*#__PURE__*/React.createElement("button", {
+    onClick: togglePayments,
+    disabled: !sel,
+    style: S.btn(sel ? "#FEF3C7" : "#F1F5F9", sel ? "#92400E" : "#94A3B8"),
+    title: sel ? "Card payments + merchant id for ".concat(sel) : "Select a builder first"
+  }, payOpen ? "Cancel" : "Card payments"), /*#__PURE__*/React.createElement("button", {
     onClick: function onClick() {
       return setDelOpen(function (o) {
         return !o;
@@ -2385,7 +2552,160 @@ function AdminApp() {
       marginTop: 6,
       color: "#991B1B"
     }
-  }, /*#__PURE__*/React.createElement("b", null, "Careful:"), " you are removing Non-billable. If ", sel, " has no active subscription they will be locked out of their portal the moment this saves. Set the discount first, have them subscribe, then remove the exemption."))), linkOpen && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("b", null, "Careful:"), " you are removing Non-billable. If ", sel, " has no active subscription they will be locked out of their portal the moment this saves. Set the discount first, have them subscribe, then remove the exemption."))), payOpen && /*#__PURE__*/React.createElement("div", {
+    style: _objectSpread(_objectSpread({}, S.card), {}, {
+      background: "#FFFBEB",
+      border: "1px solid #FDE68A"
+    })
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.h2
+  }, "\uD83D\uDCB3 Card payments \u2014 ", sel), !sel ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "#B91C1C"
+    }
+  }, "Select a builder above first.") : payLoaded === null ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "#92400E"
+    }
+  }, "Reading this builder's payment settings\u2026") : payLoaded.error ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "#B91C1C"
+    }
+  }, "Couldn't read their payment settings: ", payLoaded.error) : /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: "#78350F",
+      marginBottom: 12,
+      lineHeight: 1.55
+    }
+  }, /*#__PURE__*/React.createElement("b", null, sel, " boards and underwrites directly with Fiserv."), " The merchant id below is theirs \u2014 the money goes to ", /*#__PURE__*/React.createElement("b", null, "their"), " account and the chargeback liability is", /*#__PURE__*/React.createElement("b", null, " theirs"), ". We only pass the card through and keep a token plus the last 4 digits.", /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6
+    }
+  }, "Nothing here charges anybody. It is the switch the customer pay page, the card modal and the swipe reader all check before they will take a payment.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: "#334155",
+      background: "#FFF",
+      border: "1px solid #FDE68A",
+      borderRadius: 8,
+      padding: "9px 12px",
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("b", null, "Right now:"), " ", payLoaded.paymentsEnabled ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#15803D",
+      fontWeight: 700
+    }
+  }, "ON") : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#B45309",
+      fontWeight: 700
+    }
+  }, "OFF \u2014 this builder has no way to take a card"), " · ", /*#__PURE__*/React.createElement("b", null, "Merchant id:"), " ", payLoaded.merchid ? /*#__PURE__*/React.createElement("code", {
+    style: {
+      fontSize: 12.5
+    }
+  }, payLoaded.merchid) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#B45309"
+    }
+  }, "none set")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      flexWrap: "wrap",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: "#1E293B"
+    }
+  }, /*#__PURE__*/React.createElement("b", null, "Their merchant id"), /*#__PURE__*/React.createElement("input", {
+    value: payMerchid,
+    onChange: function onChange(e) {
+      setPayMerchid(e.target.value);
+      setPayConfirm(false);
+    },
+    inputMode: "numeric",
+    autoComplete: "off",
+    spellCheck: false,
+    placeholder: "12\u201316 digits",
+    title: "Paste it from their Fiserv/CardConnect boarding paperwork \u2014 do not retype it",
+    style: _objectSpread(_objectSpread({}, S.input), {}, {
+      width: 200,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace"
+    })
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      color: "#1E293B",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: payEnabled,
+    onChange: function onChange(e) {
+      setPayEnabled(e.target.checked);
+      setPayConfirm(false);
+    }
+  }), /*#__PURE__*/React.createElement("b", null, "Take card payments for this builder")), /*#__PURE__*/React.createElement("button", {
+    onClick: savePayments,
+    disabled: busy || payEnabled && !payConfirm,
+    style: S.btn(busy || payEnabled && !payConfirm ? "#9CA3AF" : "#B45309", "#FFF")
+  }, "Save payment settings")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "#78350F",
+      marginTop: 6
+    }
+  }, "Digits only \u2014 no spaces, dashes or letters. A mistyped id is not rejected by anyone downstream; it just sends the money somewhere else. Clearing the box removes the id."), payEnabled && /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 8,
+      marginTop: 12,
+      fontSize: 13,
+      color: "#7F1D1D",
+      background: "#FEF2F2",
+      border: "1px solid #FECACA",
+      borderRadius: 8,
+      padding: "10px 12px",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: payConfirm,
+    onChange: function onChange(e) {
+      return setPayConfirm(e.target.checked);
+    },
+    style: {
+      marginTop: 2
+    }
+  }), /*#__PURE__*/React.createElement("span", null, "I have checked this merchant id against ", /*#__PURE__*/React.createElement("b", null, sel), "'s own Fiserv boarding paperwork, character for character.", /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      marginTop: 2,
+      lineHeight: 1.45
+    }
+  }, "Once this is on, their customers' cards are charged to whatever account this id names. Nothing in the payment path will tell us it was the wrong builder."))), payLoaded.paymentsEnabled && !payEnabled && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "#B45309",
+      marginTop: 10,
+      lineHeight: 1.5
+    }
+  }, /*#__PURE__*/React.createElement("b", null, "Turning payments off."), " Their customers' pay page and the card modal stop working as soon as this saves. Payments already taken are unaffected."))), linkOpen && /*#__PURE__*/React.createElement("div", {
     style: _objectSpread(_objectSpread({}, S.card), {}, {
       background: "#EFF6FF",
       border: "1px solid #BFDBFE"

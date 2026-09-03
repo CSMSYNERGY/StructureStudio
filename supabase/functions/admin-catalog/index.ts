@@ -227,7 +227,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   // break-glass console out of every write while telling it the account is read-only.
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
-    "get_billing_overview",
+    "get_billing_overview", "get_payments",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -241,6 +241,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
          || String(action ?? "") === "wallet_set_limits")
         && !identity.canBill) {
       return json({ error: "This operator account cannot change billing." }, 403);
+    }
+    // set_payments charges nobody, so it is not "billing" in 056's sense — but it decides
+    // WHOSE BANK ACCOUNT a shopper's card lands in, which is the same class of mistake and a
+    // worse one to make quietly. Gated on the same money grant, deny-by-default, with its own
+    // sentence because "cannot change billing" would send an operator to the wrong screen.
+    // The ADMIN_PASSWORD break-glass path is untouched (it carries no operator row at all).
+    if (String(action ?? "") === "set_payments" && !identity.canBill) {
+      return json({ error: "This operator account cannot change payment routing." }, 403);
     }
   }
 
@@ -1015,6 +1023,124 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           note: live && live.length
             ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
             : "Saved.",
+        });
+      }
+      // ── card payments: the per-tenant merchant of record (migration 174) ──────────
+      // `client_settings.payments_online_enabled` + `.cardpointe_merchid` are what
+      // portal-payments and customer-pay gate every card charge on. Both columns shipped
+      // with 174 and, until these two actions existed, NOTHING could write them — turning a
+      // builder's pay surface on meant hand-written SQL, so the whole card path (customer
+      // pay-an-invoice, the builder card modal, the swipe reader) was unreachable for every
+      // tenant. This is that missing door, and it is deliberately the only one.
+      case "get_payments": {
+        // Per-tenant on purpose, rather than folded into list_clients: a MID identifies
+        // somebody else's bank account, and there is no reason for every operator page-load
+        // to carry one for every builder when the console shows one tenant at a time.
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+        const { data, error } = await sb.from("client_settings")
+          .select("payments_online_enabled, cardpointe_merchid")
+          .eq("client_id", clientId).maybeSingle();
+        if (error) throw error;
+        return json({
+          ok: true,
+          clientId,
+          paymentsEnabled: data?.payments_online_enabled === true,
+          merchid: data?.cardpointe_merchid ?? null,
+        });
+      }
+      case "set_payments": {
+        // ⚠️ WHAT THIS WRITES IS THE MERCHANT OF RECORD. Each builder boards and underwrites
+        // DIRECTLY with Fiserv, holds their own CardPointe MID and carries their own
+        // chargeback liability (174's own column comment, Kaylee McLaughlin 2026-08-28). The
+        // money lands in THEIR account; we pass the card through and keep a token + last 4.
+        // A wrong MID here does not fail — it succeeds, into a stranger's bank account. That
+        // is why every branch below refuses rather than repairs.
+        const clientId = await assertClient(sb, reqStr(p.clientId, "clientId"));
+
+        // The pair is meaningless half-stated, so the switch is never inferred from the
+        // presence of a merchid — the caller has to say which one it means.
+        if (typeof p.paymentsEnabled !== "boolean") {
+          throw new Error("paymentsEnabled must be true or false.");
+        }
+
+        const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
+        // undefined = leave the stored id alone (a plain on/off toggle); null or "" = clear it.
+        let merchid: string | null | undefined;
+        if (p.merchid !== undefined) {
+          if (p.merchid !== null && typeof p.merchid !== "string") {
+            // A 16-digit MID sent as a JSON *number* loses precision past 2^53 and arrives as
+            // a different, still-plausible merchant id. Refuse the type rather than coerce.
+            throw new Error("merchid must be sent as a string.");
+          }
+          const raw = String(p.merchid ?? "").trim();
+          if (!raw) {
+            merchid = null;
+          } else if (!/^[0-9]{12,16}$/.test(raw)) {
+            // SHAPE: digits only, 12–16 of them. A CardPointe MID is a 12-digit number
+            // (the gateway fixtures in _shared/cardpointe.test.ts are 12), and Fiserv has
+            // issued longer numeric ids on some front-ends — 16 leaves that headroom without
+            // ever accepting free text. NOTHING IS STRIPPED: "4900-0000-0101" and
+            // "4900 0000 0101" are refused, not silently repunctuated, because a value the
+            // operator never typed is exactly the class of change that must not happen
+            // quietly to the field that decides where money goes.
+            throw new Error(
+              `That doesn't look like a CardPointe merchant id: "${raw.slice(0, 40)}". ` +
+              "Expected 12–16 digits and nothing else — no spaces, dashes or letters. " +
+              "Copy it exactly from this builder's own Fiserv/CardConnect boarding paperwork.");
+          } else {
+            merchid = raw;
+          }
+          patch.cardpointe_merchid = merchid;
+        }
+
+        const { data: current, error: curErr } = await sb.from("client_settings")
+          .select("payments_online_enabled, cardpointe_merchid")
+          .eq("client_id", clientId).maybeSingle();
+        if (curErr) throw curErr;
+        const effectiveMerchid = merchid !== undefined ? merchid : (current?.cardpointe_merchid ?? null);
+
+        // ⛔ ENABLED WITH NO MID IS THE DANGEROUS STATE, NOT MERELY AN INCOMPLETE ONE.
+        // Both readers resolve `settings.cardpointe_merchid || CP_DEFAULT_MERCHID` — so a
+        // blank id does NOT refuse, it falls through to the deployment-wide CARDPOINTE_MERCHID
+        // and takes this builder's customers' money into OUR merchant account. Refusing at
+        // this door is the only place that pairing is checked.
+        if (p.paymentsEnabled === true && !effectiveMerchid) {
+          throw new Error(
+            "Add this builder's own CardPointe merchant id before switching payments on. " +
+            "Enabled with no MID is not a half-finished setting: portal-payments and customer-pay " +
+            "both fall back to the deployment-wide merchant id, so their customers' card payments " +
+            "would land in the wrong account rather than being refused.");
+        }
+        patch.payments_online_enabled = p.paymentsEnabled === true;
+
+        const { error: upErr } = await sb.from("client_settings").upsert(patch, { onConflict: "client_id" });
+        if (upErr) throw upErr;
+
+        // A DEDICATED audit row, on top of the generic operator one at the top of this
+        // function. That row records only that `set_payments` ran; when money has landed
+        // somewhere unexpected the question is which id it was pointed at, from what, and by
+        // whom — and the ADMIN_PASSWORD path writes no success row at all (adminGate audits
+        // only failures), so without this a break-glass change is invisible after the fact.
+        try {
+          await sb.from("admin_audit").insert({
+            action: "set_payments",
+            target_client_id: clientId,
+            actor_email: identity.via === "operator" ? identity.email : null,
+            actor_user_id: identity.via === "operator" ? identity.userId : null,
+            note: `via=${identity.via}`
+              + ` enabled ${current?.payments_online_enabled === true} -> ${patch.payments_online_enabled === true}`
+              + ` merchid ${current?.cardpointe_merchid || "(none)"} -> ${effectiveMerchid || "(none)"}`,
+          });
+        } catch (_e) { /* best-effort: never fail a completed write on a logging failure */ }
+
+        return json({
+          ok: true,
+          clientId,
+          paymentsEnabled: patch.payments_online_enabled === true,
+          merchid: effectiveMerchid,
+          note: patch.payments_online_enabled === true
+            ? `Card payments are ON for ${clientId}. Charges route to merchant id ${effectiveMerchid} — their Fiserv account, their chargeback liability.`
+            : `Card payments are OFF for ${clientId}. Their pay surface disappears; nothing already taken is affected.`,
         });
       }
       case "link_owner": {
