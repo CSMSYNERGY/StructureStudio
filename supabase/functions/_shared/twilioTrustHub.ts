@@ -93,6 +93,7 @@ async function call(
   method: "GET" | "POST" | "DELETE",
   url: string,
   form?: Record<string, string>,
+  extraHeaders?: Record<string, string>,
 ): Promise<any> {
   const pair = basicAuthPair();
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
@@ -106,6 +107,7 @@ async function call(
         Accept: "application/json",
         Authorization: `Basic ${btoa(`${pair.user}:${pair.pass}`)}`,
         ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        ...(extraHeaders ?? {}),
       },
       body: form ? new URLSearchParams(form).toString() : undefined,
     });
@@ -577,6 +579,20 @@ export type CampaignCopy = {
  *  precisely how they stayed null and unnoticed through two rejections. Proven against the
  *  live API with this header on both the write and the read-back. */
 async function campaignPost(url: string, params: URLSearchParams): Promise<any> {
+  // ⚠️ ASSERT THE WIRE, NOT THE ARGUMENTS — this is the check that would have caught the
+  // 2026-09-02 rejection and `requirePolicyUrls` would not have. The arguments were correct
+  // that day: both URLs were typed, validated, stored and echoed back on the form. What was
+  // wrong was the gap between them and the request body, and every guard we had inspected
+  // the wrong side of it. This is the last statement before the bytes leave, so a future
+  // refactor that drops an `append` cannot be quiet about it.
+  for (const key of ["PrivacyPolicyUrl", "TermsAndConditionsUrl"]) {
+    if (!String(params.get(key) ?? "").trim()) {
+      throw new TrustHubError({
+        message: `The campaign request is missing ${key}. The carriers refuse a campaign without a privacy policy and terms URL.`,
+        status: 400, code: 0, permanent: true,
+      });
+    }
+  }
   const pair = basicAuthPair();
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
   await throttle();
@@ -621,7 +637,7 @@ export async function createCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string }> {
+}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const form: Record<string, string> = {
     BrandRegistrationSid: opts.brandSid,
@@ -647,7 +663,11 @@ export async function createCampaign(opts: {
   if (opts.copy.helpMessage) params.append("HelpMessage", opts.copy.helpMessage);
 
   const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params);
-  return { campaignSid: String(body?.sid ?? ""), status: String(body?.campaign_status ?? body?.status ?? "PENDING") };
+  return {
+    campaignSid: String(body?.sid ?? ""),
+    status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
+    policyUrlsEchoed: policyUrlsEchoed(body),
+  };
 }
 
 /**
@@ -674,7 +694,7 @@ export async function updateCampaign(opts: {
   termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string }> {
+}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
   requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const params = new URLSearchParams();
   params.append("Description", opts.copy.description);
@@ -694,7 +714,20 @@ export async function updateCampaign(opts: {
   return {
     campaignSid: String(body?.sid ?? opts.campaignSid),
     status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
+    policyUrlsEchoed: policyUrlsEchoed(body),
   };
+}
+
+/** Did the campaign Twilio just wrote come BACK carrying both policy URLs?
+ *
+ *  ⚠️ REPORTED, NEVER THROWN, and the distinction is load-bearing. By the time this can be
+ *  answered the campaign EXISTS and has been vetted; throwing here would abandon a live,
+ *  billed resource before its SID was written down — the orphan bug the Messaging Service
+ *  comment in portal-sms already documents once. The caller records a false, which is how a
+ *  silent regression of the 09-02 shape becomes a log row instead of another lost week. */
+function policyUrlsEchoed(body: any): boolean {
+  return !!String(body?.privacy_policy_url ?? "").trim()
+    && !!String(body?.terms_and_conditions_url ?? "").trim();
 }
 
 /** ⚠️ READ THE ITEM, NOT THE COLLECTION. `GET …/Compliance/Usa2p` answers an ENVELOPE —
@@ -704,10 +737,35 @@ export async function updateCampaign(opts: {
  *  "still waiting" no matter what the carriers had decided, and Event Streams was silently
  *  the only thing moving the state machine. Anything that depended on the poll as a backstop
  *  — a missed webhook, a sink that was never wired — simply never recovered. */
-export async function fetchCampaign(serviceSid: string): Promise<{ status: string; sid: string | null }> {
-  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`);
+export async function fetchCampaign(
+  serviceSid: string,
+): Promise<{
+  status: string; sid: string | null; privacyPolicyUrl: string; termsUrl: string;
+  errors: unknown[]; description: string; messageFlow: string; messageSamples: string[];
+}> {
+  // ⚠️ `X-Twilio-Api-Version: v1.2` OR THIS READ IS BLIND TO THE TWO FIELDS THE 09-02 OUTAGE
+  // WAS ABOUT. The plain v1 view omits both keys entirely — not null, ABSENT — so a poller
+  // without this header reports a campaign as complete while the carriers hold nothing. It
+  // is the single cheapest way to prove what Twilio actually has, which is why the compliance
+  // check reads them from here rather than from our own row.
+  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`, undefined, {
+    "X-Twilio-Api-Version": "v1.2",
+  });
   const one = Array.isArray(r?.compliance) ? r.compliance[0] : r;
   return {
+    privacyPolicyUrl: String(one?.privacy_policy_url ?? ""),
+    termsUrl: String(one?.terms_and_conditions_url ?? ""),
+    // ⚠️ THE REASONS, READ FROM THE SOURCE. Relying on the Event Streams webhook to deliver
+    // these is how the rejection card ended up rendering "They told us why" over an empty
+    // list: one missed delivery and the builder never learns what was wrong. Twilio holds
+    // the verdict either way, so read it.
+    errors: Array.isArray(one?.errors) ? one.errors : [],
+    // What the carriers ACTUALLY hold, which is not always what our row holds — an operator
+    // editing the campaign through the API leaves the two out of step, and then the form
+    // shows text that was never submitted.
+    description: String(one?.description ?? ""),
+    messageFlow: String(one?.message_flow ?? ""),
+    messageSamples: Array.isArray(one?.message_samples) ? one.message_samples.map(String) : [],
     status: String(one?.campaign_status ?? one?.status ?? ""),
     sid: one?.sid ? String(one.sid) : null,
   };

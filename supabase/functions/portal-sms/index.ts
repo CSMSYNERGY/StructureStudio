@@ -100,6 +100,13 @@ const GATES: GateTable = {
   // (it discovers `action === "x"`, not `switch`), so omitting a line here is a runtime 403
   // that reads like a broken feature, with no push-time warning at all.
   save_copy:       { area: "settings_billing", level: "edit" },
+  // The privacy-policy and terms URLs, ON THEIR OWN. Separate from save_intake because they
+  // must stay editable long after the intake is frozen — see the branch below.
+  save_policy_urls: { area: "settings_billing", level: "edit" },
+  // Reads the builder's own policy pages and grades the registration. Spends nothing and
+  // touches no Twilio endpoint, but it makes us fetch URLs a tenant typed, so it is held to
+  // the same bar as the rest of this screen and rate-limited in the database.
+  compliance_check: { area: "settings_billing", level: "edit" },
   // Clears a REJECTED campaign so the copy can be fixed and tried again. The delete itself
   // costs nothing; the spend is the `advance` one press later, which carries its own gate.
   retry_campaign:  { area: "settings_billing", level: "edit" },
@@ -358,6 +365,45 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           }
         }
 
+        // ── RECONCILE A REJECTION AGAINST TWILIO ─────────────────────────────────────
+        // ⚠️ THE REASONS MUST NOT DEPEND ON A WEBHOOK ARRIVING. Twilio names the failing
+        // fields — 30886 USE_CASE_DESCRIPTION, 30896 MESSAGE_FLOW, 30908 PRIVACY_POLICY_URL —
+        // and for the whole life of this feature the only path for them was an Event Streams
+        // delivery that nothing stored. One missed delivery and the rejection card says
+        // "They told us why" over an empty list, which is what it did through three separate
+        // refusals. Twilio holds the verdict permanently, so read it from the source.
+        //
+        // Also pulls back the copy the carriers ACTUALLY hold. Our row and the campaign drift
+        // the moment anyone edits through the API, and a form showing text that was never
+        // submitted is worse than no form at all.
+        //
+        // A pure read, no spend, at most once a minute, and a failure is invisible to the page.
+        const stale = reg && reg.status === "campaign_failed"
+          && (!Array.isArray(reg.last_errors) || reg.last_errors.length === 0)
+          && (!reg.next_poll_at || new Date(reg.next_poll_at).getTime() <= Date.now());
+        if (stale && reg.messaging_service_sid && trustHubConfigured()) {
+          try {
+            const live = await fetchCampaign(reg.messaging_service_sid);
+            const patch: Record<string, unknown> = {
+              last_errors: live.errors,
+              next_poll_at: new Date(Date.now() + 60_000).toISOString(),
+              updated_at: new Date().toISOString(),
+            };
+            if (live.description) patch.campaign_description = live.description;
+            if (live.messageFlow) patch.campaign_message_flow = live.messageFlow;
+            if (live.messageSamples.length) patch.campaign_message_samples = live.messageSamples;
+            await admin.from("sms_registrations").update(patch).eq("client_id", clientId);
+            await note("campaign_reasons_read", { count: live.errors.length });
+            reg = await load();
+          } catch (e) {
+            await logEdgeError({
+              fn: "portal-sms", clientId, code: "sms_reason_read_failed",
+              message: `could not read the rejection reasons: ${(e as Error).message}`,
+              severity: "info",
+            }).catch(() => {});
+          }
+        }
+
         return json({ ok: true, ...view(reg, await numbersOf()) });
       }
 
@@ -371,6 +417,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // ⚠️ Refuse to edit an intake that has already been SUBMITTED. Past 'ready' the
         // authoritative copy lives in Twilio's EndUser objects; letting the form overwrite
         // our echo would make the portal disagree with what the carriers actually reviewed.
+        //
+        // ⚠️ THAT REASONING IS TRUE OF THE BUNDLE AND FALSE OF THE TWO POLICY URLS, which is
+        // why they moved out to `save_policy_urls` below. They live on the Usa2p campaign,
+        // not on any EndUser, and every resubmit re-sends them from this row — so freezing
+        // them here meant a campaign rejected FOR those URLs could be resubmitted forever
+        // with the same failing values and no control anywhere on the screen to change them.
         if (!["none", "intake", "aup_pending", "ready", "brand_failed"].includes(reg.status)) {
           return json({ error: "This registration has already been submitted, so its details cannot be edited here. Ask support to change them." }, 409);
         }
@@ -396,6 +448,40 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         await note("intake_saved", { hasEin, tier: suggestBrandTier(hasEin) });
         const fresh = await load();
         return json({ ok: true, ...view(fresh, await numbersOf()) });
+      }
+
+      // ── The two URLs the carriers judge, editable for as long as they can still be sent ──
+      //
+      // ⚠️ THIS EXISTS BECAUSE THE THIRD DEAD END OF THE SAME SHAPE WAS SITTING HERE.
+      // `save_intake` freezes at `ready`, and the campaign-rejection card — the one screen
+      // whose entire job is "fix what the carriers named" — offered no way to touch the
+      // privacy or terms URL. A campaign refused for its privacy policy could be resubmitted
+      // free and unlimited, re-sending the same URL off this row every single time.
+      //
+      // ⚠️ AND IT MUST NOT BE `save_intake` WITH A LONGER ALLOWLIST. That branch ends with
+      // `status: reg.aup_accepted_at ? "ready" : "aup_pending"`, so calling it from
+      // `campaign_failed` would throw the registration back to the start of the chain and
+      // strand a paid brand. This writes two columns and nothing else — no status, no poll.
+      case "save_policy_urls": {
+        const reg = await load();
+        const privacy = String(p.privacyPolicyUrl ?? "").trim();
+        const terms = String(p.termsUrl ?? "").trim();
+        const bad = [
+          !/^https:\/\/\S+\.\S+/i.test(privacy) ? "The privacy policy needs a full https:// address the carriers can open." : "",
+          !/^https:\/\/\S+\.\S+/i.test(terms) ? "The terms page needs a full https:// address the carriers can open." : "",
+        ].filter(Boolean);
+        if (bad.length) return json({ error: bad[0], problems: bad }, 400);
+        // Closed only once nothing we send can carry them any more.
+        if (["number_pending", "active", "paused", "releasing", "off"].includes(reg.status)) {
+          return json({ error: "Texting is already live on this account, so these are changed by support." }, 409);
+        }
+        await admin.from("sms_registrations").update({
+          privacy_policy_url: privacy,
+          terms_url: terms,
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("policy_urls_saved", { status: reg.status });
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 
       case "accept_aup": {
@@ -1056,7 +1142,18 @@ async function advanceOne(
         hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
         hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
       });
-      await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid });
+      await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid, policyUrlsEchoed: c.policyUrlsEchoed });
+      // ⚠️ THE 09-02 REGRESSION DETECTOR. Twilio echoing the campaign back WITHOUT the two
+      // policy URLs means they did not land, which is the exact failure that cost a paid
+      // registration while every local check said the data was fine. Recorded, never thrown:
+      // the campaign exists by now and abandoning it before its SID is written is the worse bug.
+      if (!c.policyUrlsEchoed) {
+        await logEdgeError({
+          fn: "portal-sms", clientId, code: "campaign_policy_urls_not_echoed",
+          message: `campaign ${c.campaignSid} came back without both policy URLs`,
+          severity: "error",
+        }).catch(() => {});
+      }
       return await set({
         messaging_service_sid: svc.serviceSid,
         campaign_sid: c.campaignSid,
@@ -1130,7 +1227,14 @@ async function advanceOne(
         hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
         hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
       });
-      await note("campaign_resubmitted", { campaignSid: c.campaignSid, status: c.status });
+      await note("campaign_resubmitted", { campaignSid: c.campaignSid, status: c.status, policyUrlsEchoed: c.policyUrlsEchoed });
+      if (!c.policyUrlsEchoed) {
+        await logEdgeError({
+          fn: "portal-sms", clientId, code: "campaign_policy_urls_not_echoed",
+          message: `resubmitted campaign ${c.campaignSid} came back without both policy URLs`,
+          severity: "error",
+        }).catch(() => {});
+      }
       return await set({
         campaign_status: normalizeCampaignStatus(c.status),
         status: "campaign_pending",

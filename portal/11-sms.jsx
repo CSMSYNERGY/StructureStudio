@@ -64,6 +64,113 @@ function SmsStatusChip({ status }) {
   );
 }
 
+/** What each carrier refusal actually means, and what to change.
+ *
+ *  ⚠️ TWILIO'S OWN SENTENCE IS NOT AN INSTRUCTION. "The campaign submission has been reviewed
+ *  and it was rejected because of provided Opt-in information" tells a shed builder nothing
+ *  they can act on, and it is all the screen showed for three refusals in a row. Each entry
+ *  below adds the two lines that are missing: what the carriers were looking at, and what to
+ *  change. Keyed on the numeric CODE, never on the sentence — the sentence is Twilio's to
+ *  reword, and a text key would silently stop matching the day they do.
+ *
+ *  An unmapped code still renders: Twilio's own description, the field it named, and a link.
+ *  Better a bare reason than a swallowed one — that is the whole lesson of this card. */
+const SMS_ERROR_HELP = {
+  "30886": {
+    title: "The description of what you text about was not accepted",
+    what: "The carriers read the sentence describing what you send, and could not tell from it who is texting, who they are texting, or why. Listing what you send — quotes, invoices, updates — is not enough on its own.",
+    fix: "Rewrite it so it names your business, says the customer asked you for a quote, and says what the texts are about. Something like: \"Junior Barns sends text messages to customers who have requested a quote from us, about their quote, their invoice and the delivery date of the building they ordered. Customers give permission on our quote form.\"",
+  },
+  "30896": {
+    title: "They could not verify how customers agree to be texted",
+    what: "This is the one about your opt-in. The carriers go and look for the consent box you described, and they have to be able to SEE it — the wording, the tick box, and links to your privacy policy and terms — on a page that opens without signing in or clicking around.",
+    fix: "Give them a page they can open. Describe where the box is, quote the exact wording next to it, and include the link. If the box only appears part-way through a form, they will not find it, and this comes back rejected every time.",
+  },
+  "30908": {
+    title: "Your privacy policy was not accepted",
+    what: "Either no privacy policy reached them, or the one they read does not say what happens to a phone number. They look for a plain statement that mobile numbers and texting permission are never shared or sold to anyone else for marketing.",
+    fix: "Add a short SMS section to your privacy policy saying you do not share, sell or rent mobile numbers or texting consent to third parties or affiliates for marketing, and that the number is only used to message that customer about their own quote and building.",
+  },
+  "30932": {
+    title: "Your privacy policy has to say who else sees the data",
+    what: "The carriers want the policy to be explicit about sharing with anyone outside your business — and explicit that texting permission is excluded from any sharing you do.",
+    fix: "Say it in one sentence: mobile information and texting consent are not shared with third parties or affiliates for marketing or promotional purposes.",
+  },
+  "30882": {
+    title: "Your terms page was not accepted",
+    what: "Either no terms page reached them, or the page they opened does not cover texting.",
+    fix: "Add a short texting section to your terms: what the messages are about, that message frequency varies, that message and data rates may apply, and that customers can reply STOP to stop or HELP for help.",
+  },
+  "30922": {
+    title: "They could not verify your website",
+    what: "The website on the registration has to be a real, public business site with your business name on it, and it has to carry links to your privacy policy and terms.",
+    fix: "Use your main business website, not a social page or a landing page, and make sure the privacy and terms links are on it.",
+  },
+  "30924": {
+    title: "The consent wording is not where they need it",
+    what: "The message-frequency and \"message and data rates may apply\" lines have to sit next to the tick box itself — not only inside a linked privacy policy or terms page.",
+    fix: "Put the full sentence beside the box, including who is texting, what about, that frequency varies, that rates may apply, and how to stop.",
+  },
+  "30933": { title: "The terms URL was missing from the submission", what: "The registration reached the carriers without a terms address at all.", fix: "Fill in the terms page address and send it again." },
+  "30934": { title: "The privacy policy URL was missing from the submission", what: "The registration reached the carriers without a privacy policy address at all.", fix: "Fill in the privacy policy address and send it again." },
+};
+
+/** ⚠️ TWILIO NAMES THE FIELD, AND THE FIELD NAME IS THE MOST USEFUL THING IN THE PAYLOAD.
+ *  `fields: ["MESSAGE_FLOW"]` is what turns "your campaign was rejected" into "the box on
+ *  your screen labelled How do people agree to be texted". Rendered as the label the builder
+ *  is actually looking at, never as Twilio's constant. */
+const SMS_ERROR_FIELD_LABEL = {
+  USE_CASE_DESCRIPTION: "In a sentence, what will you text customers about?",
+  MESSAGE_FLOW: "How do people agree to be texted?",
+  MESSAGE_SAMPLES: "Your example messages",
+  PRIVACY_POLICY_URL: "Privacy policy address",
+  TERMS_AND_CONDITIONS_URL: "Terms page address",
+  WEBSITE_URL: "Website",
+  BRAND_NAME: "Legal business name",
+};
+
+/** The rejection reasons, each with what it means and what to change. */
+function SmsErrorList({ errors }) {
+  const list = (errors || []).filter(Boolean);
+  if (!list.length) return null;
+  return (
+    <div style={{ margin: "0 0 12px", display: "grid", gap: 10 }}>
+      {list.map((e, i) => {
+        const code = String((e && e.error_code) || "");
+        const help = SMS_ERROR_HELP[code];
+        const fields = (e && Array.isArray(e.fields) ? e.fields : [])
+          .map((f) => SMS_ERROR_FIELD_LABEL[f] || f);
+        return (
+          <div key={i} style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "11px 13px" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#991B1B", marginBottom: fields.length ? 4 : 6 }}>
+              {help ? help.title : (e.description || String(e))}
+            </div>
+            {fields.length > 0 && (
+              <div style={{ fontSize: 12, color: "#B91C1C", marginBottom: 6 }}>
+                What they were looking at: <strong>{fields.join(", ")}</strong>
+              </div>
+            )}
+            {help && (
+              <>
+                <div style={{ fontSize: 12.5, color: "#7F1D1D", lineHeight: 1.55, marginBottom: 6 }}>{help.what}</div>
+                <div style={{ fontSize: 12.5, color: "#166534", background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, padding: "8px 10px", lineHeight: 1.55 }}>
+                  <strong>What to change:</strong> {help.fix}
+                </div>
+              </>
+            )}
+            {code && (
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+                Carrier code {code}
+                {!help && e.description ? " — " + e.description : ""}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** The progress rail. Five steps, because a builder who can see where they are stops
  *  emailing to ask. `number_pending` and `active` both read as step 5 — from the outside
  *  they are "nearly there" and "there". */
@@ -248,7 +355,12 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       // Seed the form from the echo so a returning builder sees what they typed.
       if (d.intake && d.intake.legalBusinessName) {
         setForm((f) => ({ ...f, legalBusinessName: d.intake.legalBusinessName, websiteUrl: d.intake.websiteUrl || "" }));
-        setUrls({ privacyPolicyUrl: d.intake.privacyPolicyUrl || "", termsUrl: d.intake.termsUrl || "" });
+        // ⚠️ PRISTINE-ONLY, same reasoning as the copy seed below — these two are editable on
+        // the rejection card now, so an unconditional reseed would wipe a URL mid-typing the
+        // moment any action's refresh() came back.
+        setUrls((u) => (u.privacyPolicyUrl || u.termsUrl)
+          ? u
+          : { privacyPolicyUrl: d.intake.privacyPolicyUrl || "", termsUrl: d.intake.termsUrl || "" });
       }
       // ⚠️ SEED THE COPY ONLY WHILE THE FORM IS PRISTINE. refresh() runs after every action AND
       // on a 60-second timer while pending, so an unconditional seed would delete a sentence the
@@ -341,11 +453,14 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             <strong>Needs attention.</strong> {data.attentionNote}
           </div>
         )}
+        {/* The short version. The card below carries the same reasons with what to change —
+            two full renderings on one screen would bury the fix under the complaint. */}
         {Array.isArray(data.errors) && data.errors.length > 0 && (
           <ul style={{ marginTop: 10, paddingLeft: 18, fontSize: 12, color: "#B91C1C" }}>
-            {data.errors.slice(0, 5).map((e, i) => (
-              <li key={i} style={{ marginBottom: 3 }}>{(e && (e.description || e.message)) || String(e)}</li>
-            ))}
+            {data.errors.slice(0, 5).map((e, i) => {
+              const help = SMS_ERROR_HELP[String((e && e.error_code) || "")];
+              return <li key={i} style={{ marginBottom: 3 }}>{help ? help.title : ((e && (e.description || e.message)) || String(e))}</li>;
+            })}
           </ul>
         )}
         {err && <div style={{ marginTop: 12, color: "#B91C1C", fontSize: 13 }}>{err}</div>}
@@ -699,17 +814,13 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
             charge for sending it again, and no limit on how many times you can.
           </p>
 
-          {(data.errors || []).length > 0 && (
-            <ul style={{ margin: "0 0 12px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
-              {(data.errors || []).map((e, i) => (
-                <li key={i}>
-                  {e.description || String(e)}
-                  {e.fields && e.fields.length > 0 && (
-                    <span style={{ color: "#64748B" }}> — they looked at: {e.fields.join(", ")}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
+          <SmsErrorList errors={data.errors} />
+          {(data.errors || []).length === 0 && (
+            <div style={{ margin: "0 0 12px", fontSize: 12.5, color: "#64748B", lineHeight: 1.5 }}>
+              We are fetching the reasons from the carriers — press Refresh in a moment. If they
+              still do not appear, the wording below is what was submitted, and the two most
+              common refusals are the description and the opt-in.
+            </div>
           )}
 
           {readOnly ? (
@@ -726,6 +837,22 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                   vetting fee and a try, on the click. Editing in place is free and unlimited,
                   so the builder edits right here and presses send. */}
               <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} />
+              {/* ⚠️ AND THE TWO URLS, HERE, ON THIS CARD. They are judged by the carriers as
+                  hard as the wording is (30908/30882/30932 all point at them), they are
+                  re-sent from the row on every resubmit — and until 2026-09-03 this screen
+                  had no control that could change them. A campaign refused FOR its privacy
+                  policy could be resent forever with the same failing address. */}
+              <div style={{ marginTop: 4, paddingTop: 12, borderTop: "1px solid #E2E8F0" }}>
+                <h4 style={{ margin: "0 0 8px", fontSize: 13 }}>The pages they check</h4>
+                <SmsField label="Privacy policy address" hint="Has to open without signing in, and say you never share or sell phone numbers.">
+                  <input style={SMS_INPUT} value={urls.privacyPolicyUrl} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, privacyPolicyUrl: e.target.value })} />
+                </SmsField>
+                <SmsField label="Terms page address" hint="Should cover texting: what you send, that frequency varies, that rates may apply, and how to stop.">
+                  <input style={SMS_INPUT} value={urls.termsUrl} placeholder="https://"
+                    onChange={(e) => setUrls({ ...urls, termsUrl: e.target.value })} />
+                </SmsField>
+              </div>
               {smsCopyProblems(copy).length > 0 && (
                 <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
                   {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
@@ -733,6 +860,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
               )}
               <button type="button" disabled={busy || smsCopyProblems(copy).length > 0}
                 onClick={() => act(async () => {
+                  await call("save_policy_urls", { privacyPolicyUrl: urls.privacyPolicyUrl, termsUrl: urls.termsUrl });
                   await call("save_copy", { copy });
                   await call("advance", { copy });
                 })}
