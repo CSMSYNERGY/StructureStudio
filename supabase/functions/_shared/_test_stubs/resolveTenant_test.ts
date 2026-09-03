@@ -46,14 +46,31 @@ function makeAdmin(t: Tables, opts: { auditFails?: boolean } = {}) {
       const chain: any = {
         select: () => chain,
         eq: () => chain,
+        // ⚠️ .order() REALLY SORTS here rather than being a no-op passthrough. The support
+        // branch's owner lookup is ordered precisely because a tenant can have several
+        // owners and an unordered limit(1) is whatever Postgres returns that time; a fake
+        // that accepted .order() and ignored it would let that ordering be deleted without a
+        // single test noticing, which is the entire failure this is guarding.
+        order: (col: string, o?: { ascending?: boolean }) => {
+          chain._orders.push([col, !o || o.ascending !== false]);
+          return chain;
+        },
         // The support branch's owner lookup is the one client_users read that filters on
         // role; everything else is the caller's own mapping.
-        limit: () => Promise.resolve({
-          data: (table === "client_users" && chain._eq && chain._eq.role === "owner")
+        limit: (n?: number) => {
+          const base = (table === "client_users" && chain._eq && chain._eq.role === "owner")
             ? (t.tenant_owner ?? [])
-            : (t.client_users ?? []),
-          error: null,
-        }),
+            : (t.client_users ?? []);
+          const rows = [...base];
+          for (const [col, asc] of [...chain._orders].reverse()) {
+            rows.sort((a: any, b: any) => {
+              const x = a[col], y = b[col];
+              if (x === y) return 0;
+              return (x > y ? 1 : -1) * (asc ? 1 : -1);
+            });
+          }
+          return Promise.resolve({ data: typeof n === "number" ? rows.slice(0, n) : rows, error: null });
+        },
         maybeSingle: () => {
           if (table === "app_operators") return Promise.resolve({ data: t.app_operators ?? null, error: null });
           if (table === "client_configs") {
@@ -66,6 +83,7 @@ function makeAdmin(t: Tables, opts: { auditFails?: boolean } = {}) {
       // capture the slug passed to .eq("client_id", v) for client_configs, and every column
       // filtered on, so `limit` can tell the support branch's owner lookup apart.
       chain._eq = {};
+      chain._orders = [] as Array<[string, boolean]>;
       chain.eq = (col: string, val: any) => { chain._eq[col] = val; if (col === "client_id") chain._slug = val; return chain; };
       chain.select = () => chain;
       return chain;
@@ -392,4 +410,45 @@ Deno.test("a read-only support operator still cannot edit what it can see", asyn
   const ctx = (r as any).ctx;
   assertEquals(ctx.canRead("designs"), true);
   assertEquals(ctx.canEdit("designs"), false);
+});
+
+Deno.test("SEVERAL owners: the ROW ORDER must not change who is mirrored", async () => {
+  // ⚠️ REAL SHAPE, not invented: junior-barns has two owner rows today. Before the .order(),
+  // the support branch's limit(1) took whichever row Postgres handed back that time.
+  //
+  // THE TEST IS THE SAME TWO ROWS FED IN BOTH ORDERS, because that is the only thing a
+  // deterministic fake can actually prove. Asserting "five identical calls agree" cannot fail
+  // — a fake returns its fixture the same way every time — and an earlier draft of this test
+  // did exactly that and passed happily with the ordering deleted. Feeding the rows both ways
+  // round is what makes a missing .order() show up.
+  //
+  // The older row is a DRIVER purely so the two resolve DIFFERENTLY and the pick is
+  // observable at all: two genuine owners are indistinguishable by construction, because
+  // effectiveAccess short-circuits on role === "owner" and never reads the title or the blob.
+  const OLDEST = { role: "user", title: "driver", access: null, created_at: "2026-01-01T00:00:00Z", user_id: "u-old" };
+  const NEWEST = { role: "owner", title: "owner", access: null, created_at: "2026-09-01T00:00:00Z", user_id: "u-new" };
+
+  const resolve = async (rows: unknown[]) => {
+    signedIn();
+    const r = await resolveTenant(
+      req({ action: "save", targetClientId: "victim" }),
+      makeAdmin({ client_users: TEAM, app_operators: SUPPORT, client_configs: ["victim"], tenant_owner: rows as never }),
+      { readActions: READS },
+    );
+    assertEquals(r.ok, true);
+    return (r as any).ctx.access;
+  };
+
+  const aThenB = await resolve([NEWEST, OLDEST]);
+  const bThenA = await resolve([OLDEST, NEWEST]);
+  assertEquals(aThenB, bThenA, "the same two rows in a different order must resolve the same");
+
+  // And it is the OLDEST that wins, so the choice is written down rather than incidental.
+  // ⛔ Do NOT read that as "the founder": on junior-barns the older row is OUR OWN support@
+  // address and the actual customer was added a week later. Anything that wants "the real
+  // owner" has to ask a different question than "the first one".
+  assertEquals(aThenB.delivery_schedule, "edit", "the oldest row is the one taken");
+  assertEquals(aThenB.designs, "none", "…and it really is that row's map, not a default");
+  // Billing stays clamped whichever row wins.
+  assertEquals(aThenB.settings_billing, "none");
 });

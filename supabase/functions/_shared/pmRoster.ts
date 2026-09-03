@@ -77,8 +77,15 @@ export async function syncRosterMember(
     // copied its first four from app_operators.email — could in principle carry mixed case
     // and simply not match here; the cost is a second roster row rather than a wrong link,
     // which is the right way for this to fail.
+    //
+    // Ordered for the same reason resolveTenant's owner lookup is: this filter is NOT on a
+    // primary key, so two login-less rows could share an address, and an unordered limit(1)
+    // would adopt whichever one Postgres happened to return that time. `position` picks the
+    // one nearest the top of the roster — the one a person looking at the screen would have
+    // meant — and, more to the point, picks the SAME one every time.
     const byEmail = await admin.from("pm_people")
-      .select("id, user_id").eq("email", email).is("user_id", null).limit(1);
+      .select("id, user_id").eq("email", email).is("user_id", null)
+      .order("position", { ascending: true }).limit(1);
     if (byEmail.error) throw new Error(`pm_people read failed: ${byEmail.error.message}`);
     const hit = byEmail.data && byEmail.data[0];
     if (hit) {

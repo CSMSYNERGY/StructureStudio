@@ -362,11 +362,31 @@ export async function resolveTenant(
   } else {
     // limit(1), not maybeSingle(): a duplicate owner row must not lock support out entirely.
     // Same reasoning as the client_users read on the normal path above.
+    //
+    // ⚠️ ORDERED, because a tenant really can have SEVERAL owners and an unordered limit(1)
+    // is whatever Postgres hands back that time. `junior-barns` has two today.
+    //
+    // What the ordering buys is STABILITY, not correctness — and the distinction matters,
+    // because it is the thing a future reader is most likely to get wrong. Every owner row
+    // resolves to the SAME map: effectiveAccess short-circuits on `role === "owner"` and never
+    // reads the title or the stored blob, so which owner is picked cannot change what support
+    // sees. It only starts to matter the day one of them is demoted — and on that day, a read
+    // that silently picked a different row each time would look like an intermittent
+    // permissions bug rather than a data change.
+    //
+    // ⛔ DO NOT re-read this as "the oldest owner is the founder". On the one live multi-owner
+    // customer tenant it is the opposite: junior-barns' older row is OUR OWN support@ address
+    // (2026-06-24) and the actual customer, Nevin Friesen, was added a week later. Anything
+    // that wants "the real owner" has to ask a different question than "the first one".
+    //
+    // user_id breaks the tie, so two rows written in the same transaction still order.
     const { data: ownerRows, error: ownerErr } = await admin
       .from("client_users")
       .select("role, title, access")
       .eq("client_id", clientId)
       .eq("role", "owner")
+      .order("created_at", { ascending: true })
+      .order("user_id", { ascending: true })
       .limit(1);
     if (ownerErr) return { ok: false, status: 500, body: { error: ownerErr.message } };
     const ownerRow = ownerRows && ownerRows[0];
