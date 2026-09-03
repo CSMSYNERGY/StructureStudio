@@ -2777,10 +2777,16 @@ const LP_METHODS = [
 // combination stops being offered -- the row is deleted, get_config stops emitting it, and the
 // customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
 // fourth row here: a stored fourth rate would be a second place for the price to live.
+// The three devices the electrical package lays out. They are ordinary layout items under the
+// hood (so they price through save_layout_pricing like any other), but a builder meets them in
+// the Electrical card, not in the general options list.
+const SS_ELEC_DEVICE_KEYS = ["outlet", "lightSwitch", "lightFixture"];
+
 function Electrical({ viewingLabel = null, clientId = null }) {
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
   const [f, setF] = useState(null);
   const [items, setItems] = useState([]);
+  const [dev, setDev] = useState([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
 
@@ -2790,6 +2796,18 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       () => sb.functions.invoke("portal-settings", { body }),
       String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
     if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    // Rates live in layout_item_pricing, same as every other placeable item — the card just
+    // presents them here. save_layout_pricing upserts per row, so saving these three never
+    // touches the rest of the list.
+    const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
+    setDev(SS_ELEC_DEVICE_KEYS
+      .map((k) => (data.items || []).find((it) => it.key === k))
+      .filter(Boolean)
+      .map((it) => ({
+        item_key: it.key, label: it.label,
+        rate: byKey[it.key] && byKey[it.key].rate != null ? String(byKey[it.key].rate) : "",
+        heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "",
+      })));
     const e = data.electrical || {};
     setF({
       enabled: e.enabled === true,
@@ -2822,6 +2840,17 @@ function Electrical({ viewingLabel = null, clientId = null }) {
     try {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical", ...f }) });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      // One Save button covers the standards AND the per-device rates: they are one decision to
+      // a builder, even though they land in two tables. A device left blank is priced at 0,
+      // which is what keeps it out of the customer's palette (hidden_until_priced).
+      const devRows = dev.map((d) => ({
+        item_key: d.item_key, pricing_method: "each", rate: Number(d.rate) || 0,
+        heightOffFloorIn: String(d.heightOffFloorIn ?? "").trim(),
+      }));
+      if (devRows.length) {
+        const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_layout_pricing", rows: devRows }) });
+        if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
+      }
       const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical_items", rows: items }) });
       if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
       await load();
@@ -2851,7 +2880,7 @@ function Electrical({ viewingLabel = null, clientId = null }) {
         building &mdash; a plug every so many feet, lights down the middle, a switch by the door.
         The package is <b>one fixed price</b> covering that standard layout.{" "}
         <b>Removing a device never reduces it</b>; only devices added <i>beyond</i> the standard
-        are charged, at the per-device rates in the Layout Pricing list above.
+        are charged, at the per-device rates below.
       </p>
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
         <input type="checkbox" checked={f.enabled} onChange={(e) => set("enabled", e.target.checked)}
@@ -2899,6 +2928,34 @@ function Electrical({ viewingLabel = null, clientId = null }) {
         </label>
       </div>
 
+      {/* The three devices moved here out of the general Layout Pricing list (Carolyn
+          2026-09-02): a rate for an outlet means nothing without the spacing that decides how
+          many of them there are, and they are not options a builder picks from a palette —
+          the package places them. They are still ordinary layout items underneath, saved
+          through save_layout_pricing, which upserts per row and so never touches the rest of
+          that list. */}
+      {dev.length > 0 && (<>
+        <div style={{ ...S.lbl, marginBottom: 8 }}>Per-device rates</div>
+        <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 8px", maxWidth: 680 }}>
+          What ONE extra costs beyond the standard layout. Leave a rate at 0 and the customer
+          simply cannot add more of that device &mdash; the package still lays out the standard.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
+          {dev.map((d, i) => (
+            <label key={d.item_key} style={{ display: "block", minWidth: 150 }}>
+              <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{d.label}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 12, color: "#64748B" }}>$</span>
+                <input type="number" min="0" step="1" value={d.rate}
+                  onChange={(e) => setDev((p2) => p2.map((x, j) => (j === i ? { ...x, rate: e.target.value } : x)))}
+                  style={{ ...S.input, width: 90 }} />
+                <span style={{ fontSize: 12, color: "#64748B" }}>each</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </>)}
+
       <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", marginBottom: 14 }}>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
           title="Available in the rep designer only - hidden from the customer-facing page. A rep-selected package still prices normally.">
@@ -2914,9 +2971,8 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       </div>
 
       <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 18px", maxWidth: 680 }}>
-        Extras are only offered once you price them: set a rate for <b>Outlet</b>, <b>Light</b> and{" "}
-        <b>Light Switch</b> in Layout Pricing above. Until then the package still lays out the
-        standard, and the customer simply has no way to add more.
+        Extras are only offered once you price them &mdash; see Per-device rates above. Until then
+        the package still lays out the standard, and the customer simply has no way to add more.
       </p>
 
       <div style={{ ...S.lbl, marginBottom: 6 }}>Your electrical items</div>
@@ -3297,8 +3353,10 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   const buildRows = (data) => {
     const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
-    // no longer shown or archived here.
-    return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
+    // no longer shown or archived here. The three electrical devices moved the same way, into
+    // the Electrical card, where they sit with the standards that lay them out (Carolyn
+    // 2026-09-02) — a rate for an outlet means nothing without the spacing beside it.
+    return (data.items || []).filter((it) => it.key !== "ramp" && SS_ELEC_DEVICE_KEYS.indexOf(it.key) === -1).map((it) => {
       const p = byKey[it.key] || {};
       return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
         wallSnap: !!it.wallSnap, depthIn: it.depthIn != null ? String(it.depthIn) : "", heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "" };

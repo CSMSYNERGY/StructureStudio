@@ -1284,6 +1284,31 @@ function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
   return widthFt === undefined || wallHeightFitsWidth(hit, widthFt) ? hit : null;
 }
 
+// ── Quote sections (Carolyn, 2026-09-02) ────────────────────────────────────
+// The quote reads in the order a customer thinks about the building:
+//   1 building · 2 cladding + its colours · 3 roof + its colours
+//   4 DOORS & WINDOWS — doors first, then windows
+//   5 everything else, taller walls and electrical included
+// Every row carries its section, so the ORDER lives in one list rather than in the order the
+// two row-builders happen to push. Anything unclassified falls to "options", which is the safe
+// direction: a new priced thing shows up in the quote rather than silently vanishing from it.
+const SS_QUOTE_SECTIONS = ["building", "cladding", "roof", "openings", "options"];
+const SS_SECTION_HEADING = { openings: "Doors & Windows", options: "Options on your plan" };
+// Doors before windows inside the openings section. A rough opening is an opening in a wall,
+// so it reads with the windows rather than off in the general options.
+function ssOpeningRank(key) {
+  const k = String(key || "");
+  if (k === "singleDoor" || k === "doubleDoor" || k.indexOf("fx:") === 0) return 0;      // doors
+  if (k === "window" || k.indexOf("win:") === 0 || k === "roughOpening") return 1;        // windows
+  return -1;                                                                              // not an opening
+}
+function ssRowSection(key) {
+  if (key === "building") return "building";
+  if (key === "paint") return "cladding";
+  if (key === "roof") return "roof";
+  return ssOpeningRank(key) >= 0 ? "openings" : "options";
+}
+
 function computeSelectionRows(sel, paintColors, C, items) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
@@ -1506,16 +1531,24 @@ function computeSelectionRows(sel, paintColors, C, items) {
       });
     });
   }
+  // CLADDING, not "Paint Colors" (Carolyn): the line is about the siding the customer chose,
+  // and the colours belong under it. The key stays "paint" — it is what the tax lookup, the
+  // estimate and every saved design already join on; only what the customer READS changes.
   const painted = sel && sel.paint === "Painted";
-  let pDetail = "Unpainted", pTotal = 0;
+  let pTotal = 0;
+  let colourTxt = "Unpainted";
   if (painted) {
     const body = pick(paintColors && paintColors.body, (c) => c.siding, true);
     const trim = pick(paintColors && paintColors.trim, (c) => c.trim, true);
     const seen = {};
     [body, trim].forEach((c) => { if (c && c.id && !seen[c.id]) { seen[c.id] = 1; pTotal += charge(c); } });
-    pDetail = `Body: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
+    colourTxt = `Siding: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
   }
-  rows.push({ key: "paint", label: "Paint Colors", detail: pDetail, total: showP ? pTotal : null });
+  // The cladding TYPE comes from the tenant's own option list, so it is only named when they
+  // offer one; otherwise the line is just the colours, exactly as it read before.
+  const claddingTxt = (sel && String(sel.cladding || "").trim()) || "";
+  const pDetail = claddingTxt ? `${claddingTxt} — ${colourTxt}` : colourTxt;
+  rows.push({ key: "paint", label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null });
   const offersRoof = colors.some((c) => c.shingle || c.metal);
   if (offersRoof) {
     const rt = (sel && sel.roofType) || "";
@@ -1527,6 +1560,8 @@ function computeSelectionRows(sel, paintColors, C, items) {
     }
     rows.push({ key: "roof", label: "Roof", detail: rDetail, total: showP ? rTotal : null });
   }
+  // One place decides the section, so the two builders cannot disagree about where a row goes.
+  rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return rows;
 }
 // The one Supabase storage host a design's image_url may legitimately point at, derived
@@ -1655,6 +1690,8 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   }
 
   const rows = [];
+  // Tagged on the way out (see the end of this function) with the same ssRowSection the
+  // selection rows use.
   const deferred = [];
   let nonPctSubtotal = 0;
   for (const key of LAYOUT_PRICE_ORDER) {
@@ -1874,6 +1911,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
 
   // (Declined included items are no longer shown here — they're itemized under the building line
   // by computeSelectionRows, matching the GHL estimate.)
+  rows.forEach((r) => { r.section = ssRowSection(r.key); });
   return { rows };
 }
 
@@ -13141,63 +13179,79 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
           <div style={{ marginTop: 8 }}>
-            {/* Building, Paint Colors, Roof — same order as the estimate; price shown when enabled. */}
-            <div style={{ marginBottom: 4 }}>
-              {selRows.map((r) => (
-                <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
-                    <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail}</div>
-                  </div>
-                  {r.total != null && (<>
-                    <div style={amtCell}>{fmtMoney2(r.total)}</div>
-                    <div style={actSpacer} />
-                  </>)}
-                </div>
-              ))}
-            </div>
-            {priceRows.length > 0 && (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ ...S.lbl, marginBottom: 8 }}>Options on your plan</div>
-                {priceRows.map((r) => (
+            {/* The quote reads in Carolyn's order (2026-09-02): the building, then CLADDING and
+                its colours, then the ROOF and its colours, then a DOORS & WINDOWS section with
+                doors before windows, then everything else — taller walls and electrical
+                included. Both row-builders tag each row with a section, so the order lives in
+                SS_QUOTE_SECTIONS rather than in the order rows happened to be pushed. */}
+            {(() => {
+              // Removing a placed item is a PLAN edit, and these rows sit outside the canvas
+              // and outside the configuration panel — so it keeps its own planLocked guard, or
+              // the lock is bypassable from Details (on the customer's share link too).
+              const removePlaced = (r) => {
+                // "each"-priced items step down one at a time (when several are placed, the
+                // plan asks which one); everything else clears the line and removes everything
+                // on it. priceRowMatcher, not `i.type === r.key`: catalog rows carry
+                // fx:/win:/ramp: keys that match no item's type, so this × removed nothing for
+                // exactly the rows that carry a price (audit 2026-08-20). The label rides along
+                // so pick mode can name the item (its key is not ITEMS-keyed).
+                const match = priceRowMatcher(r.key);
+                const placed = items.filter(match);
+                if (r.method === "each" && placed.length > 1) {
+                  setPendingRemoval({ type: r.key, label: r.label });
+                  setSelectedId(null); setActiveTool(null);
+                  setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
+                } else {
+                  // Cascade like delSel: removing a door also removes its snapped ramp.
+                  const removedIds = new Set(placed.map((i) => i.id));
+                  setItems((p) => p.filter((i) => !match(i) && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
+                  setSelectedId(null);
+                }
+              };
+              const all = selRows.concat(priceRows);
+              const inSection = (s) => all.filter((r) => (r.section || "options") === s);
+              // Doors first, then windows. Stable inside each half, so a tenant's own catalog
+              // order still shows through.
+              const openings = inSection("openings").slice()
+                .sort((a, b) => ssOpeningRank(a.key) - ssOpeningRank(b.key));
+              // A layout row carries a qty and can be removed from the plan; a selection row
+              // (cladding, taller walls, the electrical package) carries neither.
+              const line = (r) => {
+                const onPlan = r.qty != null;
+                return (
                   <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
-                      <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{r.unit}</div>
+                      <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail || r.unit}</div>
                     </div>
-                    <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>
-                    <div style={amtCell}>{fmtMoney2(r.total)}</div>
-                    {/* Removing a placed item is a PLAN edit, and this row sits outside the
-                        canvas and outside the configuration panel — so it needs its own
-                        guard, or the lock is bypassable from Details (on the customer's
-                        share link too). */}
-                    {!planLocked && <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
-                      onClick={() => {
-                        // "each"-priced items step down one at a time (when several are
-                        // placed, the plan asks which one); everything else clears the line
-                        // and removes everything on it from the layout. priceRowMatcher, not
-                        // `i.type === r.key`: catalog rows carry fx:/win:/ramp: keys that
-                        // match no item's type, so this × removed nothing for exactly the
-                        // rows that carry a price (audit 2026-08-20). The row label rides
-                        // along so pick mode can name the item (its key is not ITEMS-keyed).
-                        const match = priceRowMatcher(r.key);
-                        const placed = items.filter(match);
-                        if (r.method === "each" && placed.length > 1) {
-                          setPendingRemoval({ type: r.key, label: r.label });
-                          setSelectedId(null); setActiveTool(null);
-                          setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (_) {} }, 0);
-                        } else {
-                          // Cascade like delSel: removing a door also removes its snapped ramp.
-                          const removedIds = new Set(placed.map((i) => i.id));
-                          setItems((p) => p.filter((i) => !match(i) && !(i.type === "ramp" && removedIds.has(i.snapDoorId))));
-                          setSelectedId(null);
-                        }
-                      }}
-                      style={delBtn}>×</button>}
+                    {onPlan && <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>}
+                    {r.total != null ? <div style={amtCell}>{fmtMoney2(r.total)}</div> : <div style={amtCell} />}
+                    {onPlan && !planLocked
+                      ? <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
+                          onClick={() => removePlaced(r)} style={delBtn}>&times;</button>
+                      : <div style={actSpacer} />}
                   </div>
-                ))}
-              </div>
-            )}
+                );
+              };
+              const section = (key) => {
+                const rows = key === "openings" ? openings : inSection(key);
+                if (!rows.length) return null;
+                return (
+                  <div key={key} style={{ marginTop: 14 }}>
+                    <div style={{ ...S.lbl, marginBottom: 8 }}>{SS_SECTION_HEADING[key]}</div>
+                    {rows.map(line)}
+                  </div>
+                );
+              };
+              return (<>
+                {/* Building, cladding and roof carry no heading — they ARE the building. */}
+                <div style={{ marginBottom: 4 }}>
+                  {["building", "cladding", "roof"].map((s) => inSection(s).map(line))}
+                </div>
+                {section("openings")}
+                {section("options")}
+              </>);
+            })()}
 
             {roList.length > 0 && (
               <div style={{ marginTop: 14 }}>
