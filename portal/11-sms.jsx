@@ -223,7 +223,7 @@ function SmsSteps({ status }) {
  *  just a Continue button that posted a freshly-mounted state's two empty strings into a
  *  guaranteed 400, with nothing on screen to fix it. Two copies of this markup would drift
  *  straight back into that, so there is exactly one. */
-function SmsCopyForm({ copy, setCopy, readOnly }) {
+function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
   return (
     <>
           <h4 style={{ margin: "0 0 6px", fontSize: 14 }}>What you will text people about</h4>
@@ -243,6 +243,40 @@ function SmsCopyForm({ copy, setCopy, readOnly }) {
           placeholder="Customers tick a box giving us permission to text them when they request a quote on our website."
           onChange={(e) => setCopy({ ...copy, messageFlow: e.target.value })} />
       </SmsField>
+
+      {/* ⚠️ THE ANSWER TO ERROR 30896, AND IT HAS TO BE A LINK THEY CAN OPEN.
+          The carriers do not take "customers tick a box on our quote form" on trust — they go
+          and look, and on 2026-09-03 they looked at a page that renders "Loading…" and refused
+          the campaign. The consent box is real, but it is drawn by JavaScript, only appears
+          once a visitor works the canvas, and never appears again after that. This page is the
+          same wording on a plain public URL with nothing to click through, which is exactly
+          what Twilio's own remediation for 30924 asks for. */}
+      {optInUrl && !readOnly && (
+        <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "11px 13px", marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 800, color: "#166534", marginBottom: 4 }}>
+            Give them a page they can open
+          </div>
+          <div style={{ fontSize: 12.5, color: "#166534", lineHeight: 1.55, marginBottom: 8 }}>
+            We publish your opt-in wording, your policy links and your example messages on a
+            public page. Put its address in the answer above — a reviewer who can see the box
+            for themselves is the difference between approved and refused.
+          </div>
+          <a href={optInUrl} target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: "#166534", wordBreak: "break-all", display: "block", marginBottom: 8 }}>
+            {optInUrl}
+          </a>
+          <button type="button"
+            onClick={() => {
+              const line = `The exact wording, the tick box and links to our privacy policy and terms can be seen at ${optInUrl}`;
+              if (String(copy.messageFlow || "").includes(optInUrl)) return;
+              const base = String(copy.messageFlow || "").trim();
+              setCopy({ ...copy, messageFlow: (base ? base.replace(/\s*$/, " ") : "") + line });
+            }}
+            style={{ background: "#166534", color: "#fff", border: "none", borderRadius: 7, padding: "7px 13px", cursor: "pointer", fontWeight: 700, fontSize: 12, fontFamily: "inherit" }}>
+            Add this link to my answer
+          </button>
+        </div>
+      )}
       {copy.messageSamples.map((sample, i) => (
         <SmsField key={i} label={`Example message ${i + 1}`}>
           <input style={SMS_INPUT} value={sample} disabled={readOnly}
@@ -674,7 +708,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
       {/* ── Step 3: what they will send, then submit ───────────────────────── */}
       {status === "ready" && (
         <div style={card}>
-          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} />
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl} />
 
           {!readOnly && (
             <>
@@ -760,7 +794,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
           {/* ⚠️ THE FORM MUST BE HERE. This card is reached DAYS later, so the page has certainly
               reloaded and the in-memory copy is empty. It used to render no fields at all and
               post that empty state straight into a refusal. It is pre-filled from the row now. */}
-          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} />
+          <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={readOnly} optInUrl={data.optInDisclosureUrl} />
           {smsCopyProblems(copy).length > 0 && (
             <ul style={{ margin: "0 0 10px", paddingLeft: 18, fontSize: 13, color: "#B91C1C", lineHeight: 1.6 }}>
               {smsCopyProblems(copy).map((pr, i) => <li key={i}>{pr}</li>)}
@@ -836,7 +870,7 @@ function SmsMessagingView({ clientId, viewingLabel, canEdit }) {
                   fixed, and the yellow box beside it said that cost nothing. It cost the
                   vetting fee and a try, on the click. Editing in place is free and unlimited,
                   so the builder edits right here and presses send. */}
-              <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} />
+              <SmsCopyForm copy={copy} setCopy={setCopy} readOnly={false} optInUrl={data.optInDisclosureUrl} />
               {/* ⚠️ AND THE TWO URLS, HERE, ON THIS CARD. They are judged by the carriers as
                   hard as the wording is (30908/30882/30932 all point at them), they are
                   re-sent from the row on every resubmit — and until 2026-09-03 this screen

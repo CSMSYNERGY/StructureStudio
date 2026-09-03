@@ -189,6 +189,16 @@ verify_jwt = false
 # Twilio delivery receipts, same reasoning and the same secret as sms-inbound.
 verify_jwt = false
 
+[functions.sms-optin-disclosure]
+# ⚠️ PUBLIC ON PURPOSE, AND IT IS THE WHOLE POINT OF THE PAGE. A carrier reviewer opens this
+# cold, from an unknown network, with no account and often with no browser — it is the
+# evidence Twilio asks for by name (error 30924, "a public URL … showing the complete consent
+# language as it appears to the consumer"). Flipping this to true does not make anything safer:
+# it makes the page unopenable by the only audience it has, and the campaign is refused again.
+# The page reads a public-safe projection only — the registered business name, the tenant's own
+# campaign wording, their policy links. Never the EIN, the representative, or any Twilio SID.
+verify_jwt = false
+
 # NOTE: `github-monday-bug` and `migrate-style-images` are deployed on the project but have
 # no directory in this repo, so they are deliberately absent here — a [functions] block for
 # a function the CLI cannot find is not something to invent. `github-monday-bug` runs with

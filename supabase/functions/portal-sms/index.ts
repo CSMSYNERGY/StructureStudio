@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { optInDisclosureUrl } from "../_shared/smsConsentText.ts";
 import type { GateTable } from "../_shared/access.ts";
 import {
   trustHubConfigured,
@@ -305,6 +306,10 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     businessTypes: BUSINESS_TYPES,
     jobPositions: JOB_POSITIONS,
     configured: trustHubConfigured(),
+    // The public page a carrier reviewer can open to see how this builder asks permission.
+    // Derived from the client id rather than stored — there is nothing to keep in step, and a
+    // column would only be a second copy to go stale.
+    optInDisclosureUrl: optInDisclosureUrl(clientId),
   });
 
   const numbersOf = async () => {
