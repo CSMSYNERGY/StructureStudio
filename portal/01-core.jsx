@@ -556,7 +556,13 @@ function ssFallbackTab(access) {
 // to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
-function ssClampTab(tab, isOperator, canAdmin, access, supportView = false) {
+// `canProjects` is the SECOND door into the Projects console (migration 183): a CSM Synergy
+// team member granted the `projects` area on Settings → Team, who is not an operator at all.
+// It defaults to `isOperator` so every existing caller keeps exactly today's behaviour —
+// this function is called from three places and one of them is a hook-order-sensitive
+// effect, so a required parameter would be a silent behaviour change at whichever call site
+// somebody missed.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator) {
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /portal/reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
@@ -567,7 +573,13 @@ function ssClampTab(tab, isOperator, canAdmin, access, supportView = false) {
   // builder's shoes has no business in either. Splitting the old single line is the whole
   // difference; `supportView` defaults false so every existing caller is unchanged.
   if (tab === "accounts") return isOperator ? tab : ssFallbackTab(access);
-  if (tab === "admin" || tab === "projects") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
+  if (tab === "admin") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
+  // Projects splits off from Admin here. The two used to share a line because both meant
+  // "platform operator", and they no longer do: Admin is where delete_client lives and stays
+  // operator-only, while Projects is a board a CSM team member can be granted from Settings →
+  // Team without any access to builders' accounts. `!supportView` still applies to both —
+  // someone standing in a builder's shoes has no business in either console.
+  if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;

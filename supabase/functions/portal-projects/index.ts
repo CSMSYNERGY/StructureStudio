@@ -2,6 +2,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { loginTenant } from "../_shared/internalTenant.ts";
+import { canEdit as accCanEdit, type Level } from "../_shared/access.ts";
+import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -243,15 +245,15 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const user = userData?.user;
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
-  // 2. Operator membership — service role (app_operators has no browser policies).
+  // 2. WHICH DOOR — see _shared/projectsAccess.ts, which owns the rule and is tested.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: op, error: opErr } = await admin
-    .from("app_operators")
-    .select("user_id, email, can_write, display_name, support_only")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (opErr) return json({ error: opErr.message }, 500);
-  if (!op) return json({ error: "Operator access required." }, 403);
+  let access: Awaited<ReturnType<typeof resolveProjectsAccess>>;
+  try { access = await resolveProjectsAccess(admin, user.id); }
+  catch (e) { return json({ error: (e as Error).message }, 500); }
+  if (!access) return json({ error: "Operator access required." }, 403);
+  const op = access.op;
+  const teamAcc = access.teamAcc;
+
   // A SUPPORT operator is refused here, at the door.
   //
   // Migration 176's note further down this file already claimed "the Admin + Projects
@@ -261,7 +263,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   // Anyone holding the session could POST here directly and read every builder's setup
   // state. Zero support operators exist today, so nothing has leaked; the moment the
   // first one is flagged it would, which is why this lands before that switch is used.
-  if (op.support_only) {
+  if (op && op.support_only) {
     return json({ error: "Support accounts can't open Projects — that console is for platform operators." }, 403);
   }
 
@@ -272,11 +274,43 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const action = String(payload?.action || "");
 
   const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
-  if (!READ_ACTIONS.has(action) && !op.can_write) {
-    return json({ error: "This operator account is read-only." }, 403);
+
+  // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
+  //
+  // The second door admits CSM staff to the BOARD. It must not, by doing so, hand them the
+  // two things that live in this same function and are not board data at all.
+  //
+  //   1. BOARD actions — either door. Read/write by READ_ACTIONS vs the writer's own level:
+  //      an operator's can_write, or a team member's projects:edit. Same split, two sources.
+  //
+  //   2. setup_* — OPERATORS ONLY. These read and write every builder's onboarding progress,
+  //      which is customer data wearing a Projects-shaped URL. Someone granted the bug board
+  //      gets the bug board, not a list of every client's setup state.
+  //
+  //   3. THE ROSTER AND OPERATOR TOGGLES — operators with write access, only. add_person,
+  //      save_person, remove_person and the three set_operator_* actions are how platform
+  //      operator access is handed out. Without this line a CSM assistant granted
+  //      projects:edit could open the people editor and mint themselves an operator — the
+  //      exact escalation the previous commit closed from the other direction. The roster is
+  //      managed from Settings -> Team now anyway, so this surface is operator-side
+  //      reconciliation and nothing a team member needs.
+  const OPERATOR_ONLY = new Set([
+    "add_person", "save_person", "remove_person",
+    "set_operator_access", "set_operator_write", "set_operator_support",
+  ]);
+  if (!op && (action.startsWith("setup_") || OPERATOR_ONLY.has(action))) {
+    return json({ error: "That part of Projects is for platform operators." }, 403);
   }
 
-  const actorEmail = op.email || user.email || user.id;
+  // The writer check, from whichever door let them in. A team member's level is the `projects`
+  // area they were granted on the Team screen — view reads, edit writes — which is why an
+  // area was the right shape for the grant and a boolean was not.
+  const canWrite = op ? !!op.can_write : accCanEdit(teamAcc as Record<string, Level>, "projects");
+  if (!READ_ACTIONS.has(action) && !canWrite) {
+    return json({ error: op ? "This operator account is read-only." : "You have view-only access to Projects." }, 403);
+  }
+
+  const actorEmail = (op && op.email) || user.email || user.id;
   // Best-effort activity log — accountability for shared write access; never blocks.
   const act = async (boardId: string | null, itemId: string | null, action: string, detail: Record<string, unknown> = {}) => {
     try {
@@ -455,7 +489,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .eq("board_id", b.id).is("archived_at", null);
           counts[b.id] = count || 0;
         }
-        return json({ boards, counts, canWrite: !!op.can_write });
+        return json({ boards, counts, canWrite });
       }
 
       case "get_board": {
@@ -467,7 +501,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // Opening the roadmap board pulls in any new roadmap entries. Only for an
         // operator who can write — a read-only account should never trigger inserts —
         // and never fatal: a sync problem must not take the board down with it.
-        if (board.slug === "roadmap" && op.can_write) {
+        if (board.slug === "roadmap" && canWrite) {
           try { await syncRoadmap(board); } catch (e) {
             console.error("roadmap sync:", e instanceof Error ? e.message : String(e));
           }
@@ -486,7 +520,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (viewsRes.error) throw viewsRes.error;
         return json({
           board, columns, groups: groupsRes.data, items: itemsRes.data,
-          people: opsRes.data, views: viewsRes.data, canWrite: !!op.can_write,
+          people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }
 
@@ -524,7 +558,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             submission = { ...sub, attachmentUrl };
           }
         }
-        return json({ item, updates, activity: actRes.data, submission, canWrite: !!op.can_write });
+        return json({ item, updates, activity: actRes.data, submission, canWrite });
       }
 
       case "sign_attachment": {
@@ -1331,7 +1365,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           ? {
             completed_at: new Date().toISOString(),
             completed_by_kind: "team",
-            completed_by_name: (str(op.display_name, 120) || String(actorEmail).split("@")[0]),
+            completed_by_name: (str(op && op.display_name, 120) || String(actorEmail).split("@")[0]),
           }
           : { completed_at: null, completed_by_kind: null, completed_by_name: null };
         const { error } = await admin.from("tenant_setup_items").update(patch).eq("id", id);

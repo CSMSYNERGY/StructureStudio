@@ -157,6 +157,35 @@ function Dashboard({ session }) {
     return () => { cancelled = true; };
   }, [session]);
 
+  // THE SECOND DOOR INTO PROJECTS (migration 183). True for an operator, and ALSO for a CSM
+  // Synergy team member granted the `projects` area on Settings → Team — someone who has no
+  // access to any builder's account and should not need one to file a bug.
+  //
+  // A THIRD rpc, for the same reason there is a second: is_operator is called by a live page
+  // and cannot grow a field, because a schema change and a static asset do not deploy
+  // atomically. can_open_projects answers both doors server-side so the browser never has to
+  // reconstruct the rule — and portal-projects re-checks it regardless, since a nav item is
+  // a courtesy and not a control.
+  //
+  // ⚠️ THREE STATES, NOT TWO: null = still asking, and it is not the same as "no".
+  //
+  // A plain false start would be safe for RENDERING (no tab is the right way to be wrong) and
+  // wrong for ROUTING: the URL-normalising effect below runs before this call returns, would
+  // read false as a refusal, and would replaceState a typed /portal/projects away to
+  // /portal/designs while the page itself rendered Projects correctly a moment later. That is
+  // the precise silent failure the placement comment on that effect was written about, and it
+  // only ever showed up on the operator-gated tabs. So `gatesResolved` waits for a real
+  // answer, exactly as it already does for `entitlement`.
+  //
+  // Truthiness still governs display, so null renders nothing. A failed call keeps the last
+  // value rather than answering false — same non-answer posture as its two siblings above.
+  const [canProjects, setCanProjects] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("can_open_projects").then(({ data, error }) => { if (!cancelled && !error) setCanProjects(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [session]);
+
   // Only ever true INSIDE a tenant. On the operator's own portal a support account is just
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
@@ -220,12 +249,15 @@ function Dashboard({ session }) {
   // apply to them so the access map governs which tabs resolve. Platform operators keep the
   // blanket, which is what stops a subscription lapse locking us out of fixing an account.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
+  // under a team member while the page itself renders correctly — the exact silent,
+  // operator-tabs-only failure the placement comment above this block was written about.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null, supportView);
+    (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
   useEffect(() => {
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
-    const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
+    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
     // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
@@ -780,7 +812,7 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -1000,17 +1032,20 @@ function Dashboard({ session }) {
         </nav>
         </>)}
 
-        {isOperator && (<>
-        <div className="ss-navlabel">Operator</div>
+        {(isOperator || canProjects) && (<>
+        {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
+            else is not an "Operator", and calling the group that would tell them they hold
+            access to every builder's account, which they do not. */}
+        <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
         <nav className="ss-nav">
           {/* Accounts is the switcher and support needs it — it is how they reach the next
               builder. Admin and Projects are OUR consoles (delete_client lives in one, our
               internal bug board is the other) and a support account standing in a builder's
               shoes has no business in either. ssClampTab refuses the routes too, so a typed
               URL lands on a real page rather than a hidden-but-reachable one. */}
-          {navItem("accounts", "Accounts")}
-          {!supportView && navItem("admin", "Admin")}
-          {!supportView && navItem("projects", "Projects")}
+          {isOperator && navItem("accounts", "Accounts")}
+          {isOperator && !supportView && navItem("admin", "Admin")}
+          {canProjects && !supportView && navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -1428,7 +1463,7 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && isOperator && !supportView && (
+            {activeTab === "projects" && canProjects && !supportView && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
             {!gateLocked && activeTab === "releases" && (
