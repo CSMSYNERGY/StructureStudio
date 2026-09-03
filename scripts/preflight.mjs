@@ -665,6 +665,81 @@ async function artifactCheck() {
 //
 // Takes the html as an argument (rather than reading the file) so --self-test can hand it a
 // deliberately broken variant and prove this check actually fails.
+// Lifts payFigures() + fmtMoney() out of the shipped page and executes them, so a copy in this
+// file cannot drift into passing while the page itself is broken. payFigures decides what a
+// customer is asked to pay; the case that matters most is a clearing bank transfer removing
+// the button, because a button that still says you owe it is how a customer pays twice.
+function checkMyQuotesPayFigures(html) {
+  const errors = [];
+  const lines = html.split("\n");
+  const takeBlock = (needle) => {
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+
+  const fmtSrc = takeBlock("function fmtMoney(");
+  const figSrc = takeBlock("function payFigures(");
+  if (!fmtSrc || !figSrc) {
+    errors.push("my-quotes.html: payFigures() or fmtMoney() is gone — that function decides what a "
+      + "customer is asked to pay, and it is the only automated coverage this page's pay panel has. "
+      + "If it was removed on purpose, remove this check too.");
+    return errors;
+  }
+
+  let fig;
+  try {
+    fig = new Function("opt", [fmtSrc, figSrc, "return payFigures(opt);"].join("\n"));
+  } catch (e) {
+    errors.push("my-quotes.html: payFigures() does not parse in isolation — " + e.message);
+    return errors;
+  }
+
+  const cases = [
+    ["deposit set, nothing paid",
+      { canPay: true, askCents: 100000, askKind: "deposit", balanceCents: 365000, settledCents: 0, pendingCents: 0, depositCents: 100000 },
+      (r) => r.canPay === true && r.askCents === 100000 && r.rows[0].value === "$1,000.00"],
+    ["no deposit: the ask is the balance",
+      { canPay: true, askCents: 365000, askKind: "balance", balanceCents: 365000, settledCents: 0, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === true && r.rows[0].value === "$3,650.00"],
+    // THE ONE THAT MATTERS: a clearing bank transfer must remove the button entirely.
+    ["pending ACH covers the ask",
+      { canPay: false, reason: "pending_clearing", askCents: 0, balanceCents: 365000, settledCents: 0, pendingCents: 365000, depositCents: null },
+      (r) => r.canPay === false && /clearing/i.test(r.notice || "")],
+    ["pending ACH covers only PART of it — still no button",
+      { canPay: false, reason: "pending_clearing", askCents: 0, balanceCents: 365000, settledCents: 0, pendingCents: 10000, depositCents: null },
+      (r) => r.canPay === false],
+    ["paid in full: no ask, no button",
+      { canPay: false, reason: "paid_in_full", askCents: 0, balanceCents: 0, settledCents: 365000, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === false && r.rows.length === 1 && /Paid in full/.test(r.rows[0].label)],
+    ["overpaid never renders a negative ask",
+      { canPay: false, reason: "paid_in_full", askCents: 0, balanceCents: -5000, settledCents: 370000, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === false && !r.rows.some((x) => /-/.test(x.value))],
+    ["an empty payload renders nothing rather than throwing",
+      null,
+      (r) => r.canPay === false && r.rows.length === 0],
+  ];
+
+  for (const [name, input, ok] of cases) {
+    let out;
+    try {
+      out = fig(input);
+    } catch (e) {
+      errors.push(`my-quotes.html payFigures — ${name}: threw ${e.message}`);
+      continue;
+    }
+    if (!ok(out)) {
+      errors.push(`my-quotes.html payFigures — ${name}: got ${JSON.stringify(out)}`);
+    }
+  }
+  return errors;
+}
+
 function checkMyQuotesTaxBreakdown(html) {
   const errors = [];
   const lines = html.split("\n");
@@ -1373,6 +1448,7 @@ if (tests.skipped) {
 }
 
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
+errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);
