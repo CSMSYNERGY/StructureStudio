@@ -658,120 +658,20 @@ function run(files) {
   }
 
   // Every action in a gated edge function must have a line in that function's GATES table.
+  // The rule itself is checkGateTable(); the functions it runs over are DISCOVERED rather than
+  // listed, because the four-name array that used to sit here left portal-sms — ten gates,
+  // three of them able to spend the tenant's money — checked by nothing at all.
   //
-  // WHY THIS IS A PUSH-BLOCKING RULE. Per-person access (migration 100) is enforced by one
-  // table per function, checked in resolveTenant before dispatch. That design is only sound
-  // while the table is COMPLETE: these functions are long `if (action === "x")` chains, so a
-  // branch is reachable the moment it is written. resolveTenant refuses actions missing from
-  // the table, which turns the mistake into a 403 instead of an open endpoint — but a 403 on
-  // a brand-new feature reads like a bug in the feature, and the tempting fix is to widen the
-  // gate rather than to write the right one. Catching it here says exactly what is wrong.
-  // The reverse (a table entry with no branch) is caught too: a stale line is a claim that
-  // something is protected when nothing by that name exists.
-  for (const fn of ["portal-settings", "portal-schedule", "portal-billing", "sync-design-status"]) {
-    const src = readFileSync(join(root, "supabase", "functions", fn, "index.ts"), "utf8");
-    const start = src.indexOf("const GATES: GateTable = {");
-    if (start < 0) {
-      errors.push(`supabase/functions/${fn}/index.ts: no GATES table — every JWT-authenticated `
-        + "function must declare one (see _shared/access.ts)");
-      continue;
-    }
-    const rest = src.slice(start);
-    const end = rest.search(/\n\};/);
-    const table = rest.slice(0, end);
-    const body = rest.slice(end);
-    // [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so
-    // the table could not satisfy this rule for it by ANY spelling. The only ways out were
-    // renaming a deployed action or --no-verify -- i.e. a correctness gate teaching people to
-    // bypass it. Surfaced by the 3D merge, which grafted six such actions in at once.
-    const gated = new Set([...table.matchAll(/^\s*([a-z0-9_]+)\s*:/gm)].map((m) => m[1]));
-    const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
-    for (const a of used) {
-      if (!gated.has(a)) {
-        errors.push(`supabase/functions/${fn}/index.ts: action "${a}" has no entry in GATES — `
-          + "add the area and level it requires, or it is refused at runtime");
-      }
-    }
-    for (const a of gated) {
-      if (!used.has(a)) {
-        errors.push(`supabase/functions/${fn}/index.ts: GATES lists "${a}" but no branch handles `
-          + "it — remove the stale entry so the table describes what actually exists");
-      }
-    }
+  // The old "no GATES table" arm is gone with the array: a function that loses its table leaves
+  // `gates: GATES` dangling, which the deno check below fails on. What CANNOT be caught that
+  // way is discovery going blind, so that is what is guarded here.
+  const gatedFns = gatedFunctions();
+  if (!gatedFns.length) {
+    errors.push(`${FUNCTIONS_DIR}/: no function declares \`${GATES_DECL}\` — either the gate `
+      + "model was renamed or this discovery has gone blind; re-anchor it in "
+      + "scripts/preflight.mjs rather than leaving every gated function unchecked");
   }
-
-  // ── THE PERMISSION MODEL HAS TWO COPIES, AND THEY MUST AGREE ───────────────────────────
-  // _shared/access.ts is the TypeScript resolver every edge function runs; area_level_for()
-  // in SQL is its mirror, and migration 154's own header says "CHANGE THE TWO TOGETHER".
-  // Nothing enforced that, and it drifted twice without anyone noticing:
-  //
-  //   * `change_orders` was added to access.ts on 2026-09-01 and never reached the SQL, so
-  //     the mirror resolved it to 'none' for every non-owner.
-  //   * the sales_rep preset's `orders` went 'view' -> 'edit' in the same period, and the
-  //     mirror kept saying 'view'.
-  //
-  // Both were INERT — 154's restrictive policies key on designs/contacts/inventory only, and
-  // an unknown area returns 'none' rather than raising — which is precisely why they lasted.
-  // The day someone adds a policy for change_orders, every row vanishes for everyone and the
-  // cause is a two-day-old commit in a different language. This closes that gap: the two
-  // area lists must match on every push, in both directions.
-  //
-  // Deliberately compares KEYS and not the whole resolution logic. The logic is a hand
-  // translation that has to be read to be checked; the lists are mechanical, drift silently,
-  // and are what actually went wrong twice. A cheap check that fires is worth more than a
-  // thorough one nobody can maintain.
-  {
-    const accessSrc = readFileSync(join(root, "supabase", "functions", "_shared", "access.ts"), "utf8");
-    const areasStart = accessSrc.indexOf("export const AREAS: Area[] = [");
-    const areasEnd = areasStart < 0 ? -1 : accessSrc.indexOf("\n];", areasStart);
-    if (areasStart < 0 || areasEnd < 0) {
-      errors.push("_shared/access.ts: could not find the AREAS array — the areas/SQL mirror "
-        + "cross-check cannot run, so re-point it rather than leaving it silently disabled");
-    } else {
-      const tsAreas = new Set(
-        [...accessSrc.slice(areasStart, areasEnd).matchAll(/^\s*\{\s*key:\s*"([a-z0-9_]+)"/gm)].map((m) => m[1]),
-      );
-
-      // The mirror lives in whichever migration most recently re-issued the function, so find
-      // the highest-numbered file that defines it rather than pinning 154 — pinning it would
-      // make this check quietly test a superseded copy the first time it moves.
-      const migDir = join(root, "supabase", "migrations");
-      const owner = readdirSync(migDir)
-        .filter((f) => f.endsWith(".sql"))
-        .filter((f) => readFileSync(join(migDir, f), "utf8").includes("function public.area_level_for("))
-        .sort()
-        .pop();
-      if (!owner) {
-        errors.push("supabase/migrations: no migration defines area_level_for() — the SQL "
-          + "mirror of _shared/access.ts is missing");
-      } else {
-        const sql = readFileSync(join(migDir, owner), "utf8");
-        const kStart = sql.indexOf("k_areas constant jsonb");
-        const kEnd = kStart < 0 ? -1 : sql.indexOf("$j$::jsonb", kStart);
-        if (kStart < 0 || kEnd < 0) {
-          errors.push(`supabase/migrations/${owner}: could not find the k_areas block that `
-            + "mirrors AREAS — re-point this check rather than leaving it disabled");
-        } else {
-          const sqlAreas = new Set(
-            [...sql.slice(kStart, kEnd).matchAll(/^\s*"([a-z0-9_]+)"\s*:\s*\{/gm)].map((m) => m[1]),
-          );
-          for (const k of tsAreas) {
-            if (!sqlAreas.has(k)) {
-              errors.push(`area "${k}" is in _shared/access.ts but NOT in ${owner}'s k_areas. `
-                + "The SQL mirror resolves an unknown area to 'none' for every non-owner, so this "
-                + "denies it silently rather than erroring. Add it in this same commit.");
-            }
-          }
-          for (const k of sqlAreas) {
-            if (!tsAreas.has(k)) {
-              errors.push(`area "${k}" is in ${owner}'s k_areas but NOT in _shared/access.ts. `
-                + "A mirror describing an area that no longer exists is a claim nothing checks.");
-            }
-          }
-        }
-      }
-    }
-  }
+  for (const g of gatedFns) errors.push(...checkGateTable(g.fn, g.src));
 
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
@@ -1037,6 +937,180 @@ function edgeEntrypoints() {
     .map((e) => `${e.name}/index.ts`)
     .filter((rel) => existsSync(join(dir, rel)))
     .sort();
+}
+
+// ── Gated edge functions: the GATES ⇄ action cross-check ─────────────────────────────────
+// Discovered rather than listed, for the reason this file opens with: a second hand-kept list
+// is how this gate has twice reported clean while running zero rules. The four-name array that
+// used to live inside run() was exactly that mistake — portal-sms shipped a GATES table of ten
+// actions, three of which SPEND THE TENANT'S MONEY, covered by nothing at all, because nobody
+// added its name to the array. Now a new gated function is checked the day it lands.
+const GATES_DECL = "const GATES: GateTable = {";
+
+function gatedFunctions() {
+  const dir = join(root, FUNCTIONS_DIR);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith("_"))
+    .map((e) => ({ fn: e.name, path: join(dir, e.name, "index.ts") }))
+    .filter((f) => existsSync(f.path))
+    .map((f) => ({ fn: f.fn, src: readFileSync(f.path, "utf8") }))
+    .filter((f) => f.src.includes(GATES_DECL))
+    .sort((a, b) => a.fn.localeCompare(b.fn));
+}
+
+// Sticky (`y`) on purpose: walkBlock anchors these at a known offset rather than searching.
+//
+// [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so the
+// table could not satisfy this rule for it by ANY spelling. The only ways out were renaming a
+// deployed action or --no-verify -- i.e. a correctness gate teaching people to bypass it.
+// Surfaced by the 3D merge, which grafted six such actions in at once.
+const GATE_KEY = /([a-z0-9_]+)\s*:/y;
+const CASE_LABEL = /case\s*"([^"]+)"\s*:/y;
+
+// A gate name follows the table's `{` or a comma; a `case` label follows the switch's `{`, a
+// previous case's `:`, or the end of the previous case's block or statement.
+const KEY_AFTER = new Set(["{", ","]);
+const CASE_AFTER = new Set(["{", "}", ";", ":"]);
+
+function skipString(src, i) {
+  const q = src[i];
+  for (let j = i + 1; j < src.length; j++) {
+    if (src[j] === "\\") { j++; continue; }
+    if (src[j] === q) return j + 1;
+    // An unterminated quote must not swallow the rest of the file and take the brace depth
+    // with it. Only a template literal legitimately spans lines.
+    if (q !== "`" && src[j] === "\n") return j;
+  }
+  return src.length;
+}
+
+// Walk the braced block whose `{` sits at `open`. Returns { end, hits }: `end` is the index
+// just past the matching `}` (-1 if the braces never balance), and `hits` are `token`'s capture
+// groups matched at DEPTH 1 of that block, outside comments and strings, and only where the
+// preceding significant character is in `after` — so a match can never start mid-identifier.
+//
+// Character-level rather than line-anchored, and that is load-bearing three times over:
+//   - sync-design-status writes its whole table on ONE line, which has no line anchor at all.
+//     The old `/\n\};/` extent search ran straight past it into the next object and the old
+//     `/^\s*name:/gm` then matched nothing -- zero gates, zero actions, a silent pass on a
+//     function that was already named in the checked list.
+//   - every entry in all five tables happens to sit on one line TODAY. Wrap one and a
+//     line-anchored scan harvests `area` and `level` as gate names, reporting two phantom
+//     stale entries. Depth is what tells a gate name from a field of its value.
+//   - portal-sms holds a SECOND switch (`switch (reg.status)`, in advanceOne) whose ten labels
+//     are states, not actions. Scoping the case scan to the dispatch block's own braces is the
+//     only thing keeping those out of the action set.
+function walkBlock(src, open, token, after) {
+  const hits = [];
+  let depth = 0;
+  let prev = "";
+  let i = open;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && src[i + 1] === "/") {
+      const nl = src.indexOf("\n", i);
+      i = nl < 0 ? src.length : nl + 1;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const e = src.indexOf("*/", i + 2);
+      i = e < 0 ? src.length : e + 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { i = skipString(src, i); prev = c; continue; }
+    if (c === "{") { depth++; prev = c; i++; continue; }
+    if (c === "}") {
+      depth--;
+      prev = c;
+      i++;
+      if (depth === 0) return { end: i, hits };
+      continue;
+    }
+    if (/\s/.test(c)) { i++; continue; }
+    if (depth === 1 && after.has(prev)) {
+      token.lastIndex = i;
+      const m = token.exec(src);
+      if (m) { hits.push(m[1]); prev = ":"; i = token.lastIndex; continue; }
+    }
+    prev = c;
+    i++;
+  }
+  return { end: -1, hits };
+}
+
+// Every action a gated edge function dispatches must have a line in that function's GATES
+// table, and every line in that table must have a branch.
+//
+// WHY THIS IS A PUSH-BLOCKING RULE. Per-person access (migration 100) is enforced by one table
+// per function, checked in resolveTenant before dispatch. That design is only sound while the
+// table is COMPLETE: a branch is reachable the moment it is written. resolveTenant refuses
+// actions missing from the table, which turns the mistake into a 403 instead of an open
+// endpoint -- but a 403 on a brand-new feature reads like a bug in the feature, and the
+// tempting fix is to widen the gate rather than to write the right one. Catching it here says
+// exactly what is wrong. The reverse (a table entry with no branch) is caught too: a stale line
+// is a claim that something is protected when nothing by that name exists.
+//
+// Takes its subject as an ARGUMENT, like checkMyQuotesTaxBreakdown above, so --self-test can
+// feed it a mutated source and prove each direction really fires.
+function checkGateTable(fn, src) {
+  const errors = [];
+  const file = `${FUNCTIONS_DIR}/${fn}/index.ts`;
+  const decl = src.indexOf(GATES_DECL);
+  if (decl < 0) return errors;   // gatedFunctions() only yields files that have one
+
+  const { end, hits } = walkBlock(src, decl + GATES_DECL.length - 1, GATE_KEY, KEY_AFTER);
+  if (end < 0) {
+    errors.push(`${file}: the GATES table's braces never close — preflight cannot read it, so `
+      + "nothing in this function is cross-checked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gated = new Set(hits);
+  const body = src.slice(end);
+
+  // The two dispatch shapes, unioned. The Set is what keeps an action written both ways from
+  // counting twice.
+  const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
+  const sw = /switch\s*\(\s*action\s*\)\s*\{/.exec(body);
+  if (sw) {
+    const dispatch = walkBlock(body, sw.index + sw[0].length - 1, CASE_LABEL, CASE_AFTER);
+    if (dispatch.end < 0) {
+      errors.push(`${file}: the \`switch (action)\` block's braces never close — its case `
+        + "labels cannot be read, so every gate in this function would report as stale");
+      return errors;
+    }
+    for (const a of dispatch.hits) used.add(a);
+  }
+  // The default action is dispatched too: resolveTenant reads `payload?.action ||
+  // opts.defaultAction`, so a request with no action in its body runs it, and it is gated like
+  // any other. It is the ONLY thing justifying sync-design-status's single entry — that
+  // function compares `action` nowhere at all.
+  const dflt = /defaultAction\s*:\s*"([^"]+)"/.exec(body);
+  if (dflt) used.add(dflt[1]);
+
+  // Vacuity guard. A rule whose anchors stop matching reports clean forever and nobody finds
+  // out — this file's signature failure, and exactly what happened here: sync-design-status sat
+  // in the checked list for months while zero gates and zero actions were parsed out of it.
+  if (!gated.size || !used.size) {
+    errors.push(`${file}: parsed ${gated.size} gate(s) and ${used.size} action(s) — the `
+      + "cross-check can no longer read this function and is silently inert; re-anchor it in "
+      + "scripts/preflight.mjs rather than leaving a gated function unchecked");
+    return errors;
+  }
+
+  for (const a of used) {
+    if (!gated.has(a)) {
+      errors.push(`${file}: action "${a}" has no entry in GATES — `
+        + "add the area and level it requires, or it is refused at runtime");
+    }
+  }
+  for (const a of gated) {
+    if (!used.has(a)) {
+      errors.push(`${file}: GATES lists "${a}" but no branch handles `
+        + "it — remove the stale entry so the table describes what actually exists");
+    }
+  }
+  return errors;
 }
 
 function denoInstalled() {
@@ -1700,6 +1774,122 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
+
+  // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
+  // This rule had NO self-test at all until now, in either direction — while quietly running
+  // zero checks on one of the four functions it named. So prove the whole mechanism: that
+  // discovery finds the functions, that BOTH dispatch shapes are read, that the real repo is
+  // quiet, and that the scoping which makes the case scan safe is really in place.
+  const gateFns = gatedFunctions();
+  if (gateFns.length < 5) {
+    console.error(`self-test FAILED: discovery found ${gateFns.length} gated function(s), expected at least 5`);
+    process.exit(1);
+  }
+  // Named explicitly, in the shape of the ["_shared", "_test_stubs"] assertion above: portal-sms
+  // is the function the hand-kept list missed entirely, and sync-design-status is the one it
+  // named while parsing nothing out of it.
+  for (const want of ["portal-sms", "sync-design-status"]) {
+    if (!gateFns.some((g) => g.fn === want)) {
+      console.error(`self-test FAILED: gated function "${want}" was not discovered`);
+      process.exit(1);
+    }
+  }
+  // The case-label half must have a real subject. If no discovered function dispatches with
+  // `switch (action)` any more, every assertion below still passes while that whole code path
+  // sits inert — the failure shape this script keeps re-learning.
+  if (!gateFns.some((g) => /switch\s*\(\s*action\s*\)/.test(g.src))) {
+    console.error("self-test FAILED: no discovered gated function dispatches with `switch (action)` — "
+      + "the case-label half of the cross-check has no subject and is silently inert");
+    process.exit(1);
+  }
+  for (const g of gateFns) {
+    const errs = checkGateTable(g.fn, g.src);
+    if (errs.length) {
+      console.error(`self-test FAILED: ${g.fn} does not pass the GATES cross-check against the real file:`);
+      for (const e of errs) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  const gateSrcOf = (fn) => gateFns.find((g) => g.fn === fn).src;
+
+  // FIRES on the switch/case form. portal-sms dispatches with `switch (action)`, so under the
+  // old `action === "x"` scan every one of its ten gates would have read as stale — which is
+  // why adding it to the list was never enough on its own.
+  const smsSrc = gateSrcOf("portal-sms");
+  const smsCase = 'case "opt_outs": {';
+  if (!smsSrc.includes(smsCase)) {
+    console.error("self-test: could not find the portal-sms case label to rename — update the self-test");
+    process.exit(1);
+  }
+  const smsErrs = checkGateTable("portal-sms", smsSrc.replace(smsCase, 'case "opt_outs_typo": {'));
+  if (!smsErrs.some((e) => e.includes('action "opt_outs_typo" has no entry in GATES'))) {
+    console.error("self-test FAILED: a `case` label with no GATES entry was not caught — the switch/case "
+      + "half of the cross-check does not fire");
+    process.exit(1);
+  }
+  if (!smsErrs.some((e) => e.includes('GATES lists "opt_outs" but no branch'))) {
+    console.error("self-test FAILED: a GATES entry whose `case` label is gone was not reported as stale");
+    process.exit(1);
+  }
+  // SCOPED. portal-sms holds a second switch (`switch (reg.status)`, in advanceOne) whose ten
+  // labels are states, not actions. An unscoped case scan reports every one of them as ungated.
+  if (smsErrs.some((e) => e.includes("brand_pending"))) {
+    console.error("self-test FAILED: a `switch (reg.status)` label was read as an action — the case scan "
+      + "is no longer scoped to the `switch (action)` dispatch block");
+    process.exit(1);
+  }
+
+  // FIRES on the `action === "x"` form too — the original shape, which had no coverage either.
+  const setSrc = gateSrcOf("portal-settings");
+  const setIf = 'if (action === "save_colors") {';
+  if (!setSrc.includes(setIf)) {
+    console.error("self-test: could not find the portal-settings branch to rename — update the self-test");
+    process.exit(1);
+  }
+  const setErrs = checkGateTable("portal-settings", setSrc.replace(setIf, 'if (action === "save_colors_typo") {'));
+  if (!setErrs.some((e) => e.includes('action "save_colors_typo" has no entry in GATES'))
+      || !setErrs.some((e) => e.includes('GATES lists "save_colors" but no branch'))) {
+    console.error("self-test FAILED: the `action === \"x\"` half of the cross-check no longer fires");
+    process.exit(1);
+  }
+
+  // The ONE-LINE table is really parsed. sync-design-status writes its whole table on a single
+  // line and reaches its only action through `defaultAction`, never `===` — it sat in the
+  // checked list for months with zero gates and zero actions read out of it, passing by saying
+  // nothing about anything.
+  const syncSrc = gateSrcOf("sync-design-status");
+  const syncTable = 'const GATES: GateTable = { sync: { area: "designs", level: "view" } };';
+  if (!syncSrc.includes(syncTable)) {
+    console.error("self-test: could not find sync-design-status's one-line GATES table — update the self-test");
+    process.exit(1);
+  }
+  const syncStale = checkGateTable("sync-design-status",
+    syncSrc.replace(syncTable, syncTable.replace(" } };", ' }, stale_entry: "open" };')));
+  if (!syncStale.some((e) => e.includes('GATES lists "stale_entry"'))) {
+    console.error("self-test FAILED: a second entry added to the one-line GATES table was not read — the "
+      + "table's extent or its keys are being parsed as nothing");
+    process.exit(1);
+  }
+  // Multi-line, the shape any reformat would produce. `area` and `level` are fields of the
+  // value, not gate names: a line-anchored key scan reports two phantom stale entries here.
+  const syncMulti = checkGateTable("sync-design-status", syncSrc.replace(syncTable,
+    'const GATES: GateTable = {\n  sync: {\n    area: "designs",\n    level: "view",\n  },\n};'));
+  if (syncMulti.length) {
+    console.error("self-test FAILED: the same table written across several lines does not pass:");
+    for (const e of syncMulti) console.error("  " + e);
+    process.exit(1);
+  }
+  // And the vacuity guard fires: strip the default action and nothing in that file dispatches
+  // at all, which must read as "this rule has gone blind", never as a clean pass.
+  const syncBlind = checkGateTable("sync-design-status",
+    syncSrc.replace('defaultAction: "sync"', "readActions: new Set()"));
+  if (!syncBlind.some((e) => e.includes("silently inert"))) {
+    console.error("self-test FAILED: a gated function with no discoverable action passed the cross-check — "
+      + "the vacuity guard does not fire, so a rule reading nothing reports clean");
+    process.exit(1);
+  }
+  console.log(`self-test passed: the GATES cross-check reads all ${gateFns.length} discovered function(s), fires on `
+    + "both `action === \"x\"` and `switch/case` dispatch, ignores a non-dispatch switch, and refuses to run blind");
 
   process.exit(0);
 }
