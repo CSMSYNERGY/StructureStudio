@@ -801,6 +801,39 @@ function fmtFtIn(inches) {
   if (inch === 0) return ft + "'";
   return ft + "'" + inch + '"';
 }
+// fmtFtIn returns "" for zero and below, which is right for a size ("" beats '0"' on a label)
+// and wrong for a DIMENSION, where flush-to-the-corner is a real, useful measurement. This is
+// the dimension spelling.
+function fmtDimFtIn(feet) { return fmtFtIn(Number(feet) * 12) || '0"'; }
+// How far a placed item's two ends sit from the two ends of the wall it is on.
+//
+// Carolyn, 2026-09-03: "we're not showing the measurements of light, so they don't know if
+// they're centered or not ... we need to show how far it is from here to here at the end."
+// She was comparing us against ShedPro, which draws exactly this pair of dimensions either
+// side of the selected item.
+//
+// Works on the building's INTERIOR axis in feet (0 .. bldgW for a north/south wall, 0 .. bldgH
+// for east/west) — deliberately the same axis and the same (pos - mg) / scale conversion that
+// getResizeBounds uses, so a dimension and a resize clamp can never disagree about where a
+// wall ends.
+//
+// Returns null for anything with no wall, which is the honest answer for a loft, a note, a
+// line, a stored prop, and a ceiling-mounted electrical device — they float free, and there is
+// no wall to be centred on. Callers must handle null rather than defaulting to a wall.
+function ssWallDims(item, cfg, bldgW, bldgH, mgX, mgY, scale) {
+  if (!item || !cfg || !item.wall) return null;
+  const isHoriz = item.wall === "north" || item.wall === "south";
+  const wallLen = isHoriz ? bldgW : bldgH;
+  const widthFt = Number(item.widthFt) || Number(cfg.width) || 0;
+  const posFt = isHoriz ? (item.x - mgX) / scale : (item.y - mgY) / scale;
+  const half = widthFt / 2;
+  const before = Math.max(0, posFt - half);
+  const after = Math.max(0, wallLen - (posFt + half));
+  // A quarter of an inch. Finer than anyone frames to, and loose enough that "centred" does
+  // not flicker off under a sub-pixel drag — which would read as a bug rather than a reading.
+  const centered = Math.abs(before - after) < 0.02;
+  return { isHoriz, wallLen, widthFt, posFt, half, before, after, centered };
+}
 // Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
 // style with more than one size reveals a size chooser, then swing/operation where more than one
 // is offered, then place.
@@ -9612,6 +9645,61 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
     setItems((p) => p.map((i) => i.id !== selectedId ? i : { ...i, rotation: ((i.rotation || 0) + 90) % 360 }));
   };
+  // Centre the selected item on its wall. Carolyn relayed the request on 2026-09-03 from a
+  // builder about to sign up: "he was asking, oh, can we not have it snap to the center?"
+  // ShedPro calls the same thing "Center Items".
+  //
+  // It does NOT hand-set x/y. It aims the wall's midpoint at the SAME snapper the drag uses
+  // for that item class and lets it clamp, so a centred item lands exactly where dragging it
+  // to the middle would land it — including the half-width clamp that keeps a wide door off
+  // the corner. Then it runs the drag's two guards, in the drag's order, and refuses rather
+  // than overlapping: centring is a convenience, never a way past a collision rule.
+  const centerSel = () => {
+    if (!selectedId || planLocked) return;
+    const it = items.find((i) => i.id === selectedId);
+    if (!it) return;
+    const cfg = ITEMS[it.type];
+    if (!cfg) return;
+    const dims = ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale);
+    if (!dims) return;                       // no wall: nothing to be centred on
+    const iWidthFt = it.widthFt || cfg.width;
+    const iwPx = iWidthFt * scale;
+    // The wall's midpoint in page coordinates. Both snappers clamp, so this is all they need.
+    const midX = mgX + pW / 2, midY = mgY + pH / 2;
+    const others = items.filter((i) => i.id !== it.id);
+    let sn;
+    if (cfg.wallOnly) {
+      sn = snapToWall(it.wall, midX, midY, iwPx, 0.5 * scale, pW, pH, mgX, mgY);
+      const cand = { ...it, ...sn, widthFt: iWidthFt };
+      if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)
+        || checkWallSlabOverlap(sn, iwPx, others, ITEMS, scale, cand)) {
+        setToast("Something is already in the middle of that wall — move it first.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+    } else if (cfg.wallSnap) {
+      sn = snapToWallInterior(it.wall, midX, midY, iwPx, slabDepthFt(cfg, it) * scale, pW, pH, mgX, mgY);
+      const cand = { ...it, ...sn };
+      if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)
+        || checkWallSlabOverlap(sn, iwPx, others, ITEMS, scale, cand)) {
+        setToast("Something is already in the middle of that wall — move it first.");
+        setTimeout(() => setToast(null), 4000);
+        return;
+      }
+    } else {
+      return;                                // carries a wall but neither mount: not ours to move
+    }
+    // A ramp follows its door here for the same reason it follows during a drag: it is derived
+    // geometry, and leaving it behind detaches it on the plan and in the exported PDF.
+    setItems((p) => p.map((i) => {
+      if (i.id === it.id) return { ...i, ...sn };
+      if (i.type === "ramp" && i.snapDoorId === it.id) {
+        const rp = rampPlacementForDoor(sn, i.heightFt, pW, pH, mgX, mgY, scale);
+        return rp ? { ...i, ...rp } : i;
+      }
+      return i;
+    }));
+  };
   const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
   // ─── EXPORT RENDERING (shared by Export modal, PDF, and submit) ───
@@ -12485,6 +12573,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
             </>;
           })()}
+          {/* Center, and the centred READOUT, only for an item that actually has a wall to be
+              centred on. Rotate beside it is shown for everything and silently no-ops on wall
+              items (rotSel returns early for them) — do not copy that here: a button that
+              looks live and does nothing is the failure mode this whole change is fixing. */}
+          {selectedId && !planLocked && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            const sc = si && ITEMS[si.type];
+            if (!si || !sc || !(sc.wallOnly || sc.wallSnap)) return null;
+            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
+            if (!d) return null;
+            return d.centered
+              ? <span style={{ ...S.btn("#ECFDF5", "#059669"), border: "1px solid #A7F3D0", cursor: "default" }}>✓ Centered</span>
+              : <button onClick={centerSel} style={{ ...S.btn("#ECFEFF", "#0891B2"), border: "1px solid #A5F0FC" }}>⇔ Center</button>;
+          })()}
           {selectedId && !planLocked && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
@@ -12887,7 +12989,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     ) : (
                       <>
                         <text x={0} y={2} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">{cfg.shortLabel}</text>
-                        <text x={0} y={14} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>{itemW}×{itemH}</text>
+                        {/* Feet-inches, not raw feet. These are stored as fractions of a foot, so
+                            an 6"x8" outlet printed on the plan as its literal widthFt x heightFt —
+                            "0.5×0.666666" — which is what Carolyn was looking at on 2026-09-03
+                            when she said there are no real measurements. fmtFtIn is the same
+                            formatter the door and window labels above already use. */}
+                        <text x={0} y={14} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>{fmtFtIn(itemW * 12)}×{fmtFtIn(itemH * 12)}</text>
                       </>
                     )}
                     {isWB && isSel && (() => {
@@ -12933,6 +13040,69 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
+          {/* ── ALONG-WALL DIMENSIONS FOR THE SELECTED ITEM (Carolyn 2026-09-03) ──────────
+              Two measurements, one to each end of the wall, the way ShedPro draws them:
+              "we're not showing the measurements of light, so they don't know if they're
+              centered or not ... how far it is from here to here at the end."
+
+              Three placement decisions, each load-bearing:
+              • Rendered HERE, as a sibling of the resize badge, NOT inside the item's own <g>.
+                That group carries `transform=rotate(...)` for east/west walls, so a chip drawn
+                inside it would hang sideways and the numbers would be unreadable on two of the
+                four walls.
+              • Drawn INSIDE the building. The band outside each wall already holds the
+                building's own "12 ft" dimensions and the FRONT/BACK/LEFT/RIGHT labels, and it
+                is also where the viewBox `frame` crops — inside, nothing can collide and
+                nothing can be clipped.
+              • No export twin, on purpose. renderExportCanvas draws no selection chrome at all,
+                and these follow the selection; they are a design-time aid, not part of the
+                customer's quote (Ahsan, 2026-09-04).
+
+              Live during a drag for free: onPtrMove commits to `items` on every pointer move,
+              and this reads `items`. A REFUSED move commits nothing, so the chips simply hold
+              their last legal reading instead of flickering — which is the honest behaviour. */}
+          {selectedId && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            const sc = si && ITEMS[si.type];
+            if (!si || !sc) return null;
+            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
+            if (!d) return null;                     // loft, note, line, prop, ceiling device
+            const isSlab = !!ssSlabModel(si.type, ITEMS);
+            // Clear the item itself: a wall slab is drawn inside the wall and would sit on top
+            // of a dimension line placed at a fixed inset.
+            const inset = (isSlab ? slabDepthFt(sc, si) : 0.5) * scale + 22;
+            const axis0 = d.isHoriz ? mgX : mgY;
+            const near = axis0 + (d.posFt - d.half) * scale;
+            const far = axis0 + (d.posFt + d.half) * scale;
+            const end = axis0 + d.wallLen * scale;
+            const cross = d.isHoriz
+              ? (si.wall === "north" ? mgY + inset : mgY + pH - inset)
+              : (si.wall === "west" ? mgX + inset : mgX + pW - inset);
+            const ink = d.centered ? "#059669" : "#1E293B";
+            const seg = (key, a, b, feet) => {
+              const mid = (a + b) / 2;
+              const label = fmtDimFtIn(feet);
+              const cw = Math.max(28, label.length * 6.5 + 12);
+              const x1 = d.isHoriz ? a : cross, y1 = d.isHoriz ? cross : a;
+              const x2 = d.isHoriz ? b : cross, y2 = d.isHoriz ? cross : b;
+              const cx = d.isHoriz ? mid : cross, cy = d.isHoriz ? cross : mid;
+              const tk = 4;                          // end-tick half length, perpendicular
+              return (
+                <g key={key} pointerEvents="none">
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <line x1={d.isHoriz ? x1 : x1 - tk} y1={d.isHoriz ? y1 - tk : y1}
+                        x2={d.isHoriz ? x1 : x1 + tk} y2={d.isHoriz ? y1 + tk : y1}
+                        stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <line x1={d.isHoriz ? x2 : x2 - tk} y1={d.isHoriz ? y2 - tk : y2}
+                        x2={d.isHoriz ? x2 : x2 + tk} y2={d.isHoriz ? y2 + tk : y2}
+                        stroke={ink} strokeWidth={1} opacity={0.5} />
+                  <rect x={cx - cw / 2} y={cy - 9} width={cw} height={18} rx={4} fill={ink} />
+                  <text x={cx} y={cy + 4} textAnchor="middle" fill="#FFF" fontSize={10} fontWeight="700">{label}</text>
+                </g>
+              );
+            };
+            return <>{seg("dim-a", axis0, near, d.before)}{seg("dim-b", far, end, d.after)}</>;
+          })()}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
             if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)
