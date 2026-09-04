@@ -839,7 +839,13 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
 function fmtFtIn(inches) {
   const n = Number(inches);
   if (!isFinite(n) || n <= 0) return "";
-  const ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100;
+  let ft = Math.floor(n / 12), inch = Math.round((n - ft * 12) * 100) / 100;
+  // CARRY. Rounding the remainder can land on a full twelve: 35.9999" is one floating-point
+  // hair under 3 ft, and without this it prints 2'12" — a measurement that does not exist on
+  // a tape. Not theoretical: the Center action divides a wall in two and reaches it in one
+  // click, and the reading appears on the plan chip, the wall elevation and the 3D chip at
+  // once. d3FtIn has always carried (`if (inch === 12)`); this is the same rule, at 2 dp.
+  if (inch >= 12) { ft += 1; inch = 0; }
   if (ft === 0) return inch + '"';
   if (inch === 0) return ft + "'";
   return ft + "'" + inch + '"';
