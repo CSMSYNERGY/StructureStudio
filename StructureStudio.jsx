@@ -834,6 +834,132 @@ function ssWallDims(item, cfg, bldgW, bldgH, mgX, mgY, scale) {
   const centered = Math.abs(before - after) < 0.02;
   return { isHoriz, wallLen, widthFt, posFt, half, before, after, centered };
 }
+// The vertical band a wall item occupies, in FEET off the floor.
+//
+// The two families store this in different units and different fields, which is the whole
+// reason this exists: an OPENING carries feet (sillFt / openingHeightFt, stamped at placement
+// by d3OpeningDefaults and overridden per fixture from sillIn), while a SLAB or a wall device
+// carries INCHES (heightOffFloorIn). Reading one as the other silently draws a window at four
+// inches or an outlet at four feet.
+//
+// Slabs go through ssSlabBand — the SAME band the collision rule uses — so the elevation and
+// the refusal can never disagree about what is where. Its "legacy" sentinel is a full-height
+// blocker ([0, 1e4]) rather than a real measurement, so it is rejected here and the item falls
+// through to its own heightOffFloorIn.
+//
+// Returns null when nothing on the item says where it sits vertically. Callers must draw no
+// vertical dimension in that case rather than guessing zero — a made-up height off the floor
+// is worse than none, because a builder would frame to it.
+function ssItemVBand(item, cfg, itemTypes) {
+  if (!item || !cfg) return null;
+  if (cfg.wallOnly) {
+    const def = d3OpeningDefaults(item.type) || {};
+    let h = Number(item.openingHeightFt != null ? item.openingHeightFt : def.openingHeightFt);
+    if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : D3.DOOR_H;
+    let sill = Number(item.sillFt != null ? item.sillFt : def.sillFt);
+    if (!isFinite(sill) || sill < 0) sill = 0;
+    return { bottomFt: sill, topFt: sill + h };
+  }
+  const band = ssSlabBand(item, itemTypes);
+  if (band && isFinite(band[1]) && band[1] < 1e3) return { bottomFt: band[0] / 12, topFt: band[1] / 12 };
+  // A "legacy" slab — a config predating modelKey — reports [0, 1e4], which is a full-height
+  // COLLISION blocker, not a measurement. Its floor is still a fact though: every slab in that
+  // family stands on the ground, so bottom 0 is known rather than guessed, and no off-floor
+  // dimension is drawn from it. The top falls back to the same BENCH_H the 3D renders such a
+  // slab at, so the two views agree.
+  if (band) return { bottomFt: 0, topFt: D3.BENCH_H };
+  const offIn = Number(item.heightOffFloorIn != null ? item.heightOffFloorIn : cfg.heightOffFloorIn);
+  if (isFinite(offIn) && offIn >= 0) {
+    const bottom = offIn / 12;
+    return { bottomFt: bottom, topFt: bottom + (Number(cfg.height) || 0.5) };
+  }
+  return null;
+}
+// A flat wall-face elevation of the wall the selected item is on, with the height off the
+// floor spelled out.
+//
+// This is the other half of Carolyn's 2026-09-03 ask — "I have the window set to standard be
+// a certain feet off the floor ... the measurements from here to here would also be good, up
+// and down" — and a floor plan structurally cannot answer it: looking down, there is no up.
+//
+// It is SVG beside the plan rather than an overlay in the 3D view, deliberately, and the
+// reasoning is already written down at D3ElevationSVG: "the preview beside it is a perspective
+// three-quarter shot, where dimension lines are unreadable, and it is a shared WebGL context
+// that should not grow overlay complexity." That conclusion was reached after Carolyn spent
+// two and a half minutes on 2026-08-24 unable to read which number to change. The dimension
+// idiom here — tick pairs, a ft-in label, the run drawn to the thing it measures — is lifted
+// from that component; the palette is the designer's slate rather than the settings amber,
+// because this lives on the plan.
+//
+// Screen only. Like the plan dimensions it follows the selection, and renderExportCanvas draws
+// no selection chrome.
+function SSWallElevation({ item, cfg, itemTypes, dims, wallHeightFt, wallLabel }) {
+  const band = ssItemVBand(item, cfg, itemTypes);
+  if (!dims || !band) return null;
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const L = Math.max(1, dims.wallLen);
+  // Clamp to the wall: a legacy band or a builder's oversized depthIn can exceed the plate,
+  // and a rectangle drawn through the roof reads as a rendering bug rather than a measurement.
+  const bot = Math.max(0, Math.min(band.bottomFt, H));
+  const top = Math.max(bot, Math.min(band.topFt, H));
+
+  const VW = 420, VH = 176, PL = 52, PR = 20, PT = 14, PB = 42;
+  const innerW = VW - PL - PR, innerH = VH - PT - PB;
+  // ONE scale for both axes. A dimensioned drawing that stretches to fill its box would show
+  // a 10 ft wall as tall as an 8 ft one, and the numbers would then contradict the picture.
+  // A short wall therefore leaves slack, so the drawing is centred in it rather than pinned
+  // to the padding — which also means every dimension below is placed relative to the WALL,
+  // not to PL.
+  const sc = Math.min(innerW / L, innerH / H);
+  const ox = PL + Math.max(0, (innerW - L * sc) / 2);
+  const X = (u) => ox + u * sc;                 // 0 = the wall's left end, looking AT the wall
+  const Y = (y) => PT + innerH - y * sc;        // 0 = floor
+
+  const INK = "#1E293B", DIM = "#94A3B8", ACC = cfg.color || "#0EA5E9";
+  const lbl = (x, y, text, anchor, fill) => (
+    <text x={x} y={y} textAnchor={anchor || "middle"} style={{ fontSize: 9.5, fontWeight: 800, fill: fill || INK }}>{text}</text>
+  );
+  const iL = X(dims.before), iR = X(dims.before + dims.widthFt);
+
+  return (
+    <svg viewBox={`0 0 ${VW} ${VH}`} style={{ width: "100%", height: "auto", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, display: "block" }}>
+      {/* the wall face, seen from outside, and the ground line under it */}
+      <rect x={X(0)} y={Y(H)} width={L * sc} height={H * sc} fill="#FFF" stroke={INK} strokeWidth="1.4" />
+      <line x1={X(0) - 12} y1={Y(0)} x2={X(L) + 8} y2={Y(0)} stroke="#CBD5E1" strokeWidth="1" />
+      {/* the item on that wall */}
+      <rect x={iL} y={Y(top)} width={Math.max(2, iR - iL)} height={Math.max(2, (top - bot) * sc)}
+        fill={ACC + "33"} stroke={ACC} strokeWidth="1.6" rx={1.5} />
+
+      {/* HEIGHT OFF THE FLOOR — the number she asked for, and the reason this view exists.
+          Suppressed when the item stands on the floor: a door does not have one, and a "0"
+          dimension line under a door reads as a mistake. */}
+      {bot > 0.01 && (
+        <g>
+          <line x1={X(0) - 22} y1={Y(0)} x2={X(0) - 22} y2={Y(bot)} stroke={INK} strokeWidth="1" />
+          <line x1={X(0) - 26} y1={Y(0)} x2={X(0) - 18} y2={Y(0)} stroke={INK} strokeWidth="1" />
+          <line x1={X(0) - 26} y1={Y(bot)} x2={X(0) - 18} y2={Y(bot)} stroke={INK} strokeWidth="1" />
+          {/* a thin leader across to the item, so the number is unambiguously ITS height */}
+          <line x1={X(0) - 22} y1={Y(bot)} x2={iL} y2={Y(bot)} stroke={DIM} strokeWidth="0.75" strokeDasharray="3 2" />
+          {lbl(X(0) - 30, (Y(0) + Y(bot)) / 2 + 3, fmtDimFtIn(bot), "end")}
+          {lbl(X(0) - 30, (Y(0) + Y(bot)) / 2 + 13, "off floor", "end", DIM)}
+        </g>
+      )}
+      {/* the item's own height, inside it when there is room, above it when there is not */}
+      {top - bot > 0.01 && lbl((iL + iR) / 2, (top - bot) * sc > 16 ? (Y(bot) + Y(top)) / 2 + 3 : Y(top) - 5, fmtDimFtIn(top - bot), "middle", (top - bot) * sc > 16 ? INK : DIM)}
+
+      {/* the two along-wall runs, same numbers as the plan chips, so the two views agree */}
+      <line x1={X(0)} y1={Y(0) + 16} x2={iL} y2={Y(0) + 16} stroke={INK} strokeWidth="1" opacity="0.55" />
+      <line x1={iR} y1={Y(0) + 16} x2={X(L)} y2={Y(0) + 16} stroke={INK} strokeWidth="1" opacity="0.55" />
+      {lbl((X(0) + iL) / 2, Y(0) + 30, fmtDimFtIn(dims.before))}
+      {lbl((iR + X(L)) / 2, Y(0) + 30, fmtDimFtIn(dims.after))}
+
+      {/* wall height, right-hand side — the frame of reference for everything above */}
+      <line x1={X(L) + 8} y1={Y(0)} x2={X(L) + 8} y2={Y(H)} stroke={DIM} strokeWidth="1" />
+      {lbl(X(L) + 12, (Y(0) + Y(H)) / 2, fmtDimFtIn(H), "start", DIM)}
+      {wallLabel ? lbl(X(0), PT - 3, wallLabel + " WALL", "start", DIM) : null}
+    </svg>
+  );
+}
 // Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
 // style with more than one size reveals a size chooser, then swing/operation where more than one
 // is offered, then place.
@@ -13133,6 +13259,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })}
         </svg>
+        {/* Wall elevation for the selected item — the "up and down" half of the 2026-09-03 ask.
+            Sits directly under the plan, inside the plan's own column, so it never disturbs the
+            flex row the docked 3D panel lives in. Appears only when the selected item is on a
+            wall AND something on it actually says where it sits vertically; a made-up height
+            off the floor is worse than none, because a builder would frame to it. */}
+        {selectedId && (() => {
+          const si = items.find((i) => i.id === selectedId);
+          const sc2 = si && ITEMS[si.type];
+          if (!si || !sc2) return null;
+          const d = ssWallDims(si, sc2, bldgW, bldgH, mgX, mgY, scale);
+          if (!d) return null;
+          const wh = d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW) || d3BaseWallHeightFt(C, selectedStyle);
+          return (
+            <div style={{ marginTop: 10 }}>
+              <SSWallElevation item={si} cfg={sc2} itemTypes={ITEMS} dims={d}
+                wallHeightFt={wh} wallLabel={getDisplayLabel(si.wall, frontWall)} />
+            </div>
+          );
+        })()}
         </div>
         {view3dOn && dock3D && (
           /* Width and height are pure CSS — never derived from `frame` or dispMaxW,
