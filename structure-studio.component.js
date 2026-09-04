@@ -2977,6 +2977,76 @@ function d3RoofProfile(roofCfg, S, H, tallNeg) {
   const dedup = prof.filter((pt, i) => i === 0 || Math.abs(pt[0] - prof[i - 1][0]) > 1e-6 || Math.abs(pt[1] - prof[i - 1][1]) > 1e-6);
   return { prof, slopes, dedup };
 }
+// Height of the roof profile at a given profile-u. The profile is just the dedup'd top
+// polyline, so one piecewise-linear walk serves gable, gambrel and shed alike.
+function d3MakeProfYAt(dedup, H) {
+  return (u) => {
+    for (let i = 0; i + 1 < dedup.length; i++) {
+      const A = dedup[i], B = dedup[i + 1];
+      const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
+      if (u < lo - 1e-6 || u > hi + 1e-6) continue;
+      if (Math.abs(B[0] - A[0]) < 1e-6) return Math.max(A[1], B[1]);
+      return A[1] + ((u - A[0]) / (B[0] - A[0])) * (B[1] - A[1]);
+    }
+    return H;
+  };
+}
+// Everything about a transom dormer that depends on the roof it sits on.
+//
+// ⚠️ ONE COPY, deliberately, and it is why this is module scope rather than inline in the
+// renderer. The calibration panel shows the builder what their rise number will ACTUALLY
+// build, and a panel that recomputed that itself would drift from what gets built — which
+// is the precise failure this readout exists to prevent. Renderer and readout call this.
+//
+// The run is DERIVED FROM THE RISE and then clamped by the eave: a shed dormer only stands
+// proud of the roof by the amount the main roof falls faster than its own does, so a taller
+// dormer needs a longer run, and eventually it runs out of roof. `maxFace` is the tallest
+// face this style and size can build, and `clamped` says whether the builder's number was
+// honoured — the two fields the panel needs to stop the input lying.
+function d3TransomDormerGeom(roofCfg, S, profYAt) {
+  const cfg = roofCfg || {};
+  const fr = Math.max(-0.85, Math.min(0.85, cfg.dormerOffsetU != null ? cfg.dormerOffsetU : 0.45));
+  const uTop = (S / 2) * fr;
+  const yTop = profYAt(uTop);
+  // It projects toward the eave it already sits nearest, so a dormer placed on the right
+  // half runs right. Held back from the eave so it can never overhang the edge.
+  const dirU = fr < 0 ? -1 : 1;
+  const probe = 0.5;
+  // MEASURED off the profile rather than read from cfg.pitch, so this is right on a
+  // gambrel's two pitches as well as a gable's one.
+  const mainSlope = Math.max(0.05, (yTop - profYAt(uTop + dirU * probe)) / probe);
+  const dormSlope = Math.max(0.08, mainSlope * 0.35);          // visibly shallower than the roof
+  const eaveU = dirU > 0 ? (S / 2 - 0.3) : (-S / 2 + 0.3);
+  const wantRise = Math.max(0.5, cfg.dormerRiseFt != null ? cfg.dormerRiseFt : 2.5);
+  const gain = Math.max(1e-6, mainSlope - dormSlope);
+  const wantRun = wantRise / gain;
+  const maxRun = Math.abs(eaveU - uTop);
+  const run = Math.min(wantRun, maxRun);
+  const uOut = uTop + dirU * run;
+  const yOut = yTop - dormSlope * run;                          // the dormer's own roof line
+  const yBase = profYAt(uOut);
+  return {
+    uTop, yTop, dirU, run, uOut, yOut, yBase,
+    face: Math.max(0.3, yOut - yBase),   // what actually shows: the gap between the two planes
+    maxFace: gain * maxRun,              // the tallest face this style + size can build
+    clamped: wantRun > maxRun + 1e-9,
+    wantRise,
+  };
+}
+// The dormer geometry for a SPEC + a size label, so the calibration panel can say what the
+// rise number will really build. Parses the size and derives S and the profile exactly the
+// way D3ElevationSVG does, then hands off to the shared d3TransomDormerGeom — so the number
+// beside the input is produced by the same code that builds the mesh, not a second estimate.
+// Returns null when there is no transom dormer to describe.
+function d3DormerReadout(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  if (roof.type === "shed" || roof.dormerType !== "transom" || !((roof.dormerWidthFt || 0) > 0.5)) return null;
+  const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
+  const S = d3RoofAxes(roof, w, d).S;
+  const H = (spec && spec.wallHeightFt) || 8;
+  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H));
+}
 
 // Feet as a builder writes them: 4' 7" rather than 0.55 x half-span. This is the whole
 // point of the elevation drawing -- Carolyn spent two and a half minutes on 2026-08-24
@@ -4098,15 +4168,21 @@ function buildShed3DModel(THREE, p) {
     //   null    panel siding has its grooves cut INTO the face, so it gets NO proud strips.
     //           The old code gave it battens, which is the opposite of the real product.
     if (clad.relief) {
-      const relief = (b0, b1) => {
-        if (b1 - b0 < 0.3) return;
+      // yLo/yHi bound the strip VERTICALLY. They default to the whole wall, and are passed
+      // explicitly for the sill and header panels around an opening — see the loop below.
+      const relief = (b0, b1, yLo, yHi) => {
+        const lo = yLo || 0, hi = yHi != null ? yHi : H;
+        if (b1 - b0 < 0.3 || hi - lo < 0.25) return;
         if (clad.relief === "batten" || clad.relief === "rib") {
           const bs = clad.stepFt;
           const halfW = clad.relief === "rib" ? 0.05 : 0.07;
           const depth = clad.relief === "rib" ? 0.05 : 0.1;
           const reliefMat = clad.reliefTrim ? battenMat : wallMat;
+          // `a` steps through MULTIPLES OF bs measured from the wall origin, never from b0,
+          // so every span lands on the same global phase. That is what lets the battens over
+          // a window line up with the ones beside it instead of starting a new rhythm.
           for (let a = Math.ceil((b0 + 0.2) / bs) * bs; a < b1 - 0.2; a += bs) {
-            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, 0, H, CLAD_RELIEF_OUT, depth));
+            wg.add(wallBox(reliefMat, wf, a - halfW, a + halfW, lo, hi, CLAD_RELIEF_OUT, depth));
           }
         } else {
           // Courses DIE INTO the corner boards instead of running to the wall's end — the
@@ -4115,13 +4191,38 @@ function buildShed3DModel(THREE, p) {
           const s0 = Math.max(b0 + 0.03, trimFace);
           const s1 = Math.min(b1 - 0.03, wf.len - trimFace);
           if (s1 - s0 < 0.1) return;
+          // Same phase argument as the battens: y walks the whole wall from the ground and
+          // the BAND filters it, rather than restarting the courses inside the band. A lap
+          // course that restarted above a window would step out of line with the wall beside
+          // it, which is the exact fault this block exists to avoid.
           for (let y = clad.stepFt; y < H - 0.15; y += clad.stepFt) {
+            if (y < lo + 0.04 || y > hi - 0.04) continue;
             wg.add(wallBox(wallMat, wf, s0, s1, y - 0.04, y + 0.04, CLAD_RELIEF_OUT, 0.1));
           }
         }
       };
+      // ⚠️ CLADDING DOES NOT STOP AT A WINDOW — IT STOPS AT THE HOLE.
+      //
+      // This used to emit strips ONLY in the gaps between openings, so a window subtracted
+      // its full width from the cladding for the ENTIRE height of the wall: the sill panel
+      // below it and the header panel above it kept the flat texture (they are wallMat) but
+      // lost every proud batten, and the siding visibly changed character in a band running
+      // floor to plate. Ahsan, 2026-09-04, looking at a board-and-batten wall: "why is the
+      // design changing under the window?"
+      //
+      // The wall panels there are already drawn a few lines above (rg.y0 > 0 gives a sill,
+      // rg.y1 < H gives a header) — only the relief was missing. Real board-and-batten runs
+      // the battens straight past a window, above and below it, which is what the strips do
+      // now. This is the third instance of the same family Carolyn has flagged (2026-08-18,
+      // 2026-08-24: "this going up, it has to go straight up"); the roof cap was the second,
+      // fixed further down, and openings were the one still standing.
       let bc = 0;
-      ranges.forEach((rg) => { if (rg.a0 > bc + 0.01) relief(bc, rg.a0); bc = rg.a1; });
+      ranges.forEach((rg) => {
+        if (rg.a0 > bc + 0.01) relief(bc, rg.a0);
+        if (rg.y0 > 0.01) relief(rg.a0, rg.a1, 0, rg.y0);          // under the sill
+        if (rg.y1 < H - 0.01) relief(rg.a0, rg.a1, rg.y1, H);      // over the head
+        bc = rg.a1;
+      });
       if (bc < wf.len - 0.01) relief(bc, wf.len);
     }
     const ogs = [];
@@ -4380,18 +4481,9 @@ function buildShed3DModel(THREE, p) {
   rg.add(new THREE.Mesh(gableGeom,
     (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat));
 
-  // Height of the roof profile at a given profile-u. The profile is just the dedup'd top
-  // polyline, so one piecewise-linear walk serves gable, gambrel and shed alike.
-  const profYAt = (u) => {
-    for (let i = 0; i + 1 < dedup.length; i++) {
-      const A = dedup[i], B = dedup[i + 1];
-      const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
-      if (u < lo - 1e-6 || u > hi + 1e-6) continue;
-      if (Math.abs(B[0] - A[0]) < 1e-6) return Math.max(A[1], B[1]);
-      return A[1] + ((u - A[0]) / (B[0] - A[0])) * (B[1] - A[1]);
-    }
-    return H;
-  };
+  // Lifted to module scope so the calibration panel's dormer readout walks the SAME profile
+  // this renderer does — see d3MakeProfYAt.
+  const profYAt = d3MakeProfYAt(dedup, H);
 
   // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
   // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
@@ -4493,49 +4585,91 @@ function buildShed3DModel(THREE, p) {
   // "look inside" hides the whole roofGroup, so the missing opening is never visible.
   // Skipped on a shed roof for the same reason the gable dormer is.
   if (dormW > 0.5 && roofCfg.type !== "shed" && dormerIsTransom) {
-    const fr = Math.max(-0.85, Math.min(0.85, roofCfg.dormerOffsetU != null ? roofCfg.dormerOffsetU : 0.45));
-    const uTop = (S / 2) * fr;
-    const yTop = profYAt(uTop);
-    // It projects toward the eave it already sits nearest, so a dormer placed on the right
-    // half runs right. Held back from the eave so it can never overhang the edge.
-    const dirU = fr < 0 ? -1 : 1;
-    // ⚠️ THE RUN IS DERIVED FROM THE RISE, NOT FIXED. A shed dormer only stands proud of the
-    // roof by the amount the MAIN roof falls faster than the dormer's own does, so with a
-    // fixed 3 ft run the face could only ever be (mainSlope - dormSlope) x 3 -- about 1.2 ft
-    // on a 6:12 -- and 1.2 ft of lift over 3 ft reads as a torn shingle lying on the slope,
-    // not as a dormer. It rendered exactly that way on beta before this.
-    //
-    // So: the builder asks for a rise, and the dormer extends as far as it needs to to earn
-    // it. The main slope is MEASURED off the profile rather than read from roofCfg.pitch, so
-    // this is right on a gambrel's two pitches as well as a gable's one.
-    const probe = 0.5;
-    const mainSlope = Math.max(0.05, (yTop - profYAt(uTop + dirU * probe)) / probe);
-    const dormSlope = Math.max(0.08, mainSlope * 0.35);          // visibly shallower than the roof
-    const eaveU = dirU > 0 ? (S / 2 - 0.3) : (-S / 2 + 0.3);
-    const wantRise = Math.max(0.5, roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5);
-    // Clamped by the eave, not by the number box: how tall a dormer fits depends on pitch and
-    // position, so a fixed max on the input would be wrong for most styles. Running out of
-    // roof shortens the dormer rather than refusing it.
-    const run = Math.min(wantRise / (mainSlope - dormSlope), Math.abs(eaveU - uTop));
+    // ⚠️ THE RUN IS DERIVED FROM THE RISE, NOT FIXED, and then clamped by the eave — all of
+    // it now in d3TransomDormerGeom at module scope, because the CALIBRATION PANEL shows the
+    // builder what their rise number will really build and the two must be the same code.
+    // Read that function for why the run is derived and why the main slope is measured off
+    // the profile rather than read from roofCfg.pitch.
+    const dg = d3TransomDormerGeom(roofCfg, S, profYAt);
+    const { uTop, yTop, dirU, run, uOut, yOut, yBase, face } = dg;
     if (run > 0.8) {
-      const uOut = uTop + dirU * run;
-      const yOut = yTop - dormSlope * run;   // the dormer's own roof line at the outer end
-      // What actually shows: the gap between the two roof planes, which IS the face height.
-      const face = Math.max(0.3, yOut - profYAt(uOut));
       const du = uOut - uTop, dy = yOut - yTop;
       const slen = Math.sqrt(du * du + dy * dy) || 1;
       const ang = Math.atan2(dy, du);
-      const rise = face;
-      // ONE ROTATED SOLID gives the face and both cheeks together, the way the gable
-      // dormer's single box does. Tilting it to the dormer's OWN pitch is what makes the
-      // top face meet the slab instead of leaving an air gap under it, and it buries the
-      // upslope end inside the main roof, which is where a real shed dormer's framing goes.
-      const body = box(mat(bodyColor), slen, rise, dormW);
-      body.rotation.z = ang;
-      body.position.set((uTop + uOut) / 2 + Math.sin(ang) * rise / 2,
-                        (yTop + yOut) / 2 - Math.cos(ang) * rise / 2,
-                        L / 2);
-      rg.add(body);
+      // ⚠️ THE FACE STANDS UP. It used to be ONE ROTATED SOLID — box(slen, rise, dormW) with
+      // `body.rotation.z = ang` — which gave the face and both cheeks in one mesh, but tilted
+      // the FACE by the dormer's own pitch along with everything else. Carolyn, 2026-09-03,
+      // annotating it in red: "do you see how it tilts out? ... It should go straight up, like
+      // more like that. So the front should be like a wall."
+      //
+      // She is right, and it is not a nicety: on a real shed dormer the face is a stud wall
+      // standing plumb off the rafters. Only the ROOF follows the dormer's pitch. So the one
+      // solid becomes the three surfaces it was always standing in for — a plumb face and two
+      // sloping cheeks — which is what the 2026-09-02 session predicted would be needed if the
+      // shape turned out to be wrong rather than just hard to see from the fixed camera. It was
+      // wrong.
+      //
+      // Built like an EAST/WEST wall (run along z, normal along u, rotation.y = PI/2) and given
+      // the same world-feet UV rewrite wallBox does, because `wallMat` carries the cladding
+      // texture at a repeat of 1/tileFt: stock BoxGeometry UVs span 0..1 per face, so without
+      // this the whole siding pattern would compress into the face and read at a different
+      // scale from the wall under it. cu is the dormer's centre measured in the SAME z the end
+      // wall counts from, so the boards stay in phase with the wall below rather than starting
+      // a new rhythm.
+      const faceU = uOut - dirU * (T / 2);
+      const faceMesh = box(wallMat, dormW, face, T);
+      {
+        const uvA = faceMesh.geometry.attributes.uv, posA = faceMesh.geometry.attributes.position;
+        const cu = L / 2, cv = yBase + face / 2;
+        for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
+        uvA.needsUpdate = true;
+      }
+      faceMesh.rotation.y = Math.PI / 2;
+      faceMesh.position.set(faceU, yBase + face / 2, L / 2);
+      rg.add(faceMesh);
+      // The cheeks: the triangle between the dormer's own roof line and the main roof under it.
+      // Sampled along the profile rather than drawn as a straight hypotenuse, so a GAMBREL's
+      // knee is followed instead of cut across — the same reason mainSlope is measured off the
+      // profile above rather than read from roofCfg.pitch. ExtrudeGeometry's UVs are already in
+      // profile FEET (see the gable cap), so these need no rewrite to match the face.
+      const cheek = new THREE.Shape();
+      cheek.moveTo(uTop, yTop);
+      cheek.lineTo(uOut, yOut);
+      cheek.lineTo(uOut, yBase);
+      const CH_STEPS = 8;
+      for (let i = CH_STEPS - 1; i >= 1; i--) {
+        const uu = uOut + (uTop - uOut) * (i / CH_STEPS);
+        cheek.lineTo(uu, profYAt(uu));
+      }
+      cheek.closePath();
+      const cheekOpts = { depth: T, bevelEnabled: false };
+      const cheekA = new THREE.Mesh(new THREE.ExtrudeGeometry(cheek, cheekOpts), wallMat);
+      cheekA.position.z = L / 2 - dormW / 2;
+      rg.add(cheekA);
+      const cheekB = new THREE.Mesh(new THREE.ExtrudeGeometry(cheek, cheekOpts), wallMat);
+      cheekB.position.z = L / 2 + dormW / 2 - T;
+      rg.add(cheekB);
+      // A WINDOW, because a transom dormer has one. Carolyn: "typically, transom dormers come
+      // with windows like this, like almost always." So it is part of the shape rather than a
+      // separate switch — a dormer with a blank face is the unusual case, not the default.
+      // Skipped when the face is too small to hold one, which is honest: a 6-inch lift has no
+      // window in it either.
+      const winH = Math.min(face * 0.6, 2.0), winW = Math.min(dormW * 0.55, 2.4);
+      if (winH > 0.55 && winW > 0.7) {
+        const wy = yBase + face * 0.52;
+        const outAt = (d) => uOut + dirU * d;
+        const put = (m, w, h, d, off) => {
+          const b = box(m, w, h, d);
+          b.rotation.y = Math.PI / 2;          // same swap the face takes: w runs along z
+          b.position.set(outAt(off), wy, L / 2);
+          rg.add(b);
+        };
+        const sashMat = mat("#3A3F45", { roughness: 0.6 });
+        put(trimMat, winW + 0.26, winH + 0.26, 0.06, 0.02);        // casing
+        put(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), winW, winH, 0.04, 0.05);
+        put(sashMat, 0.05, winH, 0.05, 0.07);                      // muntins, one each way
+        put(sashMat, winW, 0.05, 0.05, 0.07);
+      }
       const tslab = box(roofMat, slen + OV, D3.ROOF_T, dormW + 0.5);
       d3RoofSlabUVs(tslab);
       tslab.rotation.z = ang;
@@ -9979,9 +10113,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ctx.fillRect(-iw / 2, -ih / 2, iw, ih); ctx.strokeRect(-iw / 2, -ih / 2, iw, ih);
       }
       ctx.fillStyle = "#1E293B"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
-      if (ssSlabModel(item.type, ITEMS)) { ctx.fillText(`${itemW} ft`, 0, 0); ctx.font = "9px sans-serif"; ctx.fillText(cfg.label || "Workbench", 0, 13); }
+      if (ssSlabModel(item.type, ITEMS)) { ctx.fillText(d3FtIn(itemW), 0, 0); ctx.font = "9px sans-serif"; ctx.fillText(cfg.label || "Workbench", 0, 13); }
       else if (item.type === "ramp") { ctx.textAlign = "left"; ctx.fillText(item.planLabel || "RAMP", -iw / 2 + 5, 4); }
-      else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${itemW}×${itemH} ft`, 0, 14); ctx.globalAlpha = 1; }
+      else if (item.type === "loft") { ctx.fillStyle = cfg.color; ctx.fillText("LOFT", 0, 0); ctx.font = "10px sans-serif"; ctx.globalAlpha = 0.7; ctx.fillText(`${d3FtIn(itemW)} × ${d3FtIn(itemH)}`, 0, 14); ctx.globalAlpha = 1; }
       // The SVG twin of this label lives in the item map — same text, same rule. CLAUDE.md's
       // "two rendering paths must stay in sync" is exactly about these two branches.
       else if (cfg.propType) { ctx.fillStyle = cfg.color; ctx.font = "bold 9px sans-serif"; ctx.fillText(d3PropSpec(item.propKind).label, 0, 3); }
@@ -11804,6 +11938,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer rise (ft)
                     <input type="number" step="0.25" min="0" {...calNumProps("dormerRiseFt", adminCal.spec.roof.dormerRiseFt != null ? adminCal.spec.roof.dormerRiseFt : 2.5, (n) => calSetRoof({ dormerRiseFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                    {/* WHAT IT WILL ACTUALLY BUILD. The run is clamped by the eave, so on a
+                        short building a big rise is quietly impossible — a 14 ft gable at
+                        7:12 turns a requested 5 ft into about 2 ft 6, and before this the box
+                        said 5 and said nothing. That is the same silent-clamp fault the
+                        2026-09-02 fix removed from the old fixed-run version, just moved into
+                        the input. The number is computed by d3TransomDormerGeom, the SAME
+                        function that builds the mesh, so it cannot drift from the building.
+                        Deliberately a readout and not a max on the input: how tall a dormer
+                        fits depends on the SIZE, and a builder calibrating on 14x16 also sells
+                        12x40, where the same number is fine. */}
+                    {(() => {
+                      const dg = d3DormerReadout(adminCal.spec, sel.size);
+                      if (!dg) return null;
+                      return (
+                        <div style={{ fontSize: 10, fontWeight: 700, marginTop: 3, color: dg.clamped ? "#B45309" : "#A16207" }}>
+                          {dg.clamped
+                            ? `Builds ${d3FtIn(dg.face)} on ${sel.size || "this size"} — this roof runs out at ${d3FtIn(dg.maxFace)}`
+                            : `Builds ${d3FtIn(dg.face)} on ${sel.size || "this size"}`}
+                        </div>
+                      );
+                    })()}
                   </label>
                 )}
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
@@ -13015,7 +13170,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <rect x={-iw / 2} y={-ih / 2} width={iw} height={ih} fill={cfg.color + "18"} stroke={cfg.color} strokeWidth={2} strokeDasharray="6 4" rx={2} />
                     <g opacity={0.15} clipPath={`url(#loftClip${item.id})`}>{Array.from({ length: Math.ceil((iw + ih) / 10) + 2 }, (_, d) => <line key={d} x1={-iw / 2 + d * 10} y1={-ih / 2} x2={-iw / 2 + d * 10 - ih} y2={ih / 2} stroke={cfg.color} strokeWidth={1} />)}</g>
                     <text x={0} y={4} textAnchor="middle" fill={cfg.color} fontSize={10} fontWeight="700">LOFT</text>
-                    <text x={0} y={16} textAnchor="middle" fill={cfg.color} fontSize={9} opacity={0.7}>{itemW}×{itemH} ft</text>
+                    <text x={0} y={16} textAnchor="middle" fill={cfg.color} fontSize={9} opacity={0.7}>{d3FtIn(itemW)} × {d3FtIn(itemH)}</text>
                     {isSel && (() => {
                       const hz = Math.min(Math.max(ih / 3, 22), 36, ih * 0.5);
                       const vz = Math.min(Math.max(iw / 3, 22), 36, iw * 0.5);
@@ -13105,7 +13260,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       <text x={-iw / 2 + 5} y={4} textAnchor="start" fill={cfg.color} fontSize={9} fontWeight="700">{item.planLabel || "RAMP"}</text>
                     ) : isWB ? (
                       <>
-                        <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{itemW} ft</text>
+                        <text x={0} y={0} textAnchor="middle" fill={cfg.color} fontSize={11} fontWeight="700">{d3FtIn(itemW)}</text>
                         <text x={0} y={13} textAnchor="middle" fill={cfg.color} fontSize={8} opacity={0.7}>{cfg.label}</text>
                       </>
                     ) : cfg.propType ? (
@@ -13237,7 +13392,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
                 <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
-                <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{Math.round(ri.widthFt * 10) / 10} ft</text>
+                <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{d3FtIn(ri.widthFt)}</text>
               </g>
             );
           })()}

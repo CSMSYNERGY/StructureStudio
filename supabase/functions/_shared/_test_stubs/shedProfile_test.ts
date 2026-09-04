@@ -81,7 +81,11 @@ for (const name of ["d3RoofAxes", "d3RoofProfile", "tallNeg"]) {
 // The END anchor deliberately sits AFTER `rg.add(new THREE.Mesh(...))`, because the group
 // re-cut is meaningless without the array that gives materialIndex 0 its meaning.
 const REPAINT_START = "// ── SINGLE SLANT: the tall band above the plate is a WALL";
-const REPAINT_END = "const profYAt = (u) =>";
+// Re-pointed 2026-09-04: profYAt was an inline arrow here and is now d3MakeProfYAt at module
+// scope, so the calibration panel's dormer readout walks the same profile the renderer does.
+// The anchor is one line further on; the region it bounds — and every fragment asserted about
+// it below — is unchanged.
+const REPAINT_END = "const profYAt = d3MakeProfYAt(";
 const REPAINT_JSX = lift(JSX, "StructureStudio.jsx", "single-slant repaint", REPAINT_START, REPAINT_END);
 const REPAINT_CMP = lift(CMP, "structure-studio.component.js", "single-slant repaint", REPAINT_START, REPAINT_END);
 for (const frag of ["inTallPlane", "triTall", "clearGroups()", "addGroup(", "setXY(", "[wallMat, gableMat]"]) {
