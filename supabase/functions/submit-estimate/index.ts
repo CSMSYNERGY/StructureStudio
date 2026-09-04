@@ -1384,6 +1384,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const wcr = await supabase.from("window_colors").select("id, label, rate").eq("client_id", clientId).in("id", wColorIds);
       for (const r of wcr.data ?? []) winColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.rate) || 0 });
     }
+    // Shutter / flower-box colours (Carolyn 2026-09-03). Re-resolved from `colors` by id and
+    // accepted ONLY from rows ticked for TRIM — the same palette the designer offers and the
+    // same trust posture as the door colours above. A forged, stale or foreign id falls back
+    // to the snapshot label, which buys an attacker nothing here: the money on a dressing line
+    // comes from layout_item_pricing, never from the colour.
+    const dressIds = [...new Set(windows.flatMap((w: any) => [w && w.shutterColorId, w && w.flowerBoxColorId]).filter(Boolean).map(String))];
+    const dressColorMap = new Map<string, string>();
+    if (dressIds.length) {
+      const dcr = await supabase.from("colors").select("id, label, trim").eq("client_id", clientId).in("id", dressIds);
+      for (const r of dcr.data ?? []) if (r.trim === true) dressColorMap.set(String(r.id), String(r.label || ""));
+    }
+    const dressLabel = (id: unknown, fallback: unknown): string | null => {
+      const k = id ? String(id) : "";
+      return (k && dressColorMap.get(k)) || (k && fallback ? String(fallback) : null);
+    };
+    // Named on the window's OWN line as well as priced on its own line below. The two are not
+    // redundant: this text is lost whenever the window itself is $0 or included (the `continue`
+    // below drops the whole line), and the priced line is what survives that case.
+    const dressDesc = (w: any): string | null => {
+      const bits: string[] = [];
+      if (w && w.shutters) { const l = dressLabel(w.shutterColorId, w.shutterColorLabel); bits.push(l ? `shutters: ${l}` : "shutters"); }
+      if (w && w.flowerBox) { const l = dressLabel(w.flowerBoxColorId, w.flowerBoxColorLabel); bits.push(l ? `flower box: ${l}` : "flower box"); }
+      return bits.length ? bits.join(" · ") : null;
+    };
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -1402,8 +1426,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const price = basePrice + colorRate;
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}|${colorText || ""}`;
+      const dressText = dressDesc(w);
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      // The dressing joins the group key for the same reason the colour does: two otherwise
+      // identical windows, one with shutters and one without, are two different products to
+      // the shop, and collapsing them into one line would describe both by whichever arrived
+      // first.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}`;
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
       g.qty++; wg.set(key, g);
     }
@@ -1417,6 +1446,56 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
       }, { kind: "window", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
+    }
+
+    // ── Shutters and flower boxes as their own priced lines (Carolyn 2026-09-04) ──────────
+    // "Add them as priced items, but for now they are priced 0." The rate is a real
+    // layout_item_pricing key, so the day she charges for them is a rate change and not a
+    // deploy. Mirrors computeLayoutPricingRows in the designer exactly — same grouping (by
+    // colour), same flat rate × count — so the previewed quote and the emailed one agree.
+    //
+    // ⚠ PUSHED EVEN AT $0, which no other block on this endpoint does. Every
+    // `if (!(price > 0)) continue` above is right, because a free window is still on the plan
+    // drawing and still in the window schedule. Dressing has no second home: skip the line and
+    // the customer's design shows shutters while the estimate, the PDF, the GHL opportunity and
+    // the estimate_lines snapshot QuickBooks invoices from never mention them, and the shop
+    // builds a bare window. That is the "I ordered shutters" dispute, and nothing on screen
+    // looks wrong while it happens.
+    //
+    // ⚠ The rate is read as a FLAT amount whatever pricing_method its row carries — unlike the
+    // pushItem path above, which resolves the method. Per-square-foot shutters are not a thing,
+    // and the designer's preview does the same, which is the property that actually matters.
+    //
+    // ⚠ QuickBooks: these arrive as kind "layout_item" with item_key "shutters"/"flowerBox".
+    // qboInvoice falls back to the tenant's kind-level `layout_item||` mapping, which is how
+    // these maps are normally set up — but a tenant who mapped every item_key individually and
+    // set no kind-level default will get a loud "unmapped: layout_item:shutters" and a Retry
+    // button, not a silent wrong invoice.
+    for (const spec of [
+      { itemKey: "shutters", name: "Shutters", on: "shutters", cid: "shutterColorId", clab: "shutterColorLabel" },
+      { itemKey: "flowerBox", name: "Flower Box", on: "flowerBox", cid: "flowerBoxColorId", clab: "flowerBoxColorLabel" },
+    ]) {
+      const rate = layoutRates.get(spec.itemKey)?.rate || 0;
+      const dgr = new Map<string, { label: string | null; qty: number }>();
+      for (const w of windows) {
+        if (!w || !(w as any)[spec.on]) continue;
+        const id = (w as any)[spec.cid] ? String((w as any)[spec.cid]) : "";
+        const g = dgr.get(id) || { label: dressLabel(id, (w as any)[spec.clab]), qty: 0 };
+        g.qty++; dgr.set(id, g);
+      }
+      for (const g of dgr.values()) {
+        targetItems.push(tagLine({
+          name: g.label ? `${spec.name} — ${g.label}` : spec.name,
+          qty: g.qty,
+          amount: rate,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: `${g.qty} window${g.qty === 1 ? "" : "s"}`,
+        }, { kind: "layout_item", itemKey: spec.itemKey, nonTaxable: layoutTaxable.get(spec.itemKey) === false }));
+      }
     }
   }
 

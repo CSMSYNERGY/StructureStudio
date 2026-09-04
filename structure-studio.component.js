@@ -747,6 +747,14 @@ function windowColorStamps(c) {
 // which is the same shape as the bug windowSillStamps documents just below, where catalog
 // windows silently inherited a sill they never specified. Absent is false/null here, never
 // undefined-and-inherited.
+// The two dressings, in the order they appear on the quote. One table, read by the pricing
+// rows, the estimate payload and the plan bullets alike — the stamp field names live here
+// once, so renaming one cannot be done in a place that leaves the others reading undefined.
+const SS_WINDOW_DRESSING = [
+  { key: "shutters",  label: "Shutters",   on: "shutters",  colorId: "shutterColorId",   colorLabel: "shutterColorLabel" },
+  { key: "flowerBox", label: "Flower box", on: "flowerBox", colorId: "flowerBoxColorId", colorLabel: "flowerBoxColorLabel" },
+];
+
 function windowDressStamps(d) {
   const sc = d && d.shutterColor, fc = d && d.flowerBoxColor;
   return {
@@ -1494,6 +1502,10 @@ function ssOpeningRank(key) {
   const k = String(key || "");
   if (k === "singleDoor" || k === "doubleDoor" || k.indexOf("fx:") === 0) return 0;      // doors
   if (k === "window" || k.indexOf("win:") === 0 || k === "roughOpening") return 1;        // windows
+  // Shutters and flower boxes rank WITH the windows they hang on, so the quote reads
+  // "Window — White" and then "Shutters — Black" underneath it, instead of burying the
+  // dressing in the generic options block halfway down the page.
+  if (k.indexOf("dress:") === 0) return 1;                                                // window dressing
   return -1;                                                                              // not an opening
 }
 function ssRowSection(key) {
@@ -2050,6 +2062,62 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     const total = Math.round(g.price * chargeable * 100) / 100;
     rows.push({ key: `win:${gk}`, label: g.label, qty: chargeable, unit: fmtMoney2(g.price) + " each" + (inc > 0 ? ` · ${inc} included` : ""), total, method: "each" });
     nonPctSubtotal += total;
+  }
+
+  // Shutters and flower boxes (Carolyn 2026-09-03; priced 2026-09-04 — "add them as priced
+  // items, but for now they are priced 0"). The rate is a real layout_item_pricing key, so
+  // the day she charges for them it is a rate change and not a deploy; until then every line
+  // reads $0.
+  //
+  // ⚠ THE $0 LINE STILL PRINTS, which is the opposite of every block above. `if (!(g.price
+  // > 0)) continue` is right for a window: a free window is still drawn on the plan and still
+  // named in the window schedule, so dropping its money line loses nothing. Dressing has no
+  // second home. Skip it and the design shows shutters while the quote, the PDF and the
+  // estimate_lines snapshot QuickBooks bills from never mention them — and the shop builds a
+  // bare window. That is the "I ordered shutters" dispute, and it is invisible in testing
+  // because everything on screen looks correct. $0 reads "included", the same idiom the
+  // inclusion pool above already uses for a line that is real but costs nothing.
+  //
+  // ITS OWN ROW, not another segment on the window's group key. Splitting the window group
+  // would mean re-cutting `win:<fid>|<colorId>` and the right-anchored parser in
+  // priceRowMatcher in lockstep, and if those two ever disagree the × on every catalog-window
+  // row stops working silently. A separate row also reads the way Carolyn described the
+  // feature: an add-on with its own colour, chosen per window.
+  //
+  // No qty, so no ×. A shutter is an attribute of a window, not a thing on the plan, and the
+  // matcher behind that button removes ITEMS — a × here would delete the window itself.
+  // Changing your mind means Swap, which carries the dressing across. The count rides in the
+  // unit text instead, because the shop still needs to know how many pairs to build.
+  //
+  // The rate applies "each" whatever pricing_method the row carries, because that is exactly
+  // what submit-estimate does with it (`layoutRates.get("shutters")?.rate || 0` × qty). A
+  // per-square-foot shutter is not a thing; agreeing with the server is.
+  const dressRate = (key) => {
+    const lp = pricing[key];
+    if (!lp) return 0;
+    const ov = (lp.byStyle && styleKey) ? lp.byStyle[styleKey] : null;
+    return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+  };
+  for (const d of SS_WINDOW_DRESSING) {
+    const rate = dressRate(d.key);
+    const groups = {}, order = [];
+    for (const it of customWindows) {
+      if (!it[d.on]) continue;
+      const gk = String(it[d.colorId] || "");
+      if (!groups[gk]) { groups[gk] = { label: it[d.colorLabel] || null, qty: 0 }; order.push(gk); }
+      groups[gk].qty++;
+    }
+    for (const gk of order) {
+      const g = groups[gk];
+      const total = Math.round(rate * g.qty * 100) / 100;
+      rows.push({
+        key: `dress:${d.key}|${gk}`,
+        label: d.label + (g.label ? ` — ${g.label}` : ""),
+        unit: `${g.qty} window${g.qty === 1 ? "" : "s"} · ` + (rate > 0 ? fmtMoney2(rate) + " each" : "included"),
+        total, method: "each",
+      });
+      nonPctSubtotal += total;
+    }
   }
 
   // Catalog ramps (Options → Ramps). Custom ramps carry their own snapshot price (grouped by
@@ -10511,6 +10579,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const parts = [];
       if (w.widthIn && w.heightIn) parts.push(`${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}`);
       if (w.colorLabel) parts.push(w.colorLabel);
+      // Dressing joins the window's OWN spec bullet rather than getting one of its own: it is
+      // a property of this window, and a floating "Shutters" line would not say which window
+      // wears them.
+      for (const d of SS_WINDOW_DRESSING) {
+        if (w[d.on]) parts.push(w[d.colorLabel] ? `${d.label.toLowerCase()}: ${w[d.colorLabel]}` : d.label.toLowerCase());
+      }
       bullets.push(`${w.windowName || "Window"}${parts.length ? " — " + parts.join(", ") : ""}`);
     });
     const winCount = items.filter((i) => i.type === "window" && !i.fixtureItemId).length;
@@ -11395,7 +11469,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ...(item.heightOffFloorIn != null ? { heightOffFloorIn: item.heightOffFloorIn } : {}),
             ...(item.type === "fixtureDoor" ? { name: item.doorName, widthIn: item.widthIn, heightIn: item.heightIn, swing: item.swing, operation: item.operation, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null, colorId: item.colorId || null, colorLabel: item.colorLabel || null, trimColorId: item.trimColorId || null, trimColorLabel: item.trimColorLabel || null } : {}),
             ...(item.type === "ramp" ? { name: item.rampName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId || null } : {}),
-            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId, colorId: item.colorId || null, colorLabel: item.colorLabel || null } : {}),
+            ...(item.type === "window" && item.fixtureItemId ? { name: item.windowName || null, widthIn: item.widthIn || null, heightIn: item.heightIn || null, price: (item.price != null ? Number(item.price) : null), fixtureItemId: item.fixtureItemId, colorId: item.colorId || null, colorLabel: item.colorLabel || null, shutters: !!item.shutters, shutterColorLabel: item.shutterColorLabel || null, flowerBox: !!item.flowerBox, flowerBoxColorLabel: item.flowerBoxColorLabel || null } : {}),
           };
         }),
         // Catalog door schedule: one row per placed fixture door, with its snapshotted spec +
@@ -11452,6 +11526,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             fixtureItemId: w.fixtureItemId || null,
             colorId: w.colorId || null,
             colorLabel: w.colorLabel || null,
+            // Shutters + flower box ride the window schedule so submit-estimate can both
+            // price them (their own line, at the tenant's rate) and name them in this
+            // window's description. Sent even when both are off: the server reads booleans,
+            // and an absent field is indistinguishable from an older client that never had
+            // the feature.
+            shutters: !!w.shutters,
+            shutterColorId: w.shutterColorId || null,
+            shutterColorLabel: w.shutterColorLabel || null,
+            flowerBox: !!w.flowerBox,
+            flowerBoxColorId: w.flowerBoxColorId || null,
+            flowerBoxColorLabel: w.flowerBoxColorLabel || null,
           };
         }),
         itemSummary: {
