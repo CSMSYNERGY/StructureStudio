@@ -3940,6 +3940,56 @@ function d3MakeGroundLabel(THREE, text, hFt) {
   return m;
 }
 
+// A dimension chip for the 3D view: the dark rounded badge with white bold text the PLAN
+// already draws, minted as a canvas so it can stand against a wall face. Same two inks as
+// the plan (slate normally, green when the item is centred), so a builder reading a distance
+// in one view recognises it in the other rather than learning a second vocabulary.
+//
+// Cached by ink+text like the ground labels, but CAPPED. A drag walks through a new reading
+// every frame (2′7.72″, then 2′7.81″, ...), and an unbounded map of 64px canvases would grow
+// for the length of the session. Oldest-out at 120 keeps the readings that recur (a held
+// position, a centred one) and drops the ones a drag flew past.
+const _d3DimChips = new Map();
+const _D3_DIM_CHIP_MAX = 120;
+function d3MakeDimChip(THREE, text, ink, hFt) {
+  if (typeof document === "undefined") return null;
+  const key = ink + "|" + text;
+  let cv = _d3DimChips.get(key);
+  if (cv) { _d3DimChips.delete(key); _d3DimChips.set(key, cv); }   // re-insert = mark recent
+  else {
+    const FONT = "700 40px Arial";
+    const probe = document.createElement("canvas").getContext("2d");
+    probe.font = FONT;
+    cv = document.createElement("canvas");
+    cv.width = Math.ceil(probe.measureText(text).width) + 34;
+    cv.height = 64;
+    const g = cv.getContext("2d");
+    const w = cv.width - 4, h = cv.height - 4, r = 12;
+    g.beginPath();
+    g.moveTo(2 + r, 2);
+    g.lineTo(2 + w - r, 2);     g.quadraticCurveTo(2 + w, 2, 2 + w, 2 + r);
+    g.lineTo(2 + w, 2 + h - r); g.quadraticCurveTo(2 + w, 2 + h, 2 + w - r, 2 + h);
+    g.lineTo(2 + r, 2 + h);     g.quadraticCurveTo(2, 2 + h, 2, 2 + h - r);
+    g.lineTo(2, 2 + r);         g.quadraticCurveTo(2, 2, 2 + r, 2);
+    g.closePath();
+    g.fillStyle = ink; g.fill();
+    g.font = FONT; g.fillStyle = "#FFFFFF";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(text, cv.width / 2, cv.height / 2 + 1);
+    _d3DimChips.set(key, cv);
+    if (_d3DimChips.size > _D3_DIM_CHIP_MAX) _d3DimChips.delete(_d3DimChips.keys().next().value);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  // depthTest off, like the runs it labels: a chip that vanishes behind the trim board it is
+  // measuring to is worse than one floating slightly proud of it.
+  const m = new THREE.Mesh(
+    new THREE.PlaneGeometry(hFt * (cv.width / cv.height), hFt),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false })
+  );
+  m.renderOrder = 999;
+  return m;
+}
+
 // Dev-only build timing: set window.__SS3D_DEBUG = true in the console and
 // every model build records a "ss3d:rebuild" performance measure. The flag
 // gates all work, so shipped pages pay nothing.
@@ -5888,6 +5938,83 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       );
       highlight.visible = false;
       scene.add(highlight);
+      // ── Along-wall dimensions, in 3D (Ahsan 2026-09-05: "I want this distance inside the
+      // three d view also") ───────────────────────────────────────────────────────
+      // The plan's two chips, drawn on the building itself.
+      //
+      // THE NUMBERS COME FROM ssWallDims \u2014 the same function the plan calls, on the same
+      // interior axis \u2014 so the two views cannot print different distances for one wall.
+      // Everything below is placement; none of it is arithmetic. Two views of one building
+      // disagreeing about a measurement would be worse than either view lacking it.
+      //
+      // Tied to the HOVER/DRAG item, not to the 2D selection. That is where the plumbing
+      // already is (`highlight` tracks exactly this item, and commitLive re-places it every
+      // drag frame) and, more to the point, it is when the number is wanted: Carolyn's
+      // builder could not tell whether a light was centred WHILE placing it. Threading
+      // selectedId in would mean a new prop on all four Structure3DViewer mounts, for a
+      // worse moment.
+      const dimGroup = new THREE.Group();
+      dimGroup.visible = false;
+      scene.add(dimGroup);
+      const clearDims = () => {
+        for (let i = dimGroup.children.length - 1; i >= 0; i--) {
+          const c = dimGroup.children[i];
+          dimGroup.remove(c);
+          if (c.geometry) c.geometry.dispose();
+          // The chip canvas is CACHED and shared; the texture wrapping it is per-mesh and is
+          // not. Dispose the texture, never the canvas.
+          if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); }
+        }
+      };
+      const placeDims = (it) => {
+        clearDims();
+        const cfg = it && itemTypes[it.type];
+        const d = cfg ? ssWallDims(it, cfg, bldgW, bldgH, mgX, mgY, scale) : null;
+        if (!d) { dimGroup.visible = false; return; }   // loft, note, line, prop: no wall to measure along
+        // Height: the middle of the band the item actually occupies, so the run reads ACROSS
+        // the item instead of under it. ssItemVBand returns null when nothing on the item says
+        // where it sits vertically; bench height then, which only positions the line and is
+        // never itself printed.
+        const band = ssItemVBand(it, cfg, itemTypes);
+        const y = band ? (band.bottomFt + band.topFt) / 2 : D3.BENCH_H / 2;
+        const ink = d.centered ? "#059669" : "#1E293B";     // the plan's two inks, exactly
+        const lineMat = new THREE.LineBasicMaterial({ color: ink, transparent: true, opacity: 0.8, depthTest: false });
+        // Proud of the siding, on the OUTSIDE face of this item's own wall.
+        const off = D3.WALL_T / 2 + 0.09;
+        const outward = (it.wall === "north" || it.wall === "west") ? -1 : 1;
+        const cross = ((d.isHoriz ? bldgH : bldgW) / 2 + off) * outward;
+        const at = (u) => (d.isHoriz
+          ? new THREE.Vector3(u - bldgW / 2, y, cross)
+          : new THREE.Vector3(cross, y, u - bldgH / 2));
+        const TICK = 0.22;
+        const run = (u0, u1, feet) => {
+          if (u1 - u0 > 0.04) {
+            const pts = [at(u0), at(u1)];
+            for (const u of [u0, u1]) {                 // end ticks, perpendicular to the run
+              const p = at(u);
+              pts.push(new THREE.Vector3(p.x, p.y - TICK, p.z), new THREE.Vector3(p.x, p.y + TICK, p.z));
+            }
+            const seg = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lineMat);
+            seg.renderOrder = 998;
+            dimGroup.add(seg);
+          }
+          // The chip is drawn even when the run is too short to draw \u2014 flush to the corner is a
+          // real reading a builder needs, and it is exactly the case the line above skips.
+          // fmtDimFtIn, not fmtFtIn, for that reason: the plain formatter returns "" at zero.
+          const chip = d3MakeDimChip(THREE, fmtDimFtIn(feet), ink, 0.62);
+          if (chip) {
+            const p = at((u0 + u1) / 2);
+            chip.position.set(p.x, p.y, p.z);
+            // Face outward off the wall. A plane fronts +Z, so each wall gets the quarter turn
+            // that puts its front where the viewer standing outside that wall is.
+            chip.rotation.y = d.isHoriz ? (outward < 0 ? Math.PI : 0) : outward * Math.PI / 2;
+            dimGroup.add(chip);
+          }
+        };
+        run(0, d.posFt - d.half, d.before);
+        run(d.posFt + d.half, d.wallLen, d.after);
+        dimGroup.visible = true;
+      };
       const applyShellMode = (e) => {
         e.model.roofGroup.visible = !e.interior && e.roofOn !== false;
         if (e.model.envGroup) e.model.envGroup.visible = e.envOn !== false;
@@ -6373,7 +6500,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (!it) {
           // An orbit is starting and hover raycasts pause while a button is
           // held - drop any hover outline so it can't ride along stale.
-          if (lastHoverId != null) { lastHoverId = null; highlight.visible = false; render(); }
+          if (lastHoverId != null) { lastHoverId = null; highlight.visible = false; dimGroup.visible = false; render(); }
           return;
         }
         ev.stopImmediatePropagation();
@@ -6383,6 +6510,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setInteractDpr(true);
         lastHoverId = it.id;
         placeHighlight(it);
+        placeDims(it);              // sets its own visibility: a loft has no wall to measure along
         highlight.visible = true;
         canvas.style.cursor = "grabbing";
         try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* synthetic pointer */ }
@@ -6395,6 +6523,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         liveItems = liveItems.map((i) => (i.id === it.id ? { ...i, ...patch } : i));
         dragging3.moved = true;
         placeHighlight(liveItems.find((i) => i.id === it.id));
+        // Live during the drag, for the same reason the plan's chips are: the number is being
+        // read to decide where to let go.
+        placeDims(liveItems.find((i) => i.id === it.id));
         queueRebuild(scope);
       };
       const onPtr3Move = (ev) => {
@@ -6590,6 +6721,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (hid !== lastHoverId) {
           lastHoverId = hid;
           if (hov) placeHighlight(hov);
+          placeDims(hov);
           highlight.visible = !!hov;
           render();
         }
@@ -6603,6 +6735,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         canvas.style.cursor = "";
         try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* not captured */ }
         highlight.visible = false;
+        dimGroup.visible = false;
         lastHoverId = null;
         render();
         if (d.moved) {
@@ -6636,6 +6769,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         canvas.removeEventListener("pointermove", onPtr3Move);
         canvas.removeEventListener("pointerup", onPtr3Up);
         canvas.removeEventListener("pointercancel", onPtr3Up);
+        clearDims();
+        scene.remove(dimGroup);
         scene.remove(highlight);
         highlight.geometry.dispose();
         highlight.material.dispose();
