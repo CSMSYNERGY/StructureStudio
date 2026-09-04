@@ -9310,22 +9310,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       // Mouse position in feet along the wall axis.
       //
-      // ⚠️ THIS IS THE ONE CAROLYN DEMONSTRATED, and it is a resize, not a drag: "click on
-      // this here to drag it, you drag, yes, but also THE END, click the end to drag. It is
-      // required to drag to a foot, they can't go halfway in between." A workbench or shelf
-      // used to round its edges to whole feet while a rough opening beside it resized
-      // smoothly — same handle, same gesture, two different behaviours, and only one of them
-      // was the one she wanted. Every slab now takes the path the rough opening already took,
-      // which is why this reads as deleting a branch rather than adding one.
+      // ⚠️ WHOLE FEET, AND DO NOT TAKE THIS OUT AGAIN. 2026-09-02 read Carolyn's "it is
+      // required to drag to a foot, they can't go halfway in between" as a complaint and
+      // deleted the rounding, so every slab resized like a rough opening. She opened the
+      // 09-03 call with the correction, and it is unusually explicit: "I was showing you
+      // how this jumps, you know, per foot, and I don't want to change that ... it did
+      // change this for all of the shelving, the work shelves, all of them. They now go by
+      // inches." She was demonstrating the behaviour she WANTED, not one she wanted gone.
       //
-      // The lineal-foot PRICE is unaffected: it has always been rate * lengthFt, continuous
-      // arithmetic. It just stops being a whole number, so itemSummary rounds the reported
-      // length to 2 dp for the quote line.
+      // The free-drag she asked for on 09-02 is a different gesture and stays free: the
+      // prop drag in the 3D viewer ("drag it exactly where they want it and to not snap to
+      // anything") and the 2D position drag are both untouched by this. Size steps by the
+      // foot; position does not step at all. Only the rough opening still resizes smoothly,
+      // which is how it has always been.
+      //
+      // "6.0 workbench" on the export was this same regression, not a label bug: a slab
+      // stopped at 6.04 ft, and the quote's qty cell prints a non-integer to 1 dp. With
+      // whole feet back, the width is exactly 6 and it prints "6".
       const mouseFt = isHoriz ? (pt.x - mgX) / scale : (pt.y - mgY) / scale;
-      const mouseFtVal = mouseFt;
+      const mouseFtVal = isRO ? mouseFt : Math.round(mouseFt);
 
       const origCenterFt = isHoriz ? (resizing.origX - mgX) / scale : (resizing.origY - mgY) / scale;
-      const origLeft = origCenterFt - resizing.origWidthFt / 2;
+      const origLeft = isRO
+        ? (origCenterFt - resizing.origWidthFt / 2)
+        : Math.round(origCenterFt - resizing.origWidthFt / 2);
       const origRight = origLeft + resizing.origWidthFt;
 
       const origItem = { ...it, x: resizing.origX, y: resizing.origY, widthFt: resizing.origWidthFt };
@@ -9334,13 +9342,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const minWidth = isRO ? 0.5 : 2;
 
       let newLeft = origLeft, newRight = origRight;
-      // The floor/ceil on the non-RO bounds went with the rounding: they existed to keep a
-      // whole-foot edge inside a fractional bound, and with no whole-foot edge left they only
-      // cost the slab up to a foot of the wall it can legitimately reach.
+      // floor/ceil come back with the rounding. They keep a whole-foot edge inside a
+      // fractional bound: without them a slab rounds its edge PAST the wall it is allowed
+      // to reach, which is the corner-overhang the bounds exist to stop.
       if (resizing.handle === "max") {
-        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, maxEdge));
+        newRight = Math.max(origLeft + minWidth, Math.min(mouseFtVal, isRO ? maxEdge : Math.floor(maxEdge)));
       } else {
-        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, minEdge));
+        newLeft = Math.min(origRight - minWidth, Math.max(mouseFtVal, isRO ? minEdge : Math.ceil(minEdge)));
       }
 
       const newWidthFt = newRight - newLeft;
@@ -12511,16 +12519,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {dock3D ? "🧊 Hide 3D" : dockOn ? "🧊 3D View" : (has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View")}
             </button>
           )}
-          {/* Not granted 3D yet: keep the marketing teaser shoppers already see on the
-              public designer, so a tenant without the feature sees NO change. Portal
-              users never get the teaser - business users see 3D Design in their nav. */}
-          {!view3dOn && customerFacing && (
-            <button disabled title="See your building in 3D — coming soon"
-              style={{ ...S.btn("#F8FAFC", "#94A3B8"), border: "1px dashed #CBD5E1", cursor: "default", display: "inline-flex", alignItems: "center", gap: 5 }}>
-              3D
-              <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", background: "#75E6DA", color: "#0F4C46", borderRadius: 5, padding: "1.5px 5px" }}>Coming&nbsp;soon</span>
-            </button>
-          )}
+          {/* Not granted 3D: NOTHING renders here. There used to be a disabled "3D — Coming
+              soon" teaser on the public designer, on the theory that it advertised the
+              upsell. Carolyn killed it on 2026-09-03, testing a fresh unpaid tenant: "if
+              they haven't paid for 3D, it says 3D View is coming soon, and I don't want
+              that." A builder who has not bought 3D is not running a Structure Studio advert
+              on their own storefront — their customers should never learn the feature exists.
+              So: paid, the real button above; unpaid, no button and no gap where one was. */}
           <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
         </div>
         </div>
