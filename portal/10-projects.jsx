@@ -928,6 +928,17 @@ function PMSetupAdmin({ canWrite }) {
           their account is created — <b>changes here apply to new assignments only</b>, never to a
           list somebody is already partway through.
         </div>
+        {/* The two gates read alike and do opposite things, so they are spelled out once
+            here rather than left to a tooltip. Both are properties of the STEP, which is
+            why they are the exception to the "new assignments only" rule above. */}
+        <div style={{ fontSize: 12, color: "#64748B", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 12px", marginBottom: 12, lineHeight: 1.55 }}>
+          <b>Hide from builders</b> keeps the step in everyone's list but shows it to nobody — use it
+          while that part of the product isn't finished. Show it again and it appears for every
+          builder at once, with nothing to re-assign. <b>Needs an add-on</b> greys the step with a
+          padlock for builders who haven't bought it, links them to Billing, and leaves it out of
+          their "X of Y done". Neither is <b>Disable</b>, which only decides what <i>new</i> builders
+          are given.
+        </div>
         {tpl === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
         {tpl && tpl.length === 0 && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No steps yet.</div>}
         {(tpl || []).map((t, i) => (
@@ -941,6 +952,20 @@ function PMSetupAdmin({ canWrite }) {
             <span style={{ fontSize: 12, fontWeight: 800, color: "#94A3B8", minWidth: 18, paddingTop: 2 }}>{i + 1}.</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{t.title}</div>
+              {(t.builder_visible === false || t.requires_feature) && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                  {t.builder_visible === false && (
+                    <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.4, background: "#FEF3C7", color: "#B45309", borderRadius: 4, padding: "2px 6px" }}>
+                      HIDDEN FROM BUILDERS
+                    </span>
+                  )}
+                  {t.requires_feature && (
+                    <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.4, background: "#DBEAFF", color: ACCENT, borderRadius: 4, padding: "2px 6px" }}>
+                      NEEDS {String(ssFeatureLabel(t.requires_feature)).toUpperCase()}
+                    </span>
+                  )}
+                </div>
+              )}
               {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
               {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
               {t.image_url && (
@@ -961,13 +986,30 @@ function PMSetupAdmin({ canWrite }) {
                 )}
                 {arrow("▲", () => move(tpl, i, -1, "setup_template_reorder"), i === 0)}
                 {arrow("▼", () => move(tpl, i, 1, "setup_template_reorder"), i === tpl.length - 1)}
+                {/* ⚠️ Each of these sends ONLY its own flag. setup_template_save reads them
+                    with a `!== undefined` test, so a whole-row save that omits one leaves it
+                    alone — which is what stops the 📷 handler and Disable above from wiping
+                    a gate somebody set. Do not "tidy" these into one payload. */}
+                <select value={t.requires_feature || ""} disabled={busy}
+                  title="Which paid add-on this step needs"
+                  onChange={(e) => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", requiresFeature: e.target.value }, loadTpl)}
+                  style={{ fontSize: 11, fontFamily: "inherit", color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "2px 4px", maxWidth: 150 }}>
+                  <option value="">— no add-on —</option>
+                  {SS_SETUP_FEATURE_CHOICES.map((k) => <option key={k} value={k}>{ssFeatureLabel(k)}</option>)}
+                </select>
+                <button type="button" disabled={busy}
+                  title={t.builder_visible === false ? "Builders cannot see this step" : "Hide while we finish building it"}
+                  onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", builderVisible: t.builder_visible === false }, loadTpl)}
+                  style={{ background: "none", border: "none", color: t.builder_visible === false ? "#B45309" : "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                  {t.builder_visible === false ? "Show to builders" : "Hide from builders"}
+                </button>
                 <button type="button" disabled={busy}
                   onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", active: t.active === false }, loadTpl)}
                   style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit" }}>
                   {t.active === false ? "Enable" : "Disable"}
                 </button>
                 <button type="button" disabled={busy}
-                  onClick={() => { if (window.confirm(`Delete "${t.title}" from the template? Builders who already have it keep their copy.`)) run({ action: "setup_template_delete", id: t.id }, loadTpl); }}
+                  onClick={() => { if (window.confirm(`Delete "${t.title}" from the template? Builders who already have it keep their copy — and it would stop being hidden and stop being locked for them. Hide it instead if it is only unfinished.`)) run({ action: "setup_template_delete", id: t.id }, loadTpl); }}
                   style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 4px", fontFamily: "inherit" }}>Delete</button>
               </div>
             )}
@@ -1026,6 +1068,24 @@ function PMSetupAdmin({ canWrite }) {
                         <div style={{ fontSize: 13, fontWeight: 700, color: it.completed_at ? "#64748B" : "#1E293B", textDecoration: it.completed_at ? "line-through" : "none" }}>
                           {i + 1}. {it.title}
                         </div>
+                        {/* Why this builder may not be seeing a step. Read from the template
+                            we already hold in state — the gates live there, not on the copy.
+                            "Needs X" is the step's requirement, NOT a verdict on whether THIS
+                            builder has bought it; their own Billing tab is where that lives. */}
+                        {(() => {
+                          const t = (tpl || []).find((x) => x.id === it.template_item_id);
+                          if (!t || (t.builder_visible !== false && !t.requires_feature)) return null;
+                          return (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+                              {t.builder_visible === false && (
+                                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.4, background: "#FEF3C7", color: "#B45309", borderRadius: 4, padding: "2px 5px" }}>HIDDEN FROM BUILDERS</span>
+                              )}
+                              {t.requires_feature && (
+                                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.4, background: "#DBEAFF", color: ACCENT, borderRadius: 4, padding: "2px 5px" }}>NEEDS {String(ssFeatureLabel(t.requires_feature)).toUpperCase()}</span>
+                              )}
+                            </div>
+                          );
+                        })()}
                         {it.detail && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{it.detail}</div>}
                         {it.image_url && (
                           <img src={it.image_url} alt="" onClick={() => setViewing({ url: it.image_url, title: it.title })}

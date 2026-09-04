@@ -4,6 +4,7 @@ import { withErrorLog } from "../_shared/logError.ts";
 import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
+import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -1257,6 +1258,22 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         };
         if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
         if (payload.active !== undefined) row.active = payload.active === true;
+        // ⚠️ THE `!== undefined` IDIOM IS LOAD-BEARING for all three of these. Every edit in
+        // the editor is a WHOLE-ROW save that resends title/detail/linkPage/section/imageUrl
+        // (the 📷 handler, Enable/Disable, the gate buttons), and none of them sends the
+        // others — so "omitted" has to mean "unchanged", never "clear it".
+        if (payload.requiresFeature !== undefined) {
+          const rf = str(payload.requiresFeature, 40);
+          // Validated at WRITE time against the one list portal-billing's own map is kept
+          // in step with. A typo stored here would padlock a step for every builder,
+          // forever, with nothing on screen to say why — and the read path deliberately
+          // fails open, so it would never surface as an error either.
+          if (rf && !FEATURE_KEYS.includes(rf)) {
+            return json({ error: `"${rf}" is not a feature key. Pick one from the list.` }, 400);
+          }
+          row.requires_feature = rf || null;   // "" clears it
+        }
+        if (payload.builderVisible !== undefined) row.builder_visible = payload.builderVisible === true;
         if (id) {
           const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
           if (error) throw error;
@@ -1316,7 +1333,24 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       }
 
       case "setup_template_delete": {
-        const { error } = await admin.from("setup_template_items").delete().eq("id", str(payload.id, 40));
+        const delId = str(payload.id, 40);
+        // ⚠️ A delete NULLs tenant_setup_items.template_item_id (on delete set null), and
+        // both gates are read THROUGH that link — so deleting a hidden or gated template
+        // row would silently un-hide and un-lock the step in every builder's list, with
+        // nothing on any screen to say it happened. Refuse; "Hide from builders" is what
+        // the operator meant, and it is reversible.
+        const { data: delRow } = await admin.from("setup_template_items")
+          .select("requires_feature, builder_visible").eq("id", delId).maybeSingle();
+        if (delRow && (delRow.builder_visible === false || delRow.requires_feature)) {
+          const { count } = await admin.from("tenant_setup_items")
+            .select("id", { count: "exact", head: true }).eq("template_item_id", delId);
+          if ((count || 0) > 0) {
+            return json({
+              error: `${count} builder${count === 1 ? " has" : "s have"} this step. Deleting it here would un-hide and un-lock their copies — hide it instead.`,
+            }, 409);
+          }
+        }
+        const { error } = await admin.from("setup_template_items").delete().eq("id", delId);
         if (error) throw error;
         return json({ ok: true });
       }
@@ -1335,15 +1369,25 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       // Who is set up, and who is stuck — every tenant with a list, plus the ones with none.
       case "setup_overview": {
         const { data: rows, error } = await admin.from("tenant_setup_items")
-          .select("client_id, completed_at");
+          .select("client_id, completed_at, template_item_id");
         if (error) throw error;
         const { data: clients, error: cErr } = await admin.from("client_configs").select("client_id");
         if (cErr) throw cErr;
+        // Steps we have not finished building are not counted, so this card reads the same
+        // denominator the BUILDER sees (portal-setup's `list` drops them outright). Locked
+        // steps are NOT excluded here: that would mean one entitlement computation per
+        // tenant on a screen that lists every tenant, and the per-client card below is
+        // where a specific builder's padlocks are worth showing.
+        const { data: hidden, error: hErr } = await admin.from("setup_template_items")
+          .select("id").eq("builder_visible", false);
+        if (hErr) throw hErr;
+        const hiddenIds = new Set((hidden || []).map((h: { id: string }) => h.id));
         const byClient = new Map<string, { clientId: string; total: number; done: number; lastAt: string | null }>();
         for (const c of clients || []) {
           byClient.set(c.client_id, { clientId: c.client_id, total: 0, done: 0, lastAt: null });
         }
         for (const r of rows || []) {
+          if (r.template_item_id && hiddenIds.has(r.template_item_id)) continue;
           const e = byClient.get(r.client_id) || { clientId: r.client_id, total: 0, done: 0, lastAt: null };
           e.total++;
           if (r.completed_at) {
@@ -1374,6 +1418,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if ((count || 0) > 0) {
           return json({ error: "That builder already has a setup list. Add or remove steps on it instead." }, 409);
         }
+        // ⚠️ `builder_visible = false` rows ARE COPIED, deliberately — do not "helpfully"
+        // filter them out here or in admin-catalog's create_client. Hidden means "we have
+        // not built this yet", and the payoff is that flipping it true later reveals the
+        // step for everyone at once. Skipping them at assign time would quietly exclude
+        // every builder who signed up in the meantime, which is the whole thing this was
+        // built to avoid. `active` is the flag that means "leave it out of new lists".
         const { data: tpl, error: tErr } = await admin.from("setup_template_items")
           .select("*").eq("active", true).order("position");
         if (tErr) throw tErr;

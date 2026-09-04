@@ -1469,7 +1469,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "releases" && (
               <ReleasesView submissionsKey={feedbackKey}
                 sub={activeTab === "releases" ? sub : null} onSub={(x) => navigate("releases", x)}
-                onNavigate={navigate} />
+                onNavigate={navigate} canAdmin={canAdmin} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through

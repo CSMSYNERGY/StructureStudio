@@ -749,59 +749,63 @@ function MySubmissions({ refreshKey }) {
 // it, assigned from the template operators keep in Projects. Reads are RLS-scoped direct
 // (tenant_setup_items is readable to its own tenant); the tick goes through portal-setup
 // so that WHO completed it — the builder, or us on a call — is decided server-side.
-function SetupChecklist({ onNavigate, onCount }) {
-  const [items, setItems] = useState(null);
+// The builder's setup checklist.
+//
+// ⚠️ IT NO LONGER READS tenant_setup_items DIRECTLY, and must not go back to it. That read
+// was RLS-scoped to current_client_id() — the SIGNED-IN person's tenant — so an operator in
+// view-as was shown THEIR OWN tenant's checklist under a banner naming somebody else (both
+// operator accounts carry a client_users row for structure-studio, which has its own
+// 19-step list). portal-setup is in SS_TENANT_SCOPED_FNS, so it answers for the VIEWED
+// tenant; it is also where the gating verdict is computed, because entitlement is a
+// server-side question and featureOn() in the browser is never true for an operator.
+//
+// `items` and `counts` are owned by ReleasesView above (one fetch feeds both the tab badge
+// and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
+// not bought: shown, padlocked, and left out of the count — Carolyn 2026-09-04, it doubles
+// as the upsell. A step we have not finished building never arrives here at all.
+function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
   const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
-  const load = useCallback(async () => {
-    const { data, error: err } = await sb
-      .from("tenant_setup_items")
-      .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
-      .order("position", { ascending: true });
-    if (err) { setError(err.message); setItems([]); return; }
-    setItems(data || []);
-    // Hand the tally back up so the tab badge above cannot sit stale at the number it
-    // had on page load while the list underneath it says something else.
-    if (onCount) onCount({ total: (data || []).length, open: (data || []).filter((r) => !r.completed_at).length });
-  }, [onCount]);
-  useEffect(() => { load(); }, [load]);
-
   const toggle = async (it) => {
+    if (it.locked) return;
     const done = !it.completed_at;
     setBusy(it.id); setError(null);
     // Optimistic: ticking a box that then sits there doing nothing feels broken.
-    setItems((cur) => cur.map((x) => x.id === it.id
-      ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
-      : x));
+    if (onPatch) onPatch(it.id, done);
     try {
       const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "toggle", id: it.id, done } });
       if (err) throw new Error(err.message || "Could not save that.");
       if (data && data.error) throw new Error(data.error);
-      load();                       // re-read so the real name/time replace the guess
+      if (onReload) onReload();     // re-read so the real name/time replace the guess
     } catch (e) {
       setError(e.message || "Could not save that.");
-      load();                       // and never leave a tick the server did not accept
+      if (onReload) onReload();     // and never leave a tick the server did not accept
     }
     setBusy(null);
   };
 
-  if (items === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
+  if (items === null || items === undefined) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
   if (!items.length) return null;   // nothing assigned — the tab is hidden anyway
 
-  const done = items.filter((i) => i.completed_at).length;
-  const allDone = done === items.length;
+  // Counted over what they can actually DO. A padlocked step is not homework, so it is
+  // neither in the tally nor in the numbering below — a bar reading "3 of 15" above rows
+  // numbered to 19 looks broken.
+  const total = counts ? counts.total : items.filter((i) => !i.locked).length;
+  const done = counts ? counts.done : items.filter((i) => !i.locked && i.completed_at).length;
+  const allDone = total > 0 && done === total;
+  let stepNo = 0;
 
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <span style={{ ...S.h2, marginBottom: 0 }}>Getting set up</span>
         <span style={{ fontSize: 12, fontWeight: 700, color: allDone ? "#0E9F6E" : "#64748B" }}>
-          {done} of {items.length} done
+          {done} of {total} done
         </span>
         <div style={{ flex: "1 1 120px", minWidth: 80, height: 6, borderRadius: 999, background: "#EEF2F7", overflow: "hidden" }}>
-          <div style={{ width: `${Math.round((done / items.length) * 100)}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
+          <div style={{ width: `${total ? Math.round((done / total) * 100) : 0}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
         </div>
       </div>
       <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
@@ -814,6 +818,9 @@ function SetupChecklist({ onNavigate, onCount }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {items.map((it, i) => {
           const isDone = !!it.completed_at;
+          const locked = !!it.locked;
+          const feat = it.requiresFeature;
+          if (!locked) stepNo++;   // only doable steps carry a number — see the tally above
           return (
             <React.Fragment key={it.id}>
             {/* Section header whenever it changes walking the list in order — the copy
@@ -824,16 +831,25 @@ function SetupChecklist({ onNavigate, onCount }) {
             )}
             <div style={{
               display: "flex", gap: 11, alignItems: "flex-start",
-              border: "1px solid " + (isDone ? "#DCFCE7" : "#E2E8F0"),
-              background: isDone ? "#F7FEF9" : "#FFF",
+              border: "1px solid " + (locked ? "#E2E8F0" : isDone ? "#DCFCE7" : "#E2E8F0"),
+              background: locked ? "#F8FAFC" : isDone ? "#F7FEF9" : "#FFF",
               borderRadius: 10, padding: "10px 13px",
             }}>
-              <input type="checkbox" checked={isDone} disabled={busy === it.id}
-                onChange={() => toggle(it)} aria-label={it.title}
-                style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              {/* A padlock where the checkbox would be. A greyed-out checkbox invites a
+                  click that does nothing; the lock says why before they reach for it. */}
+              {locked ? (
+                <span style={{ marginTop: 3, width: 16, display: "flex", justifyContent: "center", flexShrink: 0 }}>
+                  <SsLock title={`Needs ${ssFeatureLabel(feat)}`} />
+                </span>
+              ) : (
+                <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                  onChange={() => toggle(it)} aria-label={it.title}
+                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              )}
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: isDone ? "#64748B" : "#1E293B", textDecoration: isDone ? "line-through" : "none" }}>
-                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{i + 1}.</span>
+                {/* No line-through on a locked row — that reads as "done". */}
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : isDone ? "#64748B" : "#1E293B", textDecoration: !locked && isDone ? "line-through" : "none" }}>
+                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{locked ? "—" : `${stepNo}.`}</span>
                   {it.title}
                 </div>
                 {it.detail && <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 3 }}>{it.detail}</div>}
@@ -848,7 +864,25 @@ function SetupChecklist({ onNavigate, onCount }) {
                   </div>
                 )}
               </div>
-              {it.link_page && !isDone && (
+              {/* Locked: the upsell replaces "Take me there". The button is owner/admin
+                  only — a sales rep cannot open Settings → Billing, so for them it would
+                  be a dead end (the QuickBooksLocked rule, below). And the deep link goes
+                  to the BILLING sub-tab specifically: navigate("settings") alone lands on
+                  the Structures catalog editor with nothing about payment on screen.
+                  A grant-only feature (view_3d) has nothing to buy, so it never gets a
+                  button whoever is looking. */}
+              {locked ? (
+                canAdmin && (SS_FEATURE_LABELS[feat] || {}).buyable ? (
+                  <button type="button" onClick={() => onNavigate && onNavigate("settings", "billing")}
+                    style={{ ...S.btn("#EEF2FF", ACCENT), padding: "6px 12px", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>
+                    Add {ssFeatureLabel(feat)} — see Billing
+                  </button>
+                ) : (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0, marginTop: 4 }}>
+                    Needs {ssFeatureLabel(feat)}
+                  </span>
+                )
+              ) : it.link_page && !isDone && (
                 <button type="button" onClick={() => {
                   const [page, sub] = String(it.link_page).split("/");
                   if (onNavigate) onNavigate(page, sub || null);
@@ -871,7 +905,9 @@ function SetupChecklist({ onNavigate, onCount }) {
 }
 
 // ─── What's New: global product changelog (read-only; team-populated) ───
-function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
+// `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
+// Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
   // The sub-tab lives in the URL (/portal/releases/setup), so a "Take me there" link or a
@@ -893,22 +929,55 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
     })();
   }, []);
 
-  // How many setup steps are still open. Drives both the badge and whether the tab
-  // exists at all: a builder who was never assigned a list should see no change here.
-  const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  // The setup checklist, fetched ONCE here and handed to SetupChecklist below — the badge
+  // and the list read the same object, so they cannot disagree about the tally. It used to
+  // be two independent reads of tenant_setup_items straight from the browser; both were
+  // RLS-scoped to the SIGNED-IN person's tenant, which meant an operator in view-as saw
+  // their own checklist under another builder's name. portal-setup answers for the VIEWED
+  // tenant and is also where the padlocks are decided. See SetupChecklist's header.
+  const [setupData, setSetupData] = useState(null);   // null = not loaded yet
+  const loadSetup = useCallback(async () => {
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "list" } });
+      if (err) throw new Error(err.message);
+      if (!data || data.error) throw new Error((data && data.error) || "no data");
+      const items = data.items || [];
+      // Derived here when absent so the edge function and this bundle can land in either
+      // order without the checklist going blank in between.
+      const counts = data.counts || (() => {
+        const c = items.filter((i) => !i.locked);
+        return { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length };
+      })();
+      const next = { items, counts };
+      setSetupData(next);
+      return next;
+    } catch (_e) {
+      // A builder who was never assigned a list looks the same as a failure here, and both
+      // should simply leave the tab out rather than showing an error in a changelog.
+      setSetupData({ items: [], counts: { total: 0, done: 0, open: 0 } });
+      return null;
+    }
+  }, []);
   // Which tab leads the strip and gets landed on. LATCHED on the first read and never
   // recomputed: ticking the last setup step would otherwise reorder the tabs and switch
   // the page out from under the person who just ticked it. They graduate to My Requests
   // leading on their next visit, which is the right moment for the strip to change.
   const [lead, setLead] = useState(null);
   useEffect(() => {
-    (async () => {
-      const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) { setLead("mine"); return; }
-      const open = data.filter((r) => !r.completed_at).length;
-      setSetupOpen({ total: data.length, open });
-      setLead(open > 0 ? "setup" : "mine");
-    })();
+    loadSetup().then((d) => setLead(d && d.counts.open > 0 ? "setup" : "mine"));
+  }, [loadSetup]);
+  const setupOpen = setupData ? { total: setupData.items.length, open: setupData.counts.open } : null;
+  // Optimistic tick, applied to the one copy of the data. Recomputed rather than patched
+  // so the badge, the bar and the row can never drift apart by a rounding of the truth.
+  const patchSetup = useCallback((id, done) => {
+    setSetupData((cur) => {
+      if (!cur) return cur;
+      const items = cur.items.map((x) => x.id === id
+        ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
+        : x);
+      const c = items.filter((i) => !i.locked);
+      return { items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
+    });
   }, []);
 
   // Count only — the list itself is fetched by MySubmissions when that tab opens.
@@ -1038,7 +1107,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
         })}
       </div>
 
-      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} onCount={setSetupOpen} />
+      {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
+        onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>

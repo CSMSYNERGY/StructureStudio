@@ -744,6 +744,14 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // response is about to say so. Failing the whole creation over a checklist —
         // when the duplicate-slug check then blocks the retry (see the note at the top of
         // this action) — would turn a cosmetic problem into a half-made tenant.
+        //
+        // ⚠️ The gate flags (migration 185: requires_feature, builder_visible) are NOT
+        // copied and NOT filtered on — they live on the template and portal-setup reads
+        // them through template_item_id at request time. So a new builder gets every
+        // step, including ones we have not finished building, and they stay invisible to
+        // them until the flag flips — at which point they appear for everyone at once.
+        // Do not add a `builder_visible` filter here; it would exclude every builder who
+        // signed up while a feature was still being built.
         let setupAssigned = 0;
         try {
           const tpl = await sb.from("setup_template_items")

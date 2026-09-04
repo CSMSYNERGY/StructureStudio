@@ -827,6 +827,45 @@ function ShareLinkCard({ clientId }) {
   );
 }
 
+// ─── Paid add-ons, named for a human ───
+// How a feature key reads in tenant-facing copy, and whether pointing someone at Billing
+// would actually help. `buyable: false` means there is nothing to purchase — view_3d is
+// operator-GRANTED only (see view3dUnlocked in 12-shell.jsx, which reads
+// entitlement.granted rather than entitlement.features for exactly this reason), so
+// "Add 3D — see Billing" would send a builder to a page with no such button. Used by the
+// setup checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
+// FEATURE_KEYS, which is what the operator editor validates against.
+const SS_FEATURE_LABELS = {
+  schedule_builds:     { label: "Scheduling",           buyable: true },
+  quickbooks_sync:     { label: "QuickBooks Sync",      buyable: true },
+  on_demand_pricing:   { label: "Real-Time Pricing",    buyable: true },
+  crm:                 { label: "the Built-in CRM",     buyable: true },
+  simple_layout:       { label: "Simple Layout",        buyable: true },
+  self_serve_displays: { label: "Self Serve Displays",  buyable: false },
+  view_3d:             { label: "3D",                   buyable: false },
+};
+const ssFeatureLabel = (key) => (SS_FEATURE_LABELS[key] || {}).label || "an add-on";
+// What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
+// _shared/featureCheck.ts, which validates the save and rejects anything else — a typo
+// stored here would padlock a step for every builder forever, with nothing on screen to
+// say why. `full_suite` is absent on purpose: it is a bundle you buy, never a requirement.
+const SS_SETUP_FEATURE_CHOICES = [
+  "schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm", "view_3d", "self_serve_displays", "simple_layout",
+];
+
+// The portal's padlock, in one place. The nav rail draws its own copy inline (12-shell.jsx
+// navItem) because that one is CSS-classed `.lock` and positioned by the rail's stylesheet;
+// this is the same glyph for anything that just needs to render a lock inline.
+function SsLock({ size = 13, color = "#94A3B8", title = "Locked" }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color}
+      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      role="img" aria-label={title} style={{ flexShrink: 0 }}>
+      <rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
 // ─── Designs table ───
 // Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
 // designs.status and refreshed by the sync-design-status edge function on load —

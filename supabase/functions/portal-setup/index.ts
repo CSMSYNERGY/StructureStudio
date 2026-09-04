@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { usableFeatureSet } from "../_shared/featureCheck.ts";
 
 // The builder's SETUP checklist (portal.html → What's New → "Getting set up").
 //
@@ -26,8 +27,33 @@ import { resolveTenant } from "../_shared/resolveTenant.ts";
 // and that must be derived from the caller's identity here, never accepted from the body,
 // or "Done · CSM Synergy" would be something a tenant could write about themselves.
 //
+// ── GATING (migration 185) ────────────────────────────────────────────────────────────
+// Two flags live on the TEMPLATE row and are read through template_item_id at request
+// time, never copied onto the tenant's row — so finishing a build reaches every existing
+// builder at once instead of needing a per-tenant backfill:
+//
+//   builder_visible = false  we have not finished building this part of the product. The
+//                            row NEVER LEAVES THIS FUNCTION — not hidden by CSS, not sent
+//                            and ignored. Section headers therefore cannot orphan either,
+//                            because the browser only ever sees the surviving rows.
+//   requires_feature         the step needs a paid add-on. It IS sent, flagged `locked`,
+//                            and the browser greys it with a padlock and a Billing link
+//                            (Carolyn 2026-09-04 — she wants it visible as the upsell).
+//                            Locked steps are excluded from `counts`, so "X of Y done"
+//                            only ever counts work the builder can actually do.
+//
+// ⚠️ THE TWO GATES HAVE OPPOSITE FAILURE POSTURES, deliberately. The template read fails
+// CLOSED (throws): guessing "show it" because a query failed is how half-built work
+// reaches a builder. The entitlement read fails OPEN (caught, everything unlocked):
+// wrongly padlocking a step a builder can do strands them mid-setup, and the feature's own
+// screens fail closed anyway — this one is guidance, not enforcement.
+//
+// A tenant-only step (added via portal-projects' setup_client_save, so template_item_id is
+// NULL) is always visible and never gated. Those are bespoke instructions written for one
+// builder who is already in the conversation.
+//
 // Actions:
-//   { action: "list" }                  → the tenant's items, in order
+//   { action: "list" }                  → the tenant's items, in order, gated
 //   { action: "toggle", id, done }      → tick/untick, stamping who and when
 
 const cors = {
@@ -37,6 +63,47 @@ const cors = {
 };
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
+}
+
+type Gate = { requires: string | null; visible: boolean };
+
+/** The template flags for a set of tenant rows, keyed by template_item_id.
+ *
+ *  FAILS CLOSED (throws) — see the posture note in the header. A row whose template says
+ *  "not built yet" must not become visible because a query blipped. */
+async function templateGate(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  // deno-lint-ignore no-explicit-any
+  rows: any[] | null,
+): Promise<Map<string, Gate>> {
+  const ids = [...new Set((rows ?? []).map((r) => r.template_item_id).filter(Boolean))];
+  const out = new Map<string, Gate>();
+  if (!ids.length) return out;
+  const { data, error } = await admin.from("setup_template_items")
+    .select("id, requires_feature, builder_visible").in("id", ids);
+  if (error) throw error;
+  // deno-lint-ignore no-explicit-any
+  for (const t of (data ?? []) as any[]) {
+    out.set(t.id, { requires: t.requires_feature || null, visible: t.builder_visible !== false });
+  }
+  return out;
+}
+
+/** Which of these features the tenant may use, failing OPEN. See the header. */
+async function usableOrOpen(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  clientId: string,
+  features: string[],
+): Promise<Set<string>> {
+  if (!features.length) return new Set();
+  try {
+    return await usableFeatureSet(admin, clientId, features);
+  } catch (e) {
+    console.error("portal-setup: entitlement read failed, leaving every step unlocked:", (e as Error)?.message);
+    return new Set(features);
+  }
 }
 
 Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
@@ -59,11 +126,40 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
 
   switch (action) {
     case "list": {
-      const { data, error } = await admin.from("tenant_setup_items")
-        .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
+      const { data: rows, error } = await admin.from("tenant_setup_items")
+        .select("id, template_item_id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
         .eq("client_id", clientId).order("position");
       if (error) throw error;
-      return json({ items: data || [], canEdit: true });
+
+      const gate = await templateGate(admin, rows);
+      const needed = [...new Set([...gate.values()].map((g) => g.requires).filter(Boolean))] as string[];
+      const usable = await usableOrOpen(admin, clientId, needed);
+
+      const items = [];
+      for (const r of rows ?? []) {
+        const g = r.template_item_id ? gate.get(r.template_item_id) : null;
+        if (g && !g.visible) continue;   // not built yet — never leaves the server
+        // A step they ALREADY TICKED never re-locks. They plainly had the add-on when they
+        // did it, so padlocking it back would rewrite their own history and shrink the
+        // progress bar under them for work they did not undo.
+        const locked = !!(g && g.requires) && !usable.has(g.requires!) && !r.completed_at;
+        // template_item_id is internal plumbing; the browser has no use for it and it
+        // names a row in a table the tenant cannot read.
+        const { template_item_id: _tpl, ...rest } = r;
+        items.push({ ...rest, locked, requiresFeature: locked ? g!.requires : null });
+      }
+
+      // Counts cover only what they can actually do — a padlocked step is not homework.
+      const counted = items.filter((i) => !i.locked);
+      return json({
+        items,
+        counts: {
+          total: counted.length,
+          done: counted.filter((i) => i.completed_at).length,
+          open: counted.filter((i) => !i.completed_at).length,
+        },
+        canEdit: true,
+      });
     }
 
     case "toggle": {
@@ -72,8 +168,23 @@ Deno.serve(withErrorLog("portal-setup", async (req: Request) => {
 
       // Scoped to the resolved tenant, so an id from another account matches nothing.
       const { data: row } = await admin.from("tenant_setup_items")
-        .select("id, title").eq("id", id).eq("client_id", clientId).maybeSingle();
+        .select("id, title, template_item_id, completed_at").eq("id", id).eq("client_id", clientId).maybeSingle();
       if (!row) return json({ error: "That setup step is not on your list." }, 404);
+
+      // Re-derived here, not trusted from the browser: an id for a step that has since
+      // been hidden or locked can still be sitting in a tab opened before the flag moved.
+      const tGate = (await templateGate(admin, [row])).get(row.template_item_id) || null;
+      // The SAME wording and status as an id from another tenant, on purpose — a step we
+      // have not built yet must not be distinguishable from one that does not exist.
+      if (tGate && !tGate.visible) return json({ error: "That setup step is not on your list." }, 404);
+      // Only TICKING is gated. Un-ticking can only reach an already-completed row, which
+      // the rule above never locks — so a builder can always undo their own tick.
+      if (done && tGate && tGate.requires && !row.completed_at) {
+        const usable = await usableOrOpen(admin, clientId, [tGate.requires]);
+        if (!usable.has(tGate.requires)) {
+          return json({ error: "That step needs an add-on your account doesn't have yet." }, 403);
+        }
+      }
 
       let patch: Record<string, unknown>;
       if (!done) {
