@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 e859d3ef13ae)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 aeee24ca940c)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -1279,7 +1279,14 @@ var battenMat=mat(trimColor);var roofMat=mat(p.roofColor||D3_COLORS.roof);// Cat
 var fxById=new Map((Array.isArray(p.fixtures)?p.fixtures:[]).map(function(fx){return[String(fx.id),fx];}));// Returns the shared cache ENTRY ({ tex, status }) — not a texture — because the caller
 // needs to know whether the photo has decoded yet to decide if its layer is visible.
 var fixturePhotoTex=function fixturePhotoTex(it){if(it.fixtureItemId==null)return null;// built-in door/window
-var fx=fxById.get(String(it.fixtureItemId));if(!fx||!fx.imageUrl)return null;return d3FixtureTexture(THREE,fx.imageUrl);};// Cladding texture — multiplies the body color, so the customer's paint still drives
+var fx=fxById.get(String(it.fixtureItemId));if(!fx||!fx.imageUrl)return null;return d3FixtureTexture(THREE,fx.imageUrl);};// The 3D LOOK a builder picked for a catalog door (186: fixture_items.door_style),
+// resolved live from the catalog beside its photo and for exactly the same reason --
+// switching a door to board-and-batten should improve the designs already saved, not
+// only the next one. A built-in door, a fixture that has been archived away, an absent
+// key and any unknown value all mean "auto", which is the photo-or-raised-panel look
+// this renderer has always had. There is therefore no value of this column that can
+// change how a tenant's existing doors draw until the builder picks one.
+var fixtureDoorStyle=function fixtureDoorStyle(it){if(it.fixtureItemId==null)return"auto";var fx=fxById.get(String(it.fixtureItemId));return fx&&fx.doorStyle==="plank"?"plank":"auto";};// Cladding texture — multiplies the body color, so the customer's paint still drives
 // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
 // raster, the relief style below, and the tile scale.
 var clad=D3_CLADDING[d3NormalizeCladding(p.styleSpec&&p.styleSpec.siding)]||D3_CLADDING.panel;// How far the cladding's proudest surface stands from the wall CENTRE-line, and the one
@@ -1338,7 +1345,38 @@ var wallBox=function wallBox(m,wf,a0,a1,y0,y1,out,depth){var b=box(m,a1-a0,y1-y0
 // the wall origin), and lines the cap's courses up with the wall's at the plate line.
 // The box's thin edge faces get stripe UVs out of this; they are 0.3 ft slivers
 // buried in corner trim, invisible either way.
-var uvA=b.geometry.attributes.uv,posA=b.geometry.attributes.position;var cu=(a0+a1)/2,cv=(y0+y1)/2;for(var _i23=0;_i23<uvA.count;_i23++)uvA.setXY(_i23,posA.getX(_i23)+cu,posA.getY(_i23)+cv);uvA.needsUpdate=true;var ac=(a0+a1)/2;b.position.set(wf.O[0]+wf.U[0]*ac+wf.N[0]*(out||0),(y0+y1)/2,wf.O[1]+wf.U[1]*ac+wf.N[1]*(out||0));if(wf.U[0]===0)b.rotation.y=Math.PI/2;return b;};// WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
+var uvA=b.geometry.attributes.uv,posA=b.geometry.attributes.position;var cu=(a0+a1)/2,cv=(y0+y1)/2;for(var _i23=0;_i23<uvA.count;_i23++)uvA.setXY(_i23,posA.getX(_i23)+cu,posA.getY(_i23)+cv);uvA.needsUpdate=true;var ac=(a0+a1)/2;b.position.set(wf.O[0]+wf.U[0]*ac+wf.N[0]*(out||0),(y0+y1)/2,wf.O[1]+wf.U[1]*ac+wf.N[1]*(out||0));if(wf.U[0]===0)b.rotation.y=Math.PI/2;return b;};// ONE LEAF of a board-and-batten door, built rather than photographed (186).
+//
+// Every builder in this catalog sells this door and until now the renderer could draw
+// neither it nor anything like it: upload a photo and the slab wore that photo flat (and
+// production photos are three-quarter cut-outs, so the door came out visibly skewed);
+// upload nothing and you got a two-raised-panel residential slab with a grey lever, which
+// is a suburban front door, not a shed door.
+//
+// THE DEPTHS ARE THE WHOLE TRICK, and they are a deliberate ladder rather than four
+// numbers that happen to differ: slab face 0.08 -> boards 0.135 -> frame 0.16 -> iron
+// 0.18. Each step is about the 0.03 ft of relief the cladding uses, which is what casts
+// the shadow lines that stop a door reading as a painted rectangle whatever colour it is.
+// The top of the ladder lands ON the casing face (trimFace = T/2 + 0.03 = 0.18 on panel
+// siding, more on lap), so no part of the door can stand proud of its own trim -- the
+// inversion Carolyn caught on the corner boards, avoided here by construction.
+var plankDoorLeaf=function plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,a0,a1,y0,y1,hinge,latch){var w=a1-a0,h=y1-y0;og.add(wallBox(doorMat,wf,a0,a1,y0,y1,0,0.16));if(w<0.5||h<1)return;// a sliver; the slab alone is honest
+// Stile/rail width. Bounded by the leaf as well as by the real 3.5 in board, because a
+// narrow leaf (half a 4 ft double) framed at a fixed width has no field left to board.
+var F=Math.min(0.3,w*0.16,h*0.09);var f0=a0+F,f1=a1-F,fy0=y0+F,fy1=y1-F;var midY=y0+h*0.55,midH=Math.min(0.26,h*0.06);if(f1-f0>0.12&&fy1-fy0>0.2){// Vertical boards at ~6.5 in, but sized so the field divides EVENLY -- a part-width
+// board left over at one edge is the tell that says "repeating texture" rather than
+// "boards". The gap between them is not drawn: it is the slab showing through 0.055 ft
+// back, a real shadow that moves with the sun instead of a painted-on line.
+var n=Math.max(2,Math.round((f1-f0)/0.55));var pitch=(f1-f0)/n,gap=Math.min(0.05,pitch*0.15);for(var k=0;k<n;k++){var b0=f0+k*pitch+(k===0?0:gap/2);var b1=f0+(k+1)*pitch-(k===n-1?0:gap/2);og.add(wallBox(doorMat,wf,b0,b1,fy0,fy1,0.105,0.06));}}// Frame: two full-height stiles, then head/sill/mid rails spanning only BETWEEN them.
+// Running the rails the full width instead would put two coplanar faces at the same
+// depth in each corner, which z-fights -- the frame would flicker as the customer orbits.
+og.add(wallBox(frameMat,wf,a0,a0+F,y0,y1,0.13,0.06));og.add(wallBox(frameMat,wf,a1-F,a1,y0,y1,0.13,0.06));og.add(wallBox(frameMat,wf,f0,f1,y0,y0+F,0.13,0.06));og.add(wallBox(frameMat,wf,f0,f1,y1-F,y1,0.13,0.06));og.add(wallBox(frameMat,wf,f0,f1,midY-midH/2,midY+midH/2,0.13,0.06));// Black T-strap hinges: a leaf against the jamb and a strap tapering across the boards,
+// in two steps because a taper cannot be a box. Three on a full-height door and two on a
+// short one, and the middle one sits ON the mid rail -- where a real strap is nailed,
+// because that is the one line of solid backing across the middle of the door.
+var he=hinge==="a0"?a0:a1,dir=hinge==="a0"?1:-1;var sLen=Math.min(w*0.5,1.15);var iron=function iron(from,to,cy,half,out,depth){var p0=Math.min(he+dir*from,he+dir*to),p1=Math.max(he+dir*from,he+dir*to);og.add(wallBox(ironMat,wf,p0,p1,cy-half,cy+half,out,depth));};(h>=5?[y0+h*0.13,midY,y1-h*0.13]:[y0+h*0.18,y1-h*0.18]).forEach(function(cy){iron(0,0.11,cy,Math.min(0.17,h*0.03),0.165,0.03);iron(0.11,0.11+sLen*0.55,cy,0.085,0.165,0.03);iron(0.11+sLen*0.55,0.11+sLen,cy,0.05,0.165,0.03);});// The latch, on the STRIKE side and on the mid rail. Its lever is the one part allowed
+// past the casing face, because a handle you could not get a hand behind is not a handle.
+if(latch){var se=hinge==="a0"?a1:a0,sd=hinge==="a0"?-1:1;var lv=Math.min(0.62,w*0.45);var plate=function plate(from,to,half,out,depth){var p0=Math.min(se+sd*from,se+sd*to),p1=Math.max(se+sd*from,se+sd*to);og.add(wallBox(ironMat,wf,p0,p1,midY-half,midY+half,out,depth));};plate(0.04,Math.min(0.3,w*0.22),0.15,0.163,0.034);plate(0.08,lv,0.045,0.178,0.024);}};// WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
 // first textured roof, because this was the ONE textured surface with no UV rewrite.
 //
 // A slab is box(w = along the SLOPE, h = thickness, d = along the RIDGE), and stock
@@ -1498,15 +1536,32 @@ var shMat=mat(o.it.shutterColorHex||trimColor,{roughness:0.7});og.add(wallBox(sh
 // the same limits as the shutters, for the same reason.
 var top=Math.max(0.55,o.y0-0.08);var bot=Math.max(0.12,top-0.72);var depth=0.52;var fbL=Math.max(limL,o.a0-0.18),fbR=Math.min(limR,o.a1+0.18);if(fbR-fbL>0.3){og.add(wallBox(fbMat,wf,fbL,fbR,bot,top,trimFace+depth/2,depth));// A darker lip along the top edge, so the box reads as a container rather than a
 // slab — the same casing→sash→glass depth-step trick that sells the window itself.
-og.add(wallBox(mat(o.it.flowerBoxColorHex||trimColor,{roughness:0.55}),wf,Math.max(limL,fbL-0.04),Math.min(limR,fbR+0.04),top-0.09,top,trimFace+depth/2+0.02,depth+0.04));}}}else if(o.it.type==="singleDoor"||o.it.type==="doubleDoor"||o.it.type==="fixtureDoor"){var photoEntry=fixturePhotoTex(o.it);{// The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
+og.add(wallBox(mat(o.it.flowerBoxColorHex||trimColor,{roughness:0.55}),wf,Math.max(limL,fbL-0.04),Math.min(limR,fbR+0.04),top-0.09,top,trimFace+depth/2+0.02,depth+0.04));}}}else if(o.it.type==="singleDoor"||o.it.type==="doubleDoor"||o.it.type==="fixtureDoor"){var photoEntry=fixturePhotoTex(o.it);// A board-and-batten door is BUILT, and its photo is deliberately NOT layered over
+// it. Everywhere else in this renderer the photo wins because the parametric fill is
+// only a stand-in; here the geometry IS the door, and the cut-out floating in front
+// of it -- shot at an angle, stretched to the opening -- is the exact fault the
+// builder picked this option to be rid of. The photo still rides the estimate.
+// Never for a roll-up: "board-and-batten" describes a hinged leaf, and a roll-up has
+// no stiles, no rails and no hinges, so it keeps its horizontal-seam read.
+var plank=fixtureDoorStyle(o.it)==="plank"&&o.it.operation!=="slideup";if(plank){var doorMat=mat(o.it.colorHex||D3_COLORS.door);// A two-tone catalog door frames itself in the SAME trim colour its casing already
+// takes, so the cream-frame/stained-boards door renders like the real product; a
+// one-colour door reuses doorMat outright, which is what lets a stained door read
+// as one piece of wood rather than a panel stuck inside a border.
+var frameMat=o.it.trimColorHex?mat(o.it.trimColorHex):doorMat;var ironMat=mat("#23272E",{metalness:0.55,roughness:0.42});var y0d=0.05,y1d=o.y1-0.05;if(o.it.type==="doubleDoor"||o.it.operation==="double"){// Hinges on the two OUTER jambs and one latch where the leaves meet -- the pair
+// as it is actually hung, not the single-leaf treatment applied twice.
+plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a0+0.05,o.a-0.03,y0d,y1d,"a0",false);plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a+0.03,o.a1-0.05,y0d,y1d,"a1",true);}else{// Hinge side follows the door's own operation, and "right" means the a1 end of
+// the wall run -- the SAME end the 2D plan swings its arc from (fixtureDoorSVG),
+// so the drawing the builder hands his shop and the picture the customer bought
+// agree about which side the hinges are on.
+plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a0+0.05,o.a1-0.05,y0d,y1d,o.it.operation==="left"?"a0":"a1",true);}}else{// The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
 // doors with no palette row) keeps the hard-coded natural brown as before.
-var doorMat=mat(o.it.colorHex||D3_COLORS.door);if(o.it.type==="doubleDoor"||o.it.operation==="double"){og.add(wallBox(doorMat,wf,o.a0+0.05,o.a-0.03,0.05,o.y1-0.05,0,0.16));og.add(wallBox(doorMat,wf,o.a+0.03,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}else{if(o.it.operation==="slideup"&&!photoEntry){// Roll-up read: reuse the lap texture as ~1 ft horizontal panel
+var _doorMat=mat(o.it.colorHex||D3_COLORS.door);if(o.it.type==="doubleDoor"||o.it.operation==="double"){og.add(wallBox(_doorMat,wf,o.a0+0.05,o.a-0.03,0.05,o.y1-0.05,0,0.16));og.add(wallBox(_doorMat,wf,o.a+0.03,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}else{if(o.it.operation==="slideup"&&!photoEntry){// Roll-up read: reuse the lap texture as ~1 ft horizontal panel
 // seams, matching the segmented glyph the 2D plan draws.
-var seamTex=d3MakeTexture(THREE,"lap");if(seamTex){seamTex.repeat.set(1,Math.max(2,Math.round(o.y1-0.1)));doorMat.map=seamTex;}}og.add(wallBox(doorMat,wf,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0,0.16));if(!photoEntry&&o.it.operation!=="slideup"){// Raised panels + a handle on a plain hinged slab — the relief
+var seamTex=d3MakeTexture(THREE,"lap");if(seamTex){seamTex.repeat.set(1,Math.max(2,Math.round(o.y1-0.1)));_doorMat.map=seamTex;}}og.add(wallBox(_doorMat,wf,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0,0.16));if(!photoEntry&&o.it.operation!=="slideup"){// Raised panels + a handle on a plain hinged slab — the relief
 // shadows are what stop it reading as a painted rectangle.
-var pa0=o.a0+0.22,pa1=o.a1-0.22,ph=o.y1-0.05;og.add(wallBox(doorMat,wf,pa0,pa1,ph*0.55,ph-0.18,0.1,0.05));og.add(wallBox(doorMat,wf,pa0,pa1,0.22,ph*0.45,0.1,0.05));og.add(wallBox(mat("#6B7280",{metalness:0.6,roughness:0.3}),wf,o.a1-0.38,o.a1-0.24,3.0,3.14,0.12,0.08));}}}// One photo layer even for a double or a roll-up: the photo already shows both
+var pa0=o.a0+0.22,pa1=o.a1-0.22,ph=o.y1-0.05;og.add(wallBox(_doorMat,wf,pa0,pa1,ph*0.55,ph-0.18,0.1,0.05));og.add(wallBox(_doorMat,wf,pa0,pa1,0.22,ph*0.45,0.1,0.05));og.add(wallBox(mat("#6B7280",{metalness:0.6,roughness:0.3}),wf,o.a1-0.38,o.a1-0.24,3.0,3.14,0.12,0.08));}}// One photo layer even for a double or a roll-up: the photo already shows both
 // leaves / the panel seams, so splitting it would draw them twice.
-if(photoEntry)photoLayer(photoEntry,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0.16,o.it.colorHex||null);}ogs.push(og);});return{wg:wg,ogs:ogs};};Object.keys(WALLS).forEach(function(wname){var built=buildOneWall(wname,items);wallsGroup.add(built.wg);built.ogs.forEach(function(og){return openingsGroup.add(og);});});// ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
+if(photoEntry)photoLayer(photoEntry,o.a0+0.05,o.a1-0.05,0.05,o.y1-0.05,0.16,o.it.colorHex||null);}}ogs.push(og);});return{wg:wg,ogs:ogs};};Object.keys(WALLS).forEach(function(wname){var built=buildOneWall(wname,items);wallsGroup.add(built.wg);built.ogs.forEach(function(og){return openingsGroup.add(og);});});// ── Roof (plan §4.2): a solid extruded profile in body color (its caps ARE
 // the gable/gambrel end walls) with roof-colored overhanging slope slabs on
 // top. The ridge runs down the building's LONGER axis and the gable ends cap
 // the width -- always, whatever the customer does with the doors. See

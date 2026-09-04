@@ -1268,7 +1268,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
       admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
@@ -3253,6 +3253,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
     }
+    // How the door is DRAWN in 3D (186): doors only, presence-guarded, whitelisted.
+    // 'auto' is today's behaviour (the fixture's photo if it has one, else the generic
+    // raised-panel slab) and is what anything unrecognised falls back to, so a typo or a
+    // value from a newer portal can only ever mean "render it the way you always did".
+    if (!isDoor) {
+      rec.door_style = "auto";
+    } else if (has("doorStyle")) {
+      rec.door_style = String(row?.doorStyle ?? "").trim() === "plank" ? "plank" : "auto";
+    }
     return { rec };
   };
   // Inserts still need concrete values for whatever the presence contract left out — the
@@ -3272,6 +3281,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
+    if (!("door_style" in rec)) rec.door_style = "auto";
     return rec;
   };
 

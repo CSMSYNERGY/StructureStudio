@@ -3748,6 +3748,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
     // floor-level window back into "use the default" on the next save), so 0 is spelled out.
     sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
+    // How the door is DRAWN in 3D (186). Anything unrecognised reads as "auto" — the look
+    // the app has always had — so an older row and a newer one cannot render differently.
+    door_style: d.door_style === "plank" ? "plank" : "auto",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     // Sales tax (migration 148). Absent reads as TAXABLE — the column defaults true, so the
     // only way to be untaxed is for the builder to have said so.
@@ -3784,6 +3787,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
     ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
+    ...(isDoorCat ? { doorStyle: r.door_style === "plank" ? "plank" : "auto" } : {}),
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
@@ -4064,7 +4068,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -4252,6 +4256,22 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           builder sells, so a transom and a picture window sat at the same height.
           Independent of the width/height fields above because it is not a size — it is
           where the window is INSTALLED. */}
+      {isDoorCat && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>How it looks in 3D</div>
+          <select value={edit.draft.door_style === "plank" ? "plank" : "auto"}
+            onChange={(e) => setDraft({ door_style: e.target.value })}
+            style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
+            <option value="auto">Use the photo above</option>
+            <option value="plank">Board-and-batten (built in 3D)</option>
+          </select>
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {edit.draft.door_style === "plank"
+              ? "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D."
+              : "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed."}
+          </div>
+        </div>
+      )}
       {isWindowCat && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
