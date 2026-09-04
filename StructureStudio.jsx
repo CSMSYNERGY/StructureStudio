@@ -718,6 +718,27 @@ function doorColorStamps(dc, tc) {
 function windowColorStamps(c) {
   return { colorId: c ? c.id : null, colorLabel: c ? (c.label || null) : null, colorHex: c ? (c.hex || null) : null };
 }
+// Shutters and a flower box: per-WINDOW dressing, chosen independently, each with its own
+// colour. Carolyn, 2026-09-03: "we need to add shutters and flower boxes ... they can do
+// shutters and flower boxes, or they can do just flower boxes, or they can do just shutters.
+// And those colors will be separated as well ... they can make them whatever color they want."
+// Two booleans rather than one enum, because that is what "or ... or ... or" means: four
+// states, and an enum would have to spell all four out and then be extended for the next pair.
+//
+// ⚠️ ALL EIGHT FIELDS, ALWAYS, exactly as doorColorStamps writes all six. A swap that writes
+// only the fields it happens to have leaves the PREVIOUS window's dressing on the new one —
+// which is the same shape as the bug windowSillStamps documents just below, where catalog
+// windows silently inherited a sill they never specified. Absent is false/null here, never
+// undefined-and-inherited.
+function windowDressStamps(d) {
+  const sc = d && d.shutterColor, fc = d && d.flowerBoxColor;
+  return {
+    shutters: !!(d && d.shutters),
+    shutterColorId: sc ? sc.id : null, shutterColorLabel: sc ? (sc.label || null) : null, shutterColorHex: sc ? (sc.hex || null) : null,
+    flowerBox: !!(d && d.flowerBox),
+    flowerBoxColorId: fc ? fc.id : null, flowerBoxColorLabel: fc ? (fc.label || null) : null, flowerBoxColorHex: fc ? (fc.hex || null) : null,
+  };
+}
 // How far off the interior FLOOR a catalog window sits, and whether the customer may slide
 // it (139). Stamped at placement like every other fixture field, so a design keeps the
 // height it was drawn with even if the builder later re-specs the window.
@@ -4306,6 +4327,60 @@ function buildShed3DModel(THREE, p) {
           const midY = o.y0 + wh / 2;
           og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
         }
+        // ── SHUTTERS AND FLOWER BOX (Carolyn 2026-09-03) ───────────────────────────────
+        // Independent of each other and of the sash colour, each painted from the builder's
+        // trim palette: "they can do shutters and flower boxes, or they can do just flower
+        // boxes, or they can do just shutters. And those colors will be separated as well."
+        //
+        // Both stand off `trimFace`, not off T/2. That is the number every trim face in this
+        // renderer takes, and it is what clears the proud cladding relief — a shutter parked
+        // at the bare wall face would have lap courses and battens cutting straight through
+        // it, which is the exact fault the corner boards and casings were fixed for.
+        // Colour falls back to the building trim when the stamp carries none, so a design
+        // saved before this field existed still renders something sane rather than black.
+        // ⚠️ HOW MUCH ROOM IS ACTUALLY THERE. Placement guarantees the OPENING fits the wall
+        // and clears other openings — checkDoorCollision and checkWallSlabOverlap know nothing
+        // about casing, let alone shutters. So a window snapped near a corner, or two windows
+        // placed a foot apart (both legal today), would grow leaves that float past the wall
+        // end or interpenetrate. Nothing else in this renderer solves that, so it is measured
+        // here against the wall and the neighbouring openings on the same wall.
+        let limL = 0, limR = wf.len;
+        ops.forEach((ob) => {
+          if (ob === o) return;
+          if (ob.a1 <= o.a0) limL = Math.max(limL, ob.a1);
+          if (ob.a0 >= o.a1) limR = Math.min(limR, ob.a0);
+        });
+        if (o.it.shutters) {
+          const gap = f + 0.05;                      // outside the casing, not on top of it
+          // A real pair covers the opening, so each leaf is about half the sash — capped so a
+          // wide window does not grow shutters that read as extra walls, and then cut down to
+          // whatever room the wall actually leaves. ONE width for both leaves: a pair with a
+          // fat side and a thin side reads as a bug, so the tighter side governs.
+          const shW = Math.min(0.95, (o.a1 - o.a0) * 0.42,
+                               Math.max(0, (o.a0 - gap) - limL), Math.max(0, limR - (o.a1 + gap)));
+          if (shW > 0.15) {                          // narrower than this is a sliver, not a shutter
+            const shMat = mat(o.it.shutterColorHex || trimColor, { roughness: 0.7 });
+            og.add(wallBox(shMat, wf, o.a0 - gap - shW, o.a0 - gap, o.y0, o.y1, trimFace + 0.04, 0.08));
+            og.add(wallBox(shMat, wf, o.a1 + gap, o.a1 + gap + shW, o.y0, o.y1, trimFace + 0.04, 0.08));
+          }
+        }
+        if (o.it.flowerBox) {
+          const fbMat = mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.7 });
+          // Hangs under the sill, a little wider than the window, and clamped off the ground:
+          // a low window would otherwise bury its box in the grass. Clamped sideways against
+          // the same limits as the shutters, for the same reason.
+          const top = Math.max(0.55, o.y0 - 0.08);
+          const bot = Math.max(0.12, top - 0.72);
+          const depth = 0.52;
+          const fbL = Math.max(limL, o.a0 - 0.18), fbR = Math.min(limR, o.a1 + 0.18);
+          if (fbR - fbL > 0.3) {
+            og.add(wallBox(fbMat, wf, fbL, fbR, bot, top, trimFace + depth / 2, depth));
+            // A darker lip along the top edge, so the box reads as a container rather than a
+            // slab — the same casing→sash→glass depth-step trick that sells the window itself.
+            og.add(wallBox(mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.55 }), wf,
+              Math.max(limL, fbL - 0.04), Math.min(limR, fbR + 0.04), top - 0.09, top, trimFace + depth / 2 + 0.02, depth + 0.04));
+          }
+        }
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
         {
@@ -5914,7 +5989,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))), ...windowSillStamps(fx) };
+            // No picker on this path, exactly like the door colour defaults stamped
+            // alongside: windowDressStamps(null) writes all eight fields off/null. That is
+            // deliberate rather than lazy — it is what stops this window reading `undefined`
+            // and, since there is no post-placement dress editor yet, becoming a window that
+            // can NEVER be given shutters. The sill bug this feature's comment cites failed
+            // in exactly this shape, by missing exactly these two sites.
+            ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColors))), ...windowDressStamps(null), ...windowSillStamps(fx) };
         } else {
           const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
           const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -7319,7 +7400,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
 
 // Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
 // item goes on a wall. "Choose a window" / "Place window".
-function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace }) {
+function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFrom, onCancel, onPlace }) {
   const styles = useMemo(() => {
     const m = new Map();
     windows.forEach((d) => {
@@ -7340,6 +7421,25 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
   useEffect(() => {
     setColor(sel ? fixtureWindowColorDefault(windowColorsFor(sel, windowColors)) : null);
   }, [sel]);
+  // Shutters and the flower box are INDEPENDENT of each other and of the window's own colour
+  // — four legal combinations, which is why these are two booleans and not one enum. Both
+  // start off: ShedPro's own panel, which Carolyn was holding this up against, defaults each
+  // dropdown to "None", and a window that quietly arrived wearing shutters nobody asked for
+  // would be worse than one that needs a click.
+  const dressPool = Array.isArray(dressColors) ? dressColors : [];
+  // ⚠️ SEEDED FROM THE WINDOW BEING SWAPPED, not from nothing. The swap branch writes all
+  // eight dress fields unconditionally — which is what stops the OLD window's dressing
+  // leaking onto the new one — but starting these at false meant the reverse: changing a
+  // 24x36 for a 24x30 silently threw the customer's shutters away, with the rows showing
+  // "None" as if there had never been any. The colour row never had this problem because
+  // its useEffect re-derives a live value; these needed the same courtesy.
+  // The picker mounts fresh per open (createPortal on windowPick), so a useState initialiser
+  // is the right hook — it runs once per open, with the swap target already known.
+  const byId = (id) => (Array.isArray(dressColors) ? dressColors : []).find((c) => c && c.id === id) || null;
+  const [shutters, setShutters] = useState(!!(swapFrom && swapFrom.shutters));
+  const [shutterColor, setShutterColor] = useState(() => (swapFrom ? byId(swapFrom.shutterColorId) : null));
+  const [flowerBox, setFlowerBox] = useState(!!(swapFrom && swapFrom.flowerBox));
+  const [flowerBoxColor, setFlowerBoxColor] = useState(() => (swapFrom ? byId(swapFrom.flowerBoxColorId) : null));
   const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
@@ -7387,9 +7487,35 @@ function WindowPicker({ windows, showPricing, windowColors, onCancel, onPlace })
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{colorOpts.map((c) => colorChip(c, color && color.id === c.id, () => setColor(c)))}</div>
           </div>
         )}
+        {/* Dressing. Hidden entirely when the builder's catalog offers no trim colours to
+            paint it with — an "Add" button whose colour row would be empty is a dead end, and
+            this file has form for buttons that look live and do nothing. Turning one on picks
+            the first colour so the choice is never half-made; the stamp helper still writes
+            null when there is genuinely none. */}
+        {sel && dressPool.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            {[
+              { key: "sh", label: "Shutters", on: shutters, setOn: setShutters, col: shutterColor, setCol: setShutterColor },
+              { key: "fb", label: "Flower box", on: flowerBox, setOn: setFlowerBox, col: flowerBoxColor, setCol: setFlowerBoxColor },
+            ].map((row) => (
+              <div key={row.key} style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 86 }}>{row.label}</span>
+                  {chip(row.key + ":off", !row.on, "None", () => row.setOn(false))}
+                  {chip(row.key + ":on", row.on, "Add", () => { row.setOn(true); if (!row.col) row.setCol(dressPool[0]); })}
+                </div>
+                {row.on && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6, paddingLeft: 94 }}>
+                    {dressPool.map((c) => colorChip(c, row.col && row.col.id === c.id, () => row.setCol(c)))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => sel && onPlace(sel, color)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
+          <button onClick={() => sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor })} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
         </div>
       </div>
     </div>
@@ -7618,6 +7744,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the default stamps on included-chip / 3D placements.
   const doorPaintColors = useMemo(() => (Array.isArray(C.colors) ? C.colors : []).filter((c) => c && c.door), [C.colors]);
   const windowColorList = useMemo(() => (Array.isArray(C.windowColors) ? C.windowColors : []), [C.windowColors]);
+  // Shutters and flower boxes take the builder's TRIM colours, not the window's own list.
+  // A window's colours are the sash range its manufacturer sells; shutters are painted
+  // millwork, so the honest pool is the trim palette the builder already offers — the same
+  // rows doorPaintColors filters, kept as raw catalog rows (id/label/hex) because the stamps
+  // record all three for server-side re-resolution and for the quote's wording.
+  const dressColorList = useMemo(() => (Array.isArray(C.colors) ? C.colors : []).filter((c) => c && c.hex && c.trim && !c.allowCustom), [C.colors]);
   // Memoized, not inline at the mount: the docked 3D panel keeps props alive across
   // rebuilds, and handing it a fresh array identity on every keystroke is how a cheap
   // prop turns into a churning one.
@@ -8999,7 +9131,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))), ...windowSillStamps(fx) };
+          // No picker on this path, exactly like the door colour defaults stamped
+          // alongside: windowDressStamps(null) writes all eight fields off/null. That is
+          // deliberate rather than lazy — it is what stops this window reading `undefined`
+          // and, since there is no post-placement dress editor yet, becoming a window that
+          // can NEVER be given shutters. The sill bug this feature's comment cites failed
+          // in exactly this shape, by missing exactly these two sites.
+          ...windowColorStamps(fixtureWindowColorDefault(windowColorsFor(fx, windowColorList))), ...windowDressStamps(null), ...windowSillStamps(fx) };
       } else {
         const swing = fx.swingDefault || (fx.swingOut ? "out" : fx.swingIn ? "in" : null);
         const operation = fx.opDefault || (fx.opDouble ? "double" : fx.opSlideUp ? "slideup" : fx.opRight ? "right" : fx.opLeft ? "left" : null);
@@ -9307,7 +9445,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Place the window style chosen in the picker at the remembered wall/point. A catalog window is
   // a normal type:"window" item (reuses the built-in window render/collision/payload) carrying the
   // style's width + a priced snapshot; fixtureItemId is what marks it as a catalog (vs built-in) window.
-  const placePickedWindow = useCallback((fx, windowColor) => {
+  const placePickedWindow = useCallback((fx, windowColor, dress) => {
     // Swap mode: same re-legalization as the door swap above — the new width is re-clamped
     // to the wall and collision/workbench-checked before committing; the old swap kept x/y
     // verbatim with no checks at all (audit 2026-08-20).
@@ -9345,7 +9483,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // sillFt is no longer blanked here — windowSillStamps supplies the NEW window's own
         // height off the floor (and undefined when it has none), which is what stops the
         // window being swapped INTO inheriting the height of the one it replaced.
-        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowSillStamps(fx), widthFt: wFt } : it));
+        // windowDressStamps rides the swap for the same reason the colour stamps do: it writes
+        // all eight fields, so the window being swapped IN can never keep the dressing of the
+        // one it replaced. The picker is the single source — whatever its two toggles say at
+        // the moment of the swap is what the window gets.
+        openingHeightFt: undefined, ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowSillStamps(fx), widthFt: wFt } : it));
       setSwapId(null); setWindowPick(null); setToast(null); return;
     }
     if (!windowPick || !fx) return;
@@ -9366,7 +9508,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
       price: (fx.price != null ? fx.price : null),
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
-      ...windowColorStamps(windowColor), ...windowSillStamps(fx),
+      ...windowColorStamps(windowColor), ...windowDressStamps(dress), ...windowSillStamps(fx),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("Something's already there — pick a different spot on the wall.");
@@ -12232,7 +12374,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
