@@ -4513,8 +4513,18 @@ function buildShed3DModel(THREE, p) {
             // the wall run -- the SAME end the 2D plan swings its arc from (fixtureDoorSVG),
             // so the drawing the builder hands his shop and the picture the customer bought
             // agree about which side the hinges are on.
+            //
+            // ⚠️ AFFIRMATIVE ON "right", copying fixtureDoorSVG's own `rightHinge = op ===
+            // "right"` EXACTLY -- and it has to be the same polarity, not merely the same
+            // idea. This first shipped as `=== "left" ? "a0" : "a1"`, which agrees for both
+            // values a customer can pick and disagrees for the third one: `operation` is
+            // NULL whenever a builder saves a door with all four operation boxes unticked
+            // (nothing requires one -- 064 defaults them all false and the save validator
+            // only enforces exclusivity), and a null then hinged at a1 here while the plan
+            // and the PDF drew its arc at a0. Hinges on one end of the shop drawing and the
+            // other end of the customer's picture, with the latch swapped to match.
             plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d,
-              o.it.operation === "left" ? "a0" : "a1", true);
+              o.it.operation === "right" ? "a1" : "a0", true);
           }
         } else {
           // The chosen door color drives the slab; no color chosen (built-ins, fixed-mode

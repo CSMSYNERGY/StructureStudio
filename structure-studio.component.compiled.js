@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 aeee24ca940c)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 abc04b1a4ddf)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -1553,7 +1553,17 @@ plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a0+0.05,o.a-0.03,y0d,y1d,"a0",fal
 // the wall run -- the SAME end the 2D plan swings its arc from (fixtureDoorSVG),
 // so the drawing the builder hands his shop and the picture the customer bought
 // agree about which side the hinges are on.
-plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a0+0.05,o.a1-0.05,y0d,y1d,o.it.operation==="left"?"a0":"a1",true);}}else{// The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
+//
+// ⚠️ AFFIRMATIVE ON "right", copying fixtureDoorSVG's own `rightHinge = op ===
+// "right"` EXACTLY -- and it has to be the same polarity, not merely the same
+// idea. This first shipped as `=== "left" ? "a0" : "a1"`, which agrees for both
+// values a customer can pick and disagrees for the third one: `operation` is
+// NULL whenever a builder saves a door with all four operation boxes unticked
+// (nothing requires one -- 064 defaults them all false and the save validator
+// only enforces exclusivity), and a null then hinged at a1 here while the plan
+// and the PDF drew its arc at a0. Hinges on one end of the shop drawing and the
+// other end of the customer's picture, with the latch swapped to match.
+plankDoorLeaf(og,wf,doorMat,frameMat,ironMat,o.a0+0.05,o.a1-0.05,y0d,y1d,o.it.operation==="right"?"a1":"a0",true);}}else{// The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
 // doors with no palette row) keeps the hard-coded natural brown as before.
 var _doorMat=mat(o.it.colorHex||D3_COLORS.door);if(o.it.type==="doubleDoor"||o.it.operation==="double"){og.add(wallBox(_doorMat,wf,o.a0+0.05,o.a-0.03,0.05,o.y1-0.05,0,0.16));og.add(wallBox(_doorMat,wf,o.a+0.03,o.a1-0.05,0.05,o.y1-0.05,0,0.16));}else{if(o.it.operation==="slideup"&&!photoEntry){// Roll-up read: reuse the lap texture as ~1 ft horizontal panel
 // seams, matching the segmented glyph the 2D plan draws.
