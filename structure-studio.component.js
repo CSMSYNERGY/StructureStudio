@@ -323,6 +323,20 @@ const SS_PAGE = { W: 850, H: 1100, TEXT_AREA_H: 340, TOP_LABEL_PAD: 30, BOT_LABE
 // viewport but ~832px at 900px — a viewport threshold would switch the dock ON for
 // the narrower layout and OFF for the wider one.
 const SS_DOCK_MIN_ROW_W = 960;
+// THE EMBED CONTRACT. `?open3d=1` on a public designer link asks for the 3D panel to be
+// docked beside the plan on arrival, instead of waiting behind the toolbar button.
+//
+// It exists for the iframe snippet in Settings (Carolyn 2026-09-03, about a builder whose
+// site is built on ShedPro): "I like this where they can see it. But the 3d needs to be
+// open." Ahsan on the same call: "in the iframe code, we can prioritize 3D."
+//
+// A QUERY PARAM RATHER THAN A CONFIG FLAG, deliberately: the same tenant hands the plain
+// link to some customers and the embed to others, so this is a property of the embed, not
+// of the builder. Anything other than the literal "1" reads as off.
+function ssOpen3DRequested() {
+  if (typeof window === "undefined") return false;
+  try { return new URLSearchParams(window.location.search).get("open3d") === "1"; } catch (e) { return false; }
+}
 // Settings -> Designer -> 3D docks the same panel beside a FORM, not beside a building plan,
 // and a form needs less room to stay usable: the calibration grids are
 // repeat(auto-fit, minmax(150px,1fr)) and still give two columns at ~390px, whereas the plan
@@ -8417,8 +8431,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // anonymous public designer for any tenant holding a view_3d grant. `embedded` is true
   // only when the portal's Designer tab is hosting us. Shipping it to the public page
   // later is exactly this one term.
-  const dockOn = dockCapable && embedded;
+  //
+  // ...and this is that one term. `open3d=1` is the embed asking for it explicitly, which is
+  // the safe half of "the public page": it never appears for a tenant who did not put the
+  // parameter in their own iframe, so a plain ?client= link is byte-for-byte unchanged.
+  // A plain const, not a hook — the search string cannot change without a reload, and this
+  // file has a documented React #310 hazard around hooks added beside handlers.
+  const open3dParam = ssOpen3DRequested();
+  const dockOn = dockCapable && (embedded || open3dParam);
   useEffect(() => { if (!dockOn && dock3D) setDock3D(false); }, [dockOn, dock3D]);
+  // Open it on arrival when the embed asked for it. ONCE — a ref, not the effect's deps,
+  // because the customer closing the panel with ✕ must stay closed; re-running on the next
+  // dockCapable flip (a window resize) would fight them for it.
+  //
+  // The DOCK, never the modal, and that distinction is the whole reason this is safe: the
+  // panel registers no interaction handlers, so it cannot place or drag anything. Opening
+  // the editing modal here would hand an anonymous shopper the full editor without ever
+  // passing the contact gate, which is the one thing that gate exists to prevent.
+  const autoDocked3DRef = useRef(false);
+  useEffect(() => {
+    if (autoDocked3DRef.current || !open3dParam || !view3dOn || !dockOn) return;
+    autoDocked3DRef.current = true;
+    setDock3D(true);
+  }, [open3dParam, view3dOn, dockOn]);
   // Losing the grant mid-session must close the dock, not leave it rendering. The portal
   // refetches entitlements on every session-token refresh, so view3dOn genuinely can flip
   // true -> false with the designer still mounted — an operator revoking view_3d, or a
@@ -13599,7 +13634,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
-              onEdit={() => { setDock3D(false); setShow3D(true); }}
+              /* ⚠️ THE GATE APPLIES HERE TOO. This button is the one route from the view-only
+                 dock into the full editor, and it went straight there — which was survivable
+                 while the dock was portal-only (a signed-in builder is past the gate by
+                 definition) and is not, now that ?open3d=1 can dock it on the anonymous public
+                 page. Same three lines the toolbar's 3D button runs, for the same reason: the
+                 modal PLACES and DRAGS through the real pipeline. */
+              onEdit={() => {
+                if (gateRequired) { setGateOpen(true); return; }
+                setDock3D(false); setShow3D(true);
+              }}
               onClose={() => setDock3D(false)}
             />
           </div>

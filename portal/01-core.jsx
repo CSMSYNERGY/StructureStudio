@@ -823,6 +823,57 @@ function ShareLinkCard({ clientId }) {
         <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy"}</button>
         <a href={link} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Open ↗</a>
       </div>
+      <EmbedCodeBlock clientId={clientId} />
+    </div>
+  );
+}
+
+// ─── The iframe embed, under the link it is built from ───
+//
+// Carolyn, 2026-09-03, about a builder whose website is built on ShedPro and who wants our
+// configurator inside it: "so we need to do that." Ahsan: "in the settings, we'll add another
+// section under this, URL one ... so they can copy an iframe code, which will be totally
+// different from this one. In the iframe code, we can prioritize 3D." Carolyn: "prioritize,
+// you mean prioritize that the 3D stays open ... and I think that's good."
+//
+// So it lives INSIDE the share-link card rather than in a card of its own — it is the same
+// link wearing a different hat, and splitting them would invite a builder to paste the plain
+// URL into an iframe and wonder why the 3D never opened.
+//
+// The only difference from the plain link is `&open3d=1`, which ssOpen3DRequested reads in the
+// designer: it docks the VIEW-ONLY 3D panel beside the plan on arrival. It cannot open the
+// editor — that still goes through the contact gate — so the embed shows the building without
+// handing an anonymous visitor the full designer.
+function EmbedCodeBlock({ clientId }) {
+  const [copied, setCopied] = useState(false);
+  const src = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&open3d=1`;
+  // width:100% so it fits whatever column the builder's site gives it; a fixed height because
+  // an iframe cannot size itself to its content cross-origin, and 900 is tall enough for the
+  // plan and the docked 3D side by side on a desktop layout.
+  const snippet = `<iframe src="${src}" width="100%" height="900" style="border:0;max-width:100%" title="Design your building" loading="lazy" allowfullscreen></iframe>`;
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(snippet).then(done, () => window.prompt("Copy the embed code:", snippet));
+    else window.prompt("Copy the embed code:", snippet);
+  };
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Put it on your website</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>
+        Paste this where you want the designer to appear. It opens with the 3D view already showing beside the plan.
+        Designs still land in your list, exactly like the link above.
+      </p>
+      <textarea
+        readOnly
+        rows={3}
+        onFocus={(e) => e.target.select()}
+        value={snippet}
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", fontFamily: "monospace", fontSize: 11.5, lineHeight: 1.5, resize: "vertical" }}
+      />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy embed code"}</button>
+        <a href={src} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Preview ↗</a>
+      </div>
     </div>
   );
 }
