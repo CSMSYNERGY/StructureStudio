@@ -4183,12 +4183,51 @@ function buildShed3DModel(THREE, p) {
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
   // north→south on E/W walls — exactly how the 2D snap logic measures items.
+  // ── RECESSED PORCH (Carolyn 2026-09-03; shape settled 2026-09-05) ────────────────────────────────────────
+  // Carolyn, looking at a competitor: "even they build it like this. They do it like this ...
+  // Do you see how this roof just comes down like that?" ([08:00])
+  //
+  // THE WALL SETS BACK AND THE ROOF DOES NOT MOVE. That one sentence is the whole design, and
+  // it is what makes this a recessed porch rather than the lean-to already below: the
+  // footprint, the roof extrusion and the gable cap all stay exactly where they were. So a
+  // 10x16 with a 4 ft porch is still drawn, quoted and priced as a 10x16 — which is how the
+  // trade sells it — and the roof needs no change at all. Its cap IS the sided gable that
+  // ends up standing over the porch, carried on the header this adds below.
+  //
+  // A PORCH TAKES A GABLE END, never an eave side, because the header has to run under that
+  // cap. Which walls those are is not fixed: d3RoofAxes puts the ridge down the long axis and
+  // swaps the two for a shed roof, so the gable ends are north/south on a portrait footprint
+  // and east/west on a landscape one. Reading it from the same function the ROOF reads is what
+  // stops a porch opening in the side of the building.
+  //
+  // Depth is clamped to leave four feet of building behind it. Deeper than that is a carport,
+  // and a wall clamped to zero length is a crash rather than a shape.
+  const porchAxes = d3RoofAxes(roofCfg, bldgW, bldgH);
+  const porchRun = porchAxes.uAxisIsX ? bldgH : bldgW;        // the run a porch eats into
+  const porchDepth = Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
+  const porchOn = porchDepth > 0.5;
+  const porchAtNeg = (roofCfg.porchEnd || "front") !== "back";
+  const porchWall = !porchOn ? null
+    : porchAxes.uAxisIsX ? (porchAtNeg ? "north" : "south") : (porchAtNeg ? "west" : "east");
+  // How far each wall's ORIGIN travels, and how much length it loses. Every one of these is
+  // zero without a porch, so a style that has never had one builds byte-for-byte what it did.
+  const pN = porchWall === "north" ? porchDepth : 0;
+  const pS = porchWall === "south" ? porchDepth : 0;
+  const pW = porchWall === "west" ? porchDepth : 0;
+  const pE = porchWall === "east" ? porchDepth : 0;
+  // `a0Ft` is the set-back at the wall's OWN along=0 end. buildOneWall subtracts it before
+  // placing an opening, because an item's `along` is measured in the PLAN's frame, which still
+  // spans the full footprint — and must, since the plan is the thing being quoted.
   const WALLS = {
-    north: { len: bldgW, O: [-bldgW / 2, -bldgH / 2], U: [1, 0], N: [0, -1] },
-    south: { len: bldgW, O: [-bldgW / 2, bldgH / 2],  U: [1, 0], N: [0, 1] },
-    west:  { len: bldgH, O: [-bldgW / 2, -bldgH / 2], U: [0, 1], N: [-1, 0] },
-    east:  { len: bldgH, O: [bldgW / 2, -bldgH / 2],  U: [0, 1], N: [1, 0] },
+    north: { len: bldgW - pW - pE, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [1, 0], N: [0, -1], a0Ft: pW },
+    south: { len: bldgW - pW - pE, O: [-bldgW / 2 + pW, bldgH / 2 - pS],  U: [1, 0], N: [0, 1],  a0Ft: pW },
+    west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
+    east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
+  // before it can decide which walls move, and d3RoofAxes reads this. The roof section below
+  // uses the same binding rather than re-deriving one.
+  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const wallsGroup = new THREE.Group();     // ghosted in "look inside" mode
   const openingsGroup = new THREE.Group();  // frames + door/window fills (stay solid)
 
@@ -4369,7 +4408,14 @@ function buildShed3DModel(THREE, p) {
       .map((it) => {
         const c = itemTypes[it.type];
         const w = it.widthFt || c.width;
-        const along = wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale;
+        // Measured in the PLAN's frame, which always spans the full footprint, then shifted
+        // into this wall's own frame. Without the subtraction every opening on a wall the
+        // porch shortened would be drawn a porch-depth too far along it.
+        const along = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
+        // ⚠️ The clamp is what catches an item standing where the porch now is: it slides to
+        // the end of the shortened wall rather than floating in mid-air. That is a visible
+        // move the plan does not show, and it is the known cost of a 3D-only porch — the
+        // same limit the dormer and the lean-to carry.
         const a = Math.max(w / 2, Math.min(along, wf.len - w / 2));
         const span = openingSpan(it);
         return { it, a, a0: a - w / 2, a1: a + w / 2, y0: span[0], y1: span[1] };
@@ -4695,7 +4741,6 @@ function buildShed3DModel(THREE, p) {
   // the width -- always, whatever the customer does with the doors. See
   // d3RoofAxes; the door decides the FRONT LABEL and nothing structural.
   const roofGroup = new THREE.Group();
-  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const OV = roofCfg.overhang != null ? roofCfg.overhang : D3.OVERHANG;
   // Eave finish. An AFFIRMATIVE test on purpose: absent, null, "fascia" and any junk
   // all fall through to the fascia branch, so no tenant who has not opted in moves.
@@ -4869,6 +4914,40 @@ function buildShed3DModel(THREE, p) {
     const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
     hdr.position.set(u1, y1 - 0.25, L / 2);
     rg.add(hdr);
+  }
+
+  // ── RECESSED PORCH: what stands in the opening ────────────────────────────────────────
+  // The walls already set back (see the WALLS table). All that is left is what holds the roof
+  // up over the gap: a post at each outer corner and a header between them. No deck is drawn
+  // because there already is one — the floor slab spans the full footprint and always did,
+  // which is exactly right for a porch INSIDE the footprint.
+  //
+  // Built in rg-LOCAL space, like the lean-to above, and that is what makes it one branch
+  // instead of four: whichever way the building is turned, rg's local z runs 0..L along the
+  // ridge and local x spans the gable — so the open end is always local z = 0 or z = L, and
+  // the opening is always the full local x. The world-space mapping (a z-shift for a portrait
+  // footprint, a quarter turn for a landscape one) is rg's transform's job, already written.
+  //
+  // Two posts, never three. The lean-to adds a middle one past 12 ft because it is a carport
+  // and nobody walks through the centre of it; a porch has a door behind it, and a post in the
+  // doorway is a defect rather than support.
+  if (porchOn) {
+    // local z = 0 is world -Z for a portrait footprint but world +X for a landscape one,
+    // because rg turns a quarter circle in the second case. So the end is resolved through the
+    // SAME uAxisIsX the wall set-back used, not assumed.
+    const porchAtLocalZero = uAxisIsX ? porchAtNeg : !porchAtNeg;
+    const pzFace = porchAtLocalZero ? 0 : L;
+    const pzIn = pzFace + (porchAtLocalZero ? 1 : -1) * 0.21;   // a post's half-thickness inside the edge
+    const POST = 0.32, INSET = 0.4;
+    const half = Math.max(0.5, S / 2 - INSET - POST / 2);
+    for (const s of [-1, 1]) {
+      const post = box(trimMat, POST, H, POST);
+      post.position.set(s * half, H / 2, pzIn);
+      rg.add(post);
+    }
+    const phdr = box(trimMat, S, 0.5, 0.4);
+    phdr.position.set(0, H - 0.25, pzIn);
+    rg.add(phdr);
   }
 
   // ── DORMER (2026-08-25) ──────────────────────────────────────────────────────────
@@ -12493,6 +12572,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {adminCal.spec.roof.type !== "shed" && (adminCal.spec.roof.dormerWidthFt || 0) > 0.5 && (
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Dormer position (&minus;1 &hellip; 1)
                     <input type="number" step="0.05" {...calNumProps("dormerOffsetU", adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45, (n) => calSetRoof({ dormerOffsetU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  </label>
+                )}
+                {/* The porch depth is measured INTO the building, which is the number a builder
+                    already has in their head ("a 10x16 with a 4 ft porch"), not an amount the
+                    building grows by. It reads as a size, so it sits with the other sizes. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch depth (ft, 0 = none)
+                  <input type="number" step="0.5" min="0" {...calNumProps("porchDepthFt", adminCal.spec.roof.porchDepthFt != null ? adminCal.spec.roof.porchDepthFt : 0, (n) => calSetRoof({ porchDepthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                  {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
+                    <div style={{ fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" }}>
+                      Comes out of the building, not off it {String.fromCharCode(0x2014)} the roof and the footprint do not move.
+                    </div>
+                  )}
+                </label>
+                {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
+                    <select value={adminCal.spec.roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                      <option value="front">Front gable end</option>
+                      <option value="back">Back gable end</option>
+                    </select>
                   </label>
                 )}
               </div>
