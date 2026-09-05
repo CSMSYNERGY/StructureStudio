@@ -4180,6 +4180,10 @@ function buildShed3DModel(THREE, p) {
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
   // north→south on E/W walls — exactly how the 2D snap logic measures items.
+  // Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
+  // before it can decide which walls move, and d3RoofAxes reads this. The roof section below
+  // uses the same binding rather than re-deriving one.
+  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   // ── RECESSED PORCH (Carolyn 2026-09-03; shape settled 2026-09-05) ────────────────────────────────────────
   // Carolyn, looking at a competitor: "even they build it like this. They do it like this ...
   // Do you see how this roof just comes down like that?" ([08:00])
@@ -4221,10 +4225,6 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
-  // Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
-  // before it can decide which walls move, and d3RoofAxes reads this. The roof section below
-  // uses the same binding rather than re-deriving one.
-  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
   const wallsGroup = new THREE.Group();     // ghosted in "look inside" mode
   const openingsGroup = new THREE.Group();  // frames + door/window fills (stay solid)
 

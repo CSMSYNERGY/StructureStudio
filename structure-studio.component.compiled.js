@@ -1,4 +1,4 @@
-// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 7c433756c65d)
+// GENERATED FILE — do not edit. Compiled from structure-studio.component.js (sha256 73193915b029)
 // by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile
 ;(function () {
 if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag
@@ -1382,7 +1382,10 @@ var SKID_W=3.5/12;var deck=box(mat(D3_COLORS.floor),bldgW+0.2,DECK_T,bldgH+0.2);
 var alongX=bldgW>=bldgH;var across=alongX?bldgH:bldgW;var nSkid=Math.max(2,Math.round(across/4));var inset=Math.min(1.0,across*0.14);for(var i=0;i<nSkid;i++){var t=nSkid===1?0.5:i/(nSkid-1);var at=-across/2+inset+t*(across-2*inset);var sk=alongX?box(mat(D3_COLORS.bench),bldgW+0.2,SKID_T,SKID_W):box(mat(D3_COLORS.bench),SKID_W,SKID_T,bldgH+0.2);sk.position.set(alongX?0:at,-DECK_T-SKID_T/2,alongX?at:0);root.add(sk);}}// Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
 // wall, N = exterior normal. `along` runs west→east on N/S walls and
 // north→south on E/W walls — exactly how the 2D snap logic measures items.
-// ── RECESSED PORCH (Carolyn 2026-09-03; shape settled 2026-09-05) ────────────────────────────────────────
+// Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
+// before it can decide which walls move, and d3RoofAxes reads this. The roof section below
+// uses the same binding rather than re-deriving one.
+var roofCfg=p.styleSpec&&p.styleSpec.roof||D3_DEFAULT_ROOF;// ── RECESSED PORCH (Carolyn 2026-09-03; shape settled 2026-09-05) ────────────────────────────────────────
 // Carolyn, looking at a competitor: "even they build it like this. They do it like this ...
 // Do you see how this roof just comes down like that?" ([08:00])
 //
@@ -1407,10 +1410,7 @@ var porchDepth=Math.max(0,Math.min(Number(roofCfg.porchDepthFt)||0,porchRun-4));
 var pN=porchWall==="north"?porchDepth:0;var pS=porchWall==="south"?porchDepth:0;var pW=porchWall==="west"?porchDepth:0;var pE=porchWall==="east"?porchDepth:0;// `a0Ft` is the set-back at the wall's OWN along=0 end. buildOneWall subtracts it before
 // placing an opening, because an item's `along` is measured in the PLAN's frame, which still
 // spans the full footprint — and must, since the plan is the thing being quoted.
-var WALLS={north:{len:bldgW-pW-pE,O:[-bldgW/2+pW,-bldgH/2+pN],U:[1,0],N:[0,-1],a0Ft:pW},south:{len:bldgW-pW-pE,O:[-bldgW/2+pW,bldgH/2-pS],U:[1,0],N:[0,1],a0Ft:pW},west:{len:bldgH-pN-pS,O:[-bldgW/2+pW,-bldgH/2+pN],U:[0,1],N:[-1,0],a0Ft:pN},east:{len:bldgH-pN-pS,O:[bldgW/2-pE,-bldgH/2+pN],U:[0,1],N:[1,0],a0Ft:pN}};// Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
-// before it can decide which walls move, and d3RoofAxes reads this. The roof section below
-// uses the same binding rather than re-deriving one.
-var roofCfg=p.styleSpec&&p.styleSpec.roof||D3_DEFAULT_ROOF;var wallsGroup=new THREE.Group();// ghosted in "look inside" mode
+var WALLS={north:{len:bldgW-pW-pE,O:[-bldgW/2+pW,-bldgH/2+pN],U:[1,0],N:[0,-1],a0Ft:pW},south:{len:bldgW-pW-pE,O:[-bldgW/2+pW,bldgH/2-pS],U:[1,0],N:[0,1],a0Ft:pW},west:{len:bldgH-pN-pS,O:[-bldgW/2+pW,-bldgH/2+pN],U:[0,1],N:[-1,0],a0Ft:pN},east:{len:bldgH-pN-pS,O:[bldgW/2-pE,-bldgH/2+pN],U:[0,1],N:[1,0],a0Ft:pN}};var wallsGroup=new THREE.Group();// ghosted in "look inside" mode
 var openingsGroup=new THREE.Group();// frames + door/window fills (stay solid)
 // Place a box on wall `wf` spanning [a0,a1] along it and [y0,y1] vertically,
 // `out` ft toward the exterior, `depth` ft thick (defaults to wall thickness).
