@@ -24,8 +24,8 @@
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
 
-<script defer src="/structure-studio.component.compiled.js?v=29e30aa2"></script>
-<script defer src="/index.mount.compiled.js?v=3a00b23a"></script><script data-ss-app="designer">
+<script defer src="/structure-studio.component.compiled.js?v=29e30aa2" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/index.mount.compiled.js?v=3a00b23a" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script><script data-ss-app="designer">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The three /vendor/ tags above are this page's only library dependencies, and the app
    itself arrives as COMPILED, defer'd classic scripts (built offline by scripts/compile.mjs
@@ -72,6 +72,54 @@
   try {
     var app = (document.currentScript && document.currentScript.getAttribute("data-ss-app")) || "page";
 
+    // A THROW AND A FAILED DOWNLOAD PRODUCE THE SAME SILENCE at DOMContentLoaded, and telling
+    // them apart is the whole diagnosis. This guard runs during parsing, before any defer'd
+    // app script executes, so the listener is armed in time to catch what they raise -
+    // including the SyntaxError a truncated script throws partway through.
+    var ssFirstError = null;
+    try {
+      window.addEventListener("error", function (ev) {
+        if (ssFirstError || !ev) return;
+        ssFirstError = {
+          message: String(ev.message || "").slice(0, 300),
+          file: String(ev.filename || "").slice(0, 200),
+          line: ev.lineno || 0
+        };
+      }, true);
+    } catch (_eTrap) { /* a guard that throws is worse than no guard */ }
+
+    // WHAT WE KNOW, as opposed to what we are guessing. Resource Timing records one entry per
+    // fetched script with the bytes that arrived and whether they came off the network or out
+    // of the browser cache. Reported alongside the filenames, it is the difference between
+    // "these two files did not load" (which on 2026-09-05 was false, and sent a whole
+    // investigation at a server that was serving both of them correctly on every retry) and
+    // "both arrived, in full, from cache - so the app threw".
+    function ssScriptFacts() {
+      var out = [];
+      try {
+        var tags = document.querySelectorAll("script[src]");
+        for (var i = 0; i < tags.length; i++) {
+          var raw = tags[i].getAttribute("src") || "";
+          if (raw.indexOf(".compiled.js") === -1 && raw.indexOf("/vendor/") === -1) continue;
+          var name = raw.split("?")[0].replace(/^\//, "");
+          var e = null;
+          var all = performance.getEntriesByName(new URL(raw, location.href).href, "resource");
+          if (all && all.length) e = all[all.length - 1];
+          if (!e) out.push(name + ": never fetched");
+          else if (!e.responseEnd) out.push(name + ": fetch never finished");
+          // transferSize 0 with a body means the HTTP cache answered it. That is the reading
+          // that matters most here: a cached copy is the one thing a plain reload cannot fix.
+          // decodedBodySize, not encodedBodySize: the decoded length is the one a reader can
+          // hold against the real file (880085 for the component today), so a copy that
+          // stopped short announces itself. encoded is the compressed size and matches
+          // nothing anyone can look up.
+          else out.push(name + ": " + (e.decodedBodySize || 0) + "B "
+            + (e.transferSize === 0 ? "from browser cache" : "over the network"));
+        }
+      } catch (_eRT) { /* no Resource Timing - the filenames still go out */ }
+      return out;
+    }
+
     // PUBLISHED so a page's own app script can reuse this exact failure screen for the one
     // dependency this guard cannot check itself: the shared component module. index.mount
     // checks window.StructureStudio before rendering (a compiled module that 404s leaves it
@@ -80,7 +128,7 @@
     // MESSAGE lives here because a second hand-written copy per page is exactly the drift
     // preflight exists to catch. `missing` names the file(s); `code` separates the causes
     // in app_errors.
-    function ssBootFail(missing, code) {
+    function ssBootFail(missing, code, detail) {
       // Stop the app scripts running on top of the failure screen. Every compiled artifact
       // checks this flag as its first statement (scripts/compile.mjs adds the check); the
       // guard runs during parsing, before any defer'd script executes, so the flag is
@@ -102,14 +150,63 @@
         '<div style="max-width:560px;margin:12vh auto;padding:0 24px;color:#1E293B">'
         + '<h1 style="font-size:20px;line-height:1.35;margin:0 0 10px">Couldn\'t load the ' + app + '</h1>'
         + '<p style="margin:0 0 16px;font-size:16px;line-height:1.5;color:#475569">Check your connection and reload the page.</p>'
-        + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">A file this page needs did not load ('
-        + missing.join(", ")
-        + '). This is usually a temporary network problem, so reloading should fix it.</p>'
+        + '<p style="margin:0 0 22px;font-size:14px;line-height:1.5;color:#64748B">'
+        + (detail && detail.unproven
+            ? 'The app did not start. Reloading past the cache did not help, so this may be your '
+              + 'network or a browser extension blocking a large file.'
+            : 'A file this page needs did not load (' + missing.join(", ")
+              + '). This is usually a temporary network problem, so reloading should fix it.')
+        + '</p>'
         + '<button type="button" id="ss-boot-reload" style="font:inherit;font-size:15px;padding:9px 18px;'
         + 'border:0;border-radius:8px;background:#2563EB;color:#FFF;cursor:pointer">Reload</button>'
         + '</div>';
       var btn = document.getElementById("ss-boot-reload");
-      if (btn) btn.addEventListener("click", function () { location.reload(); });
+      if (btn) btn.addEventListener("click", function () {
+        // A PLAIN location.reload() IS NOT ENOUGH, and that is why this screen came back
+        // once a minute for three minutes on 2026-09-05 while the server answered every one
+        // of those requests correctly. Chrome revalidates the DOCUMENT on a normal reload and
+        // takes subresources from cache; the compiled bundles are served
+        // `immutable, max-age=31536000` (see _headers, deliberately, and that is still the
+        // right call for the 99.9%), so they are not revalidated at all. If the broken copy is
+        // the one in the browser's own cache, reloading replays the same broken bytes - for up
+        // to a year - and the only escape is a hard reload the user has no reason to know
+        // about. So re-fetch with cache:"reload", which bypasses the HTTP cache AND overwrites
+        // the entry, and only then reload, onto the repaired copies.
+        //
+        // The PWA caches and the service-worker registration go too. sw.js does not cache
+        // scripts today, but someone staring at this screen wants OUT, and a stale worker
+        // outliving several deploys is the other way this page gets stuck.
+        try {
+          btn.disabled = true;
+          btn.textContent = "Reloading" + "\u2026";
+          var jobs = [];
+          var tags = document.querySelectorAll("script[src]");
+          for (var i = 0; i < tags.length; i++) {
+            var raw = tags[i].getAttribute("src") || "";
+            if (raw.indexOf(".compiled.js") === -1 && raw.indexOf("/vendor/") === -1) continue;
+            jobs.push(fetch(raw, { cache: "reload", credentials: "same-origin" })
+              .catch(function () { /* the reload below is the real recovery */ }));
+          }
+          if (window.caches && caches.keys) {
+            jobs.push(caches.keys().then(function (ks) {
+              return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+            }).catch(function () {}));
+          }
+          if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+            jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+              return Promise.all(rs.map(function (r) { return r.unregister(); }));
+            }).catch(function () {}));
+          }
+          // Never strand anyone behind a hung fetch: reload regardless after four seconds,
+          // and never twice.
+          var done = false;
+          var go = function () { if (!done) { done = true; location.reload(); } };
+          setTimeout(go, 4000);
+          Promise.all(jobs).then(go, go);
+        } catch (_eReload) {
+          location.reload();
+        }
+      });
 
       // Report it. A distinct source AND code so these are trivially separable from real
       // product bugs: source "boot", plus the caller's code. The page's own ssLogError cannot
@@ -136,7 +233,9 @@
           p_code: code,
           p_client_id: new URLSearchParams(location.search).get("client") || null,
           p_url: location.href.slice(0, 600),
-          p_context: { app: app, missing: missing }
+          p_context: { app: app, missing: missing, scripts: (detail && detail.scripts) || null,
+            error: (detail && detail.error) || null, failedToLoad: (detail && detail.failedToLoad) || null,
+            unproven: !!(detail && detail.unproven), retried: !!(detail && detail.retried) }
         })
       }).catch(function () {});
     }
@@ -157,14 +256,66 @@
     // DOMContentLoaded in document order, so a quiet page here means this page's own app
     // artifact never ran at all - the failure class the inline-babel world swallowed.
     document.addEventListener("DOMContentLoaded", function () {
-      if (window.__ssAppBooted || window.__ssBootBlocked) return;
+      // A boot that worked clears the latch, so the NEXT failure in this tab still gets its
+      // one free retry rather than going straight to the screen.
+      if (window.__ssAppBooted || window.__ssBootBlocked) {
+        try { sessionStorage.removeItem("ss_boot_retry"); } catch (_eClear) {}
+        return;
+      }
+
+      // HEAL BEFORE COMPLAINING. On 2026-09-05 this screen appeared three times, a minute
+      // apart, while the server answered every one of those requests correctly - and the two
+      // bundles are served `immutable, max-age=31536000` (see _headers), so a plain reload
+      // never re-fetches them. Whatever broke the copy the browser holds - a truncated
+      // transfer, an extension, the DPI box on that network - the user could not get out of it
+      // by reloading, and had no reason to know that a HARD reload was the escape.
+      //
+      // So do it for them, once: fetch each bundle with cache:"reload", which bypasses the
+      // HTTP cache AND overwrites the entry, then reload onto the repaired copies. The latch
+      // is sessionStorage, so a genuinely dead network cannot loop - the second failure in the
+      // same tab shows the screen and reports.
+      var retried = true;
+      try { retried = sessionStorage.getItem("ss_boot_retry") === "1"; } catch (_eGet) {}
+      if (!retried) {
+        try { sessionStorage.setItem("ss_boot_retry", "1"); } catch (_eSet) {}
+        try {
+          var jobs = [];
+          var rtags = document.querySelectorAll("script[src]");
+          for (var r = 0; r < rtags.length; r++) {
+            var rraw = rtags[r].getAttribute("src") || "";
+            if (rraw.indexOf(".compiled.js") === -1 && rraw.indexOf("/vendor/") === -1) continue;
+            jobs.push(fetch(rraw, { cache: "reload", credentials: "same-origin" })
+              .then(function (resp) { return resp.arrayBuffer(); })
+              .catch(function () { /* the reload is the recovery, not this fetch */ }));
+          }
+          var done = false;
+          var go = function () { if (!done) { done = true; location.reload(); } };
+          setTimeout(go, 6000);          // never strand anyone behind a hung fetch
+          Promise.all(jobs).then(go, go);
+          return;                        // do NOT paint the screen on the first attempt
+        } catch (_eRetry) { /* fall through and report */ }
+      }
+
       var srcs = [];
       var tags = document.querySelectorAll("script[defer]");
       for (var i = 0; i < tags.length; i++) {
         var s = tags[i].getAttribute("src") || "";
         if (s.indexOf(".compiled.js") !== -1) srcs.push(s.split("?")[0].replace(/^\//, ""));
       }
-      ssBootFail(srcs.length ? srcs : ["this page's compiled app script"], "boot_app_missing");
+      // PREFER THE MEASUREMENT. __ssScriptFail is populated by the onerror attribute on each
+      // compiled tag, so anything in it genuinely failed to load. Only when it is empty do we
+      // fall back to listing every bundle - and then we say so rather than asserting a cause.
+      var failed = [];
+      try {
+        var ff = window.__ssScriptFail || [];
+        for (var k = 0; k < ff.length; k++) {
+          failed.push(String(ff[k]).split("?")[0].replace(/^https?:\/\/[^/]+\//, ""));
+        }
+      } catch (_eFail) {}
+      ssBootFail(failed.length ? failed : (srcs.length ? srcs : ["this page's compiled app script"]),
+        "boot_app_missing",
+        { scripts: ssScriptFacts(), error: ssFirstError, failedToLoad: failed,
+          unproven: failed.length === 0, retried: true });
     });
   } catch (_e) {
     /* A guard that throws is worse than no guard. */
