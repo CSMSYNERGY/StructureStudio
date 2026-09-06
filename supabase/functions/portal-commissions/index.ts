@@ -436,6 +436,25 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // ── set a person's commission rate (owner or full_access) ──
       case "set_rate": {
         if (!canSeeRates) return json({ error: "You don't have access to commission rates." }, 403);
+        // ⚠️ NOBODY SETS THEIR OWN RATE EXCEPT THE OWNER. `canSeeRates` is
+        // `isOwner || full_access`, and full_access is meant to make somebody a commission
+        // ADMINISTRATOR for the team — a bookkeeper. Without this check it also made them the
+        // author of their own pay: one call with their own userId and percent 100 doubled or
+        // trebled every future line they earn, and the ledger would show it as an ordinary
+        // rate change. It is the one control every payroll system has, for the same reason.
+        //
+        // The OWNER is exempt on purpose: an owner-operator who sells is entitled to a rate,
+        // and there is nobody above them to ask.
+        //
+        // Deliberately scoped to set_rate. `adjust_amount`, `split_entry` and `assign_earner`
+        // reach the caller's own money too and are the same class of question, but a rate is a
+        // STANDING multiplier on everything they will ever earn, whereas those three are
+        // one-off corrections a bookkeeper plausibly needs on their own line. Whether full
+        // access should be barred from those as well is a decision for the owner, not a
+        // change to slip in beside this one.
+        if (!isOwner && String(p.userId || "") === String(user.id)) {
+          return json({ error: "You can't set your own commission rate — ask an owner to change it." }, 403);
+        }
         await requireMember(p.userId);
         let percent: number | null = null;
         if (p.percent !== null && p.percent !== "" && p.percent !== undefined) {
