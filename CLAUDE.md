@@ -234,10 +234,23 @@ resolution is a **third area flag, `ownerGranted`** (`_shared/access.ts`), which
 title drops owner-granted keys**, which is the safe direction for a caller that doesn't know
 whose map it is holding. `access.ts` is bundled per function, so a change here means
 redeploying **every** consumer — leaving one behind means two copies of the permission model
-disagreeing, which is unobservable until it matters. ⚠️ **Do not trust this list; derive it,**
-because it has been stale twice: `grep -rl "_shared/access.ts\|_shared/resolveTenant.ts" supabase/functions/*/index.ts`
-(resolveTenant imports access, so its importers count too). As of 2026-09-03 that is **12**:
-`portal-billing`, `portal-commissions`, `portal-feedback`, `portal-payments`,
+disagreeing, which is unobservable until it matters. ⚠️ **Do not trust this list; derive it** — and ⛔ **the `grep -rl` recipe this paragraph used to
+prescribe OVER-COUNTS, which is how the number here read 12 when it was 10.** `grep -rl` matches
+the module path anywhere in the file, *including inside a comment*, and `portal-feedback:337` and
+`submit-estimate:247` both merely MENTION these modules. Neither imports them. Deploying to that
+list wastes two deploys and, worse, invites the opposite error — someone reconciling "12" against
+a real importer list concludes they have missed two functions and goes looking for a bug that
+does not exist.
+
+Derive it with something that actually parses an import, multiline-aware (the
+`portal-commissions` import spans a dozen lines, so a line-anchored regex misses it and lands on
+9):
+
+```
+for f in supabase/functions/*/index.ts; do perl -0777 -ne 'exit(/import\s[^;]*?from\s+"\.\.\/_shared\/(access|resolveTenant)\.ts"/s ? 0 : 1)' "$f" && echo "$f"; done
+```
+
+As of 2026-09-05 that is **10**: `portal-billing`, `portal-commissions`, `portal-payments`,
 `portal-projects`, `portal-schedule`, `portal-settings`, `portal-setup`, `portal-sms`,
 `qbo-oauth-connect`, `submit-estimate`, `sync-design-status`. **`portal-projects` joined on
 2026-09-03** — it used to import only `logError.ts`, and now carries the permission model
@@ -258,10 +271,26 @@ those bundles the permission model without matching the grep above — both curr
 by **183**). `change_orders` was added here on 2026-09-01 and never reached the SQL; the
 sales_rep preset's `orders` went view→edit the same week and the mirror kept saying view. Both
 were inert — 154's policies key on designs/contacts/inventory only, and an unknown area
-returns `'none'` rather than raising — which is exactly why they lasted. **`scripts/preflight.mjs`
-now cross-checks the two area lists on every push**, in both directions, against whichever
-migration most recently defines the function. If it fires, add the area to the SQL in the same
-commit rather than bypassing it.
+returns `'none'` rather than raising — which is exactly why they lasted.
+
+⛔ **This paragraph, and migration 183's own header, claimed `scripts/preflight.mjs` cross-checked
+the two lists. THAT WAS FALSE FROM THE DAY IT WAS WRITTEN UNTIL 2026-09-05** — the script contained
+no reference to `access.ts`, `AREAS`, `PRESETS` or `area_level_for` at all. A documented guard that
+does not exist is worse than an admitted gap: it is why both drifts above sat unnoticed, because
+anyone who wondered read this sentence and stopped looking.
+
+✅ **It is true now.** `checkAreaMirror()` compares the area KEY SET and each area's LEVEL
+VOCABULARY, in both directions, against whichever migration most recently *defines* the function
+(never the highest NNN prefix — 183 is used twice on beta and the ledger keys on the timestamp).
+`--self-test` proves all four directions: clean on the real files, fires on an area missing from
+SQL, fires on a level mismatch, and refuses to run blind if `AREAS` is renamed. If it fires, add
+the area to the SQL in the same commit rather than bypassing it.
+
+⚠️ **What it still does NOT cover: `PRESETS` ↔ `k_presets`** — and the sales_rep `orders` drift
+above is a preset drift, so that one would still get through. `PRESETS.owner` is computed
+(`Object.fromEntries(AREA_KEYS.map(...))`), so it cannot be read statically the way the areas can,
+and a regex that skipped the computed row would report a clean diff while covering three titles out
+of five. Closing it needs the TypeScript evaluated, not scanned.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec

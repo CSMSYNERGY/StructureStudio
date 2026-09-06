@@ -92,11 +92,24 @@ export const CRM_FEED_TYPES = {
   // edits, with both values, which is the "changed ownership was logged" half of what she
   // described.
   //
-  // ⚠️ STILL NOT LOGGED: owner and assignee changes, and permission changes. Those columns
-  // exist on crm_contacts (owner_user_id, labels) but nothing writes them yet. When an
-  // owner picker lands, it owes this list its event — the same debt the editor just paid.
+  // ✅ THE OWNER DEBT IS PAID (2026-09-06). This slot used to read: "⚠️ STILL NOT LOGGED:
+  // owner and assignee changes, and permission changes. Those columns exist on crm_contacts
+  // (owner_user_id, labels) but nothing writes them yet. When an owner picker lands, it owes
+  // this list its event — the same debt the editor just paid." It was written when
+  // owner_user_id had zero writers, which is what 130 shipped and called "Pipedrive header
+  // furniture".
+  //
+  // It has a writer now — Carolyn, 2026-09-04, 1:09:30: "we do not ever assign deals. We only
+  // assign contacts and followers." Migration 188 makes owner_user_id editable and writes a
+  // crm_field_changes row for it under field = 'owner'; 189 writes the same row when a quote
+  // assigns the rep automatically. Both surface here as `owner_change`, resolved to people's
+  // names rather than uuids — see the field-change loop below.
+  //
+  // ⚠️ STILL NOT LOGGED, and the note stays because the remainder is real: `labels`, and
+  // permission changes. Neither has a writer.
   changelog: ["design_created", "design_version", "accepted", "quote_opened",
-    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change"],
+    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change",
+    "owner_change"],
 } as const;
 
 const iso = (v: unknown): string => (typeof v === "string" ? v : new Date(0).toISOString());
@@ -405,12 +418,70 @@ export async function buildCrmFeed(
   // Both values are shown. A changelog that says only "phone changed" answers none of the
   // questions someone opens a changelog to ask; the old value is the whole point when the
   // edit was a correction, and it is the only record of what the number used to be.
+  //
+  // Two of the field names are not fields in the sense the generic line means, and each gets
+  // its own shape below. Everything else renders exactly as it always has.
+  //
+  // OWNER: stored as two uuids, because that is what the column holds and a changelog that
+  // stores a resolved name is a changelog that lies the day somebody is renamed. Resolved to
+  // people HERE — one batched read of client_users, only when an owner row exists to resolve,
+  // because "0f3c… → 8a12…" is not an answer. A uuid with no client_users row is somebody who
+  // has since left the tenant; a row with no full_name is one of the users who predate
+  // migration 060. Those are different facts and the line says which.
+  const ownerRows = (fieldChanges as any[]).filter((f) => f.field === "owner");
+  const knownUsers = new Set<string>();
+  const nameByUser = new Map<string, string>();
+  if (ownerRows.length) {
+    const ids = Array.from(new Set(
+      ownerRows.flatMap((f) => [f.old_value, f.new_value])
+        .filter((v: unknown): v is string => typeof v === "string" && !!v),
+    ));
+    if (ids.length) {
+      const users = await q(admin.from("client_users").select("user_id, full_name").in("user_id", ids));
+      for (const u of users as any[]) {
+        knownUsers.add(u.user_id);
+        if (u.full_name) nameByUser.set(u.user_id, u.full_name);
+      }
+    }
+  }
+  const whoIs = (v: string | null): string =>
+    !v ? "Unassigned"
+      : nameByUser.get(v) ?? (knownUsers.has(v) ? "a team member" : "a former team member");
+
   for (const f of fieldChanges as any[]) {
+    if (f.field === "owner") {
+      push({
+        id: `fc:${f.id}`, type: "owner_change", at: iso(f.created_at),
+        title: "Owner changed",
+        body: `${whoIs(f.old_value)} → ${whoIs(f.new_value)}`,
+        actor: f.changed_by, icon: "edit",
+        meta: { field: "owner", from: f.old_value, to: f.new_value },
+      });
+      continue;
+    }
+    // MERGE (migration 192). old_value is the folded-in contact's label, new_value its id.
+    // Kept as a `field_change` rather than given a type of its own, deliberately: the type
+    // vocabulary is duplicated in portal/02-sales.jsx's CRM_CHIPS and the two must stay
+    // identical, so a new name there is a change in two files. This one has nothing a chip
+    // would filter on that `changelog` does not already cover.
+    if (f.field === "merged_from") {
+      push({
+        id: `fc:${f.id}`, type: "field_change", at: iso(f.created_at),
+        title: "Contact merged in",
+        body: `${f.old_value || "Another contact"} was merged into this record`,
+        actor: f.changed_by, icon: "edit",
+        meta: { field: "merged_from", mergedFrom: f.new_value },
+      });
+      continue;
+    }
     const from = f.old_value ? `"${f.old_value}"` : "(empty)";
     const to = f.new_value ? `"${f.new_value}"` : "(empty)";
+    // Underscores become spaces: migration 188's second address logs as `billing_street`,
+    // and "Billing_street changed" reads like a leaked column name.
+    const label = String(f.field).replace(/_/g, " ");
     push({
       id: `fc:${f.id}`, type: "field_change", at: iso(f.created_at),
-      title: `${f.field.charAt(0).toUpperCase()}${f.field.slice(1)} changed`,
+      title: `${label.charAt(0).toUpperCase()}${label.slice(1)} changed`,
       body: `${from} → ${to}`,
       actor: f.changed_by, icon: "edit",
       meta: { field: f.field },

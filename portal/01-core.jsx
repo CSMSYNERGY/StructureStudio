@@ -614,6 +614,13 @@ const SETTINGS_TAB_AREA = {
   options: "settings_options",
   colors: "settings_options",
   branding: "settings_branding",
+  // Company (2026-09-04) is the Business Details card lifted out of Branding into its own
+  // sub-tab. It writes the SAME client_settings.business_* columns through the SAME global
+  // save, which the server gates settings_branding:edit — so it must share that area or the
+  // sub-tab appears for someone the server will refuse. A new area here would also mean a
+  // new row in _shared/access.ts AND its hand-maintained SQL twin `area_level_for()`, for a
+  // split that grants nothing new.
+  company: "settings_branding",
   connection: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",

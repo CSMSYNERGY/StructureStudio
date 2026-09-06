@@ -2627,6 +2627,37 @@ function MyViewSettings({ prefs, onSaved }) {
   );
 }
 
+// ─── Options tab section headers (Carolyn 2026-09-04 @27:32) ───
+// She drew these on the shared screen: "right here is a header that this says exterior.
+// Stuff that goes on the exterior of the building ... that is doors, that is windows, that
+// is vents ... I've kind of done on all of this other, the insulation, the electrical ...
+// so I think we need to separate exterior, interior."
+//
+// ⚠️ THIS IS THE HALF SHE COULD NOT DO HERSELF. She took "the options page" as her task,
+// but the Options tab was a flat stack of seven components with no grouping layer, so the
+// headers are code and only the CONTENT inside each card was ever hers to reorganise.
+//
+// THREE groups, not the two she named, and the third is not padding. Wall Heights is
+// structural and Layout Pricing is the designer's placeable RATES — which span both sides
+// (lofts and workbenches are interior; shutters and flower boxes are exterior). Forcing
+// either into Exterior or Interior would file half its rows under the wrong heading, which
+// is the exact confusion the split exists to remove. INTERIOR_SCOPE.md makes the same
+// distinction: grouping is configuration, but an item type's identity is not.
+//
+// Presentation only. No data moves, no saved design changes, no price changes.
+function OptionsGroup({ title, hint, children }) {
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, margin: "18px 2px 10px" }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: "#334155", whiteSpace: "nowrap" }}>{title}</div>
+        <div style={{ fontSize: 12, color: "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hint}</div>
+        <div style={{ flex: 1, height: 2, background: "#E2E8F0", borderRadius: 1, minWidth: 12 }} />
+      </div>
+      {children}
+    </div>
+  );
+}
+
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
@@ -2635,7 +2666,12 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["options", "Options", "Add-on items and rates"],
     ["colors", "Colors", "Paint, shingle, and metal palettes"],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape"],
-    ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
+    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
+    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
+    // client: "we need to have everything about the company ... the EIN, all that stuff needs
+    // to be in here. Their terms and conditions, company, branding, company information").
+    // Her structure is Branding / Company / Team, and Team already exists below.
+    ["company", "Company", "Your legal business details, address, and the terms printed on estimates"],
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
@@ -2713,12 +2749,31 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
-      {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><WallHeights viewingLabel={viewingLabel} clientId={clientId} /><Electrical viewingLabel={viewingLabel} clientId={clientId} /><Insulation viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<>
+        <OptionsGroup title="Building" hint="Sizes and the rates behind everything a customer drops on a plan">
+          <WallHeights viewingLabel={viewingLabel} clientId={clientId} />
+          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+        <OptionsGroup title="Exterior" hint="Anything that goes on the outside of the building">
+          <DoorsView viewingLabel={viewingLabel} clientId={clientId} />
+          <WindowsView viewingLabel={viewingLabel} clientId={clientId} />
+          <VentsView viewingLabel={viewingLabel} clientId={clientId} />
+          <RampsView viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+        <OptionsGroup title="Interior" hint="Anything that goes on the inside">
+          <Electrical viewingLabel={viewingLabel} clientId={clientId} />
+          <Insulation viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+      </>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
+      {/* Same component, different section. SettingsView's form state covers every field
+          whichever section renders and its save is global, so the two tabs cannot save
+          half a form between them — see the note at the top of SettingsView. */}
+      {sub === "company" && <SettingsView section="company" />}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}

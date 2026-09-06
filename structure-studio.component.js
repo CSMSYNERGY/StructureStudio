@@ -560,6 +560,29 @@ const SIMPLE_RAMP_CFG = { label: "Ramp", color: "#78716C", icon: "⬛", doorSnap
 // (built-in windows have no fixtureItemId; that's how the two are told apart in pricing).
 const FIXTURE_WINDOW_COLOR = "#0EA5E9";
 const WINDOW_PICKER_CFG = { label: "Window", color: FIXTURE_WINDOW_COLOR, icon: "🪟", wallOnly: true, width: 2, height: 0.5, shortLabel: "WIN", isWindowPicker: true, group: "windows" };
+// Catalog VENTS (Carolyn 2026-09-04 @25:19-27:14). Asked whether a vent belonged with the
+// windows she answered the PRICING question instead, and that answer settles the shape: "most
+// of the time it comes with the building ... there are times when they have ... an upcharge for
+// a different vent ... I do think we need to put it in as an item for them to put in and say no
+// charge or it is a charge." So a vent is a catalog fixture, not a per-style appearance flag,
+// and NOT styleD3.gableVent — that one describes how a builder's buildings already look.
+//
+// ⚠️ A PLACED VENT IS A type:"window" ITEM CARRYING `isVent`, not an item type of its own.
+// That is the same trade catalog windows and catalog ramps made two comments up, and here it is
+// not merely tidy, it is the only shape that PRICES: submit-estimate re-prices the `windows[]`
+// schedule server-side from fixture_items by fixtureItemId with NO category filter, naming and
+// grouping each row off the catalog. A vent sent that way is quoted correctly with no
+// edge-function change at all, and a brand-new item type would have been silently FREE on every
+// estimate — free being the one wrong answer for the case she actually named. Everything
+// generic follows for the same reason: collision, drag, reflow, the declined-item credit and
+// the plan bullet all already know what a wall opening is, and a vent simply is one.
+//
+// The flag is STAMPED at placement rather than resolved live from the catalog the way
+// fixtureDoorStyle resolves a door's look, and the difference is identity vs appearance:
+// archiving the vent drops it from get_fixtures, and a live lookup would then redraw a saved
+// design's vent as a glazed window with muntins.
+const FIXTURE_VENT_COLOR = "#65A30D";   // olive — the tint the Vents card already uses in Settings
+const isVentItem = (it) => !!(it && it.isVent);
 // The single "Shelving" palette tool (Carolyn 2026-09-02) — the shelf family and the workbench
 // behind one button instead of three, so Interior stays two buttons wide however many kinds of
 // shelf a builder offers.
@@ -783,6 +806,55 @@ function windowSillStamps(fx) {
     sillMode: (fx && fx.sillMode === "variable") ? "variable" : "fixed",
   };
 }
+// Everything a placed VENT snapshots beyond the position/size fields every wall item carries.
+// ONE helper for both placement paths (the 2D included chip and the 3D viewer) on purpose: the
+// sill bug documented just above failed by missing exactly one of those two sites, and a vent
+// has more fields that must be written OFF than on.
+//
+// The colour is the fixture's own FIXED colour and nothing else. A vent has no colour choice
+// (portal-settings forces the whole colour-mode group off for a non-door, non-window category),
+// so it must take neither a door-palette default nor a window colour — and the window one is
+// not merely redundant, it is expensive: windowColorStamps would write a real window_colors id,
+// and submit-estimate re-resolves that id and ADDS its per-window rate to the line. That is a
+// silent upcharge on an item the builder priced flat. colorId therefore stays null deliberately;
+// the label rides only for the plan bullet, which reads it locally.
+//
+// windowDressStamps(null) writes all eight dressing fields off rather than leaving them
+// undefined, for the reason that helper's own comment gives.
+// WHERE A VENT SITS on the wall, in feet off the floor, and the ONE place that decides it.
+// Two renderers ask: buildShed3DModel's openingSpan, which cuts the hole, and ssItemVBand,
+// which feeds the wall elevation that PRINTS the height. A vent is the only wall opening
+// measured DOWN FROM THE PLATE rather than up from the floor, so neither of them could derive
+// it from a sill, and two copies of that arithmetic is exactly the drift CLAUDE.md's
+// "two rendering paths must stay in sync" is about.
+//
+// Down from the plate because that is what a vent IS — a gable vent sits in the peak, a wall
+// vent goes high to pull the hot air out — and because the catalog row has no sill column to
+// read: portal-settings forces the whole swing/operation/trim/sill group off for a non-door,
+// non-window category, so there is nothing a builder could have told us.
+// 0.15 ft short of the clamp rather than flush with it, so the header strip above stays a REAL
+// panel: the wall-splitting loop skips a segment thinner than 0.01 ft and the casing itself
+// already reaches 0.17 ft above the opening.
+function ssVentSpan(it, wallHeightFt) {
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const maxTop = H - 0.2;
+  const hIn = Number(it && it.heightIn);
+  const vh = Math.min(hIn > 0 ? hIn / 12 : 1, maxTop - 0.6);
+  const top = maxTop - 0.15;
+  return [Math.max(0.5, top - vh), top];
+}
+function ventStamps(fx) {
+  const fc = (fx && fx.fixedColor) || null;
+  return {
+    isVent: true,
+    colorId: null, colorLabel: fc ? (fc.label || null) : null, colorHex: fc ? (fc.hex || null) : null,
+    ...windowDressStamps(null),
+    // Explicit, not absent: openingSpan's vent branch never reads a sill (a vent hangs off the
+    // plate, not off the floor) but the swap and drag paths test sillMode, and "fixed" is what
+    // keeps the vertical drag handle off an item that has nothing to slide.
+    sillFt: null, sillMode: "fixed",
+  };
+}
 function buildFixtureTools(fixtures) {
   const out = {};
   (Array.isArray(fixtures) ? fixtures : []).forEach((fx) => {
@@ -902,9 +974,16 @@ function ssWallDims(item, cfg, bldgW, bldgH, mgX, mgY, scale) {
 // Returns null when nothing on the item says where it sits vertically. Callers must draw no
 // vertical dimension in that case rather than guessing zero — a made-up height off the floor
 // is worse than none, because a builder would frame to it.
-function ssItemVBand(item, cfg, itemTypes) {
+function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
   if (!item || !cfg) return null;
   if (cfg.wallOnly) {
+    // A vent is the one wall opening with no sill to read — see ssVentSpan, which both this
+    // and the 3D's openingSpan defer to so the printed height and the cut hole agree.
+    // `wallHeightFt` is optional because only one of the two callers has it: the elevation,
+    // which PRINTS the number, passes it; the 3D dimension line uses the band only to choose
+    // how high up the wall to hang a RUN measurement, so a default plate height there moves a
+    // line and never a figure.
+    if (isVentItem(item)) { const s = ssVentSpan(item, wallHeightFt); return { bottomFt: s[0], topFt: s[1] }; }
     const def = d3OpeningDefaults(item.type) || {};
     let h = Number(item.openingHeightFt != null ? item.openingHeightFt : def.openingHeightFt);
     if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : D3.DOOR_H;
@@ -946,7 +1025,7 @@ function ssItemVBand(item, cfg, itemTypes) {
 // Screen only. Like the plan dimensions it follows the selection, and renderExportCanvas draws
 // no selection chrome.
 function SSWallElevation({ item, cfg, itemTypes, dims, wallHeightFt, wallLabel }) {
-  const band = ssItemVBand(item, cfg, itemTypes);
+  const band = ssItemVBand(item, cfg, itemTypes, wallHeightFt);
   if (!dims || !band) return null;
   const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   const L = Math.max(1, dims.wallLen);
@@ -4016,6 +4095,19 @@ function d3TimedBuild(fn) {
 // +z = south, matching the 2D plan (page-down = south). Returns { root, wallMat,
 // roofGroup } so the viewer can ghost the shell for the "look inside" mode and
 // dispose everything on close.
+// The door LOOKS a builder may pick (186 shipped 'plank'; 187 adds the other three — Carolyn
+// 2026-09-04, walking through the several door styles one builder sells, pointed at a barn door
+// with an X across the lower half and asked for that one by its shape). The KEY is the value
+// stored in fixture_items.door_style; membership here is the whitelist, and anything absent
+// falls back to 'auto', which is 186's deliberate property and the reason a value written by a
+// newer portal can only ever mean "draw it the way you always did".
+//
+// The three hinged styles are ONE leaf with three fields, not three doors: they share
+// plankDoorLeaf's stiles, rails, strap hinges and barn latch because on the real products those
+// ARE shared, and four near-identical copies of that geometry would drift apart the first time
+// one of them was adjusted. 'rollup' is the odd one and is drawn by rollUpCurtain instead — it
+// has no stiles, no hinges and no latch, so it is not a plank leaf with a different field.
+const D3_DOOR_STYLES = { plank: true, zbrace: true, xbrace: true, rollup: true };
 function buildShed3DModel(THREE, p) {
   const { bldgW, bldgH, items, itemTypes, bodyColor, trimColor, frontWall, scale, mgX, mgY } = p;
   // Wall height: config-driven when the tenant sets it (per-style wallHeightFt
@@ -4061,7 +4153,7 @@ function buildShed3DModel(THREE, p) {
   const fixtureDoorStyle = (it) => {
     if (it.fixtureItemId == null) return "auto";
     const fx = fxById.get(String(it.fixtureItemId));
-    return (fx && fx.doorStyle === "plank") ? "plank" : "auto";
+    return (fx && D3_DOOR_STYLES[fx.doorStyle]) ? fx.doorStyle : "auto";
   };
   // Cladding texture — multiplies the body color, so the customer's paint still drives
   // the hue while the pattern supplies the relief. One entry in D3_CLADDING decides the
@@ -4275,7 +4367,12 @@ function buildShed3DModel(THREE, p) {
   // The top of the ladder lands ON the casing face (trimFace = T/2 + 0.03 = 0.18 on panel
   // siding, more on lap), so no part of the door can stand proud of its own trim -- the
   // inversion Carolyn caught on the corner boards, avoided here by construction.
-  const plankDoorLeaf = (og, wf, doorMat, frameMat, ironMat, a0, a1, y0, y1, hinge, latch) => {
+  // `field` is what the three hinged styles differ by and NOTHING else differs (187): 'plank'
+  // (or absent, which is what every 186-era caller passes) is bare vertical boards, 'zbrace'
+  // lays one diagonal over them and 'xbrace' two. Parameterising the field rather than cloning
+  // this function is the whole point — the stiles, rails, straps and latch below are the door,
+  // and three more copies of them would be three more places to fix the next hinge bug.
+  const plankDoorLeaf = (og, wf, doorMat, frameMat, ironMat, a0, a1, y0, y1, hinge, latch, field) => {
     const w = a1 - a0, h = y1 - y0;
     og.add(wallBox(doorMat, wf, a0, a1, y0, y1, 0, 0.16));
     if (w < 0.5 || h < 1) return;                  // a sliver; the slab alone is honest
@@ -4305,6 +4402,42 @@ function buildShed3DModel(THREE, p) {
     og.add(wallBox(frameMat, wf, f0, f1, y0, y0 + F, 0.13, 0.06));
     og.add(wallBox(frameMat, wf, f0, f1, y1 - F, y1, 0.13, 0.06));
     og.add(wallBox(frameMat, wf, f0, f1, midY - midH / 2, midY + midH / 2, 0.13, 0.06));
+    // The BRACE — the one thing that separates the three hinged styles, laid over the door
+    // 'plank' already drew. It sits at 0.152, between the frame at 0.13 and the strap hinges at
+    // 0.165, so it reads as bolted ON to the boards rather than let into them.
+    if ((field === "zbrace" || field === "xbrace") && f1 - f0 > 0.3 && fy1 - fy0 > 0.5) {
+      const bt = Math.min(0.22, (f1 - f0) * 0.11, F * 0.8);
+      const bx0 = f0 + 0.03, bx1 = f1 - 0.03;   // off the stiles, so it lands on boards
+      // A brace is ONE wallBox turned in the wall plane, not a new primitive. wallBox already
+      // orients the box to its wall (rotation.y on the two end walls) and rotateZ then turns it
+      // about the box's own DEPTH axis — which IS the wall normal either way — so the brace
+      // lies flat on the door face on all four walls with no second code path. The sign corrects
+      // the end walls, whose local +X runs against the wall's own direction; a box is symmetric,
+      // so -th and pi-th are the same rotation and that one flip is the whole correction.
+      const turn = (wf.U[0] !== 0) ? 1 : -1;
+      const brace = (x0, yy0, x1, yy1) => {
+        const dx = x1 - x0, dy = yy1 - yy0, len = Math.hypot(dx, dy);
+        if (len < 0.25) return;
+        const cx = (x0 + x1) / 2, cy = (yy0 + yy1) / 2;
+        const bm = wallBox(frameMat, wf, cx - len / 2, cx + len / 2, cy - bt / 2, cy + bt / 2, 0.152, 0.05);
+        bm.rotateZ(turn * Math.atan2(dy, dx));
+        og.add(bm);
+      };
+      if (field === "zbrace") {
+        // Rising FROM the hinge side, the way a real Z brace carries the leaf's weight back into
+        // the hinges. Reading `hinge` rather than fixing a direction is what makes it mirror with
+        // the door instead of pointing the wrong way on half the doors a builder hangs.
+        const lo = fy0 + 0.06, hi = fy1 - 0.06;
+        if (hinge === "a0") brace(bx0, lo, bx1, hi); else brace(bx1, lo, bx0, hi);
+      } else {
+        // ⚠️ THE X GOES IN THE LOWER PANEL, not corner-to-corner across the whole leaf, and
+        // that is Carolyn's own words on 2026-09-04: a barn door "with an X across the lower
+        // half". It is also the only place it fits — the mid rail crosses the leaf at 55%, so a
+        // full-height X would run straight through it and read as a mistake rather than a door.
+        const lo = fy0 + 0.06, hi = Math.min(midY - midH / 2 - 0.04, fy1 - 0.06);
+        if (hi - lo > 0.3) { brace(bx0, lo, bx1, hi); brace(bx0, hi, bx1, lo); }
+      }
+    }
     // Black T-strap hinges: a leaf against the jamb and a strap tapering across the boards,
     // in two steps because a taper cannot be a box. Three on a full-height door and two on a
     // short one, and the middle one sits ON the mid rail -- where a real strap is nailed,
@@ -4332,6 +4465,38 @@ function buildShed3DModel(THREE, p) {
       plate(0.04, Math.min(0.3, w * 0.22), 0.15, 0.163, 0.034);
       plate(0.08, lv, 0.045, 0.178, 0.024);
     }
+  };
+
+  // A ROLL-UP / garage door (187, Carolyn 2026-09-04). Deliberately NOT a plankDoorLeaf variant:
+  // it has no stiles, no rails, no hinge side and no latch, so every argument past the materials
+  // would be ignored, and a "leaf" that silently ignores its hinge argument is a trap for whoever
+  // reads it next. What it does share is the DEPTH LADDER — slab 0, slats 0.105, track 0.13 —
+  // because the ladder is what casts the shadows, not the stiles.
+  const rollUpCurtain = (og, wf, doorMat, frameMat, a0, a1, y0, y1) => {
+    og.add(wallBox(doorMat, wf, a0, a1, y0, y1, 0, 0.16));
+    const w = a1 - a0, h = y1 - y0;
+    if (w < 0.5 || h < 1) return;                  // a sliver; the slab alone is honest
+    // Slats at roughly 21 in, sized so the curtain divides EVENLY — a part-height panel left
+    // over at the bottom is the tell that says "repeating texture" rather than "panels", the
+    // same rule the plank door's boards follow. The gap between them is not drawn: it is the
+    // slab showing through, a real shadow that moves with the sun.
+    const n = Math.max(3, Math.round(h / 1.75));
+    const pitch = h / n, gap = Math.min(0.05, pitch * 0.09);
+    for (let k = 0; k < n; k++) {
+      og.add(wallBox(doorMat, wf, a0 + 0.03, a1 - 0.03, y0 + k * pitch + gap / 2, y0 + (k + 1) * pitch - gap / 2, 0.105, 0.06));
+    }
+    // Side tracks and a head hood — the parts that say "this rolls up" rather than "this
+    // swings". Two-tone doors frame themselves in their chosen trim exactly as the plank leaf
+    // does; a one-colour door reuses doorMat, so the track reads as one piece of the same door.
+    const t = Math.min(0.14, w * 0.06);
+    og.add(wallBox(frameMat, wf, a0, a0 + t, y0, y1, 0.13, 0.06));
+    og.add(wallBox(frameMat, wf, a1 - t, a1, y0, y1, 0.13, 0.06));
+    og.add(wallBox(frameMat, wf, a0, a1, y1 - t, y1, 0.15, 0.07));
+    // A lift handle low and centred: the one thing a customer looks for to know which door this
+    // is. It takes the same licence past the casing face the barn latch takes, for the same
+    // reason — a handle you could not get a hand behind is not a handle.
+    const cx = (a0 + a1) / 2, hw = Math.min(0.3, w * 0.22);
+    og.add(wallBox(mat("#6B7280", { metalness: 0.6, roughness: 0.3 }), wf, cx - hw, cx + hw, y0 + 0.55, y0 + 0.68, 0.178, 0.05));
   };
 
   // WORLD-FEET UVs for a roof slab -- and the fix for a defect that shipped with the very
@@ -4386,6 +4551,16 @@ function buildShed3DModel(THREE, p) {
   const openingSpan = (it) => {
     const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
     const maxTop = H - 0.2;
+    // A vent hangs just under the plate, and how high is NOT a customer choice: the catalog row
+    // has no sill column at all (portal-settings forces the whole swing/operation/trim/sill group
+    // off for a non-door, non-window category), so there is nothing to read and nothing to slide.
+    // Both of the things Carolyn called a vent live up there anyway — a gable vent sits in the
+    // peak and a wall vent goes high to pull the hot air out — so one rule serves both, and it
+    // is the rule a builder would draw without being asked.
+    // 0.15 ft under maxTop rather than flush with it, so the header strip above stays a REAL
+    // panel: the wall-splitting loop skips a segment thinner than 0.01 ft, and the casing itself
+    // already reaches 0.17 ft above the opening.
+    if (isVentItem(it)) return ssVentSpan(it, H);
     if (it.type === "window") {
       const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
       let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
@@ -4563,7 +4738,42 @@ function buildShed3DModel(THREE, p) {
         d3BindFixturePhoto(entry, pm, mesh);
         og.add(mesh);
       };
-      if (o.it.type === "window") {
+      if (isVentItem(o.it)) {
+        // A vent, DRAWN rather than glazed. It is not a small window: no sash, no muntins, no
+        // glass and no photo layer — a louvre is opaque, and the see-through pane that sells a
+        // window would read here as a hole punched in the wall.
+        //
+        // The depth ladder is plankDoorLeaf's, for plankDoorLeaf's reason: field 0 → frame 0.13
+        // → blades 0.16, each step about the 0.03 ft of relief the cladding uses, which is what
+        // casts the shadow lines that stop a small rectangle reading as a painted patch at the
+        // distance a customer actually orbits from.
+        //
+        // Frame and blades take the vent's own fixed colour and fall back to the BUILDING TRIM,
+        // not the body: a vent is millwork the builder paints with the trim, and falling back to
+        // the body colour would make it vanish into the wall on every unconfigured catalog row.
+        const ventMat = mat(o.it.colorHex || trimColor, { roughness: 0.7 });
+        const vF = Math.min(0.14, (o.a1 - o.a0) * 0.16, (o.y1 - o.y0) * 0.16);
+        og.add(wallBox(ventMat, wf, o.a0, o.a0 + vF, o.y0, o.y1, 0.13, 0.06));
+        og.add(wallBox(ventMat, wf, o.a1 - vF, o.a1, o.y0, o.y1, 0.13, 0.06));
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y1 - vF, o.y1, 0.13, 0.06));
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y0, o.y0 + vF, 0.13, 0.06));
+        // The dark field BEHIND the blades. Without it the gaps between them show wall colour and
+        // the vent reads as stripes painted on the siding rather than as an opening with blades
+        // in it — the same trick the plank door's recessed slab plays.
+        og.add(wallBox(mat("#2A2E33", { roughness: 0.95 }), wf, o.a0 + vF, o.a1 - vF, o.y0 + vF, o.y1 - vF, 0, 0.08));
+        const vy0 = o.y0 + vF, vy1 = o.y1 - vF, vh = vy1 - vy0;
+        if (vh > 0.12 && o.a1 - o.a0 > 2 * vF + 0.05) {
+          // 3–5 blades, counted off the opening's OWN height so a 12" vent gets three and a
+          // taller one gets five rather than three fat ones. Each blade is drawn thinner than its
+          // pitch and the leftover IS the shadow gap — real geometry, not a painted line.
+          const n = Math.max(3, Math.min(5, Math.round(vh / 0.28)));
+          const pitch = vh / n, blade = pitch * 0.62;
+          for (let k = 0; k < n; k++) {
+            const b1 = vy1 - k * pitch;
+            og.add(wallBox(ventMat, wf, o.a0 + vF * 0.6, o.a1 - vF * 0.6, b1 - blade, b1, 0.16, 0.05));
+          }
+        }
+      } else if (o.it.type === "window") {
         og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, casingDepth));
         // Sill nose: a slightly wider, deeper board under the casing — the one
         // horizontal shadow line that makes the window read as installed.
@@ -4661,9 +4871,16 @@ function buildShed3DModel(THREE, p) {
         // only a stand-in; here the geometry IS the door, and the cut-out floating in front
         // of it -- shot at an angle, stretched to the opening -- is the exact fault the
         // builder picked this option to be rid of. The photo still rides the estimate.
-        // Never for a roll-up: "board-and-batten" describes a hinged leaf, and a roll-up has
-        // no stiles, no rails and no hinges, so it keeps its horizontal-seam read.
-        const plank = fixtureDoorStyle(o.it) === "plank" && o.it.operation !== "slideup";
+        // ⚠️ REVERSED ON 2026-09-04, and the old rule is kept here because it was right for as
+        // long as it was the only rule. It read: "Never for a roll-up: 'board-and-batten'
+        // describes a hinged leaf, and a roll-up has no stiles, no rails and no hinges, so it
+        // keeps its horizontal-seam read." True while a slide-up door could only ever be asking
+        // for a hinged leaf it cannot have. A builder who picks the ROLLUP style is asking for
+        // exactly that seamed door and should get the DRAWN one, so slideup now excludes only
+        // the hinged styles — and a slide-up door still on 'auto' falls through to the
+        // lap-textured slab below, unchanged, which is what keeps every existing design identical.
+        const dStyle = fixtureDoorStyle(o.it);
+        const plank = dStyle === "rollup" || (dStyle !== "auto" && o.it.operation !== "slideup");
         if (plank) {
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           // A two-tone catalog door frames itself in the SAME trim colour its casing already
@@ -4673,11 +4890,16 @@ function buildShed3DModel(THREE, p) {
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : doorMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
           const y0d = 0.05, y1d = o.y1 - 0.05;
-          if (o.it.type === "doubleDoor" || o.it.operation === "double") {
+          if (dStyle === "rollup") {
+            // ONE curtain across the whole opening even at a "double" width: a 10 ft roll-up is
+            // one door in one track, and splitting it at the centre would draw a pair of garage
+            // doors nobody ordered.
+            rollUpCurtain(og, wf, doorMat, frameMat, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d);
+          } else if (o.it.type === "doubleDoor" || o.it.operation === "double") {
             // Hinges on the two OUTER jambs and one latch where the leaves meet -- the pair
             // as it is actually hung, not the single-leaf treatment applied twice.
-            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a - 0.03, y0d, y1d, "a0", false);
-            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a + 0.03, o.a1 - 0.05, y0d, y1d, "a1", true);
+            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a - 0.03, y0d, y1d, "a0", false, dStyle);
+            plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a + 0.03, o.a1 - 0.05, y0d, y1d, "a1", true, dStyle);
           } else {
             // Hinge side follows the door's own operation, and "right" means the a1 end of
             // the wall run -- the SAME end the 2D plan swings its arc from (fixtureDoorSVG),
@@ -4694,7 +4916,7 @@ function buildShed3DModel(THREE, p) {
             // and the PDF drew its arc at a0. Hinges on one end of the shop drawing and the
             // other end of the customer's picture, with the latch swapped to match.
             plankDoorLeaf(og, wf, doorMat, frameMat, ironMat, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d,
-              o.it.operation === "right" ? "a1" : "a0", true);
+              o.it.operation === "right" ? "a1" : "a0", true, dStyle);
           }
         } else {
           // The chosen door color drives the slab; no color chosen (built-ins, fixed-mode
@@ -6398,17 +6620,25 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // fixtures invisible to pricing.
       const placeFixture3 = (fx, type, ptx, pty) => {
         const w = getWallFromClick(ptx, pty, pWpx, pHpx, mgX, mgY) || getNearestWall(ptx, pty, pWpx, pHpx, mgX, mgY);
-        const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : 36)) / 12;
+        const widthFt = (Number(fx.widthIn) || (type === "window" ? 24 : type === "vent" ? 12 : 36)) / 12;
         // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
         // overhangs the building corner; refuse up front — same computation the 2D
         // included-chip branch gained in the 2026-08-20 audit.
         if (widthFt > (w === "north" || w === "south" ? pWpx : pHpx) / scale + 1e-6) {
-          flash3(`That ${type === "window" ? "window" : "door"} is wider than this wall — pick a longer wall.`);
+          flash3(`That ${type === "window" ? "window" : type === "vent" ? "vent" : "door"} is wider than this wall — pick a longer wall.`);
           return false;
         }
         const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
         let ni;
-        if (type === "window") {
+        if (type === "vent") {
+          // The 3D twin of the 2D included-chip branch, field for field. Both write ventStamps
+          // rather than spelling the fields out, because the sill bug this file documents failed
+          // by these two sites disagreeing.
+          ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Vent",
+            planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
+            price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+            ...ventStamps(fx) };
+        } else if (type === "window") {
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
@@ -6465,7 +6695,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         if (cfg.includedFixture && !cfg.doorSnap) {
-          placeFixture3(cfg.includedFixture, cfg.includedFixture.category === "window" ? "window" : "fixtureDoor", pageX, pageY);
+          // A vent gets its OWN value here even though it lands as a type:"window" item, because
+          // this argument and the item's type answer different questions: this one picks which
+          // STAMPS to write. Collapsing it into "window" is precisely how a vent would quietly
+          // acquire a priced window colour — see ventStamps.
+          const incCat = cfg.includedFixture.category;
+          placeFixture3(cfg.includedFixture, incCat === "window" ? "window" : incCat === "vent" ? "vent" : "fixtureDoor", pageX, pageY);
           return;
         }
         // Annotation tools — same stamps as the 2D branches; the page-bound
@@ -8162,6 +8397,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const doorFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "door") === "door"), [C.fixtures]);
   const rampFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "ramp"), [C.fixtures]);
   const windowFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "window"), [C.fixtures]);
+  // Vents (Carolyn 2026-09-04). No `|| "door"` default here, unlike doorFixtures: an absent
+  // category has always meant a door and must keep meaning one.
+  const ventFixtures = useMemo(() => (Array.isArray(C.fixtures) ? C.fixtures : []).filter((f) => f && (f.category || "") === "vent"), [C.fixtures]);
   // Internal-only fixtures: the rep (embedded) designer can place them, but the customer-facing page
   // must NOT offer them as placement options. These "placeable" lists drive the PICKERS + picker
   // buttons only; the full memos above still feed isArchivedItem / swap / render so an already-placed
@@ -8169,6 +8407,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const placeableDoors = customerFacing ? doorFixtures.filter((f) => !f.internalOnly) : doorFixtures;
   const placeableRamps = customerFacing ? rampFixtures.filter((f) => !f.internalOnly) : rampFixtures;
   const placeableWindows = customerFacing ? windowFixtures.filter((f) => !f.internalOnly) : windowFixtures;
+  const placeableVents = customerFacing ? ventFixtures.filter((f) => !f.internalOnly) : ventFixtures;
   // Colors offered on fixtures: doors pick from the palette rows ticked for Doors
   // (get_config emits the flag + a show_pricing-gated doorRate); windows have their own
   // small per-client list (get_fixtures emits windowColors). Both feed the pickers and
@@ -8217,11 +8456,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const cat = fx.category || "door";
       out[k] = {
         label: fx.name || "Item",
-        color: cat === "window" ? FIXTURE_WINDOW_COLOR : cat === "ramp" ? FIXTURE_RAMP_COLOR : FIXTURE_DOOR_COLOR,
-        icon: cat === "window" ? "🪟" : cat === "ramp" ? "⬛" : "🚪",
+        color: cat === "window" ? FIXTURE_WINDOW_COLOR : cat === "ramp" ? FIXTURE_RAMP_COLOR : cat === "vent" ? FIXTURE_VENT_COLOR : FIXTURE_DOOR_COLOR,
+        icon: cat === "window" ? "🪟" : cat === "ramp" ? "⬛" : cat === "vent" ? "🌬️" : "🚪",
         shortLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "ITEM").toUpperCase().slice(0, 4),
+        // A vent mounts on a wall like a window and attaches to nothing, so it already falls out
+        // of `cat !== "ramp"` — true by luck rather than by decision, which is why it is said
+        // out loud here: the next category added to this list will not necessarily be either.
         wallOnly: cat !== "ramp", doorSnap: cat === "ramp",
-        width: (Number(fx.widthIn) || 36) / 12, height: 0.5,
+        // 12 in for a vent, matching the placeholder the Vents catalog card shows. 36 is a DOOR's
+        // width and would drop a yard-wide louvre on the wall of any builder who left it blank.
+        width: (Number(fx.widthIn) || (cat === "vent" ? 12 : 36)) / 12, height: 0.5,
         includedFixture: { ...fx },   // placement marker: drop THIS specific fixture
       };
     }
@@ -8267,6 +8511,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     });
     return out;
   })();
+  // One palette button per catalog vent, and deliberately NOT a picker. Every other fixture
+  // family has one because the popup has a question to ask — which door, which swing, which
+  // colour, which of five window sizes. A vent has none of those (no swing, no operation, no
+  // trim colour, no sill; portal-settings forces that whole group off for the category), so a
+  // picker would present a grid and then ask nothing.
+  //
+  // It matters that this exists at all rather than leaving vents to the included-chip row: the
+  // case Carolyn named is the UPCHARGE vent — "there are times when they have ... an upcharge
+  // for a different vent" — and an upcharge vent is by definition not in the size's inclusions,
+  // so inclusions-only would have shipped a feature that works for exactly the free case.
+  //
+  // `includedFixture` is what makes the button place THAT exact fixture: it routes into the same
+  // branch the place-or-decline chips take, in 2D handleClick and in the 3D viewer's place3
+  // alike, so there is no third placement path to keep in step. Grouped with the windows because
+  // that is what a vent is on a wall, and a fifth palette group would mean a new
+  // layout_item_types.palette_group value shipped for one button.
+  const ventTools = (() => {
+    const out = {};
+    placeableVents.forEach((fx) => {
+      out[`vnt:${fx.id}`] = {
+        label: fx.name || "Vent", color: FIXTURE_VENT_COLOR, icon: "🌬️",
+        wallOnly: true, width: (Number(fx.widthIn) || 12) / 12, height: 0.5,
+        shortLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
+        group: "windows", includedFixture: { ...fx },
+      };
+    });
+    return out;
+  })();
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
     ...elecItemTools,
     ...(Object.keys(elecItemTools).length ? { elecItemPicker: ELEC_ITEM_PICKER_CFG } : {}),
@@ -8278,6 +8550,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
     ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    ...ventTools,
     // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
     // make. With a single one offered the popup would present one card, so the item keeps its
     // own button under its own name (Carolyn's call, and the same thing the door picker does
@@ -8300,7 +8573,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const isArchivedItem = (it) => {
     if (!it) return false;
     if (it.fixtureItemId) {
-      const pool = it.type === "window" ? windowFixtures : it.type === "ramp" ? rampFixtures : doorFixtures;
+      // A vent is a type:"window" item but its fixture row lives in the VENT list, so the plain
+      // type test would find every placed vent missing from windowFixtures and badge it
+      // "⚠ archived" against a perfectly current catalog.
+      const pool = it.type === "window" ? (isVentItem(it) ? ventFixtures : windowFixtures) : it.type === "ramp" ? rampFixtures : doorFixtures;
       return !pool.some((f) => String(f.id) === String(it.fixtureItemId));
     }
     const c = ITEMS[it.type];
@@ -9567,18 +9843,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (cfg.includedFixture && !cfg.doorSnap) {
       const fx = cfg.includedFixture;
       const w = getWallFromClick(pt.x, pt.y, pW, pH, mgX, mgY) || getNearestWall(pt.x, pt.y, pW, pH, mgX, mgY);
-      const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : 36)) / 12;
+      const widthFt = (Number(fx.widthIn) || (fx.category === "window" ? 24 : fx.category === "vent" ? 12 : 36)) / 12;
       // Wider than the clicked wall = snapToWall's clamp degenerates and the fixture
       // overhangs the building corner; refuse up front, as the door picker does
       // (audit 2026-08-20).
       if (widthFt > (w === "north" || w === "south" ? pW : pH) / scale + 1e-6) {
-        setToast(`That ${fx.category === "window" ? "window" : "door"} is wider than this wall — pick a longer wall.`);
+        setToast(`That ${fx.category === "window" ? "window" : fx.category === "vent" ? "vent" : "door"} is wider than this wall — pick a longer wall.`);
         setTimeout(() => setToast(null), 4000); return;
       }
       const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
       const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
       let ni;
-      if (fx.category === "window") {
+      if (fx.category === "vent") {
+        // type:"window" carrying isVent — see FIXTURE_VENT_COLOR for why that is the only shape
+        // submit-estimate can price. windowName carries the vent's name because that is the field
+        // the estimate payload, the plan bullet and priceRowMatcher all read.
+        ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Vent",
+          planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
+          price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
+          ...ventStamps(fx) };
+      } else if (fx.category === "window") {
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
@@ -10665,7 +10949,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } else if (cfg.wallOnly) {
         // Rounded rect for door/window bar (matches SVG rx=1)
         const barH = 10, barR = 1;
-        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color;
+        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : isVentItem(item) ? FIXTURE_VENT_COLOR : cfg.color;
         ctx.beginPath();
         ctx.moveTo(-iw / 2 + barR, -barH / 2);
         ctx.lineTo(iw / 2 - barR, -barH / 2);
@@ -10693,6 +10977,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
         } else if (item.type === "fixtureDoor") {
           fixtureDoorCanvas(ctx, item, iw, fixtureDoorColor(item));
+        } else if (isVentItem(item)) {
+          // Louvre blades along the wall. The SVG twin of this glyph is in the item map —
+          // CLAUDE.md's "two rendering paths must stay in sync" is exactly about these two.
+          ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.2;
+          [-2, 0, 2].forEach((ly) => { ctx.beginPath(); ctx.moveTo(-iw / 2 + 2, ly); ctx.lineTo(iw / 2 - 2, ly); ctx.stroke(); });
         } else if (item.type === "window") {
           ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
           [0, -iw / 4, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -4); ctx.lineTo(lx, 4); ctx.stroke(); });
@@ -13468,7 +13757,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!si) return null;
             if (planLocked) return null;
             const isDoor = si.type === "fixtureDoor" || si.type === "singleDoor" || si.type === "doubleDoor";
-            const isWin = si.type === "window";
+            // A vent is a type:"window" item, and the bare type test offered it the WINDOW
+            // picker — which would have replaced the vent with a window: isVent gone, a priced
+            // window colour stamped on, and the customer's line item silently changed. Vents
+            // have no swap of their own (there is nothing to choose between but the row itself),
+            // so the honest answer is no button rather than the wrong one.
+            const isWin = si.type === "window" && !isVentItem(si);
             const isRamp = si.type === "ramp";
             if (!(isDoor || isWin || isRamp)) return null;
             const pool = isDoor ? placeableDoors : isWin ? placeableWindows : placeableRamps;
@@ -13828,7 +14122,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     {item.type === "roughOpening" ? (
                       <rect x={-iw / 2} y={-5} width={iw} height={10} fill="#FFFFFF" stroke="#000000" strokeWidth={1.5} rx={1} />
                     ) : (
-                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={item.type === "fixtureDoor" ? fixtureDoorColor(item) : cfg.color} rx={1} />
+                      <rect x={-iw / 2} y={-5} width={iw} height={10} fill={item.type === "fixtureDoor" ? fixtureDoorColor(item) : isVentItem(item) ? FIXTURE_VENT_COLOR : cfg.color} rx={1} />
                     )}
                     {item.type === "singleDoor" && (() => {
                       const r = iw * 0.8, out = item.wall === "north" || item.wall === "east";
@@ -13846,7 +14140,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       );
                     })()}
                     {item.type === "fixtureDoor" && fixtureDoorSVG(item, iw, fixtureDoorColor(item))}
-                    {item.type === "window" && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
+                    {item.type === "window" && !isVentItem(item) && <g><line x1={0} y1={-4} x2={0} y2={4} stroke="#FFF" strokeWidth={1.5} /><line x1={-iw / 4} y1={-4} x2={-iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /><line x1={iw / 4} y1={-4} x2={iw / 4} y2={4} stroke="#FFF" strokeWidth={1} /></g>}
+                    {/* A vent reads as LOUVRE BLADES seen edge-on — lines ALONG the wall, the
+                        opposite axis to the window's mullions above. That is what lets the two be
+                        told apart on a plan that has been printed in grey, where the fill colour
+                        is the one cue that does not survive. Canvas twin in generatePNG. */}
+                    {isVentItem(item) && <g>{[-2, 0, 2].map((ly) => <line key={ly} x1={-iw / 2 + 2} y1={ly} x2={iw / 2 - 2} y2={ly} stroke="#FFF" strokeWidth={1.2} />)}</g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
                       if (item.type === "roughOpening") {
                         const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);

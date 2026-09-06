@@ -226,7 +226,20 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // for why the blob itself never crosses the wire for a list.
     const [dRes, vRes] = await Promise.all([
       sb.from("designs")
-        .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url`)
+        // contact_id (130) is selected for ONE reason: the Pipeline's job is now to open the
+        // CUSTOMER, and the customer record is addressed by contact id, not short_code.
+        // Carolyn 2026-09-04 @1:07:19, watching it work: "this pipeline click is going to
+        // take you into the customer view where you can see everything about that customer."
+        // It stays nullable — crm_ensure_contact returns NULL for a design carrying neither
+        // a phone nor an email, and those rows fall back to the design record.
+        //
+        // ⚠️ It rides ALONGSIDE the SEL_LIST_COLS projection, which is a separate change that
+        // landed the same night: the list stopped pulling the whole `selections` blob across
+        // the wire and now names the two columns it reads. Taking either side of that merge
+        // alone was wrong in a way nothing would have reported — keeping only the narrow
+        // projection loses the Pipeline's ability to open a customer at all, and keeping only
+        // this line silently re-inflates every list payload back to the blob.
+        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("design_versions")
@@ -516,7 +529,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                     const c = r.contact || {}; const s = r.selections || {};
                     return (
                       <button key={r.short_code} type="button"
-                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code) : (onOpenDesign && onOpenDesign(r.short_code)))}
+                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code, r.contact_id) : (onOpenDesign && onOpenDesign(r.short_code)))}
                         style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 9px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {c.name || c.email || c.phone || "—"}
@@ -559,7 +572,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                   <React.Fragment key={r.short_code}>
                   <tr>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
+                    {/* THE NAME IS THE LINK, and it opens the CUSTOMER — Carolyn 2026-09-04
+                        @1:07:19: "when you're in pipeline and you click on test customer,
+                        you're going to open up this ... you're going to see everything in
+                        here." The list is the DEFAULT view, so before this the most common
+                        click in the product went to the designer instead, which is the
+                        opposite of what she asked for. "Open" in the Actions column still
+                        goes to the designer — that is a different intention and it keeps it.
+                        Same pattern LeadsTable already uses for a contact name. */}
+                    <td style={{ ...S.td, fontWeight: 700 }}>
+                      {onOpenRecord
+                        ? <button type="button" onClick={() => onOpenRecord(r.short_code, r.contact_id)}
+                            title={`Open ${c.name || "this customer"}`}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
+                            {c.name || "—"}
+                          </button>
+                        : (c.name || "—")}
+                    </td>
                     <td style={S.td}>
                       <div>{c.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
@@ -1409,9 +1438,103 @@ const CRM_CHIPS = [
   // Everything that happened, not three types two of which were never emitted — see the
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
+  // `owner_change` (2026-09-05) — assignment is a thing that HAPPENED to this record, and
+  // Carolyn's definition of the word is everything that happened to it (08-26 25:18: "if they
+  // changed ownership of a lead from one person to another person, that was logged").
+  //
+  // ⚠️ A chip asking for a type the server never emits fails SILENTLY — the filter returns
+  // nothing and an empty changelog reads as "nothing has happened here" rather than as a bug.
+  // That is how this very chip came to read 0 on Carolyn's screen. Mirrors
+  // CRM_FEED_TYPES.changelog in _shared/crmFeed.ts; keep the two identical.
+  //
+  // A contact MERGE deliberately has no chip of its own: migration 192 records it as a
+  // `crm_field_changes` row (`field = 'merged_from'`) and the feed emits it as the existing
+  // `field_change` type, so it already rides this list.
   { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
-    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change"] },
+    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change", "owner_change"] },
 ];
+
+// Street / City / State / ZIP for the contact editor, which renders in TWO places (the
+// contact record's Person card and a deal record's Person drop-down). It was copy-pasted
+// between them, and adding the billing pair (2026-09-04) would have made that four identical
+// blocks — so it is one component that takes the field names it writes.
+//
+// ⚠️ `keys` is explicit rather than derived from a prefix. The delivery columns are bare
+// (`street`) and the billing ones are prefixed (`billingStreet`), so any "" + capitalise rule
+// would be a lie for one of the two and would break the moment somebody adds a third address.
+function CrmAddressFields({ edit, setEdit, keys }) {
+  const set = (k) => (e) => setEdit((p) => ({ ...p, [k]: e.target.value }));
+  const cell = { ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" };
+  return (
+    <>
+      <span style={S.lbl}>Street</span>
+      <input style={{ ...S.input, marginBottom: 7 }} value={edit[keys.street]} placeholder="412 Ladder Lane"
+        onChange={set(keys.street)} />
+      <div style={{ display: "flex", gap: 7 }}>
+        <div style={{ flex: "2 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>City</span>
+          <input style={cell} value={edit[keys.city]} placeholder="Springfield" onChange={set(keys.city)} />
+        </div>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>State</span>
+          <input style={cell} value={edit[keys.state]} placeholder="MO" onChange={set(keys.state)} />
+        </div>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>ZIP</span>
+          <input style={cell} value={edit[keys.zip]} placeholder="65801" onChange={set(keys.zip)} />
+        </div>
+      </div>
+    </>
+  );
+}
+// WHO OWNS THIS CUSTOMER. Carolyn 2026-09-04 @1:09:30, settling a 40-minute argument with
+// herself: "we do not ever assign deals. We only assign contacts and followers … if they are
+// not assigned to or following that customer, they can't see anything of it."
+//
+// The roster comes from the SERVER (`crm_record`'s `team`), never from a browser query:
+// client_users' only policy is `client_users_select_own`, so a portal user cannot read their
+// own colleagues' rows and a locally-built list would be empty for everyone but an operator.
+//
+// `undefined` team = this record was not built with one (a DESIGN record, or an older server).
+// Render nothing rather than an empty picker — a drop-down with no names next to a filled-in
+// owner name reads as broken, and Carolyn has already been shown one screen that did that.
+function CrmOwnerPicker({ edit, setEdit, team }) {
+  if (!Array.isArray(team)) return null;
+  return (
+    <>
+      <span style={S.lbl}>Assigned to</span>
+      <select style={{ ...S.input, marginBottom: 7 }} value={edit.owner || ""}
+        onChange={(e) => setEdit((p) => ({ ...p, owner: e.target.value }))}>
+        {/* "" is a real answer, not a placeholder — the server reads it as "clear the owner". */}
+        <option value="">Unassigned</option>
+        {team.map((m) => (
+          <option key={m.userId} value={m.userId}>
+            {m.name || "(no name set)"}{m.title ? ` — ${ssTitleLabel(m.title)}` : ""}
+          </option>
+        ))}
+      </select>
+    </>
+  );
+}
+// Titles are stored as slugs (`sales_rep`); this is the only place the record page shows one.
+function ssTitleLabel(t) {
+  return String(t || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// The two address sets, named once so a caller cannot invent a third spelling.
+const CRM_ADDR_DELIVERY = { street: "street", city: "city", state: "state", zip: "zip" };
+const CRM_ADDR_BILLING = { street: "billingStreet", city: "billingCity", state: "billingState", zip: "billingZip" };
+
+// A section heading inside the contact editor. Only earns its place now that there are two
+// addresses: with one, an unlabelled Street/City/State/ZIP was unambiguous.
+function CrmEditHead({ children, hint }) {
+  return (
+    <div style={{ margin: "9px 0 5px", display: "flex", alignItems: "baseline", gap: 7 }}>
+      <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#475569", whiteSpace: "nowrap" }}>{children}</span>
+      {hint && <span style={{ fontSize: 11, color: "#94A3B8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>}
+    </div>
+  );
+}
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
 //
@@ -1562,7 +1685,7 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -1627,7 +1750,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   // early returns below, same as the two above it — and it is the ONLY new one: activeCode
   // is derived, not stored, because a useMemo would be a second hook that would have to sit
   // above the `!data` guard where `data` does not exist yet.
-  const [selCode, setSelCode] = useState(null);
+  // SEEDED from initialDeal when the reader arrived by clicking that deal in the Pipeline
+  // (2026-09-04). Initial state only — a hand-pick later supersedes it, and `key={sub}` in
+  // the shell remounts on every route so a stale seed cannot outlive its own navigation.
+  //
+  // ⚠️ It is NOT trusted: activeCode below re-checks membership against knownCodes, so a
+  // deal that does not belong to this contact resolves to null and the reader gets the
+  // ordinary pick hint rather than somebody else's quote. That check already existed for
+  // load()'s re-runs; seeding just gave it a second thing to protect against.
+  const [selCode, setSelCode] = useState(initialDeal || null);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1720,6 +1851,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
+    // WHO OWNS THIS CUSTOMER (188). Carolyn 2026-09-04 @1:09:30: "we do not ever assign
+    // deals. We only assign contacts and followers." The column has existed since 130 as
+    // deliberate "header furniture" with nothing able to write it; this is the writer.
+    // "" means unassigned — the server reads an empty string as a clear, the same contract
+    // every other field here uses.
+    owner: (data.contact && data.contact.owner_user_id) || "",
     // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
     // here, but everything that is contact related should be in here." These columns have
     // existed since 130 and were filled in from submitted designs -- the record SHOWED them
@@ -1729,6 +1866,20 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     city: (data.contact && data.contact.city) || "",
     state: (data.contact && data.contact.state) || "",
     zip: (data.contact && data.contact.zip) || "",
+    // SECOND ADDRESS (188). Carolyn, 2026-09-04 @1:14:06: "Address, we are going to need a
+    // second address as well. One is going to be a delivery address. There is going to be a
+    // mailing slash billing."
+    //
+    // ⚠️ THE FOUR FIELDS ABOVE ARE THE DELIVERY ADDRESS AND KEEP THAT MEANING. They are read
+    // as the delivery destination all the way downstream — `_shared/contactAddress.ts`'s
+    // `hasDestination()` and `territoryFor()` feed the delivery scheduler off exactly these
+    // columns. Repurposing them as "the main address" and adding delivery as the new pair
+    // would silently re-point every existing stop at a billing address, on live data, with
+    // nothing raising.
+    billingStreet: (data.contact && data.contact.bill_street) || "",
+    billingCity: (data.contact && data.contact.bill_city) || "",
+    billingState: (data.contact && data.contact.bill_state) || "",
+    billingZip: (data.contact && data.contact.bill_zip) || "",
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -1739,8 +1890,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
         id: (data.contact && data.contact.id) || null,
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
-        name: edit.name, phone: edit.phone, email: edit.email,
+        name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
         street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
+        billingStreet: edit.billingStreet, billingCity: edit.billingCity,
+        billingState: edit.billingState, billingZip: edit.billingZip,
       },
     });
     setBusy(false);
@@ -1939,26 +2092,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             <span style={S.lbl}>Phone</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
-            <span style={S.lbl}>Street</span>
-            <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
-              onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
-            <div style={{ display: "flex", gap: 7 }}>
-              <div style={{ flex: "2 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>City</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
-                  onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
-              </div>
-              <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>State</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
-                  onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
-              </div>
-              <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>ZIP</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
-                  onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
-              </div>
-            </div>
+            <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
+            {/* DELIVERY, then MAILING/BILLING (188). Carolyn 2026-09-04 @1:14:06. The first
+                four columns are the DELIVERY address and keep that meaning — the scheduler
+                builds its destination from these same submitted values, so relabelling them
+                would re-point live stops at a billing address with nothing raising. */}
+            <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
+            <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+            <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
+            <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -2266,26 +2408,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   <span style={S.lbl}>Phone</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
-                  <span style={S.lbl}>Street</span>
-                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
-                    onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
-                  <div style={{ display: "flex", gap: 7 }}>
-                    <div style={{ flex: "2 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>City</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
-                        onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
-                    </div>
-                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>State</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
-                        onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
-                    </div>
-                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>ZIP</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
-                        onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
-                    </div>
-                  </div>
+                  <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
+                  {/* DELIVERY, then MAILING/BILLING (188). Carolyn 2026-09-04 @1:14:06. The first
+                      four columns are the DELIVERY address and keep that meaning — the scheduler
+                      builds its destination from these same submitted values, so relabelling them
+                      would re-point live stops at a billing address with nothing raising. */}
+                  <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
+                  <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+                  <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
+                  <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}

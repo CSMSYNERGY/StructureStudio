@@ -716,6 +716,9 @@ function run(files) {
   }
   for (const g of gatedFns) errors.push(...checkGateTable(g.fn, g.src));
 
+  // The permission model's two hand-maintained copies must agree. See checkAreaMirror().
+  errors.push(...checkAreaMirror(files));
+
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
   // artifact's real bytes is the compile drift gate's job (it recompiles and compares) —
@@ -1135,6 +1138,155 @@ function walkBlock(src, open, token, after) {
 //
 // Takes its subject as an ARGUMENT, like checkMyQuotesTaxBreakdown above, so --self-test can
 // feed it a mutated source and prove each direction really fires.
+// Repo-relative read that yields null instead of throwing. `read()` above is for files this
+// script requires; these two are for files a RULE discovers, where "absent" is an answer the
+// rule reports itself rather than a crash with no context.
+const readIfExists = (f) => { try { return readFileSync(join(root, f), "utf8"); } catch { return null; } };
+const listMigrations = () => {
+  try {
+    return readdirSync(join(root, "supabase/migrations"))
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => "supabase/migrations/" + f);
+  } catch { return []; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// THE PERMISSION MODEL EXISTS TWICE, AND UNTIL NOW NOTHING COMPARED THE TWO COPIES.
+//
+// `AREAS` in supabase/functions/_shared/access.ts is what the edge functions and the Team
+// screen resolve against. `area_level_for()` in SQL is what the RESTRICTIVE RLS policies
+// resolve against — migration 154 introduced it, 183 re-issued it. Both files say in
+// capitals that they must change in the same commit.
+//
+// ⚠️ 183's own header AND CLAUDE.md both claim THIS SCRIPT already cross-checked them. It did
+// not — before 2026-09-05 `preflight.mjs` contained no reference to access.ts, AREAS, PRESETS
+// or area_level_for at all. The claim was written as though the guard existed, which is worse
+// than an admitted gap: it is why the drift below shipped twice with nobody looking.
+//   • `change_orders` was added to access.ts on 2026-09-01 and never reached the SQL.
+//   • the sales_rep `orders` preset moved view -> edit on one side only.
+// Both were inert only by luck — no policy happened to key on either — and "inert by luck" is
+// not a property you get to keep.
+//
+// WHAT THIS COVERS: the area KEY SET and each area's LEVEL VOCABULARY, both directions.
+// WHAT IT DELIBERATELY DOES NOT: the PRESETS / k_presets tables. `PRESETS.owner` is computed
+// (`Object.fromEntries(AREA_KEYS.map(...))`), so it cannot be read statically the way the rest
+// can, and a regex that silently skipped the computed row would report a clean preset diff
+// while covering three titles out of five. That gap is real and named here rather than
+// papered over — the second drift above is a preset drift and this rule would NOT catch it.
+// Closing it needs the TS evaluated, not scanned.
+//
+// The SQL side is discovered as "the newest migration that actually DEFINES area_level_for",
+// never the highest-numbered file: the NNN prefix stopped being unique on beta (183 is used
+// twice) and the ledger keys on the timestamp, not the prefix.
+// `inject` exists ONLY for --self-test: it substitutes the text of one side so a fabricated
+// drift can be pushed through the real comparison. A rule nothing ever proves can fire is the
+// failure mode this whole script keeps re-learning, and it is the exact failure that let the
+// two copies drift while 183's header claimed they were checked.
+function checkAreaMirror(files, inject = null) {
+  const errors = [];
+  const TS = "supabase/functions/_shared/access.ts";
+  const ts = (inject && inject.ts) ?? files[TS] ?? readIfExists(TS);
+  if (!ts) {
+    errors.push(`${TS}: missing — the permission model's TypeScript half is gone, or this `
+      + "discovery has gone blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  // ── TS side ──
+  // ⚠️ ANCHORED ON THE COLON, not on the bare name. `ts.indexOf("export const AREAS")` matches
+  // `export const AREAS_RENAMED` too — the name is a PREFIX of anything someone renames it to —
+  // so the blind-detection arm below reported clean on a renamed export, which is the exact
+  // failure this rule exists to make impossible. Caught by the self-test, which is why it is
+  // written; a rule that cannot detect its own subject going missing is not a rule.
+  const areasMatch = /export\s+const\s+AREAS\s*:/.exec(ts);
+  const areasAt = areasMatch ? areasMatch.index : -1;
+  const areasEnd = areasAt < 0 ? -1 : ts.indexOf("\n];", areasAt);
+  if (areasAt < 0 || areasEnd < 0) {
+    errors.push(`${TS}: cannot find the \`export const AREAS\` array — it was renamed or `
+      + "reshaped, so the SQL mirror is now unchecked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const areasSrc = ts.slice(areasAt, areasEnd);
+  // `levels:` is either a named constant (RVE) or an inline array. Resolve named ones from
+  // their own declaration so a change to the constant is seen, not assumed.
+  const namedLevels = {};
+  for (const m of ts.matchAll(/^const\s+([A-Z][A-Z0-9_]*)\s*:\s*Level\[\]\s*=\s*\[([^\]]*)\]/gm)) {
+    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+  }
+  const tsAreas = new Map();
+  for (const m of areasSrc.matchAll(/\{\s*key:\s*"([a-z_]+)"[^}]*?levels:\s*(\[[^\]]*\]|[A-Z][A-Z0-9_]*)/g)) {
+    const raw = m[2];
+    const levels = raw.startsWith("[")
+      ? [...raw.matchAll(/"([a-z]+)"/g)].map((x) => x[1])
+      : namedLevels[raw];
+    if (!levels) {
+      errors.push(`${TS}: area "${m[1]}" uses levels constant \`${raw}\` which preflight could `
+        + "not resolve — declare it as `const NAME: Level[] = [...]` or inline the array");
+      continue;
+    }
+    tsAreas.set(m[1], levels.join("|"));
+  }
+  if (!tsAreas.size) {
+    errors.push(`${TS}: parsed ZERO areas out of AREAS — the entry shape changed and this rule `
+      + "is now blind; re-anchor it in scripts/preflight.mjs rather than trusting a clean run");
+    return errors;
+  }
+
+  // ── SQL side: newest file that DEFINES the function, not the highest number ──
+  let best = null;
+  for (const f of listMigrations()) {
+    const src = readIfExists(f);
+    if (src && /create\s+or\s+replace\s+function\s+public\.area_level_for/i.test(src)) {
+      if (!best || f > best.file) best = { file: f, src };
+    }
+  }
+  if (!best) {
+    errors.push("supabase/migrations/: no migration defines `public.area_level_for` — the SQL "
+      + "half of the permission model is gone, or this discovery has gone blind");
+    return errors;
+  }
+  if (inject && inject.sql) best = { file: best.file, src: inject.sql };
+  const kAt = best.src.indexOf("k_areas");
+  const open = kAt < 0 ? -1 : best.src.indexOf("$j$", kAt);
+  const close = open < 0 ? -1 : best.src.indexOf("$j$", open + 3);
+  if (close < 0) {
+    errors.push(`${best.file}: cannot read the k_areas $j$…$j$ literal — re-anchor `
+      + "checkAreaMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  let sqlAreas;
+  try {
+    const parsed = JSON.parse(best.src.slice(open + 3, close));
+    sqlAreas = new Map(Object.entries(parsed).map(([k, v]) => [k, (v.levels || []).join("|")]));
+  } catch (e) {
+    errors.push(`${best.file}: k_areas is not valid JSON (${e.message}) — the SQL resolver `
+      + "will fail at apply time");
+    return errors;
+  }
+
+  // ── Compare, both directions ──
+  for (const [k, lv] of tsAreas) {
+    if (!sqlAreas.has(k)) {
+      errors.push(`permission model drift: area "${k}" exists in ${TS} but NOT in `
+        + `${best.file}'s k_areas. Any RLS policy keyed on it resolves to NULL. Add it to the `
+        + "SQL mirror in this same commit.");
+    } else if (sqlAreas.get(k) !== lv) {
+      errors.push(`permission model drift: area "${k}" allows [${lv}] in ${TS} but `
+        + `[${sqlAreas.get(k)}] in ${best.file}. The browser and the database disagree about `
+        + "what a level means.");
+    }
+  }
+  for (const k of sqlAreas.keys()) {
+    if (!tsAreas.has(k)) {
+      errors.push(`permission model drift: area "${k}" exists in ${best.file}'s k_areas but `
+        + `NOT in ${TS}. Either it was removed from the app and left in SQL, or the SQL is `
+        + "ahead of the code.");
+    }
+  }
+  return errors;
+}
+
 function checkGateTable(fn, src) {
   const errors = [];
   const file = `${FUNCTIONS_DIR}/${fn}/index.ts`;
@@ -2033,6 +2185,61 @@ if (process.argv.includes("--self-test")) {
   }
   console.log(`self-test passed: the GATES cross-check reads all ${gateFns.length} discovered function(s), fires on `
     + "both `action === \"x\"` and `switch/case` dispatch, ignores a non-dispatch switch, and refuses to run blind");
+
+  // ── The access.ts <-> area_level_for() mirror ──
+  // Proves all four directions, because this rule exists precisely BECAUSE a claim that it
+  // existed was believed for days while the two copies drifted.
+  const amFiles = load();
+  const amTs = readIfExists("supabase/functions/_shared/access.ts");
+  let amSql = null;
+  for (const f of listMigrations()) {
+    const s = readIfExists(f);
+    if (s && /create\s+or\s+replace\s+function\s+public\.area_level_for/i.test(s)) amSql = s;
+  }
+  if (!amTs || !amSql) {
+    console.error("self-test FAILED: could not load both halves of the permission model — the "
+      + "area-mirror rule has no subject and is silently inert");
+    process.exit(1);
+  }
+  // (a) CLEAN on the real files. If this ever fails, the two copies have actually drifted.
+  const amClean = checkAreaMirror(amFiles);
+  if (amClean.length) {
+    console.error("self-test FAILED: the real access.ts and area_level_for() do not agree:");
+    for (const e of amClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // (b) FIRES when an area exists in TS but not in SQL — the `change_orders` drift, verbatim.
+  const dropOne = amSql.replace(/^\s*"contacts":\s*\{[^}]*\},?\s*$/m, "");
+  if (dropOne === amSql) {
+    console.error("self-test FAILED: could not remove an area from the SQL mirror — the k_areas "
+      + "shape changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropOne }).some((e) => /"contacts".*but NOT in/.test(e))) {
+    console.error("self-test FAILED: an area missing from the SQL mirror did not fire");
+    process.exit(1);
+  }
+  // (c) FIRES when the LEVEL VOCABULARY disagrees — the half that a key-set diff cannot see.
+  const bendLevels = amSql.replace(/"commissions":(\s*)\{"levels": \["none","own","edit"\]\}/,
+    '"commissions":$1{"levels": ["none","view","edit"]}');
+  if (bendLevels === amSql) {
+    console.error("self-test FAILED: could not alter a level vocabulary in the SQL mirror — "
+      + "the commissions anchor moved and this assertion is inert");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: bendLevels }).some((e) => /allows \[.*\] in .* but/.test(e))) {
+    console.error("self-test FAILED: a level-vocabulary mismatch did not fire");
+    process.exit(1);
+  }
+  // (d) REFUSES TO RUN BLIND. A renamed AREAS export must be an error, never a clean pass —
+  // the whole point is that a rule reporting nothing must not look like a rule reporting OK.
+  if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const AREAS", "export const AREAS_RENAMED") })
+        .some((e) => /cannot find the `export const AREAS` array/.test(e))) {
+    console.error("self-test FAILED: a renamed AREAS export reported clean instead of blind");
+    process.exit(1);
+  }
+  console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
+    + "missing from SQL and on a level-vocabulary mismatch, and refuses to run blind");
 
   process.exit(0);
 }

@@ -69,6 +69,17 @@ function Dashboard({ session }) {
   });
   // The Settings / Admin sub-page, lifted out of those shells so it can live in the URL.
   const [sub, setSub] = useState(() => ssParsePath().sub || null);
+  // Which DEAL a customer record should open on, when the reader arrived by clicking that
+  // deal in the Pipeline. Carolyn 2026-09-02: a contact record opens with nothing selected
+  // and "it's Greek, you have no idea" — but arriving from a pipeline row means the deal is
+  // already known, so there is nothing to guess.
+  //
+  // SELF-INVALIDATING BY SHAPE, which is why it stores the contact id alongside the deal
+  // rather than the deal alone: it is honoured only while `sub` still names that same
+  // contact, so walking to another record, or back and in again by hand, silently stops
+  // matching instead of preselecting a deal that belongs to somebody else. No cleanup
+  // effect, and nothing to forget on a new route.
+  const [recordDeal, setRecordDeal] = useState(null);   // { contactId, deal } | null
   // What the URL ASKED for, held until the role/operator gates have resolved. Without this
   // the clamp below runs on the first render — when isOperator is still false because
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
@@ -1470,6 +1481,10 @@ function Dashboard({ session }) {
                    record used to render with a live Notes box that 403'd on Save. Passing the
                    entitlement lets CrmRecord grey what it cannot save instead. */
                 crmUnlocked={crmUnlocked}
+                /* Only when `sub` still names the contact the deal was captured for — see
+                   recordDeal's declaration. `key={sub}` remounts the record on every route,
+                   so this is read fresh as initial state and never fights a later hand-pick. */
+                initialDeal={recordDeal && sub === "c-" + recordDeal.contactId ? recordDeal.deal : null}
                 onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
                 /* Back goes to the list this record belongs to, which after the split is a
                    whole tab rather than a sub-view. */
@@ -1514,7 +1529,25 @@ function Dashboard({ session }) {
                 isAdmin={canAdmin} crmUnlocked={crmUnlocked}
                 onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                onOpenRecord={(code) => navigate("designs", "d-" + code)}
+                /* PIPELINE OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19,
+                   after watching it: "this pipeline click is going to take you into the
+                   customer view where you can see everything about that customer ... I don't
+                   want the two different views." The deal she clicked rides along so the
+                   record opens ON it rather than on the "pick one" hint.
+
+                   TWO fallbacks to the design record, and both are load-bearing:
+                   • no contact_id — crm_ensure_contact returns NULL for a design carrying
+                     neither phone nor email, so there is no customer to open.
+                   • no CRM subscription — a contact record is paywalled and a design record
+                     is not (see the record mount's own comment above). Routing a free-tier
+                     tenant's Pipeline click at the upsell would take away the page they have
+                     today, which is a regression dressed as a feature. */
+                onOpenRecord={(code, contactId) => {
+                  if (contactId && crmUnlocked) {
+                    setRecordDeal({ contactId, deal: code });
+                    navigate("contacts", "c-" + contactId);
+                  } else navigate("designs", "d-" + code);
+                }}
                 /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
                    deliberately carries no view of its own so the saved preference can fill
                    it -- pinning it to "list" here would quietly outrank the setting. */

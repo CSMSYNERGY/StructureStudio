@@ -571,7 +571,31 @@ function SettingsView({ section }) {
       </div>
       )}
 
-      {show("branding") && (<>
+      {/* ─── COMPANY (Carolyn 2026-09-04 @28:55) ───
+          Split out of Branding, not newly built. She hit this mid-onboarding of a real
+          client: "I'm getting ready to send this email to this client ... what I'm trying to
+          work through on the setup part of it ... I feel like we need to go into branding and
+          we need to have everything about the company ... the EIN, all that stuff needs to be
+          in here. Their terms and conditions, company, branding, company information."
+
+          Her structure, in her words, is three things: Branding, Company, Team. This is the
+          Company third. Nothing moved in the DATABASE — these are the same
+          `client_settings.business_*` columns saved by the same global save; only the tab
+          they live under changed, which is what she was actually missing.
+
+          ⚠️ WHAT IS DELIBERATELY NOT HERE YET: legal business name, business type, and the
+          privacy/terms URLs. Those exist today only inside the SMS carrier registration
+          (`sms_registrations`), and promoting them is a schema change, not a re-tab. The
+          EIN is a harder case and must NOT simply be moved: 165_sms_registration.sql holds
+          that the full EIN, the rep's mobile and the registered address live at TWILIO and
+          are referenced by SID, with only `ein_last4` kept locally, so that "a support ticket
+          must never be answerable by reading our database". Reversing that is a privacy
+          decision for Ahsan and Carolyn, not a refactor. See the plan's Lane E.
+
+          Safe by construction: SettingsView's form state always covers every field no matter
+          which section renders, and the save is global — the comment at the top of this
+          component says so, and it is why this split needs no new save path. */}
+      {show("company") && (<>
       <div style={S.card}>
         <div style={S.h2}>Business Details (shown on estimates)</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -599,7 +623,9 @@ function SettingsView({ section }) {
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
       </div>
+      </>)}
 
+      {show("branding") && (<>
       <div style={S.card}>
         <div style={S.h2}>Pricing</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
@@ -644,8 +670,21 @@ function SettingsView({ section }) {
         )}
       </div>
 
-      <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
       </>)}
+
+      {/* ⚠️ THE GLOBAL SAVE MUST OUTLIVE THE BRANDING FRAGMENT. It used to sit INSIDE it,
+          which was invisible while Branding owned every editable card on this form — and the
+          moment Business Details moved to the Company tab (2026-09-04) that tab would have
+          rendered a full form of inputs and NO way to save them. A form that silently cannot
+          save looks identical to one that saved and lost the data.
+
+          Gated on branding-or-company rather than hoisted unconditionally: `show()` returns
+          true for EVERY key when `section` is null, so an unconditional button is correct for
+          the legacy all-sections render but would also add a second, whole-form Save to the
+          CRM Connection tab, which deliberately has its own three narrow saves. */}
+      {(show("branding") || show("company")) && (
+        <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
+      )}
     </form>
   );
 }
@@ -1638,12 +1677,18 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
     const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
     const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
-    const other = fx.filter((f) => !["door", "ramp", "window"].includes(f.category || "door")).map(col);
+    const KNOWN_CATS = ["door", "ramp", "window", "vent"];
+    const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
+    // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
+    // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
+    // category added later without a section here — a new fixture kind must never fall out
+    // of the export silently, which is what a bare `byCat` list per known name would do.
     return [
       { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
       { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
-      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
       { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
+      { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
+      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
       { name: "Other",            argb: "FFF1F5F9", cols: other },
     ].filter((s) => s.cols.length);
   };
@@ -3727,6 +3772,25 @@ function fmtFtIn(inches) {
 }
 function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number" && isFinite(v)) ? v : ""; }
 
+// How a catalog door is DRAWN in 3D (migration 186, widened by 187). Kept as one list in one
+// place because it is normalised at THREE sites in this file — the row→draft read, the
+// draft→save payload, and the <select>'s own value — and three hand-written ternaries pinned
+// to "plank" is exactly how the first three styles would have shipped unreachable.
+//
+// ⚠️ ANYTHING UNRECOGNISED MUST FALL BACK TO 'auto'. 186's header calls that out as
+// deliberate and `fixtureDoorStyle` in the designer relies on it: a typo, an older portal, or
+// a value written by a NEWER portal than this one can then only ever mean "draw it the way you
+// always did" — never a blank door. Keep this list in step with the CHECK constraint in 187
+// and with FIXTURE_CATEGORIES' door branch in portal-settings.
+const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup"];
+const D3_DOOR_STYLE_HINT = {
+  auto: "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed.",
+  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D.",
+  zbrace: "The same board-and-batten door with a single diagonal brace, rising from the hinge side.",
+  xbrace: "The same board-and-batten door with a crossed X brace across the lower panel.",
+  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The photo above is still used on the estimate, but not in 3D.",
+};
+
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
 // ("height" for doors/windows, "length" for ramps — height_in holds the ramp LENGTH).
 function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null, refreshKey = 0 }) {
@@ -3775,7 +3839,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
     // How the door is DRAWN in 3D (186). Anything unrecognised reads as "auto" — the look
     // the app has always had — so an older row and a newer one cannot render differently.
-    door_style: d.door_style === "plank" ? "plank" : "auto",
+    door_style: D3_DOOR_STYLES.includes(d.door_style) ? d.door_style : "auto",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     // Sales tax (migration 148). Absent reads as TAXABLE — the column defaults true, so the
     // only way to be untaxed is for the builder to have said so.
@@ -3812,7 +3876,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
     ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
-    ...(isDoorCat ? { doorStyle: r.door_style === "plank" ? "plank" : "auto" } : {}),
+    ...(isDoorCat ? { doorStyle: D3_DOOR_STYLES.includes(r.door_style) ? r.door_style : "auto" } : {}),
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
@@ -4284,16 +4348,17 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       {isDoorCat && (
         <div style={{ marginBottom: 12 }}>
           <div style={fldLbl}>How it looks in 3D</div>
-          <select value={edit.draft.door_style === "plank" ? "plank" : "auto"}
+          <select value={D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto"}
             onChange={(e) => setDraft({ door_style: e.target.value })}
             style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
             <option value="auto">Use the photo above</option>
             <option value="plank">Board-and-batten (built in 3D)</option>
+            <option value="zbrace">Board-and-batten with a Z brace</option>
+            <option value="xbrace">Board-and-batten with an X brace</option>
+            <option value="rollup">Roll-up / garage door</option>
           </select>
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {edit.draft.door_style === "plank"
-              ? "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D."
-              : "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed."}
+            {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
           </div>
         </div>
       )}
@@ -4507,6 +4572,41 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
         re-import — rows are matched by the ID column, and rows missing from the file are never deleted.
       </p>
       <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+    </div>
+  );
+}
+
+// ─── Vents (Carolyn 2026-09-04 @25:19–27:14) ───
+// Ahsan asked whether a vent should be its own category or live with windows; she answered
+// the PRICING question instead, and that answer is what settles the shape: "most of the
+// time it comes with the building. But there are times when they have ... an upcharge for a
+// different vent ... I do think we need to put it in as an item for them to put in and say
+// no charge or it is a charge."
+//
+// So a vent is a fixture, not a boolean on the style. `price` already carries all three
+// states this needs and needs no new column: NULL = not offered, 0 = included in the
+// building, > 0 = an upcharge. That is the same convention doors and windows already use.
+//
+// ⚠️ NOT the same thing as `styleD3.gableVent`. That is a per-STYLE appearance field the
+// video AI infers ("omit the whole gableVent object if the gable ends carry no vent") — it
+// describes how this builder's buildings already look. This is a CATALOG item a customer
+// chooses and may be billed for. Both can be true of one building and they answer different
+// questions, so neither replaces the other.
+//
+// No swing, no operation, no trim colour, no sill: the shared validator forces that whole
+// group off for any non-door / non-window category, so a vent row is width, height, price.
+function VentsView({ viewingLabel = null, clientId = null }) {
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Vents</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+        Gable and wall vents a customer can add to a building. Leave the <b>price blank</b> if you do not offer
+        one, set it to <b>0</b> if every building includes it at no charge, or enter an amount to charge for it —
+        the same three states the doors and windows lists use. Each vent is <b>one line</b>; click <b>Edit</b> to
+        change it and every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are
+        feet/inches — 12", 1'6" (no spaces).
+      </p>
+      <FixtureCatalog category="vent" noun="vent" addLabel="Add vent" namePh="e.g. Gable vent" labelPh="VNT" wPh={'12"'} hPh={'12"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
     </div>
   );
 }

@@ -3401,7 +3401,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // on every ID-matched row — silently un-archiving retired doors into the customer
   // designer. The UI's toPayload and a full export round-trip send every field, so those
   // saves behave exactly as before; inserts get the old defaults via fixtureInsertDefaults.
-  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
+  // 'vent' added 2026-09-05 (Carolyn 09-04 @25:19). It needs NO validator branch: every
+  // door-only group (swing/operation, colour mode, trim colour, door_style) and every
+  // window-only group (window colours, sill) is already forced off by the `!isDoor` /
+  // `category !== "window"` invariants below, so a vent validates down to name, width,
+  // height and price — which is exactly what a vent is.
+  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp", "vent"]);
   const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
     // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
     // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
@@ -3499,7 +3504,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!isDoor) {
       rec.door_style = "auto";
     } else if (has("doorStyle")) {
-      rec.door_style = String(row?.doorStyle ?? "").trim() === "plank" ? "plank" : "auto";
+      // Widened by migration 187 from the single 'plank' to four built-in looks. The
+      // fallback is the whole point and must survive any future edit: anything unrecognised
+      // becomes 'auto', so a typo, an OLDER portal, or a value written by a NEWER portal than
+      // this deploy can only ever mean "draw it the way you always did" — never a blank door
+      // on a customer's building. Keep this list in step with 187's CHECK constraint and with
+      // D3_DOOR_STYLES in portal/03-catalog.jsx.
+      rec.door_style = ["plank", "zbrace", "xbrace", "rollup"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
     }
     return { rec };
   };
@@ -4552,12 +4563,74 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       })(),
     };
 
+    // ── THE OTHER PEOPLE ON THE RECORD, AND WHO IS WATCHING IT ─────────────────────────
+    // Carolyn, 2026-09-04 ~1:13:00: "This is name one and then the wife and then the phone
+    // number … it doesn't have to be husband and wife, it can be two people buying, two
+    // business partners" — each with their own phone and email (migration 190). And at
+    // 1:09:30: "we do not ever assign deals. We only assign contacts and followers"
+    // (migration 189).
+    //
+    // Contact-scoped, because both hang off the PERSON: a design record shows them once its
+    // contact has been resolved, and shows nothing when it has not. They ride this fetch for
+    // the reason everything else here does — the record page makes exactly one call, since a
+    // direct browser read returns nothing in operator view-as.
+    //
+    // undefined on a failed read, [] on an empty one. Same distinction the orders block above
+    // exists to protect, and it matters more here than usual: until the migrations are
+    // applied these two tables do not exist, and "nobody is following this customer" is a
+    // very different sentence from "we could not ask".
+    let people: any[] | undefined;
+    let followers: any[] | undefined;
+    // The tenant's roster, for the owner picker. `undefined` on a contact record we never
+    // built it for, following this file's absent-vs-empty rule: [] would tell the browser
+    // "this tenant has no team", which is never true and would hide the picker for good.
+    let team: any[] | undefined;
+    if (contact?.id) {
+      const [pplRes, folRes] = await Promise.all([
+        admin.from("crm_contact_people")
+          .select("id, ordinal, name, phone, email, is_primary, source, created_at")
+          .eq("client_id", clientId).eq("contact_id", contact.id)
+          .order("ordinal", { ascending: true }).order("created_at", { ascending: true }).limit(25),
+        admin.from("crm_contact_followers")
+          .select("id, user_id, added_at, added_reason")
+          .eq("client_id", clientId).eq("contact_id", contact.id)
+          .order("added_at", { ascending: true }).limit(50),
+      ]);
+      people = pplRes.error ? undefined : (pplRes.data ?? []);
+      followers = folRes.error ? undefined : (folRes.data ?? []);
+      // A uuid is not a person. Resolved here rather than left to the browser, which has no
+      // way to ask: client_users' only policy is client_users_select_own, so a portal user
+      // cannot read their own colleagues' rows — a follower list rendered client-side would
+      // be a column of ids. The owner is resolved in the same pass, because the record page
+      // needs the assignee's name beside the same faces.
+      //
+      // THE WHOLE TEAM comes back, not only the ids in use, because the record page has to
+      // offer an OWNER PICKER and the same policy that stops the browser naming a follower
+      // stops it listing candidates: without this the picker would be an empty drop-down on
+      // a screen that is already showing the current owner's name, which reads as broken
+      // rather than as unauthorised. One read serves both — resolving the ids in use out of
+      // the roster costs nothing extra, so this REPLACES the previous `.in("user_id", …)`
+      // lookup rather than adding a second round trip.
+      //
+      // ⚠️ Capped, and ordered by name so the cap is stable rather than arbitrary. A tenant
+      // with more people than this needs a search field, not a longer list — and a silently
+      // truncated picker that happens to omit the person you want is worse than one that
+      // does not pretend to be complete.
+      const { data: roster } = await admin.from("client_users")
+        .select("user_id, full_name, title").eq("client_id", clientId)
+        .order("full_name", { ascending: true }).limit(200);
+      const byId = new Map((roster ?? []).map((u: any) => [u.user_id, u.full_name ?? null]));
+      if (followers) followers = followers.map((f: any) => ({ ...f, name: byId.get(f.user_id) ?? null }));
+      contact = { ...contact, owner_name: contact.owner_user_id ? (byId.get(contact.owner_user_id) ?? null) : null };
+      team = (roster ?? []).map((u: any) => ({ userId: u.user_id, name: u.full_name ?? null, title: u.title ?? null }));
+    }
+
     // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
     // the documents we generate, because Carolyn asked for exactly one place: "the top part
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs, people, followers, team });
   }
 
   if (action === "crm_feed") {
@@ -5138,8 +5211,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const city = fld(payload.city, 120);
     const state = fld(payload.state, 60);
     const zip = fld(payload.zip, 20);
+    // Billing address (188). A customer's building goes to one address and their paperwork to
+    // another. The four above stay the DELIVERY address — that is what a design submission
+    // populates and what a delivery stop is built from — so these are four more fields, not a
+    // relabelling of those.
+    const billingStreet = fld(payload.billingStreet, 200);
+    const billingCity = fld(payload.billingCity, 120);
+    const billingState = fld(payload.billingState, 60);
+    const billingZip = fld(payload.billingZip, 20);
+    // OWNER (188). Carolyn 2026-09-04: "we do not ever assign deals. We only assign contacts
+    // and followers." Same three-state contract as every field here, which is why it travels
+    // as TEXT: "" is a real instruction to UNASSIGN, and a uuid cannot carry it.
+    const owner = fld(payload.owner, 64);
     if (name === null && phone === null && email === null
-        && street === null && city === null && state === null && zip === null) {
+        && street === null && city === null && state === null && zip === null
+        && billingStreet === null && billingCity === null && billingState === null
+        && billingZip === null && owner === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -5147,11 +5234,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return json({ error: "That doesn't look like an email address." }, 400);
     }
+    // Shape-check the owner here so a mangled value gets a sentence rather than a Postgres
+    // cast error routed through dbFail. Membership is NOT checked here — the function does
+    // that, in the same statement as the write, so the check cannot be true when it is made
+    // and false when the row lands.
+    if (owner && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(owner)) {
+      return json({ error: "Pick the owner from the list — that isn't a team member." }, 400);
+    }
     const { data: n, error } = await admin.rpc("crm_update_contact", {
       p_client_id: clientId, p_id: id,
       p_name: name, p_phone: phone, p_email: email,
       p_actor: userId ?? null,
       p_street: street, p_city: city, p_state: state, p_zip: zip,
+      p_owner: owner,
+      p_billing_street: billingStreet, p_billing_city: billingCity,
+      p_billing_state: billingState, p_billing_zip: billingZip,
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
@@ -5163,6 +5260,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       if (String(error.code) === "P0002" || /contact not found/i.test(String(error.message ?? ""))) {
         return json({ error: "That contact no longer exists." }, 404);
+      }
+      // The two refusals crm_update_contact raises for the owner (188). They are the server
+      // saying no, not something breaking, so they answer with our own sentence rather than
+      // going through dbFail — the same split the error contract has always drawn between
+      // text we wrote and text we did not.
+      if (/owner is not on this team/i.test(String(error.message ?? ""))) {
+        return json({ error: "That person isn't on this team any more. Pick someone from the list." }, 400);
+      }
+      if (/owner must be a user id/i.test(String(error.message ?? ""))) {
+        return json({ error: "Pick the owner from the list — that isn't a team member." }, 400);
       }
       return dbFail(req, clientId, "save that contact", error);
     }
