@@ -1566,6 +1566,12 @@ function Dashboard({ session }) {
                 ? <OrdersView clientId={tenant.clientId}
                     schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
                     coOn={coCanEdit}
+                    /* The courtesy half of migration 188. The database refuses the write
+                       either way; this is what stops a view-only rep being offered
+                       Record-a-payment, Void and the order-total editor and then handed a
+                       raw RLS refusal for using them. Orders is READABLE at orders='view'
+                       (crew leaders and drivers, 2026-09-01), so the tab still opens. */
+                    ordersOn={ordersCanEdit}
                     /* A sold lot building is already waiting in the Delivery Schedule's
                        "to be loaded" pool (the pool is a query over sold units without a
                        sale stop), so this just takes the dispatcher there — no focus/

@@ -95,13 +95,30 @@ export async function chargeTopup(admin: Admin, opts: {
     return { ok: false, error: "Another top-up is already in progress. Give it a moment, then refresh.", blocking: false };
   }
 
-  // 3. Insert 'open' — also the concurrency guard, via the partial unique index.
+  // 3. Insert 'open' — also the concurrency guard, via the partial unique index. The orderid
+  //    written here is a placeholder: the real one is minted from the row's own id, which does
+  //    not exist until the insert returns. Do NOT reach for a pre-read to get an id first —
+  //    this insert IS the guard, and reading before writing reopens the double-charge window.
   const { data: attempt, error: attErr } = await admin.from("billing_charge_attempts")
     .insert({ client_id: clientId, plan_id: TOPUP_PLAN_ID, orderid: `ss_topup_${clientId}_${Date.now()}` })
     .select("id").maybeSingle();
   if (attErr || !attempt) {
     return { ok: false, error: "Another top-up is already in progress. Give it a moment, then refresh.", blocking: false };
   }
+
+  // THE ORDER ID IS THE RECONCILIATION KEY. When a top-up ends unverifiable, support looks the
+  // charge up AT THE GATEWAY by the string on the attempt row — so the row has to carry the
+  // string the gateway was actually given, not the placeholder minted a moment before the row
+  // had an id. One value, used for the sale below and written back here.
+  //
+  // Fire-and-forget on purpose: a failed write-back leaves the placeholder, which is still
+  // findable by tenant and timestamp, whereas throwing here would abandon an 'open' row and
+  // block every later top-up for that tenant. Never let bookkeeping abort the sale.
+  const orderid = `ss_topup_${clientId}_${attempt.id}`;
+  await admin.from("billing_charge_attempts")
+    .update({ orderid }).eq("id", attempt.id)
+    .then(() => undefined, () => undefined);
+
   const closeAttempt = (state: string, detail: string | null, txn: string | null) =>
     admin.from("billing_charge_attempts")
       .update({ state, detail, sale_txn: txn, closed_at: new Date().toISOString() })
@@ -114,7 +131,7 @@ export async function chargeTopup(admin: Admin, opts: {
       type: "sale",
       amount: (amountCents / 100).toFixed(2),
       customer_vault_id: vaultId,
-      orderid: `ss_topup_${clientId}_${attempt.id}`,
+      orderid,
       merchant_defined_field_1: clientId,
       order_description: `StructureStudio wallet top-up${auto ? " (automatic)" : ""}`,
     });
@@ -125,7 +142,7 @@ export async function chargeTopup(admin: Admin, opts: {
       await closeAttempt("closed_unknown", `top-up sale unverifiable: ${(se as Error).message}`, null);
       await admin.from("app_errors").insert({
         source: "edge:wallet-topup", severity: "error", code: "wallet_topup_unknown",
-        message: `${clientId}: ${amountCents} cent top-up outcome unverifiable - check the gateway before allowing another. ${(se as Error).message}`,
+        message: `${clientId}: ${amountCents} cent top-up outcome unverifiable - look it up at the gateway by orderid ${orderid} (attempt ${attempt.id}) before allowing another. ${(se as Error).message}`,
         client_id: clientId,
       }).then(() => undefined, () => undefined);
       return {
@@ -177,7 +194,7 @@ export async function chargeTopup(admin: Admin, opts: {
     await closeAttempt("closed_unknown", `sale ${saleTxn} succeeded but wallet_credit failed: ${msg}`, saleTxn);
     await admin.from("app_errors").insert({
       source: "edge:wallet-topup", severity: "error", code: "wallet_topup_credit_failed",
-      message: `${clientId}: CARD CHARGED ${amountCents} cents (txn ${saleTxn}) but the wallet was NOT credited: ${msg}. Credit it by hand (admin-catalog wallet_adjust) and close the attempt row.`,
+      message: `${clientId}: CARD CHARGED ${amountCents} cents (txn ${saleTxn}, orderid ${orderid}, attempt ${attempt.id}) but the wallet was NOT credited: ${msg}. Credit it by hand (admin-catalog wallet_adjust) and close the attempt row.`,
       client_id: clientId,
     }).then(() => undefined, () => undefined);
     return {

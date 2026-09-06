@@ -595,11 +595,21 @@ export async function resolveUnknownAttempt(
   attemptId: number,
 ): Promise<ResolveResult> {
   const { data: att } = await admin.from("payment_attempts")
-    .select("id, order_id, short_code, amount_cents, rail, merchid, orderid, state, retref")
+    .select("id, order_id, short_code, amount_cents, rail, merchid, orderid, state, retref, created_at")
     .eq("client_id", clientId).eq("id", attemptId).maybeSingle();
   if (!att) return { resolved: false, reason: "not_found" };
   if (att.state !== "closed_unknown" && att.state !== "open") {
     return { resolved: false, reason: "already_closed" };
+  }
+  // A FRESH `open` attempt is a charge that may be at the gateway RIGHT NOW, which means the
+  // gateway has no record of it YET — and reading that as "nothing was charged" closes it
+  // declined and unblocks the order moments before the auth lands, which is the double
+  // charge this file exists to prevent. Only once it is as old as the same STALE_OPEN_MS the
+  // charge path uses to promote one is it certainly no longer in flight. An unparseable
+  // created_at counts as fresh: the conservative direction is to leave the block in place.
+  if (att.state === "open") {
+    const ageMs = Date.now() - Date.parse(att.created_at);
+    if (!(ageMs > STALE_OPEN_MS)) return { resolved: false, reason: "in_flight" };
   }
 
   let found: Record<string, unknown> | null;
@@ -629,7 +639,7 @@ export async function resolveUnknownAttempt(
   const surcharge = chargedCents > Number(att.amount_cents) ? chargedCents - Number(att.amount_cents) : null;
   const nowIso = new Date().toISOString();
 
-  const { data: payment } = await admin.from("payments").insert({
+  const { data: payment, error: payErr } = await admin.from("payments").insert({
     client_id: clientId,
     order_id: att.order_id,
     amount_cents: att.amount_cents,
@@ -645,20 +655,47 @@ export async function resolveUnknownAttempt(
     note: "recovered by reconciliation",
   }).select("id").maybeSingle();
 
-  const { data: existing } = payment
-    ? { data: payment }
-    : await admin.from("payments").select("id")
-      .eq("client_id", clientId).eq("gateway", "cardpointe").eq("gateway_txn_id", retref).maybeSingle();
+  // The ONLY failure that still means "already recorded" is the gateway_txn uniqueness
+  // violation — that is the idempotent replay this recovery is designed to survive, and the
+  // row it collided with is the answer. EVERY other failure means the card is charged and
+  // the payments row is NOT written: the same state the charge path shouts about as
+  // payment_recorded_failed. In that case the attempt must KEEP blocking the order —
+  // stamping it closed_ok with a null payment_id would remove the double-charge block while
+  // the money is still missing from the ledger, which is worse than the state it started in.
+  let paymentId: string | null = payment?.id ?? null;
+  if (!paymentId) {
+    const msg = String(payErr?.message ?? "insert returned no row");
+    if (/duplicate key|unique constraint|23505/i.test(msg) || String(payErr?.code ?? "") === "23505") {
+      const { data: existing } = await admin.from("payments").select("id")
+        .eq("client_id", clientId).eq("gateway", "cardpointe").eq("gateway_txn_id", retref).maybeSingle();
+      paymentId = existing?.id ?? null;
+    }
+    if (!paymentId) {
+      await admin.from("app_errors").insert({
+        source: "edge:invoice-payment",
+        severity: "error",
+        code: "payment_recorded_failed",
+        message:
+          `${clientId}: reconciliation found a REAL charge (retref ${retref}) on order ${att.order_id} but the payments row was NOT written: ${msg}. ` +
+          `Record it by hand and close attempt ${att.id}. The attempt stays blocking until then, on purpose. ` +
+          `If this reads as a constraint error, check payments_claim_inventory / inventory_units before assuming a database fault.`,
+        client_id: clientId,
+      }).then(() => undefined, () => undefined);
+      return { resolved: false, reason: "record_failed" };
+    }
+  }
 
+  // Closed OK only with a payment id in hand: charged AND recorded, the same bar the charge
+  // path holds itself to.
   await admin.from("payment_attempts")
     .update({
       state: "closed_ok",
       retref,
-      payment_id: existing?.id ?? null,
+      payment_id: paymentId,
       detail: "resolved by inquireByOrderid: the charge DID go through and has been recorded",
       closed_at: nowIso,
     })
     .eq("id", att.id).then(() => undefined, () => undefined);
 
-  return { resolved: true, outcome: "charged", retref, paymentId: existing?.id ?? null };
+  return { resolved: true, outcome: "charged", retref, paymentId };
 }

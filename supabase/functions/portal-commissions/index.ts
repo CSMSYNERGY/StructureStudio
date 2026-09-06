@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { isInternalTenant } from "../_shared/internalTenant.ts";
 import { deactivateRosterMember, syncRosterMember, wantsRoster } from "../_shared/pmRoster.ts";
@@ -32,6 +32,11 @@ import {
 //   - isAdmin  (owner|admin)         → list, add_user, remove_user
 //   - canSeeRates (owner|full_access) → rates visible in list + set_rate
 //   - isOwner                         → the two grants (sees_all_payouts, full_access)
+//   - commissions AREA (migration 100) → "No access" refuses the ledger outright; "Own only"
+//                                        and above read it, scoped by seesAll below
+//   - seesAll (owner|sees_all_payouts) → other people's lines, AND the two order-level
+//                                        rewrites (split_order, reset_order), which delete
+//                                        lines a caller without the grant was never shown
 //
 // Actions:
 //   { action: "list" }
@@ -41,12 +46,12 @@ import {
 //   { action: "remove_user", userId, mode }              // mode: "unlink" | "deactivate"
 //   { action: "compute", debug? }                        // refresh the ledger from orders×settings×rates (owner|full_access)
 //   { action: "list_entries" }                           // the report (rep=own, owner/sees_all=everyone)
-//   { action: "assign_earner", entryId, userId? }        // set/clear an entry's earner (owner|full_access)
+//   { action: "assign_earner", entryId, userId? }        // set/clear an entry's earner (owner|full_access; un-approves a payable line)
 //   { action: "approve_period", periodKey }              // pending → payable, the review gate (owner)
 //   { action: "unapprove_period", periodKey }            // payable → pending while unpaid (owner)
 //   { action: "mark_paid", periodKey? | entryIds? }      // mark APPROVED (payable) lines paid (owner)
 //   { action: "split_entry", entryId, splits:[{userId,sharePercent}] }  // per-sale split (owner|full_access)
-//   { action: "adjust_amount", entryId, amountCents }    // override an amount (owner|full_access)
+//   { action: "adjust_amount", entryId, amountCents }    // override an amount (owner|full_access; un-approves a payable line)
 //   { action: "set_excluded", entryId, excluded }        // exclude/restore a line (owner|full_access)
 //   { action: "clawback", entryId, note? }               // negative line for one paid+cancelled line (owner)
 //   { action: "cancel_order", orderId }                   // cancel a whole order: claw back paid + exclude unpaid (owner)
@@ -62,6 +67,76 @@ function json(body: unknown, status = 200) {
 // One answer for every reason an address is refused, so the response can never be used to
 // discover who else uses StructureStudio. See add_user.
 const OPAQUE_ADD_FAILURE = "That email can't be added here. If they already use StructureStudio at another company, contact support.";
+
+// ── Refusals vs faults ────────────────────────────────────────────────────────────────
+// A REFUSAL is this function declining on purpose ("that person isn't on your team"). Its
+// sentence is written for the person reading it, so it keeps its 4xx and reaches them
+// unchanged. A FAULT is something that BROKE — a database or storage call that failed. It
+// is not the caller's doing, it is not actionable in those words, and PostgREST's text is
+// not ours to publish: it names tables, columns and constraints and its wording changes
+// with the Postgres version.
+//
+// Both used to leave through one `catch` that answered 400 with the raw message. That made
+// a failed money write indistinguishable from a validation refusal, and — because
+// withErrorLog only files responses at or above its minStatus (500) — the fault queue
+// stayed empty while commission rows silently did not land. Faults answer 500 now, with an
+// authored sentence and a ref label, and the raw reason goes to app_errors. Same posture,
+// same shape, as portal-settings' dbFail.
+//
+// ⚠️ A 5xx here always means something broke, so these must NEVER carry SS_REFUSAL_HEADER —
+// that header exists for the handful of deliberate refusals with no fitting 4xx, and using
+// it here would hide exactly the rows this change exists to surface.
+class Refusal extends Error {
+  status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "Refusal";
+    this.status = status;
+  }
+}
+
+// `where` completes "Couldn't …" and is the correlation key: it is both the sentence the
+// caller reads and the string to grep app_errors for, so keep each one short, specific and
+// stable. Keyed by action so a support question ("it wouldn't save my split") maps to rows.
+const WHERE_BY_ACTION: Record<string, string> = {
+  list: "load your team",
+  set_rate: "save that commission rate",
+  set_grants: "save that access change",
+  add_user: "add that person",
+  remove_user: "remove that person",
+  compute: "refresh the commission ledger",
+  list_entries: "load the commission report",
+  assign_earner: "change that line's rep",
+  split_entry: "split that commission",
+  delete_entry: "remove that commission line",
+  split_order: "save that order's split",
+  reset_order: "reset that order's commission",
+  adjust_amount: "save that commission amount",
+  set_excluded: "update that commission line",
+  clawback: "record that clawback",
+  cancel_order: "cancel that order's commissions",
+  approve_period: "approve that period",
+  unapprove_period: "reopen that period",
+  mark_paid: "mark those commissions paid",
+};
+const whereFor = (action: unknown): string => WHERE_BY_ACTION[String(action)] ?? "finish that commission change";
+
+function dbFail(req: Request, clientId: string | null, where: string, err: unknown) {
+  // deno-lint-ignore no-explicit-any
+  const e = err as any;
+  logEdgeError({
+    fn: "portal-commissions",
+    req,
+    clientId,
+    code: e?.code ?? 500,
+    message: `${where}: ${e?.message ?? "unknown database error"}`,
+    context: { where, pgCode: e?.code ?? null, details: e?.details ?? null, hint: e?.hint ?? null },
+  }).catch(() => {});
+  return json({
+    error: `Couldn't ${where}. Please try again — if it keeps happening, tell CSM Synergy and mention "${where}".`,
+    ref: where,
+  }, 500);
+}
 
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -155,7 +230,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: meRows, error: meErr } = await admin
     .from("client_users").select("client_id, role, title, access").eq("user_id", user.id).limit(1);
-  if (meErr) return json({ error: meErr.message }, 500);
+  if (meErr) return dbFail(req, null, "check your account", meErr);
   const me = meRows && meRows[0];
   if (!me?.client_id) return json({ error: "Your login isn't attached to an account." }, 403);
   const clientId: string = me.client_id;
@@ -181,7 +256,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
   // ever be asked about them. That is what makes one lookup safe here.
   let isInternal = false;
   try { isInternal = await isInternalTenant(admin, clientId); }
-  catch (e) { return json({ error: (e as Error).message }, 500); }
+  catch (e) { return dbFail(req, clientId, "check your account settings", e); }
 
   // ⚠️ INTERNAL-ONLY AREAS NEVER LAND ON A BUILDER'S ROW. sanitizeAccess drops keys it does
   // not KNOW, and `projects` is a perfectly well-known area — it exists for every tenant so
@@ -209,6 +284,19 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
     .from("commission_members").select("full_access, sees_all_payouts").eq("client_id", clientId).eq("user_id", user.id).maybeSingle();
   const canSeeRates = isOwner || myCm?.full_access === true;
   const seesAll = isOwner || myCm?.sees_all_payouts === true;
+  // The per-area Commissions switch (migration 100), which this function never consulted:
+  // scope was decided entirely by the two commission_members grants above, so setting
+  // someone to "No access" on the Team grid changed nothing at all — the ledger was still
+  // served to them. The switch is not decoration; it is the only control an owner reaches
+  // for when they mean "not this person", and one that silently does nothing is worse than
+  // no switch.
+  //
+  // 'own' RANKS AS READ (canRead in _shared/access.ts), which is the whole point of that
+  // level: a sales rep on the stock preset keeps seeing their own lines, filtered by
+  // `seesAll` below exactly as before. Only an explicit "No access" is refused, and the
+  // portal already hides the Commissions tab at this same level (TAB_AREA → ssCanRead in
+  // portal/01-core.jsx), so no control anyone can see is being refused here.
+  const canReadCommissions = accCanRead(myAccess, "commissions");
 
   let p: any;
   try { p = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -246,13 +334,16 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
     catch { /* best-effort */ }
   };
   // Confirm a userId is a member of THIS tenant before any write touches them.
+  // Both throws are REFUSALS, not faults: the sentences are ours and are what the person
+  // should read, so they keep their 400 through the catch below. A failed READ on the way
+  // to that answer is a different animal and stays a plain throw → 500.
   const requireMember = async (uid: unknown) => {
-    if (!isUuid(uid)) throw new Error("Invalid user id.");
+    if (!isUuid(uid)) throw new Refusal("Invalid user id.");
     // full_name rides along for the Projects roster mirror: pm_people wants a display name,
     // and client_users has no email column, so the address is resolved separately below.
     const { data, error } = await admin.from("client_users").select("user_id, role, title, access, full_name").eq("client_id", clientId).eq("user_id", uid).maybeSingle();
     if (error) throw error;
-    if (!data) throw new Error("That person isn't on your team.");
+    if (!data) throw new Refusal("That person isn't on your team.");
     return data as { user_id: string; role: string; title: string | null; access: Record<string, unknown> | null; full_name: string | null };
   };
 
@@ -663,6 +754,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // pre-tax base is filled best-effort from the GHL estimate subtotal; if GHL is unreachable the
       // entry is still created with a null base/amount so the order shows on the report to be resolved.
       case "compute": {
+        if (!canReadCommissions) return json({ error: "You don't have access to commissions." }, 403);
         if (!canSeeRates) return json({ error: "Only the owner or a full-access admin can run commissions." }, 403);
         const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();
         if (!settings || !settings.enabled) return json({ ok: true, enabled: false, computed: 0, updated: 0 });
@@ -814,6 +906,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
 
       // ── the report: entries scoped to what the caller may see (rep = own; owner/sees_all = everyone) ──
       case "list_entries": {
+        if (!canReadCommissions) return json({ error: "You don't have access to commissions." }, 403);
         // ⏱ THIS IS THE READ THE LEDGER PAINTS FROM, so it is kept to as few waves as its
         // dependencies allow — the tab now shows entries before compute has run, and every
         // trip saved here is one the user waits through.
@@ -920,12 +1013,29 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           rate = m?.commission_percent == null ? null : Number(m.commission_percent);
         }
         const amount = (entry.base_cents != null && rate != null) ? Math.round(entry.base_cents * rate / 100) : null;
+        // CHANGING WHO EARNS A LINE UN-APPROVES IT. `payable` is the owner having signed off
+        // on that exact person for that exact figure, and mark_paid pays whatever is payable
+        // — so rewriting the earner and the amount underneath an approval pays out a line
+        // nobody approved, to someone nobody approved. Anyone with the rate grant can reach
+        // this action, not just the owner, which is what makes it worth stating here.
+        //
+        // Un-approve rather than refuse, and only when the line is actually payable: the
+        // same direction set_excluded, split_order and reset_order already take by
+        // re-inserting as `pending`. The owner re-approves the period afterwards in one
+        // click — approve_period picks up any pending line with an amount, so an un-approved
+        // line needs nothing else done to it. Paid lines still 409 above; the money is out.
+        const patch: Record<string, unknown> = {
+          earner_user_id: earnerId, rate_percent: rate, amount_cents: amount,
+          is_override: true, updated_at: new Date().toISOString(),
+        };
+        const unapproved = entry.status === "payable";
+        if (unapproved) { patch.status = "pending"; patch.approved_at = null; }
         const { error } = await admin.from("commission_entries")
-          .update({ earner_user_id: earnerId, rate_percent: rate, amount_cents: amount, is_override: true, updated_at: new Date().toISOString() })
+          .update(patch)
           .eq("client_id", clientId).eq("id", entryId);
         if (error) throw error;
-        await audit(`assign_earner entry=${entryId} → ${earnerId || "unassigned"}`);
-        return json({ ok: true });
+        await audit(`assign_earner entry=${entryId} → ${earnerId || "unassigned"}${unapproved ? " (un-approved)" : ""}`);
+        return json({ ok: true, unapproved });
       }
 
       // ── split one sale between reps (owner|full_access) — replaces the entry with N override rows ──
@@ -947,7 +1057,12 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         for (const cs of clean) if (!teamIds.has(cs.userId)) return json({ error: "A selected person isn't on your team." }, 400);
         const rateBy = new Map(((await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId)).data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
         const now = new Date().toISOString();
-        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("id", entryId);
+        // Checked, because the insert below depends on it: a delete that failed silently and
+        // an insert that succeeded leaves the order allocated twice over. Now that a thrown
+        // database error answers 500 and files as a fault, aborting here is both visible and
+        // safe — nothing has been written yet.
+        const { error: delErr } = await admin.from("commission_entries").delete().eq("client_id", clientId).eq("id", entryId);
+        if (delErr) throw delErr;
         const rows = clean.map((cs) => {
           const baseShare = entry.base_cents != null ? Math.round(entry.base_cents * cs.share / 100) : null;
           const rate = (rateBy.get(cs.userId) ?? null) as number | null;
@@ -986,6 +1101,17 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // (that's "give the whole order to X"). Paid lines block the edit; clawbacks untouched.
       case "split_order": {
         if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        // AND sees-all-payouts, because this rewrites the WHOLE ORDER: every unpaid
+        // commission line on it is deleted and replaced by what was submitted. list_entries
+        // serves a caller without that grant only their own lines, so they would author an
+        // allocation from a list that was never complete and take a colleague's line out
+        // with it — a line they were never shown, leaving no record of what it was.
+        //
+        // The refusal is the whole action, not a filtered version of it: scoping the DELETE
+        // to the caller's own rows instead would leave the order allocated past 100%, which
+        // is a worse answer than "you can't do this". The portal already gates the Split
+        // button on exactly this pair (08-integrations), so nothing visible is refused.
+        if (!seesAll) return json({ error: "Editing an order's split needs access to everyone's payouts — ask the owner." }, 403);
         const orderId = String(p.orderId || "");
         const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
@@ -1013,7 +1139,10 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const keep = (exRows || []).find((r: any) => r.period_key) || (exRows || [])[0] || null;
         const rateBy = new Map(((await admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId)).data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
         const now = new Date().toISOString();
-        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        // Checked for the same reason as split_entry's: a silent delete failure followed by
+        // a successful insert allocates the order past 100%.
+        const { error: delErr } = await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        if (delErr) throw delErr;
         const rows = clean.map((cs) => {
           const baseShare = fullBase != null ? Math.round(fullBase * cs.share / 100) : null;
           const rate = (rateBy.get(cs.userId) ?? null) as number | null;
@@ -1032,6 +1161,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       // lines block (the money is out the door); clawbacks are left untouched.
       case "reset_order": {
         if (!canSeeRates) return json({ error: "You don't have access to change commissions." }, 403);
+        // Same pair as split_order, for the same reason: this deletes every unpaid line on
+        // the order — including colleagues' lines a caller without sees-all-payouts was
+        // never shown — before rebuilding the single default one. It is reached only from
+        // inside the Split modal, which the portal already gates on both grants.
+        if (!seesAll) return json({ error: "Resetting an order's commission needs access to everyone's payouts — ask the owner." }, 403);
         const orderId = String(p.orderId || "");
         const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
@@ -1064,7 +1198,10 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           earnedDate = collectedDate((pays || []).filter((x: any) => !x.voided_at), ord.total_cents);
         }
         const period = earnedDate ? periodKey(earnedDate, settings.payout_frequency, settings.period_anchor, settings.custom_days) : null;
-        await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        // Checked before the rebuild below, so a failed wipe can never leave the old lines
+        // beside the new default one.
+        const { error: delErr } = await admin.from("commission_entries").delete().eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission").neq("status", "paid");
+        if (delErr) throw delErr;
         const { error: insErr } = await admin.from("commission_entries").insert({
           client_id: clientId, order_id: ord.id, earner_user_id: earner,
           base_cents: baseCents, rate_percent: rate, amount_cents: (baseCents != null && rate != null) ? Math.round(baseCents * rate / 100) : null,
@@ -1084,10 +1221,16 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const { data: entry } = await admin.from("commission_entries").select("status").eq("client_id", clientId).eq("id", entryId).maybeSingle();
         if (!entry) return json({ error: "Entry not found." }, 404);
         if (entry.status === "paid") return json({ error: "This commission is already paid." }, 409);
-        const { error } = await admin.from("commission_entries").update({ amount_cents: amt, is_override: true, updated_at: new Date().toISOString() }).eq("client_id", clientId).eq("id", entryId);
+        // Same rule as assign_earner: a new amount un-approves the line. Approving a period
+        // is the owner committing to those figures, and mark_paid pays every payable line —
+        // so an edit that left the approval standing would pay a number nobody signed off.
+        const patch: Record<string, unknown> = { amount_cents: amt, is_override: true, updated_at: new Date().toISOString() };
+        const unapproved = entry.status === "payable";
+        if (unapproved) { patch.status = "pending"; patch.approved_at = null; }
+        const { error } = await admin.from("commission_entries").update(patch).eq("client_id", clientId).eq("id", entryId);
         if (error) throw error;
-        await audit(`adjust_amount ${entryId} = ${amt}`);
-        return json({ ok: true });
+        await audit(`adjust_amount ${entryId} = ${amt}${unapproved ? " (un-approved)" : ""}`);
+        return json({ ok: true, unapproved });
       }
 
       // ── exclude a line from payout, or restore it (owner|full_access) ──
@@ -1209,6 +1352,14 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         return json({ error: `Unknown action: ${action}` }, 400);
     }
   } catch (e) {
-    return json({ error: (e as Error).message || "Commission request failed." }, 400);
+    // Two different animals, one exit. A Refusal is ours and is meant to be read, so it
+    // leaves with its own 4xx and its own words (the portal appends "— ask an owner or
+    // admin to do this" to a 403 and "sign out and back in" to a 401, so those sentences
+    // have to arrive intact). Everything else got here because a database or storage call
+    // failed, and answering that with a 400 told the browser "you sent something silly",
+    // hid the raw reason in a toast, and — since withErrorLog only files at 500 — kept a
+    // failed money write out of app_errors entirely.
+    if (e instanceof Refusal) return json({ error: e.message }, e.status);
+    return dbFail(req, clientId, whereFor(action), e);
   }
 }));

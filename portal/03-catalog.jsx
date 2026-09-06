@@ -76,6 +76,15 @@ function SettingsView({ section }) {
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
     setLogoDataUrl(""); setLogoCt(""); setClearLogo(false);
   };
+  // Branding lives inside the page-wide <form> but saves through its OWN action. Enter in
+  // one of its text fields would otherwise fire the form's implicit submit: the page-wide
+  // save runs, "Settings saved." appears, and the branding edit just typed is never sent —
+  // a success message for work that didn't happen. Route Enter to this card's own save.
+  const brandKeyDown = (e) => {
+    if (e.key !== "Enter" || brandBusy) return;
+    e.preventDefault();
+    saveBranding();
+  };
   // Business-logo (estimates) upload → uploads to the branding bucket and fills
   // the Logo URL field with the public URL; persisted by the normal Save action.
   const [bizLogoBusy, setBizLogoBusy] = useState(false);
@@ -513,16 +522,16 @@ function SettingsView({ section }) {
         {brandMsg && brandMsg.err && <div style={S.err}>{brandMsg.err}</div>}
         {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} /></div>
-          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} onKeyDown={brandKeyDown} /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Quote" /></div>
           <div><span style={S.lbl}>Accent color</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} /></div></div>
+              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} /></div></div>
           <div><span style={S.lbl}>Header background</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} /></div></div>
+              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
         </div>
         <div style={{ marginBottom: 12 }}>
           <span style={S.lbl}>Logo</span>
@@ -2277,6 +2286,22 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
 
   const saveBom = async () => {
     if (!bomSizeId) return;
+    // A quantity that doesn't parse ("12 ea", "two") or is negative used to be dropped by the
+    // filter below and the save sent anyway — and since save_rtp_bom FULL-REPLACES the size's
+    // bill of materials, the line being edited was deleted rather than saved. Refuse the whole
+    // save and name the rows, the way saveOverhead does. A qty of 0 is untouched: that stays
+    // the documented way to delete a line, and so does dropping the blank starter row.
+    const badQty = bomRows
+      .map((l, i) => ({ row: i + 1, materialId: l.materialId, raw: l.qty, n: rtpNum(l.qty) }))
+      .filter((x) => x.materialId && (!Number.isFinite(x.n) || x.n < 0));
+    if (badQty.length) {
+      const names = badQty.map((x) => {
+        const m = matRows.find((mr) => mr.id === x.materialId);
+        return `${m ? m.name : `line ${x.row}`} ("${x.raw}")`;
+      });
+      setMsg({ err: `Nothing was saved — fix these quantities first: ${names.join("; ")}.` });
+      return;
+    }
     const lines = bomRows
       .map((l) => ({ materialId: l.materialId, section: l.section, qty: rtpNum(l.qty) }))
       .filter((l) => l.materialId && Number.isFinite(l.qty) && l.qty > 0);

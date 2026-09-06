@@ -488,3 +488,158 @@ Deno.test("an out-of-range amount is refused before anything is written", async 
   check("nothing written", log.length === 0, JSON.stringify(log));
   check("ZERO gateway calls", fetchCount === 0);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Part 3 — resolving an unverifiable charge.
+//
+// resolveUnknownAttempt is the ONLY code that can lift a closed_unknown block, so every
+// exit it takes is a double-charge decision. Two of them are not obvious and are pinned
+// here: an attempt still IN FLIGHT is not resolvable at all (the gateway has not heard of
+// it yet, and "no record" would read as nothing-was-charged), and a recovery that cannot
+// write the payments row must LEAVE the block standing rather than stamp closed_ok with
+// no payment behind it.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/** The gateway answering "yes, that orderid really did charge". */
+const CHARGED = JSON.stringify({ respstat: "A", respcode: "000", retref: "rz", amount: "1000.00" });
+
+const UNKNOWN_ATT = {
+  id: 42,
+  order_id: "o1",
+  short_code: "SS-ABC",
+  amount_cents: 100000,
+  rail: "card",
+  merchid: "490000000101",
+  orderid: "ssp_lost",
+  state: "closed_unknown",
+  retref: null,
+  created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+};
+
+/** Default answers for the recovery path: one attempt row, an insert that succeeds. */
+// deno-lint-ignore no-explicit-any
+function attemptAnswer(att: Record<string, any>, over: Record<string, any> = {}) {
+  // deno-lint-ignore no-explicit-any
+  return (table: string, op: string, _p: any): any => {
+    const key = `${table}:${op}`;
+    if (key in over) return over[key];
+    if (table === "payment_attempts" && op === "select") return { data: att };
+    if (table === "payment_attempts" && op === "update") return { data: null, error: null };
+    if (table === "payments" && op === "insert") return { data: { id: "pRec" }, error: null };
+    if (table === "payments" && op === "select") return { data: null };
+    if (table === "app_errors" && op === "insert") return { data: null, error: null };
+    return { data: null, error: null };
+  };
+}
+
+Deno.test("recovery of a real charge records it and closes the attempt OK", async () => {
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(attemptAnswer(UNKNOWN_ATT), log);
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("resolved", r.resolved, JSON.stringify(r));
+  if (!r.resolved || r.outcome !== "charged") return;
+  check("carries the payment id", r.paymentId === "pRec", String(r.paymentId));
+  const close = log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()
+    ?.payload as Record<string, unknown>;
+  check("closed_ok WITH a payment id", close?.state === "closed_ok" && close?.payment_id === "pRec", JSON.stringify(close));
+});
+
+Deno.test("a recovery that cannot record the payment KEEPS the block and shouts", async () => {
+  // THE ONE THIS FILE EXISTS FOR. Closing the attempt ok with a null payment_id would lift
+  // the double-charge block on an order whose money is charged and still missing from the
+  // ledger — strictly worse than the closed_unknown it started as, and invisible: the next
+  // customer tap sails straight through to a second charge.
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(
+    attemptAnswer(UNKNOWN_ATT, {
+      "payments:insert": { data: null, error: { message: "column blew up", code: "42703" } },
+    }),
+    log,
+  );
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("NOT resolved", !r.resolved, JSON.stringify(r));
+  if (r.resolved) return;
+  check("reason", r.reason === "record_failed", r.reason);
+  check(
+    "the attempt state was NOT touched — the block stands",
+    !log.some((c) => c.table === "payment_attempts" && c.op === "update"),
+    JSON.stringify(log),
+  );
+  const fault = log.find((c) => c.table === "app_errors")?.payload as Record<string, unknown>;
+  check("app_errors written", !!fault);
+  check(
+    "names the retref and the attempt a human has to close",
+    /rz/.test(String(fault?.message)) && /42/.test(String(fault?.message)),
+    String(fault?.message),
+  );
+});
+
+Deno.test("a duplicate gateway_txn during recovery is the idempotent replay, i.e. success", async () => {
+  // Must not regress: re-running reconcile over the same attempt collides with
+  // payments_gateway_txn_uniq, and the row it collided with is the answer.
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(
+    attemptAnswer(UNKNOWN_ATT, {
+      "payments:insert": { data: null, error: { message: "duplicate key value violates unique constraint", code: "23505" } },
+      "payments:select": { data: { id: "already" } },
+    }),
+    log,
+  );
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("resolved", r.resolved, JSON.stringify(r));
+  if (!r.resolved || r.outcome !== "charged") return;
+  check("the row already there IS the answer", r.paymentId === "already", String(r.paymentId));
+  const close = log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()
+    ?.payload as Record<string, unknown>;
+  check("closed_ok", close?.state === "closed_ok" && close?.payment_id === "already", JSON.stringify(close));
+});
+
+Deno.test("an OPEN attempt still in flight is left alone: no gateway call, block intact", async () => {
+  // The charge that owns this row may be at the gateway this second, so the gateway has no
+  // record of it YET. Answering "not_charged" here would unblock the order moments before
+  // the auth lands.
+  const log: Call[] = [];
+  stubGateway(() => new Response(CHARGED, { status: 200 }));
+  const admin = makeAdmin(
+    attemptAnswer({ ...UNKNOWN_ATT, state: "open", created_at: new Date().toISOString() }),
+    log,
+  );
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("NOT resolved", !r.resolved, JSON.stringify(r));
+  if (r.resolved) return;
+  check("reason", r.reason === "in_flight", r.reason);
+  check("ZERO gateway calls", fetchCount === 0, String(fetchCount));
+  check("nothing was written", !log.some((c) => c.op !== "select"), JSON.stringify(log));
+});
+
+Deno.test("a STALE open attempt is still resolvable, so the recovery route stays alive", async () => {
+  // The other half of the in-flight guard: once it is as old as the charge path's own
+  // promotion threshold it is certainly dead, and the durable orderid exists precisely to
+  // settle it. A guard that never lets go would be its own outage.
+  const log: Call[] = [];
+  stubGateway(() => new Response("{}", { status: 200 })); // no retref: the gateway never saw it
+  const admin = makeAdmin(
+    attemptAnswer({
+      ...UNKNOWN_ATT,
+      state: "open",
+      created_at: new Date(Date.now() - ip.STALE_OPEN_MS - 1000).toISOString(),
+    }),
+    log,
+  );
+  const r = await ip.resolveUnknownAttempt(admin, "t1", 42);
+  restore();
+  check("resolved", r.resolved, JSON.stringify(r));
+  if (!r.resolved) return;
+  check("nothing was charged", r.outcome === "not_charged", r.outcome);
+  const close = log.filter((c) => c.table === "payment_attempts" && c.op === "update").pop()
+    ?.payload as Record<string, unknown>;
+  check("closed_declined", close?.state === "closed_declined", JSON.stringify(close));
+  check("NO payments row", !log.some((c) => c.table === "payments" && c.op === "insert"));
+});

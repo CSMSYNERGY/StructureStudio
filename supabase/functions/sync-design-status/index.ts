@@ -272,13 +272,26 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // sync. Trade-off, deliberate: SS designs give up opportunity-stage promotion —
     // acceptance lives on our quote page, not in the CRM pipeline.
     if (!d.ghl_estimate_id && d.ss_quote_number) { statuses[d.short_code] = d.status || "sent"; continue; }
+    // THE HYBRID FLOOR (mirror of the SS fence above, for the case it deliberately lets past).
+    // A design quoted through GHL BEFORE the tenant switched to StructureStudio quotes keeps its
+    // ghl_estimate_id forever, so the two-condition fence at the line above does not fire — but
+    // its paperwork is now LOCAL: the number came from allocate_ss_quote_number, the signature
+    // from customer-accept, the invoice from the SS invoice path. The old GHL estimate is frozen
+    // at whatever it said back then, so recomputing from the 'sent' baseline would DOWNGRADE a
+    // signed-and-invoiced design to that stale value. Cached status becomes a floor for anything
+    // carrying a local quote number; the hybrid still gets GHL-derived PROMOTION from both the
+    // estimate and the opportunity stage below, which is the whole point of letting it through.
+    // Keyed on ss_quote_number and deliberately NOT on ss_invoice_sent_at: that is stamped when
+    // the invoice is SENT, before the customer signs (migration 136 stopped send_invoice moving
+    // status), so flooring there would promote an unsigned invoice and hand it the build board.
+    const ssLocal = !!d.ss_quote_number;
     // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
     // Otherwise start from what we already believe, so the computation below can raise the status
     // but never lower it (see dataComplete above).
     const cachedStage = (d.status && STAGE_RANK[d.status as keyof typeof STAGE_RANK] !== undefined)
       ? (d.status as "sent" | "accepted" | "invoiced" | "delivered")
       : "sent";
-    let stage: "sent" | "accepted" | "invoiced" | "delivered" = dataComplete ? "sent" : cachedStage;
+    let stage: "sent" | "accepted" | "invoiced" | "delivered" = (dataComplete && !ssLocal) ? "sent" : cachedStage;
 
     const estStatus = d.ghl_estimate_id ? estStatusById.get(String(d.ghl_estimate_id)) : undefined;
     if (estStatus !== undefined) {

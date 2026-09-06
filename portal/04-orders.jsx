@@ -1330,7 +1330,18 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
+//
+// ⚠️ `ordersOn` is the orders:edit half of the same grant model `coOn` already carries. The
+// Orders TAB is readable at orders='view' — that is what shipped to crew leaders and drivers
+// on 2026-09-01 — but recording a payment, voiding one and typing an order total are writes,
+// and until this prop existed the detail screen offered all three to every viewer. Migration
+// 188 is the control (restrictive area policies on orders/payments); this is the courtesy
+// half, so a viewer sees a read-only order instead of a button that returns a raw RLS
+// refusal. It DEFAULTS TO TRUE: 12-shell.jsx has computed `ordersCanEdit` since 2026-09-01
+// but does not yet pass it, and defaulting to false would take Record-a-payment away from
+// owners and admins. The default is the no-op, `ordersOn={ordersCanEdit}` at the call site
+// is the fix — see the note returned with this change.
+function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, ordersOn = true, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -1426,8 +1437,17 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     const paysP = fetchAllPayments().then((r) => r, (e) => ({ error: e }));
     // Pending change orders (migration 126): the row wears an amber chip, and the server
     // 409s an invoice while one is open — the chip is the courtesy half of that rule.
+    //
+    // ⚠️ NO `.in("short_code", codes)`. PostgREST reads filters from the QUERY STRING, so that
+    // list travelled as one `short_code=in.(...)` parameter carrying every order code in the
+    // tenant. Around 500 orders it crosses the URL length ceiling and the whole Orders tab
+    // dies on a read that is pure decoration — and it fails at the SIZE a real tenant grows
+    // into, not in testing. The filter also bought nothing: `client_id` + RLS already scope
+    // this to the tenant, `status = pending_ack` is a handful of rows on any tenant, and
+    // `pendingCo` below is only ever probed per rendered order, so codes that belong to no
+    // shown order are inert. The read stays a fixed-size URL whatever the tenant's volume.
     const coP = (codes.length
-      ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack").in("short_code", codes)
+      ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack")
       : Promise.resolve({ data: [] })
     ).then((r) => r, (e) => ({ error: e }));
 
@@ -1689,7 +1709,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     );
   }
 
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} />;
+  // moneyReady travels WITH the row: `row.paid` is 0 and `balOf(row)` is the full total until
+  // the payments read lands, and the detail screen states both as fact — "$0.00 of $84,000
+  // collected", "Nothing recorded yet", and a Record-a-payment button prefilled with a
+  // balance that is about to change. The list has always known better (its chip reads "…");
+  // this is the same honesty one component further in.
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} ordersOn={ordersOn} moneyReady={moneyReady} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -1968,14 +1993,36 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their quote page.` });
   };
 
+  // ⚠️ THROUGH void_change_order, NOT a direct update. Voiding is not one column: when the CO
+  // carries `snapshot_before` — every CO staged from the order document, and every one the
+  // document adopted — the server RESTORES the design the customer signed, writes the
+  // reverting design_version and regenerates the quote PDF (portal-settings). A direct
+  // `status = 'void'` writes the change order's own row and nothing else, so the design keeps
+  // the revision nobody ever signed while the record says the change was discarded, and the
+  // next quote or invoice PDF prints from it. The Discard button on the document above has
+  // always called this action; the card's Void is the same act and had to be the same call.
+  //
+  // Pending-only is the server's rule (it 400s an acknowledged or already-void CO) and the
+  // card only offers Void on pending_ack, so behaviour is unchanged — but the body is
+  // surfaced rather than swallowed, because that 400 is also what a second tab racing this
+  // one produces. The area gate is the same one that renders the card (change_orders/edit).
   const voidCo = async (co) => {
     const reason = window.prompt(`Void CO-${co.co_no}? Give a reason (kept in the record):`);
     if (reason == null) return;
     if (!reason.trim()) { setMsg({ err: "Voiding needs a reason." }); return; }
-    const { error } = await sb.from("change_orders")
-      .update({ status: "void", void_reason: reason.trim() })
-      .eq("id", co.id);
-    if (error) { setMsg({ err: error.message }); return; }
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "void_change_order", changeOrderId: co.id, reason: reason.trim() },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) {
+      setMsg({ err: (data && data.error) || await fnError(error) });
+      // Reload either way: a refusal usually means this card is holding a stale copy of the
+      // change order (signed or voided in another tab), and the list should say so.
+      load();
+      return;
+    }
+    setMsg({ ok: `CO-${co.co_no} voided${data && data.reverted ? " — the design is back to what the customer signed" : ""}.` });
     load(); onChanged();
   };
 
@@ -2077,8 +2124,8 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Email to customer</button>
                 <button type="button" onClick={() => { setVerbalFor(verbalFor === co.id ? null : co.id); setVConfirm(false); }}
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Record verbal confirmation</button>
-                <button type="button" onClick={() => voidCo(co)}
-                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12.5 }}>Void</button>
+                <button type="button" onClick={() => voidCo(co)} disabled={busy}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>Void</button>
               </div>
               {verbalFor === co.id && (
                 <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginTop: 8 }}>
@@ -2899,7 +2946,12 @@ function QrSvg({ matrix, size = 200 }) {
   );
 }
 
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false }) {
+// `ordersOn` = may this person WRITE money on this order (orders:edit). It defaults to true
+// for the reason spelled out on OrdersView: the shell does not pass it yet, and a false
+// default would take Record-a-payment away from owners. `moneyReady` = has the payments read
+// landed; while it is false `row.paid` is 0 and `balOf(row)` is the whole total, so every
+// figure derived from them is a number this screen does not know yet.
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false, ordersOn = true, moneyReady = true }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -3275,8 +3327,16 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               orders don't — the decision was SS-only (Carolyn 2026-08-23).
               coOn = the change_orders grant (2026-09-01): reps hold orders:edit so they can
               finalize the sale, but amending a signed agreement is handed out separately in
-              Team settings. Hiding the card is the courtesy; portal-settings refuses the
-              three change-order actions on the same grant, so this is not the gate. */}
+              Team settings.
+
+              ⚠️ WHERE THE GATE ACTUALLY IS. This comment used to say "portal-settings refuses
+              the three change-order actions on the same grant, so this is not the gate", and
+              that was false for the three the card does itself: raising a CO, attesting a
+              verbal acknowledgment and (until this change) voiding one all wrote
+              `change_orders` straight over PostgREST and never reached an edge function at
+              all. The real server gate is migration 188's restrictive change_orders_area_*
+              policies, which put `change_orders = 'edit'` on INSERT and UPDATE where a
+              browser tab cannot edit it out. Hiding the card stays the courtesy half. */}
           {ssMode && coOn && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
               currentTotalCents={o.total_cents} reloadKey={ssReload} onChanged={changedAll} />
@@ -3284,7 +3344,22 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
           <div style={S.card}>
             <div style={{ ...S.h2, marginBottom: 8 }}>Payments</div>
-            {row.pays.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Nothing recorded yet.</p>}
+            {/* "Nothing recorded yet." is a CLAIM, and `row.pays` is [] on every mount until
+                the paged payments read lands — so a settled order announced that nobody had
+                ever paid for it, then filled in. The skeleton says the same thing the header
+                chip's "…" says. */}
+            {!moneyReady ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
+                <SkelBar w={26} h={26} style={{ borderRadius: "50%", flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <SkelBar w="38%" h={12} />
+                  <SkelBar w="54%" h={9} style={{ marginTop: 6 }} />
+                </div>
+                <SkelBar w={68} h={12} style={{ flexShrink: 0 }} />
+              </div>
+            ) : row.pays.length === 0 ? (
+              <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Nothing recorded yet.</p>
+            ) : null}
             {row.pays.map((p) => {
               const dead = !!p.voided_at;
               return (
@@ -3314,8 +3389,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                       payment is different: the money is at the card network, so voiding it
                       HAS to go through the edge function, which only marks the row voided
                       if the gateway agrees. (RLS enforces the same thing from below — the
-                      browser cannot update a row where gateway IS NOT NULL.) */}
-                  {p.gateway === "cardpointe"
+                      browser cannot update a row where gateway IS NOT NULL.)
+
+                      Void/Restore is a direct payments UPDATE, so it needs orders:edit —
+                      without it the click returns the RLS refusal migration 188 installs,
+                      rendered as a red banner. A viewer sees the payment and no control. */}
+                  {!ordersOn
+                    ? <span title="You have view-only access to Orders" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                    : p.gateway === "cardpointe"
                     ? (dead
                       ? <span title="Already reversed at the card network" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
                       : <button type="button" onClick={() => voidGatewayPayment(p)} title="Cancel or refund this at the card network"
@@ -3332,18 +3413,31 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
         <div>
           <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 12, padding: "16px 18px", marginBottom: 14 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{bal != null && bal < 0 ? "Credit owed back" : "Balance due"}</div>
+            {/* ⏳ EVERY FIGURE IN THIS BLOCK IS PAID-DERIVED except the total. `row.paid` is 0
+                and `bal` is therefore the whole total until the payments read lands, so a
+                settled order painted "Balance due $84,000" and "$0.00 of $84,000 collected"
+                for the length of that read and then corrected itself. The first number is the
+                one someone reads out loud — the pale block is the honest one. */}
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{moneyReady && bal != null && bal < 0 ? "Credit owed back" : "Balance due"}</div>
             <div style={{ fontSize: 29, fontWeight: 800, margin: "4px 0 2px", fontVariantNumeric: "tabular-nums", letterSpacing: -0.7 }}>
-              {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+              {!moneyReady
+                ? <SkelBar w={148} h={25} style={{ background: "rgba(255,255,255,0.26)", margin: "4px 0" }} />
+                : bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
               {o.total_cents == null
                 ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
-                : `${money(row.paid)} of ${money(o.total_cents)} collected`}
+                : !moneyReady
+                  ? <SkelBar w={168} h={10} style={{ background: "rgba(255,255,255,0.22)", margin: "2px 0" }} />
+                  : `${money(row.paid)} of ${money(o.total_cents)} collected`}
             </div>
             {ssMode && o.total_cents != null && (
               <div style={{ borderTop: "1px solid rgba(255,255,255,0.22)", marginTop: 10, paddingTop: 6 }}>
-                {[["Total", money(o.total_cents)], ["Paid", money(row.paid)], ["Balance", bal == null ? "—" : money(bal)]].map(([k, v]) => (
+                {[
+                  ["Total", money(o.total_cents)],
+                  ["Paid", moneyReady ? money(row.paid) : <SkelBar w={72} h={10} style={{ background: "rgba(255,255,255,0.26)", display: "inline-block", verticalAlign: "middle" }} />],
+                  ["Balance", !moneyReady ? <SkelBar w={72} h={10} style={{ background: "rgba(255,255,255,0.26)", display: "inline-block", verticalAlign: "middle" }} /> : bal == null ? "—" : money(bal)],
+                ].map(([k, v]) => (
                   <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", color: "#D6E4F0" }}>
                     <span>{k}</span><span style={{ fontWeight: 700, color: "#FFF", fontVariantNumeric: "tabular-nums" }}>{v}</span>
                   </div>
@@ -3353,18 +3447,33 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 </div>
               </div>
             )}
-            {o.total_cents != null && (
-              <button type="button" onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
-                style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13 }}>Record a payment</button>
+            {/* Two conditions, and neither is cosmetic.
+                ordersOn — recording a payment INSERTs into `payments`, which fires
+                  inventory_claim_on_payment and marks the linked unit sold. Migration 188
+                  refuses that below orders:edit; this is the button not being there.
+                moneyReady — DISABLED, not merely un-prefilled. The Balance beside it is
+                  wrong until the payments read lands, so an empty amount box would still
+                  invite someone to type a figure against a number that is about to change. */}
+            {o.total_cents != null && ordersOn && (
+              <button type="button" disabled={!moneyReady}
+                title={moneyReady ? undefined : "Reading this order's payments…"}
+                onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
+                style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13, opacity: moneyReady ? 1 : 0.55, cursor: moneyReady ? "pointer" : "not-allowed" }}>Record a payment</button>
             )}
           </div>
 
           {/* SS orders derive their total (accept → CO acks → invoice); the hand-typed
-              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24). */}
+              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24).
+
+              `ordersOn` decides whether the EDITOR appears, never whether the card does: the
+              figures are the point of the Orders tab and a viewer keeps them. Typing a total
+              is an orders UPDATE, which migration 188 puts behind orders:edit — and note that
+              `editTotal` starts TRUE on an order with no total, so without this test a driver
+              opening a manual order would land straight in an input box that cannot save. */}
           {!ssMode && (
             <div style={S.card}>
               <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
-              {editTotal ? (
+              {editTotal && ordersOn ? (
                 <>
                   <span style={S.lbl}>Total (from your estimate)</span>
                   <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
@@ -3379,11 +3488,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               ) : (
                 <>
                   {kv("Total", money(o.total_cents))}
-                  {kv("Paid", money(row.paid))}
-                  {kv("Balance", bal == null ? "—" : money(bal))}
+                  {kv("Paid", moneyReady ? money(row.paid) : <SkelBar w={72} h={10} style={{ display: "inline-block", verticalAlign: "middle" }} />)}
+                  {kv("Balance", !moneyReady ? <SkelBar w={72} h={10} style={{ display: "inline-block", verticalAlign: "middle" }} /> : bal == null ? "—" : money(bal))}
                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
                     {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
-                    {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
+                    {ordersOn && <>{" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button></>}
                   </div>
                 </>
               )}
@@ -3499,24 +3608,21 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         </div>
       </div>
 
-      {pdfView && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setPdfView(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
-          <div style={{ background: "#FFF", borderRadius: 14, width: "min(900px, 96vw)", height: "min(88vh, 1100px)", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-              <div style={{ fontSize: 14.5, fontWeight: 800 }}>{pdfView.title}</div>
-              <a href={pdfView.url} target="_blank" rel="noopener"
-                style={{ marginLeft: "auto", color: "#CFE0EC", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>Open in tab ↗</a>
-              <button type="button" onClick={() => setPdfView(null)}
-                style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
-            </div>
-            {/* The browser's own viewer: its toolbar carries print + download. */}
-            <iframe src={pdfView.url} title={pdfView.title} style={{ flex: 1, width: "100%", border: "none", background: "#525659" }} />
-          </div>
-        </div>
-      )}
+      {/* ⚠️ PdfModal (01-core), NOT a private copy of it. This screen frames four URLs and one
+          of them — designs.image_url — is written VERBATIM by the anon-granted save_design
+          RPC (104), so a hostile caller can stash any address against a tenant's design and
+          this modal framed it inside the authenticated portal, behind a button the owner has
+          every reason to trust. 01-core's component runs both the iframe src and the "open in
+          a new tab" href through ssSafeUrl (https on our own origin or our own Supabase
+          storage host) and renders a refusal instead of a viewer when the URL is neither —
+          the guard 02-sales and the designer already had, which this local copy predated and
+          never received. Behaviour otherwise matches: same pop-up-never-a-tab rule, same
+          escape hatch, plus Escape-to-close and the counted body scroll lock. Both server
+          PDFs (ss_quote_pdf_url, invoice_pdf_url) live on the Supabase storage host, which
+          ssSafeUrl admits. */}
+      {pdfView && <PdfModal url={pdfView.url} title={pdfView.title} onClose={() => setPdfView(null)} />}
 
-      {payOpen && (
+      {payOpen && ordersOn && (
         <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
           <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>

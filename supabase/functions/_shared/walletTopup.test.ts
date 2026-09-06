@@ -6,13 +6,15 @@
 // and over within seconds. So the properties pinned here are the guards, not the happy path —
 // the cooldown, the available-vs-balance distinction, and every reason to refuse.
 //
-// The charge itself (chargeTopup) is not unit-testable without a gateway and a database; it
-// is covered by the ledger states it writes and by the manual gateway run in the plan.
+// chargeTopup itself moves real money, but the BOOKKEEPING half of it is testable without a
+// gateway or a database: a recording fake for `admin` and a stubbed `fetch` pin the one thing
+// support depends on when a top-up ends unverifiable — that the order id stored on the attempt
+// row is the order id the sale was actually sent with.
 //
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a machine
 // with no registry access — the same rule the other _shared tests follow.
 import {
-  autoTopupDecision, AUTO_TOPUP_COOLDOWN_MS,
+  autoTopupDecision, AUTO_TOPUP_COOLDOWN_MS, chargeTopup,
   MIN_TOPUP_CENTS, MAX_TOPUP_CENTS, TOPUP_PLAN_ID,
 } from "./walletTopup.ts";
 
@@ -112,6 +114,166 @@ Deno.test("the bounds and the attempt-ledger key are what the rest of the system
   // Changing this string orphans every in-flight attempt row: the closed_unknown block and
   // the one-open concurrency index both look it up by exactly this value.
   check("ledger key is stable", TOPUP_PLAN_ID === "wallet_topup", TOPUP_PLAN_ID);
+});
+
+// ── chargeTopup: the row's order id must be the gateway's order id ───────────────────────
+//
+// The attempt row is the ONLY handle support has on a top-up whose outcome the gateway never
+// told us. "Did this card get charged?" is answered by looking the sale up at the gateway by
+// the order id on that row — so a row carrying a different string than the sale was sent with
+// makes the very state the blocking semantics exist to preserve unresolvable, and the tenant
+// stays blocked while nobody can prove either way.
+//
+// The insert has to mint SOMETHING before the row has an id, so the real order id (which is
+// built from that id) is written back straight after. These tests pin the write-back, and that
+// it can never take the sale down with it.
+
+type Row = Record<string, unknown>;
+type AdminCfg = {
+  attemptId?: string;
+  balanceCents?: number;
+  failUpdates?: boolean;
+  gateway?: "approve" | "unknown";
+};
+
+function fakeAdmin(cfg: AdminCfg) {
+  const attemptId = cfg.attemptId ?? "att-7";
+  const inserts: { table: string; row: Row }[] = [];
+  const updates: { table: string; patch: Row; filters: Row }[] = [];
+  const rpcs: { fn: string; args: Row }[] = [];
+
+  // No prior closed_unknown and no stale open: the clean path into the sale.
+  const selectResult = (table: string) =>
+    table === "wallet_accounts"
+      ? { data: { balance_cents: cfg.balanceCents ?? 0 }, error: null }
+      : { data: [] as Row[], error: null };
+
+  const admin = {
+    from(table: string) {
+      return {
+        select(_cols?: string) {
+          // deno-lint-ignore no-explicit-any
+          const b: any = {
+            eq: (_c: string, _v: unknown) => b,
+            limit: (_n: number) => b,
+            maybeSingle: () => Promise.resolve(selectResult(table)),
+            // deno-lint-ignore no-explicit-any
+            then: (ok: any, no: any) => Promise.resolve(selectResult(table)).then(ok, no),
+          };
+          return b;
+        },
+        insert(row: Row) {
+          inserts.push({ table, row });
+          const result = table === "billing_charge_attempts"
+            ? { data: { id: attemptId }, error: null }
+            : { data: null, error: null };
+          // deno-lint-ignore no-explicit-any
+          const b: any = {
+            select: (_c?: string) => b,
+            maybeSingle: () => Promise.resolve(result),
+            // deno-lint-ignore no-explicit-any
+            then: (ok: any, no: any) => Promise.resolve(result).then(ok, no),
+          };
+          return b;
+        },
+        update(patch: Row) {
+          const filters: Row = {};
+          // deno-lint-ignore no-explicit-any
+          const b: any = {
+            eq: (c: string, v: unknown) => { filters[c] = v; return b; },
+            // deno-lint-ignore no-explicit-any
+            then: (ok: any, no: any) => {
+              updates.push({ table, patch, filters });
+              // A write that fails must never be the reason a sale is abandoned.
+              return (cfg.failUpdates
+                ? Promise.reject(new Error("update refused"))
+                : Promise.resolve({ data: null, error: null })).then(ok, no);
+            },
+          };
+          return b;
+        },
+      };
+    },
+    rpc(fn: string, args: Row) {
+      rpcs.push({ fn, args });
+      return Promise.resolve({ data: cfg.balanceCents ?? 30000, error: null });
+    },
+  };
+  return { admin, inserts, updates, rpcs, attemptId };
+}
+
+const CLIENT = "pw-demo-barns";
+
+async function runTopup(cfg: AdminCfg = {}) {
+  const fake = fakeAdmin(cfg);
+  const sent: Record<string, string>[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_input: unknown, init?: { body?: unknown }) => {
+    sent.push(Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))));
+    if (cfg.gateway === "unknown") return Promise.reject(new Error("connection reset"));
+    return Promise.resolve(
+      new Response("response=1&responsetext=SUCCESS&transactionid=TXN9911", { status: 200 }),
+    );
+  }) as unknown as typeof fetch;
+  try {
+    const res = await chargeTopup(fake.admin, {
+      clientId: CLIENT, vaultId: "vault-1", amountCents: 25000, auto: false,
+    });
+    return { ...fake, res, sent };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+// What the row ends up carrying: the insert's placeholder unless a later write replaces it.
+function storedOrderId(
+  inserts: { table: string; row: Row }[],
+  updates: { table: string; patch: Row; filters: Row }[],
+): string {
+  let id = String(inserts.find((i) => i.table === "billing_charge_attempts")?.row.orderid ?? "");
+  for (const u of updates) {
+    if (u.table === "billing_charge_attempts" && typeof u.patch.orderid === "string") id = u.patch.orderid;
+  }
+  return id;
+}
+
+Deno.test("the attempt row ends up holding the order id the gateway was actually given", async () => {
+  const { res, sent, inserts, updates, attemptId } = await runTopup();
+  check("the sale went out", sent.length === 1, JSON.stringify(sent));
+  const atGateway = sent[0].orderid;
+  check("gateway order id is built from the attempt row id", atGateway === `ss_topup_${CLIENT}_${attemptId}`, atGateway);
+  // The bug this pins: the insert minted a timestamp-based id and nothing ever reconciled it,
+  // so the stored key found nothing at the gateway.
+  check("row matches gateway", storedOrderId(inserts, updates) === atGateway,
+    `${storedOrderId(inserts, updates)} != ${atGateway}`);
+  check("and the wallet was credited", res.ok === true, JSON.stringify(res));
+});
+
+Deno.test("the insert still carries an order id, and stays the concurrency guard", async () => {
+  const { inserts } = await runTopup();
+  const row = inserts.find((i) => i.table === "billing_charge_attempts")?.row ?? {};
+  // Filed under the shared plan slot (that is what makes the partial unique index refuse a
+  // second simultaneous top-up), and never inserted without an order id.
+  check("plan slot", row.plan_id === TOPUP_PLAN_ID, String(row.plan_id));
+  check("insert has an order id", typeof row.orderid === "string" && (row.orderid as string).length > 0);
+});
+
+Deno.test("a failed order-id write-back must not abort the sale", async () => {
+  // Every write to the attempt row is bookkeeping. If one fails the money path carries on:
+  // throwing here would abandon an 'open' row and block every later top-up for that tenant.
+  const { res, sent } = await runTopup({ failUpdates: true });
+  check("the sale still ran", sent.length === 1);
+  check("and still succeeded", res.ok === true, JSON.stringify(res));
+});
+
+Deno.test("an unverifiable top-up names the order id an operator has to look up", async () => {
+  const { res, inserts, sent, attemptId } = await runTopup({ gateway: "unknown" });
+  check("blocking", res.ok === false && res.blocking === true, JSON.stringify(res));
+  const fault = inserts.find((i) => i.table === "app_errors")?.row ?? {};
+  const message = String(fault.message ?? "");
+  check("a fault row was filed", message.length > 0);
+  check("naming the gateway order id", message.includes(sent[0].orderid), message);
+  check("and the attempt row", message.includes(attemptId), message);
 });
 
 if (failures) throw new Error(`${failures} failed`);

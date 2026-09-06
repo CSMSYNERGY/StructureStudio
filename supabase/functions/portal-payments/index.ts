@@ -65,6 +65,35 @@ const GATES: GateTable = {
   reconcile:        { area: "orders", level: "view" },
 };
 
+/** Declined attempts one member may make in an hour before this function stops asking the
+ *  gateway. customer-pay carries the same number on the shopper side; the difference is
+ *  WHAT it is counted on. There the order is the natural key. Here it cannot be: a walk-in
+ *  charge mints a brand new order on every call, so an order-scoped counter never reaches
+ *  two and a loop of throwaway sales would read back card validity for free, on the
+ *  builder's merchant account, one `orders` row at a time. Counting the ACTOR closes both
+ *  the ad-hoc and the invoice path with one number.
+ *
+ *  Five is deliberately above realistic counter traffic: it counts DECLINES only, so three
+ *  good walk-in payments in a row never approach it. */
+const MAX_DECLINES_PER_HOUR = 5;
+
+/** Said to a member, not a shopper — customer-pay's phrasing, aimed at the person holding
+ *  the terminal rather than the person holding the card. */
+const DECLINE_THROTTLE_TEXT =
+  "That's several declined attempts in a row from this login. Give it an hour, or take the payment another way.";
+
+/** settlestat is ONE call per DAY and never one per payment — the 40 TPM per-MID quota is
+ *  shared with live charges, so a per-payment inquire loop would starve real money. This
+ *  caps the days a single reconcile may spend; they are spent OLDEST FIRST, so the payment
+ *  that has been stuck longest is always the one we ask about. */
+const MAX_SETTLESTAT_DAYS = 5;
+
+/** How long after funding a bank payment can still come back. Most NACHA codes return
+ *  within two business days; R10 (unauthorised) has sixty. The wide window costs no extra
+ *  gateway calls — only a wider SELECT — and the narrow one would mean a return arriving on
+ *  day nine is never seen at all. */
+const ACH_RETURN_WINDOW_DAYS = 60;
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -101,6 +130,33 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
     context: { where, pgCode: err?.code ?? null, details: err?.details ?? null, hint: err?.hint ?? null },
   }).catch(() => {});
   return json({ error: `Something went wrong trying to ${where}. Please try again in a moment.` }, 500);
+}
+
+/**
+ * How many of this member's charges the gateway has DECLINED on this tenant in the last
+ * hour. Declines only — an approval, an unknown and a gateway-config refusal all leave the
+ * counter where it was, because none of them is a probe reading back an answer.
+ *
+ * Deliberately NOT in _shared/invoicePayment.ts: _shared bundles per function, so putting
+ * it there would either leave customer-pay carrying a second throttle beside its own or
+ * force both functions to redeploy in lockstep on any change to either.
+ */
+async function recentDeclines(
+  // deno-lint-ignore no-explicit-any
+  admin: any,
+  clientId: string,
+  actorRef: string | null,
+): Promise<number> {
+  if (!actorRef) return 0;
+  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const { count } = await admin.from("payment_attempts")
+    .select("id", { count: "exact", head: true })
+    .eq("client_id", clientId)
+    .eq("actor_kind", "staff")
+    .eq("actor_ref", actorRef)
+    .eq("state", "closed_declined")
+    .gt("created_at", since);
+  return Number(count ?? 0);
 }
 
 Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
@@ -221,6 +277,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     await audit(`charge_${rail}`, null, `order=${orderId} cents=${decision.askCents}`).catch(() => {});
 
+    // The audit above is deliberately ahead of this refusal: a throttled attempt is still
+    // an attempt, and the trail has to show it was made as well as refused.
+    if (await recentDeclines(admin, clientId, userId ?? null) >= MAX_DECLINES_PER_HOUR) {
+      await audit("charge_throttled", null, `order=${orderId}`).catch(() => {});
+      return json({ error: DECLINE_THROTTLE_TEXT }, 429);
+    }
+
     // ⚠️ ACH REQUIRES AN ACCOUNT-HOLDER NAME. Without it the gateway declines with
     // "all name fields are empty" — a refusal that reads like a card problem and is really
     // an incomplete request from us. customer-pay always had this (it passes the contact off
@@ -286,6 +349,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     const adhocName = typeof payload?.name === "string" ? payload.name.trim().slice(0, 60) : "";
     if (rail === "ach" && !adhocName) {
       return json({ error: "Enter the name on the bank account — a bank payment can't be taken without it." }, 400);
+    }
+
+    // BEFORE the orders insert, not after: a throttled probe must not leave an empty counter
+    // sale behind it. The audit row is what records that the attempt was made.
+    if (await recentDeclines(admin, clientId, userId ?? null) >= MAX_DECLINES_PER_HOUR) {
+      await audit("charge_adhoc_throttled", null, `cents=${cents}`).catch(() => {});
+      return json({ error: DECLINE_THROTTLE_TEXT }, 429);
     }
 
     const { data: order, error: oErr } = await admin.from("orders").insert({
@@ -406,11 +476,13 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   // ── reconcile ─────────────────────────────────────────────────────────────────────
   // Two jobs in one action, because both are "go and ask the gateway what really happened":
   //   * resolve any attempt whose response we never saw (the closed_unknown recovery)
-  //   * move pending ACH forward, or mark it returned
+  //   * move pending ACH forward, or mark it returned, or bring back a late return
   //
-  // Called when the Orders tab loads and from an explicit Refresh. There is no pg_cron on
-  // this project, so nothing self-heals on a schedule — this is the safety net, and the
-  // GitHub Actions sweep calls the same code path.
+  // ⚠️ THIS ACTION ONLY WORKS IF SOMETHING CALLS IT. There is no pg_cron on this project, so
+  //    nothing self-heals on a schedule: bank money stays `pending` and an unresolved attempt
+  //    stays blocking until a caller asks. It is gated orders:'view' and sits in readActions
+  //    precisely so the Orders tab can fire it on load — fire-and-forget, never awaited in
+  //    the paint path, then re-read the money — and so an explicit Refresh can too.
   if (action === "reconcile") {
     const orderId = String(payload?.orderId ?? "").trim();
     const resolved: unknown[] = [];
@@ -427,29 +499,77 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // Pending bank payments. settlestat returns a whole batch in ONE call, which is the only
     // shape that survives the 40 TPM per-MID cap — a per-payment inquire loop would 429
     // itself into uselessness and starve real customer charges of the same quota.
+    //
+    // ORDERED, and the order is load-bearing. PostgREST returns rows in no defined order, so
+    // an unordered slice of days could ask about today's batch on every sweep and never once
+    // about the payment that has been stuck since last week. Oldest received first means the
+    // oldest money is always inside the day budget.
     let pq = admin.from("payments")
       .select("id, order_id, gateway_txn_id, received_at")
       .eq("client_id", clientId).eq("gateway", "cardpointe")
-      .eq("funding_state", "pending").is("voided_at", null);
+      .eq("funding_state", "pending").is("voided_at", null)
+      .order("received_at", { ascending: true });
     if (orderId) pq = pq.eq("order_id", orderId);
     const { data: pending } = await pq.limit(200);
 
+    // Bank payments that already funded but are still inside the return window. Settled is
+    // NOT final for ACH: a debit can be sent back days later, and without this pass the only
+    // record of that is a bank statement nobody reads.
+    //
+    // ⚠️ Narrow on purpose — cardpointe AND the ach rail. `funding_state` defaults to
+    //    'settled' for every pre-174 cash and cheque row, so a broader sweep here would put
+    //    historical hand-recorded payments at the mercy of a gateway batch that has never
+    //    heard of them.
+    const returnSince = new Date(Date.now() - ACH_RETURN_WINDOW_DAYS * 86400000).toISOString();
+    let rq = admin.from("payments")
+      .select("id, order_id, gateway_txn_id, received_at")
+      .eq("client_id", clientId).eq("gateway", "cardpointe").eq("method", "ach")
+      .eq("funding_state", "settled").is("voided_at", null)
+      .gt("funding_updated_at", returnSince)
+      .order("funding_updated_at", { ascending: false });
+    if (orderId) rq = rq.eq("order_id", orderId);
+    const { data: settledAch } = await rq.limit(200);
+
+    const nowIso = new Date().toISOString();
     const updated: unknown[] = [];
-    if (pending && pending.length) {
-      const days = [...new Set(pending.map((p: Record<string, unknown>) => String(p.received_at ?? "").slice(0, 10).replace(/-/g, "")))]
-        .filter(Boolean).slice(0, 5);
-      const byRetref = new Map<string, string>();
-      for (const d of days) {
+    const byRetref = new Map<string, string>();
+    const fetchedDays = new Set<string>();
+    const skippedDays = new Set<string>();
+    const dayOf = (v: unknown) => String(v ?? "").slice(0, 10).replace(/-/g, "");
+
+    /** Spend day-sized pieces of the per-MID budget, in the order given, never twice on the
+     *  same day, and never past MAX_SETTLESTAT_DAYS. */
+    const loadDays = async (rows: Record<string, unknown>[]) => {
+      for (const row of rows) {
+        const d = dayOf(row.received_at);
+        if (!d || fetchedDays.has(d) || skippedDays.has(d)) continue;
+        if (fetchedDays.size >= MAX_SETTLESTAT_DAYS) { skippedDays.add(d); continue; }
+        fetchedDays.add(d);
         try {
           const batch = await cpSettleStat(merchid, d) as Record<string, unknown>;
-          const rows = (batch?.txns ?? batch?.transactions ?? []) as Record<string, unknown>[];
-          for (const t of Array.isArray(rows) ? rows : []) {
+          const rs = (batch?.txns ?? batch?.transactions ?? []) as Record<string, unknown>[];
+          for (const t of Array.isArray(rs) ? rs : []) {
             const rr = String(t.retref ?? "");
             if (rr) byRetref.set(rr, String(t.setlstat ?? t.status ?? ""));
           }
         } catch { /* one bad day must not stop the rest */ }
       }
-      const nowIso = new Date().toISOString();
+    };
+
+    const noteReturned = (paymentId: unknown, orderRef: unknown, retref: string) => {
+      logEdgeError({
+        fn: "portal-payments",
+        req,
+        clientId,
+        code: "ach_returned",
+        message:
+          `${clientId}: bank payment ${retref} on order ${orderRef} was RETURNED — the balance has been reopened and the builder needs to chase it.`,
+        context: { paymentId, retref },
+      }).catch(() => {});
+    };
+
+    if (pending && pending.length) {
+      await loadDays(pending as Record<string, unknown>[]);
       for (const p of pending) {
         const rr = String(p.gateway_txn_id ?? "");
         const next = fundingStateFromSetlstat(byRetref.get(rr));
@@ -461,21 +581,48 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
           : { funding_state: "settled", funding_updated_at: nowIso };
         await admin.from("payments").update(patch).eq("client_id", clientId).eq("id", p.id);
         updated.push({ paymentId: p.id, to: next });
-        if (next === "returned") {
-          logEdgeError({
-            fn: "portal-payments",
-            req,
-            clientId,
-            code: "ach_returned",
-            message:
-              `${clientId}: bank payment ${rr} on order ${p.order_id} was RETURNED — the balance has been reopened and the builder needs to chase it.`,
-            context: { paymentId: p.id, retref: rr },
-          }).catch(() => {});
-        }
+        if (next === "returned") noteReturned(p.id, p.order_id, rr);
       }
     }
 
-    return json({ ok: true, resolved, updated });
+    // ── late bank returns ────────────────────────────────────────────────────────────
+    // The ONLY transition allowed out of settled is 'returned', and only when the gateway
+    // says so in as many words. An unrecognised status, a blank one, or a retref that is not
+    // in any batch we managed to read all mean the same thing they mean above: leave it
+    // alone. Un-paying an invoice on a guess is worse than a late return going unseen.
+    //
+    // ⚠️ Voiding a returned payment does NOT release the inventory unit (migration 105). A
+    //    transfer sent back is a collections problem, not an un-sale.
+    if (settledAch && settledAch.length) {
+      await loadDays(settledAch as Record<string, unknown>[]);
+      for (const p of settledAch) {
+        const rr = String(p.gateway_txn_id ?? "");
+        const raw = byRetref.get(rr);
+        if (raw === undefined) continue;
+        if (fundingStateFromSetlstat(raw) !== "returned") continue;
+        // The funding_state/voided_at predicates are repeated on the UPDATE so a row someone
+        // voided or refunded between the SELECT and here is left alone, and `.select` is what
+        // tells us whether a row actually moved — a zero-row update is not an error.
+        const { data: hit, error: rErr } = await admin.from("payments")
+          .update(returnedPaymentPatch(raw, nowIso))
+          .eq("client_id", clientId).eq("id", p.id)
+          .eq("funding_state", "settled").is("voided_at", null)
+          .select("id");
+        if (rErr || !hit || !hit.length) continue;
+        updated.push({ paymentId: p.id, to: "returned" });
+        noteReturned(p.id, p.order_id, rr);
+      }
+    }
+
+    // daysChecked/daysSkipped are additive: they say whether the budget covered everything
+    // pending, which is the difference between "nothing has changed" and "we did not look".
+    return json({
+      ok: true,
+      resolved,
+      updated,
+      daysChecked: [...fetchedDays],
+      daysSkipped: skippedDays.size,
+    });
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);

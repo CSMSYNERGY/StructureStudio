@@ -1,6 +1,11 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+// The ONE permission model (migration 100). Imported here so the staff-only pricing gate below
+// asks what a person may DO rather than whether a client_users row exists — a driver and a
+// crew leader are in that table too. ⚠️ access.ts is bundled per function: a change to it means
+// redeploying every consumer, and this function is one of them.
+import { canEdit, effectiveAccess } from "../_shared/access.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
@@ -83,6 +88,57 @@ const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 
 // deHtml moved to _shared/estimateLines.ts (2026-08-24): the SS invoice in portal-settings
 // renders the same estimate_lines snapshot and must de-render it identically.
+
+// Entity-escape a value that is about to be interpolated into HTML we author. Same chain and
+// same ORDER as the quote-terms escape in step 8 (& first, or the later replacements' own
+// ampersands get double-escaped), plus the quote character, because one use of this is inside
+// an attribute. `deHtml` unescapes in the reverse order, so an escaped value still round-trips
+// back to its original text on the two PDFs.
+const escHtml = (v: unknown): string =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+// Does this bearer token even claim to be a person? A Supabase user JWT carries `sub`; the
+// public anon key is a well-formed JWT with none, which is why getUser() rejects it. Reading
+// the shape first lets the public designer — which always sends that key — skip an auth round
+// trip that is certain to fail. Deliberately STRUCTURAL rather than a compare against
+// SUPABASE_ANON_KEY: that env value and the literal baked into the browser bundle ship through
+// different pipelines, and the day they drift a compare would invert in silence (the reasoning
+// _shared/resolveTenant.ts records for its own classifier).
+const hasSubject = (token: string): boolean => {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return false;
+    const b = part.replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
+    return typeof claims?.sub === "string" && (claims.sub as string).length > 0;
+  } catch {
+    return false;
+  }
+};
+
+// PER-TENANT SUBMIT CAP (2026-09-06). This endpoint is reachable with the public anon key, and
+// one call spends the tenant's money: several CRM API calls, a branded email to whatever
+// address the body names, a sales-tax lookup that can be a metered Avalara request, and the
+// wallet debit behind it. `capture-lead`, the other anonymous surface, has been capped since
+// 2026-07-30; this one never was.
+//
+// Two deliberate differences from that cap:
+//   1. STAFF ARE EXEMPT. A rep works inside their own tenant all day and must never be locked
+//      out of it by a flood aimed at the public designer.
+//   2. A BREACH REFUSES, LOUDLY. capture-lead answers ok:true because a dropped lead-gate
+//      capture is invisible and harmless. A dropped QUOTE is neither — the shopper would wait
+//      for an email that is never coming — so this answers 429, and creates nothing: no
+//      contact, no opportunity, no estimate, no email.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_PER_TENANT = 20;   // generous: a real public designer sees single digits/minute
+// A breach logs only while the count sits in [MAX, MAX+2], so a sustained flood writes ~3 rows
+// per window instead of one per request. app_errors has NO fingerprint dedupe in this project,
+// so self-limiting here is the only thing stopping our own log becoming the amplification.
+const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
 
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -232,9 +288,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // quote, opportunity value, and QuickBooks snapshot. The embedded portal designer calls
   // supabase.functions.invoke with the signed-in rep's JWT (its client shares the portal's
   // persisted session); the public designer sends the bare anon key. So: honour these
-  // fields only when the Authorization JWT resolves to a real user who is a member of
-  // THIS tenant (client_users) or a platform operator (app_operators — a view-as operator
-  // has no client_users row on the viewed tenant). Otherwise STRIP them and log; the
+  // fields only when the Authorization JWT resolves to a real user who MAY PRICE A QUOTE on
+  // THIS tenant — designer or designs at 'edit' (migration 100), not merely a client_users
+  // row, which a Driver and a Crew Leader both have — or to a platform operator
+  // (app_operators — a view-as operator has no client_users row on the viewed tenant, so
+  // there is no per-area map to resolve for them). Otherwise STRIP them and log; the
   // submission still goes through at full price, because a shopper must never be blocked
   // by fields they didn't knowingly send. Known, accepted cost: an anonymous re-submit of
   // a rep-built design loses the rep's delivery fee/discounts until a rep resubmits (the
@@ -251,51 +309,143 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let allowedDiscounts: any[] = Array.isArray(discounts) ? discounts : [];
   let allowedDeliveryFee: number = Number(deliveryFee) || 0;
   let allowedCustomOptions: any[] = Array.isArray(customOptions) ? customOptions : [];
+  // RESOLVED UNCONDITIONALLY (2026-09-06). This used to run only when the body carried a
+  // pricing field, which left it undefined for the two other decisions that need it: the
+  // per-tenant submit cap immediately below — a busy rep must not be throttled out of their
+  // own tenant — and the send diagnostics in step 10, where the provider's raw response is a
+  // rep's debug channel and not something an anonymous shopper should read back. It costs at
+  // most one auth round trip, and only for a request that actually presents a user token.
   let staffCaller = false;
-  if (wantsDiscounts || wantsDeliveryFee || wantsNonTaxableCustom) {
-    try {
-      const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-      if (token) {
-        // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
-        // same primary defence _shared/resolveTenant.ts documents for the portal functions.
-        const { data: userData } = await supabase.auth.getUser(token);
-        const userId = userData?.user?.id;
-        if (userId) {
-          const [memRes, opRes] = await Promise.all([
-            supabase.from("client_users").select("user_id").eq("user_id", userId).eq("client_id", clientId).limit(1),
-            supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
-          ]);
-          staffCaller = Boolean((memRes.data && memRes.data.length) || opRes.data);
-        }
+  try {
+    const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+    // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
+    // same primary defence _shared/resolveTenant.ts documents for the portal functions.
+    // hasSubject() is that same check made locally, so the public designer never pays for
+    // a round trip whose answer is already known.
+    if (token && hasSubject(token)) {
+      const { data: userData } = await supabase.auth.getUser(token);
+      const userId = userData?.user?.id;
+      if (userId) {
+        const [memRes, opRes] = await Promise.all([
+          // limit(1), not maybeSingle(): a duplicate client_users row must not lock a rep out
+          // of their own tenant (the reasoning _shared/resolveTenant.ts records for its read).
+          supabase.from("client_users").select("role, title, access").eq("user_id", userId).eq("client_id", clientId).limit(1),
+          supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
+        ]);
+        // MEMBERSHIP IS NOT PERMISSION (audit 2026-09-06). A client_users row only says "works
+        // here": a Driver and a Crew Leader are in that table too, and both resolve to
+        // designer:none / designs:none, yet the old `row exists` test let either of them apply
+        // a discount, a delivery fee or a tax exemption through this endpoint. Ask the one
+        // permission model instead. sales_rep is designer:'edit', so every rep-built delivery
+        // fee and discount still applies exactly as before.
+        const memberRow = memRes.data && memRes.data[0];
+        const mayPrice = memberRow
+          ? (() => {
+            const acc = effectiveAccess(memberRow.role, memberRow.title, memberRow.access);
+            // canEdit() compares against the shared level vocabulary — never a `=== "edit"`
+            // against something that returns a boolean.
+            return canEdit(acc, "designer") || canEdit(acc, "designs");
+          })()
+          : false;
+        // The app_operators bypass stays: a platform operator in view-as has NO client_users
+        // row on the tenant they are viewing, so there is no map to resolve for them.
+        staffCaller = Boolean(opRes.data) || mayPrice;
       }
-    } catch (e) {
-      // A failed staff check treats the caller as anonymous — fail CLOSED on money: the
-      // quote goes out at full price rather than honouring an unverified discount.
-      console.warn("submit-estimate: staff check failed:", (e as Error).message);
     }
-    if (!staffCaller) {
-      allowedDiscounts = [];
-      allowedDeliveryFee = 0;
-      // Not emptied — the charges stand; only the tax exemption is refused.
-      allowedCustomOptions = allowedCustomOptions.map((co: any) => ({ ...co, taxable: true }));
-      // Logged (never thrown) so triage can see stripping happen — a legit rep whose
-      // session expired mid-designer shows up here, not as a silently smaller quote.
-      logEdgeError({
-        fn: "submit-estimate",
-        req,
-        clientId,
-        code: "unauthorized_pricing_fields",
-        message: "Anonymous caller sent staff-only pricing fields (discounts/deliveryFee) — stripped; estimate submitted at full price.",
-        context: {
-          designId: String(designId),
-          discountCount: Array.isArray(discounts) ? discounts.length : 0,
-          discountTotal: Array.isArray(discounts)
-            ? discounts.reduce((s: number, d: any) => s + Math.abs(Number(d?.amount) || 0), 0)
-            : 0,
-          deliveryFee: Number(deliveryFee) || 0,
-        },
-      }).catch(() => {});
+  } catch (e) {
+    // A failed staff check treats the caller as anonymous — fail CLOSED on money: the
+    // quote goes out at full price rather than honouring an unverified discount.
+    console.warn("submit-estimate: staff check failed:", (e as Error).message);
+  }
+
+  // 2d. PER-TENANT SUBMIT CAP — see RATE_* at module scope for why this exists and why it
+  // refuses rather than dropping quietly. Placed HERE deliberately: after the beta pre-flight
+  // (so beta mode still refuses first, before anything is created anywhere) and before the
+  // contact upsert, so a refused submission leaves no contact, opportunity, estimate or email
+  // behind. It also sits ahead of the pricing-strip log below, so a flood carrying discounts
+  // cannot write one app_errors row per request.
+  //
+  // Counted in `rate_buckets` (migration 204): one row per tenant, a fixed window. The count
+  // has to be per REQUEST rather than per row touched — unlike capture-lead's many-different-
+  // phones shape, the damaging shape here is ONE design resubmitted in a loop, which moves no
+  // row count at all because `designs` is UPDATEd and never inserted.
+  //
+  // FAILS OPEN on any storage error, the same posture capture-lead's cap takes: one bad read
+  // must not silence a tenant's quotes. That also means the cap is inert until migration 204
+  // has been applied by hand.
+  if (!staffCaller) {
+    const bucket = `submit-estimate:${clientId}`;
+    const nowMs = Date.now();
+    const { data: rl, error: rlErr } = await supabase
+      .from("rate_buckets")
+      .select("window_started_at, hits")
+      .eq("bucket", bucket)
+      .maybeSingle();
+    if (!rlErr) {
+      const startedAt = rl?.window_started_at ? Date.parse(String(rl.window_started_at)) : NaN;
+      const inWindow = Number.isFinite(startedAt) && (nowMs - startedAt) < RATE_WINDOW_MS;
+      const hits = inWindow ? (Number(rl?.hits) || 0) : 0;
+      // COUNT FIRST, THEN DECIDE. The obvious order - refuse at the cap, increment below -
+      // freezes the counter at exactly RATE_MAX: the increment sits on the path the refusal
+      // already returned from. `hits` then reads MAX forever inside the window, the
+      // [MAX, MAX+2] log window is true on EVERY refused request, and the breach log becomes
+      // the flood's amplifier - one severity=error row per attacker request, which is the
+      // opposite of what it is for. Incrementing first lets the count climb past the cap, so
+      // the window really is three rows per window.
+      const nextHits = hits + 1;
+      // Best-effort: a failed write only means this request went uncounted, which is the same
+      // direction as the fail-open read above.
+      await supabase.from("rate_buckets").upsert({
+        bucket,
+        window_started_at: inWindow ? rl!.window_started_at : new Date(nowMs).toISOString(),
+        hits: nextHits,
+        updated_at: new Date(nowMs).toISOString(),
+      }, { onConflict: "bucket" });
+      if (nextHits > RATE_MAX_PER_TENANT) {
+        if (nextHits <= RATE_LOG_CEILING) {
+          await logEdgeError({
+            fn: "submit-estimate",
+            req,
+            clientId,
+            code: "rate_limited",
+            // Deliberately the default severity (error), matching capture-lead: a breach on
+            // the expensive anonymous surface is a signal someone should look at, not a
+            // routine refusal to file away. The [MAX+1, MAX+2] window above is what keeps it
+            // from becoming the flood's amplifier.
+            message: `submit-estimate rate cap hit - ${nextHits} submissions in ${RATE_WINDOW_MS / 1000}s; submission refused`,
+            context: { hits: nextHits, limit: RATE_MAX_PER_TENANT, windowMs: RATE_WINDOW_MS },
+          });
+        }
+        return json({
+          error: `${businessName} is receiving a lot of quote requests right now. Nothing was submitted - please wait a minute and send yours again.`,
+          retryAfterSeconds: Math.ceil(RATE_WINDOW_MS / 1000),
+        }, 429);
+      }
     }
+  }
+
+  if ((wantsDiscounts || wantsDeliveryFee || wantsNonTaxableCustom) && !staffCaller) {
+    allowedDiscounts = [];
+    allowedDeliveryFee = 0;
+    // Not emptied — the charges stand; only the tax exemption is refused.
+    allowedCustomOptions = allowedCustomOptions.map((co: any) => ({ ...co, taxable: true }));
+    // Logged (never thrown) so triage can see stripping happen — a legit rep whose
+    // session expired mid-designer shows up here, not as a silently smaller quote.
+    logEdgeError({
+      fn: "submit-estimate",
+      req,
+      clientId,
+      code: "unauthorized_pricing_fields",
+      message: "Caller without designer access sent staff-only pricing fields (discounts/deliveryFee) — stripped; estimate submitted at full price.",
+      context: {
+        designId: String(designId),
+        discountCount: Array.isArray(discounts) ? discounts.length : 0,
+        discountTotal: Array.isArray(discounts)
+          ? discounts.reduce((s: number, d: any) => s + Math.abs(Number(d?.amount) || 0), 0)
+          : 0,
+        deliveryFee: Number(deliveryFee) || 0,
+      },
+    }).catch(() => {});
   }
 
   // 2b. Address handling. The React form collects street/city/state/zip optionally
@@ -340,7 +490,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }),
     });
     if (!r.ok) {
-      return json({ error: `Failed to upsert contact: ${r.status} ${await r.text()}` }, 502);
+      // AUTHORED SENTENCE, RAW BODY TO THE LOG (portal-settings' `dbFail` contract, and the
+      // reason it exists): this response is read by an anonymous caller, and the CRM's own
+      // body carries the tenant's location id and account shape. Triage still gets every
+      // byte, just not through the shopper's browser.
+      const body = await r.text();
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: `ghl_contact_upsert_${r.status}`,
+        message: `GHL contact upsert failed (${r.status}): ${body.slice(0, 2000)}`,
+        context: { designId: String(designId) },
+      });
+      return json({ error: "We couldn't save your details with this business's CRM just now. Please try again in a moment." }, 502);
     }
     const d = await r.json();
     contactId = d?.contact?.id || contactId;
@@ -1724,7 +1884,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }, { kind: "delivery", nonTaxable: !ssTaxDelivery }));
   }
 
-  // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
+  // 7b. Opportunity link/create. Pick THIS DESIGN'S opportunity when it already has one, else
+  // the most-recently-updated opp for this contact, and
   // refresh its name/value/stage; if it's won we leave it alone and create a new one
   // (won deals are closed shed sales — a fresh quote is a new pursuit). If it's lost we
   // update it back to status "open". Failures here are non-fatal — the estimate still
@@ -1756,41 +1917,55 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         `https://services.leadconnectorhq.com/opportunities/search?location_id=${encodeURIComponent(locationId)}&contact_id=${encodeURIComponent(contactId)}`,
         { headers: ghlHeaders }
       );
-      let mostRecent: any = null;
+      // THE DESIGN'S OWN OPPORTUNITY FIRST (audit 2026-09-06). The search is by CONTACT, and
+      // one contact can hold several deals — a customer pricing two buildings has one per
+      // design. Taking whichever was updated most recently meant a resubmit of design A
+      // renamed, revalued and restaged design B's deal, silently, on a path where every
+      // failure is a console.warn. When the design already carries an opportunity id, that id
+      // IS the answer; the most-recent heuristic stays only for a design that has never been
+      // linked to one.
+      let targetOpp: any = null;
       if (sr.ok) {
         const sd = await sr.json();
         const opps: any[] = Array.isArray(sd?.opportunities) ? sd.opportunities : [];
         if (opps.length > 0) {
-          mostRecent = opps.slice().sort((a, b) => {
-            const at = new Date(a.updatedAt || a.dateUpdated || a.createdAt || 0).getTime();
-            const bt = new Date(b.updatedAt || b.dateUpdated || b.createdAt || 0).getTime();
-            return bt - at;
-          })[0];
+          const ownId = existingDesign.ghl_opportunity_id ? String(existingDesign.ghl_opportunity_id) : "";
+          targetOpp = (ownId
+            ? opps.find((o) => String(o?.id ?? o?._id ?? "") === ownId)
+            : null) || null;
+          if (!targetOpp) {
+            targetOpp = opps.slice().sort((a, b) => {
+              const at = new Date(a.updatedAt || a.dateUpdated || a.createdAt || 0).getTime();
+              const bt = new Date(b.updatedAt || b.dateUpdated || b.createdAt || 0).getTime();
+              return bt - at;
+            })[0];
+          }
         }
       } else {
         console.warn("Opportunity search failed:", sr.status, await sr.text());
       }
 
-      const foundStatus = mostRecent ? String(mostRecent.status || "").toLowerCase() : null;
+      const foundStatus = targetOpp ? String(targetOpp.status || "").toLowerCase() : null;
       const skipUpdateBecauseWon = foundStatus === "won";
 
-      if (mostRecent && !skipUpdateBecauseWon) {
+      if (targetOpp && !skipUpdateBecauseWon) {
         const updateBody: any = { name: oppName, monetaryValue: oppValue };
         if (pipelineId) updateBody.pipelineId = pipelineId;
         if (sendQuoteStageId) updateBody.pipelineStageId = sendQuoteStageId;
         if (foundStatus === "lost") updateBody.status = "open";
+        const targetOppId = String(targetOpp.id ?? targetOpp._id ?? "");
         const ur = await fetch(
-          `https://services.leadconnectorhq.com/opportunities/${mostRecent.id}`,
+          `https://services.leadconnectorhq.com/opportunities/${targetOppId}`,
           { method: "PUT", headers: ghlHeaders, body: JSON.stringify(updateBody) }
         );
         if (ur.ok) {
-          opportunityId = mostRecent.id;
+          opportunityId = targetOppId;
         } else {
           console.warn("Opportunity update failed:", ur.status, await ur.text());
-          opportunityId = mostRecent.id; // still link the estimate to it
+          opportunityId = targetOppId; // still link the estimate to it
         }
       } else if (pipelineId && sendQuoteStageId) {
-        // No opp found, OR most-recent is won → create a fresh opportunity
+        // No opp found, OR the one this design belongs to is won → create a fresh opportunity
         const cr = await fetch(
           `https://services.leadconnectorhq.com/opportunities/`,
           {
@@ -1860,7 +2035,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // only this tenant's own validated storage URL is embedded (never a caller-supplied link). GHL
     // renders the description as HTML; if it keeps the <a> the link is clickable, otherwise the URL
     // is at least visible/copyable.
-    const pdfLink = `<a href="${imageUrl}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
+    // ESCAPED, not just prefix-checked (audit 2026-09-06). The guard above fixes the START of
+    // the URL; everything after the tenant's own prefix is still body-supplied text, and this
+    // interpolation is HTML — a `"` in the tail would close the attribute and let the rest of
+    // the value become markup on a document the tenant's customer reads (and, via the line's
+    // `desc`, on the QuickBooks push). deHtml drops anchors whole, so the two PDFs are
+    // unaffected either way.
+    const pdfLink = `<a href="${escHtml(imageUrl)}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
     buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
@@ -1998,7 +2179,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const { data: allocated, error: allocErr } = await supabase
         .rpc("allocate_ss_quote_number", { p_client_id: clientId });
       if (allocErr) {
-        return json({ error: `Could not allocate a quote number: ${allocErr.message}` }, 502);
+        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
+        // contract. A driver message can carry column names, constraint text and row values,
+        // and this response is read by an anonymous shopper.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
+          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
       }
       ssQuoteNumber = allocated ? String(allocated) : null;
     }
@@ -2052,6 +2241,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         ...(resolved.reason ? { reason: resolved.reason } : {}),
       };
     }
+
+    // WHAT THE CUSTOMER OWES, TAX INCLUDED (audit 2026-09-06). `oppValue` is the pre-tax
+    // subtotal — it is computed back in step 7b for the CRM opportunity, before the tax stamp
+    // above exists — so printing it as the "Quote total" in the email put a smaller number in
+    // front of the customer than the PDF, the change-order row and the change-order
+    // description, all three of which read this snapshot. Read once, here, from the object
+    // that was just stamped, so the emailed figure IS the persisted one.
+    //
+    // GHL mode is deliberately untouched: its snapshot carries no `tax` key (GHL's own engine
+    // computes tax from the line categories), and totalFromSnapshot's legacy branch clamps an
+    // over-discount differently from the pooled one, so `oppValue` stays correct there.
+    const ssTotal = totalFromSnapshot(estimateLines) ?? oppValue;
 
     // METERED (migration 179) — and ONLY a real Avalara answer costs anything. A `fallback`
     // resolve never left the building: it means Avalara is unconfigured, the address had no
@@ -2272,7 +2473,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // designs.estimate_lines. Recomputing prints the drifted total in the email while
           // the CO and the customer's quote page show the agreed one (153).
           totalBefore: changeOrder.totalBefore,
-          totalAfter: oppValue,
+          // The same tax-inclusive figure the CO row stamped as total_after_cents. `totalBefore`
+          // is deliberately NOT recomputed — it carries the CO's own stamped baseline.
+          totalAfter: ssTotal,
           reviewUrl: myQuotesUrl(clientId, req),
           quoteTerms: quoteTerms || null,
         })
@@ -2283,7 +2486,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           phone: businessPhone || null,
           website: businessWebsite || null,
           estimateNumber: ssQuoteNumber,
-          total: oppValue,
+          // Tax-inclusive, matching the quote PDF's Total row and the customer portal.
+          total: ssTotal,
           styleLabel,
           sizeLabel: size,
           estimateUrl: myQuotesUrl(clientId, req),
@@ -2395,36 +2599,77 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
       if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
     }
-    // A stored ghl_estimate_id goes stale in two real, observed ways: staff DELETE the estimate
-    // inside GHL while tidying the location (GHL then answers the PUT 404 "Unable to find estimate
-    // with the given estimateId"), or the customer ACCEPTS it and GHL refuses further edits with
-    // 400 "Estimate is already accepted". Until now either one returned a terminal 502, and since
-    // nothing cleared the column, EVERY later resubmit of that design failed identically — the
-    // design could never produce a quote again without hand-editing the row. Both shapes are in
-    // app_errors against a real tenant. So: fall back to creating a fresh estimate, and let the
-    // new id replace the stale one where it is persisted below.
+    // A stored ghl_estimate_id goes stale in two real, observed ways, and they are NOT the same
+    // event even though GHL surfaces both on the PUT:
+    //
+    //   • GONE (404) — staff DELETED the estimate inside GHL while tidying the location. There
+    //     is no paperwork any more and nobody agreed to anything, so recreating is a plain
+    //     recovery. Before this existed every later resubmit of that design failed identically
+    //     and the design could never produce a quote again without hand-editing the row.
+    //
+    //   • LOCKED (400 "already accepted") — the CUSTOMER ACCEPTED it. The estimate still exists
+    //     and it is an agreement. Recreating it silently issued a second estimate under a new
+    //     number, emailed it, repointed the design, overwrote the line snapshot with no
+    //     change-order gate, reset the opportunity stage, and let the next status sync
+    //     downgrade the design from accepted back to sent — all reported to the caller as an
+    //     ordinary success. REFUSE instead, before any email is sent and before the persist
+    //     below, and say what happened in words the person can act on. (A staff override would
+    //     also need designs.accepted_at stamped on the CRM accept path so sync-design-status'
+    //     floor stops the downgrade; that is a different function and is not done here.)
     if (!r.ok && existingEstimateId) {
       const staleBody = await r.text();
       const gone = r.status === 404;
       const locked = r.status === 400 && /already\s*(been\s*)?accepted/i.test(staleBody);
-      if (gone || locked) {
+      if (locked) {
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "estimate_already_accepted",
+          severity: "info",
+          message: `resubmit refused — the CRM estimate is already accepted: ${staleBody.slice(0, 1000)}`,
+          context: { designId: String(designId), estimateId: existingEstimateId },
+        });
+        return json({
+          error: "This customer has already accepted this estimate, so it can't be changed or re-sent. " +
+            "Start a new quote for the revised design, or amend the accepted one in your CRM.",
+          alreadyAccepted: true,
+        }, 409);
+      }
+      if (gone) {
         console.warn(`submit-estimate: stale ghl_estimate_id (${r.status}) — creating a fresh estimate instead`);
-        // A fresh estimate number, NOT the old one: when the estimate was merely accepted it still
-        // exists in GHL, so reusing its number would collide. The deleted case does not care.
+        // A fresh estimate number, NOT the old one: the deleted case does not care, and a fresh
+        // number is the honest answer for a document nobody can look back at.
         const recreatePayload = { ...finalPayload, invoiceNumber: uniqueSequence.toString() };
         const rc = await fetch(`https://services.leadconnectorhq.com/invoices/estimate`,
           { method: "POST", headers: ghlHeaders, body: JSON.stringify(recreatePayload) });
         if (!rc.ok) {
-          return json({ error: `Failed to recreate estimate after a stale id: ${rc.status} ${await rc.text()}` }, 502);
+          // Authored sentence out, provider body to the log: the CRM's own text carries the
+          // tenant's location id, and this response reaches an anonymous caller.
+          const rcBody = await rc.text();
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_estimate_recreate_${rc.status}`,
+            message: `GHL estimate recreate after a stale id failed (${rc.status}): ${rcBody.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+          return json({ error: "We couldn't rebuild this estimate in the business's CRM. Please try again in a moment." }, 502);
         }
         r = rc;
         recreatedFromStale = true;
       } else {
-        return json({ error: `Failed to update estimate: ${r.status} ${staleBody}` }, 502);
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: `ghl_estimate_update_${r.status}`,
+          message: `GHL estimate update failed (${r.status}): ${staleBody.slice(0, 2000)}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't update this estimate in the business's CRM. Please try again in a moment." }, 502);
       }
     }
     if (!r.ok) {
-      return json({ error: `Failed to create estimate: ${r.status} ${await r.text()}` }, 502);
+      const body = await r.text();
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: `ghl_estimate_create_${r.status}`,
+        message: `GHL estimate create failed (${r.status}): ${body.slice(0, 2000)}`,
+        context: { designId: String(designId) },
+      });
+      return json({ error: "We couldn't create this estimate in the business's CRM. Please try again in a moment." }, 502);
     }
     const d = await r.json();
     estimateId = d?._id || d?.estimate?._id || (recreatedFromStale ? null : existingEstimateId);
@@ -2438,11 +2683,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //     everyone else (and every Resend failure) gets today's GHL action:"email" send.
   //     Recipient is the tenant's test inbox when beta mode is on, otherwise the customer
   //     — see the header for where each path implements that. `betaEmail` was already
-  //     validated above, so by here beta mode implies a usable address. We capture the GHL
-  //     response (status + body) and return it as `sendDebug` so failures don't hide
-  //     behind a generic 200 — the React app or curl caller can inspect what GHL rejected,
-  //     `sentTo` says who actually received it, `provider` says which sender delivered it,
-  //     and `provider` carries the ledger outcome whenever the own-domain path was attempted.
+  //     validated above, so by here beta mode implies a usable address. We report the send as
+  //     `sendDebug` so failures don't hide behind a generic 200 — `status`/`ok` say whether it
+  //     worked (the designer relies on `ok` so it cannot claim a false success), `sentTo` says
+  //     who actually received it, `provider` says which sender delivered it, and `provider`
+  //     carries the ledger outcome whenever the own-domain path was attempted.
+  //
+  //     ⚠️ `body` IS NOT THE PROVIDER'S BODY FOR AN ANONYMOUS CALLER (audit 2026-09-06). This
+  //     whole response goes back to a public, anon-key caller, and the CRM's send responses
+  //     echo `altId` — the tenant's location id, which the 400 further up this function
+  //     deliberately masks and which every other surface in the product masks too. So the raw
+  //     text goes to app_errors, `body` carries a sentence we authored, and the provider's own
+  //     words are kept for a STAFF caller, for whom this is a real debug channel. `sendDetail`
+  //     below is the one place that decides.
   let sendDebug: {
     status: number | null;
     ok: boolean;
@@ -2457,6 +2710,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     sentTo: [],
     provider: "ghl",
   };
+  /** Staff get the provider's own words (capped); everyone else gets the authored sentence. */
+  const sendDetail = (raw: string, authored: string): string =>
+    staffCaller ? raw.slice(0, 2000) : authored;
   try {
     if (estimateId) {
       const hostedUrl = estimateUrl(estimateId);
@@ -2486,7 +2742,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         );
         sendDebug.status = mr.status;
         sendDebug.ok = mr.ok;
-        sendDebug.body = (await mr.text()).slice(0, 2000); // cap to avoid huge responses
+        const manualRaw = await mr.text();
+        sendDebug.body = sendDetail(
+          manualRaw,
+          mr.ok
+            ? "The estimate was marked as sent in the CRM."
+            : "The CRM would not mark the estimate as sent; the estimate email was sent through the CRM instead.",
+        );
+        if (!mr.ok) {
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_send_manually_${mr.status}`,
+            message: `GHL send_manually failed (${mr.status}): ${manualRaw.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+        }
 
         if (mr.ok) {
           // (b) Formal estimate PDF — BEST-EFFORT, own-domain path only. Any failure here
@@ -2564,16 +2833,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             // a second send call on an already-'sent' estimate (double-send verified safe
             // 2026-08-10), so the recovery path is today's exact sender. The failed
             // attempt stays inspectable in sendDebug.ownDomain.
+            // `reason` is our own fixed vocabulary and is safe for anyone; `error` is the mail
+            // provider's raw text, so it follows the same staff-only rule as `body`. The field
+            // was already optional, so its absence is a shape the caller already handles.
             sendDebug.ownDomain = {
               sent: false,
               reason: outcome.reason,
-              ...(outcome.error ? { error: outcome.error } : {}),
+              ...(outcome.error && staffCaller ? { error: outcome.error } : {}),
             };
           }
         } else {
           // send_manually refused → the estimate was never flipped to 'sent'; the GHL
-          // email send below both flips and emails, so fall through to it.
-          console.warn("Estimate send_manually failed:", mr.status, sendDebug.body);
+          // email send below both flips and emails, so fall through to it. The provider's
+          // own text is already in app_errors (logged where the response was read).
+          console.warn("Estimate send_manually failed:", mr.status);
         }
       }
 
@@ -2598,15 +2871,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         );
         sendDebug.status = r.status;
         sendDebug.ok = r.ok;
-        sendDebug.body = (await r.text()).slice(0, 2000); // cap to avoid huge responses
-        if (!r.ok) console.warn("Estimate send failed:", r.status, sendDebug.body);
-        else console.log("Estimate send OK:", r.status, sendDebug.body.slice(0, 200));
+        const sendRaw = await r.text();
+        sendDebug.body = sendDetail(
+          sendRaw,
+          r.ok
+            ? "The estimate email was accepted by the CRM."
+            : "The CRM refused to send the estimate email.",
+        );
+        if (!r.ok) {
+          console.warn("Estimate send failed:", r.status);
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_estimate_send_${r.status}`,
+            message: `GHL estimate email send failed (${r.status}): ${sendRaw.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+        } else console.log("Estimate send OK:", r.status);
       }
     } else {
       sendDebug.body = "no estimateId after create/update";
     }
   } catch (e) {
-    sendDebug.body = `send threw: ${(e as Error).message}`;
+    sendDebug.body = sendDetail(
+      `send threw: ${(e as Error).message}`,
+      "The estimate email could not be sent.",
+    );
     console.warn("Estimate send error:", (e as Error).message);
   }
 

@@ -96,6 +96,14 @@ export interface AcceptanceEmailInput {
 }
 
 export interface InvoiceEmailInput {
+  /** Per-tenant subject/intro overrides — client_settings.email_template_copy (138), read
+   *  under the "invoice" kind (the wording screen offers that tab alongside estimate/quote).
+   *  Untyped jsonb by nature; tenantCopy() validates and drops anything unusable, so absent
+   *  or unusable copy keeps the shipped wording byte for byte. */
+  templateCopy?: unknown;
+  /** Used only by the {customer} token in tenant copy. */
+  customerName?: string;
+
   businessName: string;
   logoUrl?: string | null;
   phone?: string | null;
@@ -498,11 +506,26 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   const pdfLink = toSign && input.invoiceUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.invoiceUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View the invoice (PDF)</a></p>`
     : "";
-  const lead = toSign
+  // Tenant copy, if they wrote any (migration 138). Same contract as the estimate email:
+  // COPY ONLY, and the HTML half escapes it — the structural half above stays ours.
+  //
+  // Every token the wording screen advertises is supplied, with "" for the ones an invoice
+  // has no value for: fillTokens leaves an UNKNOWN token verbatim on purpose, so omitting
+  // {building} here would ship a literal "{building}" to a customer's inbox.
+  const copy = tenantCopy(input.templateCopy, "invoice");
+  const tokens = { business: name, number: num, total: money, building: "", customer: oneLine(input.customerName ?? "") };
+  const introRaw = copy.intro
+    ? fillTokens(copy.intro, tokens)
+    : toSign
+    ? `Thank you for your business. Your invoice from ${name} is ready for your signature.`
+    : `Thank you for your business. Your invoice from ${name} is ready.`;
+  const introHtml = copy.intro
+    ? esc(introRaw)
+    : toSign
     ? `Thank you for your business. Your invoice from ${esc(name)} is ready for your signature.`
     : `Thank you for your business. Your invoice from ${esc(name)} is ready.`;
 
-  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${lead}</p>
+  const bodyHtml = `<p style="margin:0 0 16px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${introHtml}</p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
               ${rows.join("\n")}
             </table>
@@ -512,9 +535,7 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   const text: string[] = [
     name,
     "",
-    toSign
-      ? `Thank you for your business. Your invoice from ${name} is ready for your signature.`
-      : `Thank you for your business. Your invoice from ${name} is ready.`,
+    introRaw,
     "",
     `Invoice #: ${num}`,
     `Amount due: ${money}`,
@@ -525,7 +546,11 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
   text.push(...textFooter(input));
 
   return {
-    subject: toSign ? `Invoice ${num} from ${name} - ready to sign` : `Invoice ${num} from ${name}`,
+    subject: copy.subject
+      ? fillTokens(copy.subject, tokens)
+      : toSign
+      ? `Invoice ${num} from ${name} - ready to sign`
+      : `Invoice ${num} from ${name}`,
     html: htmlShell({
       businessName: name,
       logoUrl: input.logoUrl,
