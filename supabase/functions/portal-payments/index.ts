@@ -109,13 +109,20 @@ const json = (b: unknown, s = 200, fault = false) => {
     status: s,
     headers: { ...cors, "Content-Type": "application/json" },
   });
+  // EXPOSED, or the browser cannot read it. A custom response header is invisible to
+  // cross-origin JS unless it is named in Access-Control-Expose-Headers, and the portal
+  // calls this function cross-origin. Without this line the mark is set, travels, and is
+  // silently unreadable in the browser - so a deliberate 5xx refusal ("Taking cards is not
+  // switched on for this account yet") kept filing as a FAULT in app_errors.
   if (s >= 400 && s < 500 && !fault) r.headers.set(SS_REFUSAL_HEADER, "1");
+  if (r.headers.get(SS_REFUSAL_HEADER) === "1") r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
   return r;
 };
 
 const refusal = (b: unknown, s = 503) => {
   const r = json(b, s);
   r.headers.set(SS_REFUSAL_HEADER, "1");
+  r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
   return r;
 };
 

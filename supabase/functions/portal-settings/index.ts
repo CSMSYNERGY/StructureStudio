@@ -5303,7 +5303,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // status, so it declares itself a refusal — otherwise every send attempt on an
       // un-onboarded tenant files as an error someone has to triage.
       const r = json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      // EXPOSED, or the browser cannot read it. A custom response header is invisible to
+      // cross-origin JS unless it is named in Access-Control-Expose-Headers, and the portal
+      // calls this function cross-origin. Without this line the mark is set, travels, and is
+      // silently unreadable in the browser - so a deliberate 5xx refusal ("Taking cards is not
+      // switched on for this account yet") kept filing as a FAULT in app_errors.
       r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
       return r;
     }
     return json({ error: `That email didn't send${out.error ? ` (${out.error})` : ""}. Try again — if it keeps happening, tell CSM Synergy.` }, 502);

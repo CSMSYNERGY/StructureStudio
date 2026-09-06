@@ -445,6 +445,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           : 0,
         deliveryFee: Number(deliveryFee) || 0,
       },
+      // INFO, not a fault. The comment above already says what this is: the gate WORKING —
+      // an unauthorised caller's pricing fields were stripped and the quote went out at full
+      // price. Nothing broke, nothing needs repairing, and there is no action for whoever
+      // reads the fault queue. Filed at the default severity it sat in that queue permanently
+      // while the product was behaving exactly as designed.
+      //
+      // Kept as a row rather than dropped, deliberately, and for the reason migration 140
+      // gives: a refusal that fires CONSTANTLY is a bug in disguise. A real rep whose session
+      // expired mid-designer shows up here, and a run of these is how you would notice.
+      //   select message, count(*) from app_errors where severity='info' group by 1
+      //   having count(*) > 20 order by 2 desc;
+      severity: "info",
     }).catch(() => {});
   }
 

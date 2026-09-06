@@ -114,7 +114,13 @@ const json = (b: unknown, s = 200) =>
 // button. It is the product declining, so it says so and lands as info instead.
 const refusal = (b: unknown, s = 503) => {
   const r = json(b, s);
+  // EXPOSED, or the browser cannot read it. A custom response header is invisible to
+  // cross-origin JS unless it is named in Access-Control-Expose-Headers, and the portal
+  // calls this function cross-origin. Without this line the mark is set, travels, and is
+  // silently unreadable in the browser - so a deliberate 5xx refusal ("Taking cards is not
+  // switched on for this account yet") kept filing as a FAULT in app_errors.
   r.headers.set(SS_REFUSAL_HEADER, "1");
+  r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
   return r;
 };
 

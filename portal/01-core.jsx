@@ -384,12 +384,28 @@ __ssFunctions.invoke = async (name, opts) => {
       // from a 5xx the server actually sent while the user happened to be navigating.
       const ssAborted = ssPageLeaving && st === null
         && (res.error && res.error.name) === "FunctionsFetchError";
+      // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
+      // and everything else as "something broke" — but a few refusals have to answer 5xx, and
+      // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in
+      // customer-auth / customer-pay / portal-payments / portal-settings). Without reading it,
+      // "Taking cards isn't switched on for this account yet" — a tenant who simply has not
+      // enabled payments — filed as a FAULT every time the Orders tab loaded for them.
+      //
+      // ⚠️ THIS ONLY WORKS BECAUSE THE FUNCTIONS NOW NAME IT IN Access-Control-Expose-Headers.
+      // A custom header is invisible to cross-origin JS otherwise, and this read would return
+      // null forever while looking perfectly correct. If a new function grows a refusal()
+      // helper, it must expose the header too or its 5xx refusals land back in the fault queue.
+      let ssRefusal = false;
+      try {
+        const ctx = res.error && res.error.context;
+        ssRefusal = !!(ctx && ctx.headers && ctx.headers.get("x-ss-refusal") === "1");
+      } catch (_r) { /* an unreadable context must never cost us the row */ }
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
         ssAborted ? "fetch_aborted_navigating" : ((res.error && res.error.name) || null),
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
           status: st,
           reason: (res.error && res.error.ssReason) || null },
-        (ssAborted || (st >= 400 && st < 500)) ? "info" : "error");
+        (ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
