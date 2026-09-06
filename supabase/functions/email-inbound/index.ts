@@ -202,23 +202,56 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // aim at — the outbound side already gates on this (portal-settings' Reply-To stamping)
   // and the webhook must agree with it.
   const envDomains = envelope.map((e) => e.split("@")[1] ?? "").filter(Boolean);
+  // ⚠️ TAKE TWO, ACCEPT ONE. These reads used to `.limit(1)` with no `order by`, so when the
+  // payload named domains belonging to TWO tenants the winner was whichever row Postgres
+  // handed back first. `inbound_domain` and `email_domain` are each unique per tenant, so a
+  // second row is a second TENANT — that pick was a cross-tenant pick, and a stranger's words
+  // landing on another builder's record is precisely what this file exists to prevent. It is
+  // the same refusal the caller already makes for an ambiguous CONTACT; emailInbound.ts's own
+  // docstring names this as the missing half and says the caller must supply it.
+  //
+  // Refusing costs a message its attribution, never the message: an ambiguous payload falls
+  // through to the UNATTRIBUTED_CLIENT_ID sentinel below with the row still written, which is
+  // the cheap side of the trade this file states everywhere else.
+  //
+  // SAFE TO TIGHTEN NOW, measured 2026-09-06: zero tenants share an inbound_domain, zero
+  // share an email_domain, and receiving is not live for any tenant yet. So this changes
+  // behaviour only in the case that is currently a leak.
+  const ambiguous = async (kind: string, domains: string[]) => {
+    await logEdgeError({
+      fn: "email-inbound", req, clientId: null, code: "inbound_ambiguous_tenant",
+      // Shapes only, no addresses — the logging posture the rest of this function keeps.
+      message: `two tenants match the payload's ${kind}; refusing to choose. Filed unattributed. domains=${domains.length}`,
+    }).catch(() => undefined);
+  };
   if (envDomains.length) {
     const { data: inb } = await admin.from("client_settings")
       .select("client_id, inbound_domain")
-      .in("inbound_domain", envDomains).eq("inbound_status", "active").limit(1);
-    const hit = (inb ?? [])[0] as { client_id: string; inbound_domain: string } | undefined;
-    if (hit) {
+      .in("inbound_domain", envDomains).eq("inbound_status", "active").limit(2);
+    const inbRows = (inb ?? []) as Array<{ client_id: string; inbound_domain: string }>;
+    if (inbRows.length > 1) {
+      await ambiguous("inbound_domain", envDomains);
+    } else if (inbRows.length === 1) {
+      const hit = inbRows[0];
       clientId = hit.client_id;
       matchedRecipient = envelope.find((e) => e.endsWith("@" + hit.inbound_domain)) ?? "";
     }
-    if (!clientId) {
+    // Deliberately still guarded on !clientId ONLY: after an ambiguous inbound_domain we do
+    // not fall through and try email_domain, because the payload has already proved it names
+    // more than one tenant. Trying a second column would just be a second chance to pick
+    // wrong. `inbRows.length > 1` leaves clientId null, and the check below sends it to the
+    // sentinel — but so would a second ambiguous read, so the guard is written to stop here.
+    if (!clientId && inbRows.length <= 1) {
       // The tenant's SENDING domain. Lands an unmatched row on the right account when a
       // stranger writes to a published address rather than to a reply token.
       const { data: snd } = await admin.from("client_settings")
         .select("client_id, email_domain")
-        .in("email_domain", envDomains).limit(1);
-      const s = (snd ?? [])[0] as { client_id: string; email_domain: string } | undefined;
-      if (s) {
+        .in("email_domain", envDomains).limit(2);
+      const sndRows = (snd ?? []) as Array<{ client_id: string; email_domain: string }>;
+      if (sndRows.length > 1) {
+        await ambiguous("email_domain", envDomains);
+      } else if (sndRows.length === 1) {
+        const s = sndRows[0];
         clientId = s.client_id;
         matchedRecipient = envelope.find((e) => e.endsWith("@" + s.email_domain)) ?? "";
       }

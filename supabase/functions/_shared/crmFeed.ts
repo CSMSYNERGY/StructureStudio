@@ -163,7 +163,7 @@ export async function buildCrmFeed(
     // address carries just the contact.
     (codes.length || opts.contactId)
       ? q(admin.from("email_inbound")
-          .select("id, short_code, contact_id, from_email, from_name, subject, body_text, received_at")
+          .select("id, short_code, contact_id, from_email, from_name, subject, body_text, received_at, spam_verdict")
           .eq("client_id", clientId)
           .or([
             codes.length ? `short_code.in.(${codes.join(",")})` : null,
@@ -322,7 +322,28 @@ export async function buildCrmFeed(
       body: r.body_text || null,
       actor: r.from_name || r.from_email,
       code: r.short_code, icon: "email_in",
-      meta: { from: r.from_email, inbound: true },
+      // senderVerified carries the RECEIVING side's verdict to the screen. It was stored on
+      // every row since migration 135 and read by nothing, so a forged From rendered as the
+      // customer's own words with no cue at all — in a card whose whole job is to look like
+      // the customer speaking.
+      //
+      // THREE STATES, and the third is why this is not a boolean. true = the provider said
+      // pass; false = it said something else; null = it told us nothing. `senderVerdict()`
+      // returns null for "unknown", NEVER for "clean", and the UI must not collapse those:
+      // a message we know nothing about is not a message we vouched for.
+      //
+      // DISPLAY ONLY. Nothing gates on this, deliberately — migration 135's posture is that
+      // a customer's words are worth more than our confidence in a spam score, and an
+      // earlier attempt to GATE on a sender-supplied header was reverted for being
+      // trivially defeated by the sender.
+      meta: {
+        from: r.from_email,
+        inbound: true,
+        senderVerified: r.spam_verdict == null
+          ? null
+          : !/(?:spam|virus)=(?!PASS)|(?:spf|dkim|dmarc)=(?!pass)/i.test(String(r.spam_verdict)),
+        senderVerdict: r.spam_verdict ?? null,
+      },
     });
   }
   for (const a of acts as any[]) {

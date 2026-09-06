@@ -2763,9 +2763,37 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                        machine output — the same reason a note is a yellow card. Getting this
                        wrong would bury the one thing in the conversation somebody wrote. */
                     <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, padding: "7px 9px" }}>
-                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2 }}>
-                        ↩ {e.actor || "Customer"} replied
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span>↩ {e.actor || "Customer"} replied</span>
+                        {/* NOTHING IN THE PIPELINE PROVES A REPLY IS REALLY FROM THE CUSTOMER.
+                            A forged From renders here as their own words, in a card designed
+                            to look exactly like them speaking. The receiving side's SPF/DKIM/
+                            DMARC verdict was stored on every row and read by nobody; this is
+                            it reaching a human.
+
+                            Shown ONLY when the news is bad or absent. A verified sender gets
+                            no chip at all — badging the normal case trains people to ignore
+                            the badge, and the whole value here is that the chip is rare.
+
+                            null is NOT false: "the provider told us nothing" is its own state
+                            and says so, because a message we know nothing about is not a
+                            message we vouched for. */}
+                        {e.meta && e.meta.senderVerified === false && (
+                          <span title={e.meta.senderVerdict || ""} style={{ fontSize: 10, fontWeight: 800, color: "#991B1B", background: "#FEE2E2", border: "1px solid #FCA5A5", borderRadius: 4, padding: "1px 5px" }}>
+                            SENDER NOT VERIFIED
+                          </span>
+                        )}
+                        {e.meta && e.meta.senderVerified === null && (
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#92400E", background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "1px 5px" }}>
+                            SENDER UNCHECKED
+                          </span>
+                        )}
                       </div>
+                      {/* The bare address next to the display name: "Bob Smith" is chosen by
+                          the sender, the address is what actually arrived. */}
+                      {e.meta && e.meta.from && e.meta.senderVerified !== true && (
+                        <div style={{ fontSize: 10.5, color: "#64748B", marginBottom: 2 }}>{e.meta.from}</div>
+                      )}
                       {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
                     </div>
