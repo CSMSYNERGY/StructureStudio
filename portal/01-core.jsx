@@ -220,6 +220,35 @@ const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-
 // portal-settings call in operator view-as resolved the OPERATOR'S OWN tenant. The fix
 // is to mint ONE instance, wrap it, and pin it as an own data property so it shadows
 // the prototype getter (verify in a console: `sb.functions === sb.functions` → true).
+// ── Is this page going away? ─────────────────────────────────────────────────────────────
+// A fetch that was in flight when the browser navigates or the tab closes REJECTS, and
+// supabase-js surfaces that as FunctionsFetchError — the same shape as a genuine "the
+// function is unreachable" failure, because Chrome reports both as `TypeError: Failed to
+// fetch`. The error alone cannot tell them apart; only knowing the page was leaving can.
+//
+// Left unclassified it is filed as a FAULT. Running the new smoke suite produced 186 such
+// rows in two hours (portal-settings status, portal-billing status, get_profile) purely
+// because the test navigates the moment __ssAppBooted flips. A REAL user clicking away
+// mid-load produces the identical row, which is why 57 had already accumulated before the
+// suite existed. That volume is not harmless: it is exactly what buries a real
+// unreachable-function incident in the queue the severity split exists to keep clean.
+//
+// ⚠️ THE FLAG IS THE ONLY DISCRIMINATOR, AND IT IS DELIBERATELY NARROW. `pagehide` and
+// `beforeunload` fire when this document is actually being torn down or replaced. Do NOT
+// widen this to `document.visibilityState === "hidden"`: a backgrounded tab is hidden while
+// still very much alive, and a function that becomes unreachable there is a real outage we
+// need to hear about. Over-filtering here would hide the very incidents this row exists for.
+//
+// Never reset: once a page is leaving it does not come back. A bfcache restore fires
+// `pageshow` on a page that never ran this line again in a state that matters here — the
+// app re-mounts and re-runs its effects — so clearing it would only reopen the window.
+let ssPageLeaving = false;
+try {
+  const ssMarkLeaving = () => { ssPageLeaving = true; };
+  addEventListener("pagehide", ssMarkLeaving, { capture: true });
+  addEventListener("beforeunload", ssMarkLeaving, { capture: true });
+} catch (_pl) { /* an environment without these events just keeps the old classification */ }
+
 const __ssFunctions = sb.functions;
 const __ssInvoke = __ssFunctions.invoke.bind(__ssFunctions);
 __ssFunctions.invoke = async (name, opts) => {
@@ -341,12 +370,20 @@ __ssFunctions.invoke = async (name, opts) => {
       //   select message, count(*) from app_errors where severity = 'info'
       //   group by 1 having count(*) > 20 order by 2 desc;
       const st = (res.error && res.error.ssStatus) || null;
+      // A transport failure on a page that is ALREADY LEAVING is the navigation killing its
+      // own request, not the function being unreachable. Same treatment, and for the same
+      // reason, as `session_reconnecting` above: demoted to info under its OWN code so it
+      // stays countable, never dropped. `status` is null on this path by definition — a
+      // request that never completed has no HTTP status — which is what distinguishes it
+      // from a 5xx the server actually sent while the user happened to be navigating.
+      const ssAborted = ssPageLeaving && st === null
+        && (res.error && res.error.name) === "FunctionsFetchError";
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        (res.error && res.error.name) || null,
+        ssAborted ? "fetch_aborted_navigating" : ((res.error && res.error.name) || null),
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
           status: st,
           reason: (res.error && res.error.ssReason) || null },
-        (st >= 400 && st < 500) ? "info" : "error");
+        (ssAborted || (st >= 400 && st < 500)) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
