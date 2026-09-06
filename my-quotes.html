@@ -108,7 +108,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       <div id="phone-error" class="error" role="alert" hidden></div>
     </div>
     <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
-    <p class="hint">
+    <!-- HIDDEN, not deleted (audit 2026-09-06). customer-auth refuses channel="email"
+         outright: it used to resolve a proven email to an UNPROVEN phone by scanning
+         designs and mint the session on that phone, and save_design is anon-callable, so
+         anyone could plant the pair. Leaving the button visible would offer a customer a
+         route that now answers with an error - worse than never offering it. The whole
+         email code path below is intact so re-enabling is removing this `hidden` once the
+         channel is re-keyed to a proven email identity. Zero customers are affected:
+         customer_email_otps has never held a row, and all 15 live sessions came via SMS. -->
+    <p class="hint" id="use-email-wrap" hidden>
       <button id="use-email-btn" class="linkish" type="button">Use my email instead</button>
     </p>
   </section>
@@ -348,6 +356,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     (email ? $("email-input") : $("phone-input")).focus();
   }
   $("use-email-btn").addEventListener("click", function () {
+    // Belt and braces with the `hidden` on the wrapper above: the server refuses the email
+    // channel, so switching to it can only produce an error screen. A stray click - devtools,
+    // a stale cached page, an extension unhiding things - must not reach it.
+    if ($("use-email-wrap").hidden) return;
     setChannel(channel === "email" ? "sms" : "email");
   });
   $("email-input").addEventListener("input", function () { custEmail = this.value.trim(); });
