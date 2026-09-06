@@ -674,11 +674,29 @@ function Dashboard({ session }) {
   // page, and a warm-up that competes with them would trade a fast first tab for a slow
   // first paint. A module-level flag keeps it to once per page rather than once per
   // Dashboard mount (view-as remounts this component).
+  // TEN MORE FUNCTIONS GAINED THE ENDPOINT (2026-09-06) and are warmed here in two waves.
+  // Measured on beta the day they shipped: a cold isolate answers in 2.1-2.5 s, a warm one in
+  // 0.30-0.59 s, and isolates recycle within minutes — so this is not a boot-only concern, it
+  // is what every first click into a tab costs. The waves are ordered by how soon a person
+  // can reach the thing: settings/billing back the screens the shell itself opens, the second
+  // wave backs a deliberate click. Anything not listed either has no warm endpoint or is not
+  // reachable from a signed-in portal (customer-*, the webhooks).
   useEffect(() => {
     if (window.__ssWarmed) return undefined;
     window.__ssWarmed = true;
-    const t = setTimeout(() => { ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions"); }, 1500);
-    return () => clearTimeout(t);
+    const first = setTimeout(() => {
+      ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions");
+      ssWarmFn("portal-settings"); ssWarmFn("portal-billing");
+    }, 1500);
+    const second = setTimeout(() => {
+      ssWarmFn("portal-payments"); ssWarmFn("portal-setup");
+      ssWarmFn("portal-feedback"); ssWarmFn("sync-design-status");
+    }, 3000);
+    return () => { clearTimeout(first); clearTimeout(second); };
+    // Deps stay EMPTY on purpose. Adding one (isOperator, to warm the operator-only functions)
+    // would re-run the effect the moment that flag resolves; React runs the previous cleanup
+    // first, so the pending timers would be cleared and the re-run would bail on the
+    // __ssWarmed guard — warming nothing at all. Two operators are not worth that risk.
   }, []);
 
   // ── Who the signed-in person is, and the operator's user editor ────────────────
