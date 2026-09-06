@@ -5,11 +5,13 @@
   "scripts": {
     "compile": "node scripts/compile.mjs",
     "preflight": "node scripts/preflight.mjs",
-    "selftest:pre-push": "node scripts/pre-push-selftest.mjs"
+    "selftest:pre-push": "node scripts/pre-push-selftest.mjs",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "eslint": "^9.0.0",
     "globals": "^15.0.0",
+    "@playwright/test": "1.56.1",
     "terser": "5.51.2"
   }
 }

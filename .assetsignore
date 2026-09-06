@@ -59,3 +59,9 @@ portal/
 admin.app.jsx
 wrangler.beta2.jsonc
 # First Workers Builds trigger: 2026-08-05 (deploy-freshness verification)
+
+# Playwright smoke suite (2026-09 audit): drives the live site on demand, never served.
+tests
+playwright.config.mjs
+test-results
+playwright-report
