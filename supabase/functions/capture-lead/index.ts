@@ -17,6 +17,19 @@ import { clientIp } from "../_shared/adminGate.ts";
 // rate budget and polluting their CRM.
 
 // ── Abuse guards (two, because there are two different attacks) ──────────────
+// ⚠️ BOTH GUARDS RUN BEFORE EVERY WRITE, and that ordering is the whole point of them.
+// They used to sit between the local writes and the outbound GHL call, on the reasoning
+// that a real lead arriving during someone else's flood should still land in
+// captured_leads. That reasoning only looked at the GHL leg: it left FOUR writes —
+// captured_leads, crm_ensure_contact, the contact link and sms_consent_log — running once
+// per request for an anonymous caller, with nothing bounding them. Two of those grow a
+// table per request. A cap that lets the flood write is not a cap.
+//
+// The cost of the new order is honest and small: while a tenant is over the cap, a capture
+// is dropped entirely rather than saved locally. At 30/minute that only happens during
+// abuse, it is logged, and losing one capture beats handing an anonymous caller unbounded
+// growth on three tables.
+//
 // GUARD 1 — per-tenant volume cap. Counts captured_leads rows updated inside the window,
 // index-backed by `captured_leads_client (client_id, updated_at DESC)`. This catches the
 // damaging shape: MANY DIFFERENT phones, which grows the table and floods the tenant's CRM
@@ -44,7 +57,26 @@ const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
 // Enrichment is explicitly preserved: the gate sends name+phone, and the later Details-open
 // capture adds email/address — that request DOES carry something new, so it always goes
 // through regardless of how recent the previous one was.
+//
+// ⚠️ "NEW" MEANS A FIELD WE DID NOT HAVE, NOT A FIELD THAT CHANGED. A changed value is
+// caller-controlled and infinitely repeatable, so judging novelty by difference meant one
+// phone with a rotating name (or a rotating anything) passed this guard on every request
+// while the row count Guard 1 watches sat at 1 — the two guards together let the flood
+// straight through to the tenant's CRM. Empty→filled can happen once per field, so the
+// number of times a single phone can pass this guard is now bounded by the field count for
+// the life of the lead, whatever the caller sends. The enrichment case is untouched: the
+// gate leaves email and address empty and the Details capture fills them.
+//
+// A genuine CORRECTION (a typo'd email retyped) no longer jumps the queue, but it is
+// written to the local row by the very next capture outside the window, and the two real
+// callers fire once per page load — well over 15s apart in any flow that corrects a field.
 const LEAD_DEBOUNCE_MS = 15_000;
+
+// The 10-digit NANP key, matching public.crm_phone_key / _shared/phoneKey.ts. Used for
+// every identity compare here (consent, email ownership, the GHL round-trip) so a stored
+// "+1 816…" and a typed "816…" are the same person in all of them.
+const ten = (digits: string) =>
+  digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits.slice(-10);
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -73,6 +105,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const state = str(body?.state, 60);
   const zip = str(body?.zip, 12);
   const phoneDigits = phoneRaw.replace(/\D/g, "");
+  const phoneKey10 = ten(phoneDigits);
 
   // ── SMS consent, from the public gate's checkbox ──────────────────────────
   // ⚠️ The DISCLOSURE SENTENCE IS STORED VERBATIM, not a template id. The wording will be
@@ -84,7 +117,20 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // not a failure, and it simply records nothing.
   const smsConsent = body?.smsConsent === true;
   const consentText = typeof body?.consentText === "string" ? body.consentText.trim().slice(0, 1000) : "";
-  const consentUrl = typeof body?.consentUrl === "string" ? body.consentUrl.trim().slice(0, 500) : "";
+  const consentUrlRaw = typeof body?.consentUrl === "string" ? body.consentUrl.trim().slice(0, 500) : "";
+  // Stored as evidence of WHERE the box was ticked, so it has to be a page address. Anything
+  // else (a javascript: URI, a sentence, an empty string) is dropped rather than filed.
+  const consentUrl = /^https?:\/\//i.test(consentUrlRaw) ? consentUrlRaw : "";
+  // ⚠️ VERBATIM, BUT STILL A DISCLOSURE. The text is stored exactly as sent — that is the
+  // point of the column — which also means a public caller chooses the words that get filed
+  // as this tenant's proof of permission. These two clauses are carrier-mandated (CTIA, and
+  // Twilio 30924 for the rates line) and appear in every version of the sentence in
+  // _shared/smsConsentText.ts, so requiring them rejects free text without pinning wording
+  // we may still edit. Nothing here reformats or replaces what is stored.
+  const consentTextOk =
+    consentText.length >= 40 &&
+    /message and data rates may apply/i.test(consentText) &&
+    /reply\s+stop/i.test(consentText);
 
   // Basic validation — don't spam the CRM with empty/garbage. Not fatal: skip quietly.
   if (!/^[a-z0-9][a-z0-9-]*$/.test(clientId)) return json({ ok: false, skipped: "bad_client" });
@@ -96,16 +142,100 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   const { data: cfg } = await sb.from("client_configs").select("client_id").eq("client_id", clientId).maybeSingle();
   if (!cfg) return json({ ok: false, skipped: "unknown_client" });
 
-  // ── Local record FIRST (migration 062) ─────────────────────────────────────────
+  // The lead as it stands BEFORE this request. Read once and used three times: by Guard 2
+  // to judge novelty, by the upsert below to enrich-never-blank, and by the GHL leg to find
+  // the contact it already linked.
+  const source = body?.source === "details" ? "details" : "gate";
+  const { data: existingLead } = await sb.from("captured_leads")
+    .select("id, name, email, street, city, state, zip, ghl_contact_id, source, updated_at")
+    .eq("client_id", clientId).eq("phone_digits", phoneDigits).maybeSingle();
+
+  // ── GUARD 2: per-lead debounce (the same-phone flood) ───────────────────────
+  // Judged against the row as it stands right now, before anything is written. "Adds
+  // something" is a field that was EMPTY and is now filled — see the note on
+  // LEAD_DEBOUNCE_MS for why novelty is not "differs from what we had".
+  if (existingLead?.updated_at) {
+    const sinceLast = Date.now() - Date.parse(existingLead.updated_at);
+    const addsSomething =
+      (!!email && !existingLead.email) ||
+      (!!street && !existingLead.street) ||
+      (!!city && !existingLead.city) ||
+      (!!state && !existingLead.state) ||
+      (!!zip && !existingLead.zip) ||
+      (!!name && !existingLead.name) ||
+      (source === "details" && existingLead.source !== "details");
+    if (Number.isFinite(sinceLast) && sinceLast >= 0 && sinceLast < LEAD_DEBOUNCE_MS && !addsSomething) {
+      // No log: this is the ordinary double-fire case (a visitor re-submitting the gate, a
+      // double-click, a retry) as much as it is abuse. Logging it would be noise.
+      return json({ ok: true, captured: false, reason: "debounced" });
+    }
+  }
+
+  // ── GUARD 1: per-tenant volume cap ─────────────────────────────────────────
+  // Returns ok:true like every other soft path here: the public gate must never block, so a
+  // cap breach is invisible to the visitor by design.
+  // ⚠️ `>=`, not `>`. The count no longer includes this request's own row (nothing has been
+  // written yet), so the comparison shifts by one to keep the same effective ceiling.
+  {
+    const since = new Date(Date.now() - RATE_WINDOW_MS).toISOString();
+    const { count, error: rateErr } = await sb.from("captured_leads")
+      .select("id", { count: "exact", head: true })
+      .eq("client_id", clientId).gt("updated_at", since);
+    // A failed count must not become a free pass OR an outage: fall through and allow.
+    // Failing closed here would let one bad query silence a tenant's lead capture entirely.
+    if (!rateErr && (count ?? 0) >= RATE_MAX_PER_TENANT) {
+      if ((count ?? 0) <= RATE_LOG_CEILING) {
+        await logEdgeError({
+          fn: "capture-lead", req, clientId, code: "rate_limited",
+          message: `capture-lead rate cap hit — ${count} captures in ${RATE_WINDOW_MS / 1000}s; ` +
+                   `capture skipped`,
+          context: { count, limit: RATE_MAX_PER_TENANT, windowMs: RATE_WINDOW_MS },
+        });
+      }
+      return json({ ok: true, captured: false, reason: "rate_limited" });
+    }
+  }
+
+  // ── Whose email is this? ───────────────────────────────────────────────────
+  // The PHONE is the identity this whole function is keyed on: captured_leads is unique on
+  // (client_id, phone_digits), consent is filed against the phone, and the gate verifies
+  // nothing else. Email is enrichment — but both CRM writes below treat it as a MATCH key.
+  // `crm_ensure_contact` resolves by phone THEN email, and GHL's /contacts/upsert matches on
+  // phone OR email. So a visitor who types an address that belongs to someone else — a typo,
+  // a shared household mailbox, or a deliberate one — gets handed that person's contact
+  // record, which is then rewritten with this visitor's name, phone and address, and linked
+  // back onto this lead locally.
+  //
+  // The email is still KEPT on the lead row (it is what the visitor typed and the builder
+  // may want to see it); it is simply not allowed to decide WHO this is.
+  let emailMatchable = !!email;
+  if (email) {
+    const { data: owners } = await sb.from("crm_contacts")
+      .select("phone_digits")
+      .eq("client_id", clientId).eq("email_lower", email.toLowerCase())
+      .is("merged_into", null).limit(5);
+    const claimedByAnother = (owners || []).some((o: any) => {
+      const k = ten(String(o?.phone_digits || "").replace(/\D/g, ""));
+      return !!k && k !== phoneKey10;
+    });
+    if (claimedByAnother) {
+      emailMatchable = false;
+      // ⚠️ No email address or phone digits in the message — the PII rule this function keeps.
+      await logEdgeError({
+        fn: "capture-lead", req, clientId, code: "email_conflict",
+        message: "captured email already belongs to a different contact in this tenant — " +
+                 "kept on the lead, not used as a CRM match key",
+      });
+    }
+  }
+  const ghlEmail = emailMatchable ? email : "";
+
+  // ── Local record (migration 062) ───────────────────────────────────────────────
   // The portal's browsing-leads view reads THIS table, so a lead must exist here even when
   // GHL is unconfigured, down, or rejects the upsert — previously those leads evaporated.
   // One row per (tenant, phone); later captures ENRICH, never blank: the gate sends only
   // name+phone, and a Details-open capture adds email/address onto the same row. COALESCE
   // against the existing row so the fuller value always wins over an empty resend.
-  const source = body?.source === "details" ? "details" : "gate";
-  const { data: existingLead } = await sb.from("captured_leads")
-    .select("id, name, email, street, city, state, zip, ghl_contact_id, source, updated_at")
-    .eq("client_id", clientId).eq("phone_digits", phoneDigits).maybeSingle();
   const leadRow = {
     client_id: clientId,
     name,
@@ -144,13 +274,17 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // has a record (from a design, or from an earlier visit) links to that same record
   // rather than a second one. `source` is deliberately left alone — flipping it would
   // relabel an existing customer as a browsing lead the day they come back to look again.
+  //
+  // The email handed to the resolver is the vetted one: a contested address falls back to
+  // whatever we already had against this phone, so the resolver cannot match on somebody
+  // else's mailbox and return their contact.
   if (savedLead) {
     try {
       const { data: crmId, error: crmErr } = await sb.rpc("crm_ensure_contact", {
         p_client_id: clientId,
         p_name: name,
         p_phone: phoneRaw,
-        p_email: leadRow.email,
+        p_email: emailMatchable ? leadRow.email : (existingLead?.email || null),
       });
       if (crmErr) throw crmErr;
       if (crmId) {
@@ -172,77 +306,51 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // ⚠️ REFUSED WITHOUT THE SENTENCE. A consent record that cannot say what was shown is not
   // evidence, so a `true` flag with no text is dropped rather than stored as a half-record
   // that looks like proof until someone reads it.
-  if (smsConsent && consentText && phoneDigits.length >= 10) {
-    const tenDigits = phoneDigits.length === 11 && phoneDigits.startsWith("1")
-      ? phoneDigits.slice(1) : phoneDigits.slice(-10);
-    const { error: consentErr } = await sb.from("sms_consent_log").insert({
-      client_id: clientId,
-      phone_digits: tenDigits,
-      action: "granted",
-      source: "web_form",
-      disclosure_text: consentText,
-      consent_url: consentUrl || null,
-      ip: clientIp(req),
-      user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
-      detail: { name: name || null, leadId: savedLead?.id ?? null },
-    });
-    if (consentErr) {
-      // Worth a durable row: a consent we failed to record is a text we later cannot justify
-      // sending. ⚠️ No phone digits in the message — the PII rule this function already keeps.
-      await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_insert",
-        message: `sms_consent_log insert failed: ${consentErr.message}` });
+  if (smsConsent && consentTextOk && phoneDigits.length >= 10) {
+    const tenDigits = phoneKey10;
+    // ⚠️ ONE GRANT PER (TENANT, PHONE). Append-only is about HISTORY, not about repetition:
+    // re-ticking the same box adds no fact, and this is a public endpoint, so an insert on
+    // every request means a table an anonymous caller grows without limit. The row that is
+    // already there is the evidence — the first time permission was given, with the words
+    // that were on screen then, which is the version an auditor asks for.
+    //
+    // Revocation is unaffected: a STOP writes sms_opt_outs (and its own 'revoked' row) and
+    // the send path checks that table first, so skipping a duplicate grant can never
+    // un-block someone who asked us to stop.
+    const { data: priorGrant } = await sb.from("sms_consent_log")
+      .select("id")
+      .eq("client_id", clientId).eq("phone_digits", tenDigits).eq("action", "granted")
+      .limit(1).maybeSingle();
+    if (!priorGrant) {
+      const { error: consentErr } = await sb.from("sms_consent_log").insert({
+        client_id: clientId,
+        phone_digits: tenDigits,
+        action: "granted",
+        source: "web_form",
+        disclosure_text: consentText,
+        consent_url: consentUrl || null,
+        ip: clientIp(req),
+        user_agent: (req.headers.get("user-agent") || "").slice(0, 300),
+        detail: { name: name || null, leadId: savedLead?.id ?? null },
+      });
+      if (consentErr) {
+        // Worth a durable row: a consent we failed to record is a text we later cannot justify
+        // sending. ⚠️ No phone digits in the message — the PII rule this function already keeps.
+        await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_insert",
+          message: `sms_consent_log insert failed: ${consentErr.message}` });
+      }
     }
     // The opt-out ledger is deliberately NOT touched here. Granting consent must never clear
     // an earlier STOP — that instruction outranks a checkbox on a later visit, and quietly
     // un-blocking someone who asked us to stop is the one mistake with a statutory penalty.
-  }
-
-  // ── GUARD 2: per-lead debounce (the same-phone flood) ───────────────────────
-  // Computed from the row as it was BEFORE the upsert above, which is why `existingLead` is
-  // captured earlier. "Adds nothing new" is judged field by field against that snapshot: a
-  // repeat of identical name+phone is a no-op to GHL, whereas a Details capture arriving
-  // seconds later brings email/address and must not be suppressed.
-  if (existingLead?.updated_at) {
-    const sinceLast = Date.now() - Date.parse(existingLead.updated_at);
-    const addsSomething =
-      (!!email && email !== (existingLead.email || "")) ||
-      (!!street && street !== (existingLead.street || "")) ||
-      (!!city && city !== (existingLead.city || "")) ||
-      (!!state && state !== (existingLead.state || "")) ||
-      (!!zip && zip !== (existingLead.zip || "")) ||
-      (!!name && name !== (existingLead.name || "")) ||
-      (source === "details" && existingLead.source !== "details");
-    if (Number.isFinite(sinceLast) && sinceLast >= 0 && sinceLast < LEAD_DEBOUNCE_MS && !addsSomething) {
-      // No log: this is the ordinary double-fire case (a visitor re-submitting the gate, a
-      // double-click, a retry) as much as it is abuse. Logging it would be noise.
-      return json({ ok: true, captured: false, reason: "debounced" });
-    }
-  }
-
-  // ── GUARD 1: per-tenant volume cap, AFTER the local row and BEFORE the GHL leg ──
-  // Order is deliberate. A legitimate lead arriving during someone else's flood must still
-  // land in captured_leads (the tenant's own view of it), so the cap only ever suppresses
-  // the OUTBOUND GHL write — the part that costs the tenant their API budget and pollutes
-  // their CRM. And it returns ok:true like every other soft path here: the public gate must
-  // never block, so a cap breach is invisible to the visitor by design.
-  {
-    const since = new Date(Date.now() - RATE_WINDOW_MS).toISOString();
-    const { count, error: rateErr } = await sb.from("captured_leads")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", clientId).gt("updated_at", since);
-    // A failed count must not become a free pass OR an outage: fall through and allow.
-    // Failing closed here would let one bad query silence a tenant's lead capture entirely.
-    if (!rateErr && (count ?? 0) > RATE_MAX_PER_TENANT) {
-      if ((count ?? 0) <= RATE_LOG_CEILING) {
-        await logEdgeError({
-          fn: "capture-lead", req, clientId, code: "rate_limited",
-          message: `capture-lead rate cap hit — ${count} captures in ${RATE_WINDOW_MS / 1000}s; ` +
-                   `GHL upsert skipped, lead saved locally`,
-          context: { count, limit: RATE_MAX_PER_TENANT, windowMs: RATE_WINDOW_MS },
-        });
-      }
-      return json({ ok: true, captured: false, reason: "rate_limited" });
-    }
+  } else if (smsConsent && consentText && !consentTextOk) {
+    // A ticked box whose sentence we refused. Durable, because the innocent cause is an edit
+    // to the disclosure wording that dropped a mandatory clause — and the symptom of that is
+    // silence: real consent quietly not recorded, and texting refused months later with no
+    // trace of why. Bounded by Guard 1 above, which has already run.
+    await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_text_rejected",
+      message: "sms consent not recorded - the disclosure sentence is missing a mandatory clause " +
+               "(see _shared/smsConsentText.ts)" });
   }
 
   // GHL creds (service-role only). If unset the lead still exists locally — skip quietly.
@@ -264,7 +372,7 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
       body: JSON.stringify({
         name,
         phone: phoneRaw,
-        ...(email ? { email } : {}),
+        ...(ghlEmail ? { email: ghlEmail } : {}),
         ...(street ? { address1: street } : {}),
         ...(city ? { city } : {}),
         ...(state ? { state } : {}),
@@ -288,6 +396,22 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
     }
     const d = await r.json();
     const contactId = (d && d.contact && d.contact.id) || null;
+    // ⚠️ CHECK WHO CAME BACK. /contacts/upsert matches on phone OR email and tells us nothing
+    // about which one it used, so the contact in the response is not guaranteed to be the
+    // person we sent. The email above is vetted against our own book, but GHL holds contacts
+    // we have never seen, so this is the second half of the same guard: if the returned
+    // contact carries a different number, it is somebody else's record and its id must not be
+    // stamped onto this lead — that link is what the portal calls "in your CRM", and pointing
+    // it at a stranger is worse than leaving it empty.
+    const retKey = ten(String((d && d.contact && d.contact.phone) || "").replace(/\D/g, ""));
+    if (contactId && retKey && retKey !== phoneKey10) {
+      await logEdgeError({
+        fn: "capture-lead", req, clientId, code: "ghl_contact_mismatch",
+        message: "GHL upsert returned a contact whose phone is not the captured lead's — " +
+                 "matched on another key; local link not written",
+      });
+      return json({ ok: true, captured: false, reason: "ghl_contact_mismatch" });
+    }
     // Link the local row to the CRM contact — the portal shows this as "in your CRM".
     if (contactId && savedLead) {
       await sb.from("captured_leads").update({ ghl_contact_id: contactId }).eq("id", savedLead.id)

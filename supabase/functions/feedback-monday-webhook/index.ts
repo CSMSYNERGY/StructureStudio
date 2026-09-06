@@ -225,8 +225,15 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
         // `board { id }` is required: label IDs collide across the two boards with
         // different meanings, so the lookup must be (board, id). `value` carries the
         // stable label index; `text` is only the fallback.
+        //
+        // `replies` is fetched because a /client REPLY is mirrored too, under its own id.
+        // Without it the reconcile would never see a reply again, so a reply would be the
+        // one client-visible comment that could not be edited or retracted. It is cheap:
+        // Monday charges the nested field flat, not per parent.
         query: `query ($ids: [ID!]) { items (ids: $ids) {
-          id board { id } column_values { id text value } updates (limit: 50) { id text_body created_at creator { name } } } }`,
+          id board { id } column_values { id text value } updates (limit: 50) {
+            id text_body created_at creator { name }
+            replies { id text_body created_at creator { name } } } } }`,
         variables: { ids: rows.map((r: any) => r.monday_item_id) },
       }),
     });
@@ -260,22 +267,30 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
       // seconds later still had the original text sitting in that tenant's My Submissions forever.
       // Marked → overwrite; unmarked → remove. Deleting on unmark keeps the safety property intact
       // (internal chatter is still never STORED — this only ever removes rows).
+      //
+      // A thread node is an update OR one of its replies: both are mirrored, both are keyed
+      // by their OWN Monday id, so both must be reconciled the same way. Rows the tenant
+      // wrote themselves carry monday_update_id NULL (migration 157) and are never matched
+      // by these id-scoped writes. portal-feedback's `refresh` runs this same loop over the
+      // same rows — keep the two in step.
       for (const u of it.updates ?? []) {
-        const t = u.text_body ?? "";
-        if (!CLIENT_MARKER.test(t)) {
-          const del = await admin2.from("feedback_comments")
-            .delete({ count: "exact" }).eq("monday_update_id", String(u.id));
-          if (del.count) retracted += del.count;
-          continue;
+        for (const node of [u, ...(u.replies ?? [])]) {
+          const t = node.text_body ?? "";
+          if (!CLIENT_MARKER.test(t)) {
+            const del = await admin2.from("feedback_comments")
+              .delete({ count: "exact" }).eq("monday_update_id", String(node.id));
+            if (del.count) retracted += del.count;
+            continue;
+          }
+          const ins = await admin2.from("feedback_comments").upsert({
+            submission_id: row2.id,
+            monday_update_id: String(node.id),
+            author_name: node.creator?.name ?? "Structure Studio",
+            body: t.replace(CLIENT_MARKER, "").trim(),
+            created_at: node.created_at ?? new Date().toISOString(),
+          }, { onConflict: "monday_update_id" }).select();
+          if (ins.data && ins.data.length) newComments++;
         }
-        const ins = await admin2.from("feedback_comments").upsert({
-          submission_id: row2.id,
-          monday_update_id: String(u.id),
-          author_name: u.creator?.name ?? "Structure Studio",
-          body: t.replace(CLIENT_MARKER, "").trim(),
-          created_at: u.created_at ?? new Date().toISOString(),
-        }, { onConflict: "monday_update_id" }).select();
-        if (ins.data && ins.data.length) newComments++;
       }
     }
     console.log(`sync_all: checked ${rows.length}, ${statusChanges} status changes, ${newComments} new comments, ${retracted} retracted`);
@@ -345,7 +360,16 @@ Deno.serve(withErrorLog("feedback-monday-webhook", async (req: Request) => {
     if (!CLIENT_MARKER.test(text)) {
       return json({ ok: true, ignored: "internal update (no /client marker)" });
     }
-    const updateId = String(ev.updateId ?? ev.replyId ?? "");
+    // A REPLY inside an update thread arrives on this same event carrying BOTH ids:
+    // `updateId` is the PARENT it hangs under and `replyId` is the reply's own id. Reading
+    // updateId first therefore filed a /client reply under its parent's key, and since
+    // monday_update_id is unique the upsert OVERWROTE the parent's stored text with the
+    // reply's. The next reconcile reads each parent's own body back from Monday, so it then
+    // either restored the parent (reply silently gone) or — when the parent carried no
+    // /client marker, the common case for a marked reply on internal chatter — deleted the
+    // row outright (reply gone, and never restorable). A reply's identity is its own id.
+    const replyId = ev.replyId == null ? "" : String(ev.replyId);
+    const updateId = replyId || String(ev.updateId ?? "");
     if (!updateId) return json({ ok: true, ignored: "no update id" });
     const authorName = await mondayUserName(token, ev.userId);
     const res = await admin.from("feedback_comments").upsert({

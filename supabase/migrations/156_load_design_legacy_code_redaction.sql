@@ -48,6 +48,29 @@
 -- deliberately: the two 8- and 9-character codes are 2^40 and 2^45 problems with ONE target
 -- each — not enumerable — so redacting them would cost prefill for no security gain.
 --
+-- ── WHAT THIS MIGRATION DOES *NOT* CLOSE ─────────────────────────────────────
+-- 1. THE OTHER TWO CAPABILITY RPCs. load_design is not the only SECURITY DEFINER function
+--    granted to anon and keyed on short_code: list_design_versions (032) and
+--    load_design_version (031) return design_versions rows carrying their own `contact` and
+--    `image_url`. A legacy design has no version rows today (031 shipped after all 48 were
+--    created), but the next save of one appends a full snapshot and the same information
+--    becomes readable through the same guessed code under a different function name.
+--    → migration 193 applies this same redaction, at the same threshold, to both of them.
+--
+-- 2. THE PDF OBJECT ITSELF. Nulling image_url hides the LINK, not the FILE. The floor-plans
+--    bucket is public by design (042), and the uploads these legacy designs carry are keyed
+--    on the bare code — `<client_id>/SS-<code>.pdf`, with no timestamp suffix (031 widened
+--    the key shape to add one, and every upload since carries it). An object key DERIVED
+--    from the capability is not protected by redacting the column that quotes it: whoever
+--    resolves a legacy code can still reach the PDF, and the PDF prints the same name,
+--    phone, email and address this migration withholds.
+--    Closing it means re-keying those objects with entropy the code does not supply and
+--    repointing designs.image_url / designs.ss_quote_pdf_url / design_versions.image_url at
+--    the new keys. That is a storage-API job, NOT SQL — renaming the row in storage.objects
+--    leaves the file behind at its old backend key and the link 404s. It also breaks the PDF
+--    link inside the quote emails already delivered to those customers, which is a business
+--    decision rather than a migration. Deliberately out of scope here; tracked separately.
+--
 -- ⛔ CONSIDERED AND REJECTED: redacting only when `auth.role() = 'anon'`, so signed-in staff
 --    keep the prefill. It works (auth.role() is available here), and it was tempting because
 --    the visible cost above lands on staff too — opening one of these 48 in the PORTAL

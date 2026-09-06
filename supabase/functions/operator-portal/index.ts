@@ -24,8 +24,11 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 //     owner's own tenant. Every call is audit-logged to admin_audit (cross-tenant PII).
 //   { action: "list_users", clientId }    → the people under one tenant
 //   { action: "save_user", … }            → correct a user's name/phone
-//   { action: "send_reset_link", clientId, userId } → email that user a set-password link
-//     and hand back a copyable one. Write actions require app_operators.can_write.
+//   { action: "send_reset_link", clientId, userId } → email that user a set-password link,
+//     plus a copyable one IF the email could not go out (two links would cancel each other).
+// Write actions require app_operators.can_write. A SUPPORT operator (app_operators
+// .support_only, migration 176) gets list_clients + get_portal only — the switcher and the
+// view-as read; the roster, the writes and the platform SMS list are the console side.
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -72,7 +75,9 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: op, error: opErr } = await admin
     .from("app_operators")
-    .select("user_id, email, can_write")   // can_write gates the write actions below
+    // can_write gates the write actions below; support_only decides which actions exist
+    // at all for this caller (the allow-list under the payload parse).
+    .select("user_id, email, can_write, support_only")
     .eq("user_id", user.id)
     .maybeSingle();
   if (opErr) return json({ error: opErr.message }, 500);
@@ -83,13 +88,14 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
   catch { return json({ error: "Invalid JSON" }, 400); }
   const action = payload?.action;
 
-  const audit = async (action: string, targetClientId: string | null, rowCount: number | null) => {
+  // `note` is optional so every existing call site keeps the note it already writes.
+  const audit = async (action: string, targetClientId: string | null, rowCount: number | null, note = "") => {
     try {
       await admin.from("admin_audit").insert({
         action,
         target_client_id: targetClientId,
         row_count: rowCount,
-        note: `operator:${op.email || user.email || user.id}`,
+        note: `operator:${op.email || user.email || user.id}${note ? ` ${note}` : ""}`,
       });
     } catch (_) { /* audit is best-effort — never block the view on a log failure */ }
   };
@@ -104,6 +110,36 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
     });
     if (error) throw new Error(`Could not record this change in the audit log: ${error.message}`);
   };
+
+  // ── A SUPPORT OPERATOR GETS THE SWITCHER, AND ONLY THE SWITCHER (migration 176) ──────────
+  // app_operators.support_only means "stand in the builder's shoes": resolveTenant hands that
+  // account the VIEWED tenant's owner access map instead of the blanket operator view, and the
+  // other two operator surfaces refuse it at the door (_shared/adminAuth.ts for the Admin
+  // console, portal-projects for the boards). This function was never told the flag existed,
+  // so it kept serving a support account the entire cross-tenant surface underneath it —
+  // including `send_reset_link`, which mints a recovery link for any tenant's OWNER. That link
+  // is a bearer credential (portal-commissions spells out why a set-password link is not a
+  // convenience), and it hands back the very rights the narrowing exists to withhold: sign in
+  // through it and you are the owner, with none of the support clamp applied.
+  //
+  // An ALLOW-LIST rather than a list of refusals, so the next action added to this switch is
+  // closed to a support account until somebody decides otherwise — not open because nobody
+  // remembered this gate. The two that stay open are the switcher itself: portal/01-core.jsx's
+  // ssClampTab keeps the Accounts TAB for a support operator on purpose ("Accounts is the
+  // SWITCHER, and a support operator needs it — it is how they reach the next builder"), and
+  // `get_portal` is the view-as read where their narrowed map applies. The rest of this file is
+  // the console side of the same tab: the cross-tenant user roster (names, emails, phones and
+  // who else holds platform rights), the two writes, and the platform SMS overview.
+  //
+  // Enforced HERE, not in the browser, for the reason this repo keeps writing down: the
+  // function is directly callable with nothing but a session, so a hidden button is a courtesy
+  // and not a control. Logged, like adminAuth's own support refusal — a support account
+  // reaching for the operator tools is worth being able to see after the fact.
+  const SUPPORT_ACTIONS = new Set(["list_clients", "get_portal"]);
+  if (op.support_only && !SUPPORT_ACTIONS.has(String(action ?? ""))) {
+    await audit("operator_portal_support_denied", null, null, `action=${String(action ?? "").slice(0, 60)}`);
+    return json({ error: "Support accounts can open a builder's portal, but not the operator account tools." }, 403);
+  }
 
   try {
     switch (action) {
@@ -279,16 +315,25 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
         // applying it here would refuse a real reset the default sender would have delivered.
         const { error: sendErr } = await admin.auth.resetPasswordForEmail(email, { redirectTo: AUTH_PORTAL_URL });
 
-        // A copyable link regardless, for the case that has actually bitten us: SMTP down or
-        // unconfigured, so the email never arrives and the operator needs something to paste
-        // into a chat. Best-effort — a missing link must not fail a reset that WAS emailed.
+        // ONE recovery token, never two. GoTrue keeps a SINGLE recovery token per user, so
+        // generating a link AFTER the email has gone out replaces the token that email is
+        // carrying: the copyable link works and the link the person was just told to look for
+        // in their inbox is dead on arrival. That is the one failure this action must not
+        // have, because "check your email" is what the operator says out loud while clicking.
+        //
+        // So the copyable link is minted only when the send FAILED — which is the case it was
+        // added for: SMTP down or unconfigured, nothing arrives, and the operator needs
+        // something to paste into a chat. Still best-effort, and `resetLink` is still in the
+        // response either way; it is simply null on the path where the EMAIL is the live link.
         let resetLink: string | null = null;
-        try {
-          const gl = await admin.auth.admin.generateLink({
-            type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL },
-          });
-          if (!gl.error) resetLink = gl.data?.properties?.action_link || null;
-        } catch (_) { /* link is best-effort */ }
+        if (sendErr) {
+          try {
+            const gl = await admin.auth.admin.generateLink({
+              type: "recovery", email, options: { redirectTo: AUTH_PORTAL_URL },
+            });
+            if (!gl.error) resetLink = gl.data?.properties?.action_link || null;
+          } catch (_) { /* link is best-effort */ }
+        }
 
         // Report the email failure only after the fallback link is in hand — otherwise an SMTP
         // outage would throw away the one thing that still works.
@@ -304,7 +349,7 @@ Deno.serve(withErrorLog("operator-portal", async (req: Request) => {
           // fails at Supabase, not here, so say so rather than letting it look like our bug.
           note: sendErr
             ? `Could not send the email (${sendErr.message}) — use the link below instead.`
-            : "Sent. Supabase limits reset emails to a few per address per hour; the link below works either way.",
+            : "Sent — the link is in their email. Supabase limits reset emails to a few per address per hour, so give it a minute before sending another.",
         });
       }
       case "get_portal": {

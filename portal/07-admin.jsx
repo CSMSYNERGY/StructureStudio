@@ -22,8 +22,46 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   const [resetBusy, setResetBusy] = useState({});
   const [resetInfo, setResetInfo] = useState({});
 
+  // ── Support mode: the switcher, and only the switcher (migration 176) ─────────────
+  // A support operator is deliberately narrowed to what the builder's own owner can see —
+  // Billing hidden, no Admin or Projects console. This tab is TWO things at once, and only
+  // the first survives that narrowing:
+  //   the SWITCHER — the account list and "Open portal →", which is how a support account
+  //     reaches the builder it is helping, and is exactly why ssClampTab keeps the tab;
+  //   the OPERATOR CONSOLE — the per-tenant user roster (names, emails, phones, who else
+  //     holds platform rights), the inline edit, and the reset link. A recovery link is the
+  //     sharpest of those: it lands on the tenant OWNER's login, and whoever opens it is
+  //     then that owner, Billing included — the very access the narrowing withholds.
+  // operator-portal refuses the console half server-side; this keeps the tab from offering
+  // controls that can only come back as a 403.
+  //
+  // The shell's `supportView` cannot answer this. It is `!!viewing && isSupportOp` — scoped
+  // to view-as on purpose — and this tab is the operator's OWN portal, where it is always
+  // false. So the flag is read on its own, from the same rpc the shell reads.
+  //
+  // THREE STATES, NOT TWO: null = still asking, which is not the same as "no". A failed
+  // call keeps the last known value rather than reading as `false`, same posture as the
+  // shell's three siblings.
+  const [supportOp, setSupportOp] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setSupportOp(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  // The two gates read `supportOp` from OPPOSITE ends, on purpose.
+  //   Reads (the roster) stay open until we KNOW it is a support account: a call that never
+  //     answers must not leave a platform operator with an inert tab, and the server refuses
+  //     the read anyway — with a sentence this tab already renders in `userErr`.
+  //   The reset stays shut until we know it is NOT: it mints a bearer credential, and
+  //     "unknown" is not a good enough reason to offer that.
+  const rosterOn = supportOp !== true;
+  const resetOn = supportOp === false;
+
   const sendReset = async (clientId, u) => {
     if (resetBusy[u.userId]) return;
+    // Re-checked here as well as on the button: the disabled attribute is a courtesy, and a
+    // row rendered before the answer arrived would otherwise still be clickable.
+    if (!resetOn) return;
     setResetBusy((b) => ({ ...b, [u.userId]: true }));
     setResetInfo((r) => ({ ...r, [u.userId]: null }));
     try {
@@ -71,6 +109,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   }, []);
 
   const toggle = (clientId) => {
+    if (!rosterOn) return;
     const next = !open[clientId];
     setOpen((o) => ({ ...o, [clientId]: next }));
     if (next && users[clientId] === undefined) loadUsers(clientId);
@@ -95,6 +134,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
   // visible rows, and the comment above still promised the opposite. Paging redefined
   // "looking at"; this follows it rather than leaving the promise false.
   const expandAll = () => {
+    if (!rosterOn) return;
     setOpen((o) => {
       const next = { ...o };
       filtered.forEach((c) => { next[c.clientId] = true; });
@@ -179,7 +219,10 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
         desc="Open any builder's portal and work in it as they would — designs, contacts, structures, options, colours, branding, connection and billing. Changes are LIVE in their account and every action is audit-logged. Design status badges show cached values."
         right={<>
           {/* Acts on the filtered set, and each is disabled when it would do nothing — so the
-              control tells you the current state instead of being a pair of dead buttons. */}
+              control tells you the current state instead of being a pair of dead buttons.
+              Both belong to the operator-console half of the tab, so a support account (see
+              rosterOn above) gets neither: the roster behind them is refused server-side. */}
+          {rosterOn && (<>
           <button type="button" onClick={expandAll} disabled={!filtered.length || openCount === filtered.length}
             title="Show the users under every account listed"
             style={{ ...S.btn("#F1F5F9", openCount === filtered.length || !filtered.length ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
@@ -190,6 +233,7 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
             style={{ ...S.btn("#F1F5F9", openCount === 0 ? "#CBD5E1" : "#334155"), padding: "7px 11px", fontSize: 12 }}>
             Collapse all
           </button>
+          </>)}
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search accounts…"
             style={{ border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", fontSize: 13, width: 190 }} />
         </>}
@@ -221,13 +265,20 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
         <div key={c.clientId} style={{ borderBottom: "1px solid #F1F5F9" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 4px" }}>
             {/* The whole identity block toggles, so the hit target is the row rather than a
-                6px chevron. aria-expanded so it reads as a disclosure, not a mystery button. */}
+                6px chevron. aria-expanded so it reads as a disclosure, not a mystery button.
+                For a support account it is not a disclosure at all — there is nothing behind
+                it they may read — so the chevron and aria-expanded both go, leaving the plain
+                identity block next to "Open portal →", which is the half of this tab they
+                actually have. */}
             <button type="button" onClick={() => toggle(c.clientId)}
-              aria-expanded={!!open[c.clientId]}
-              title={open[c.clientId] ? "Hide users" : "Show users"}
-              style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", textAlign: "left" }}>
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#94A3B8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
-                style={{ flexShrink: 0, transform: open[c.clientId] ? "rotate(90deg)" : "none", transition: "transform .12s" }}><path d="M9 18l6-6-6-6"/></svg>
+              disabled={!rosterOn}
+              aria-expanded={rosterOn ? !!open[c.clientId] : undefined}
+              title={!rosterOn ? undefined : open[c.clientId] ? "Hide users" : "Show users"}
+              style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: rosterOn ? "pointer" : "default", font: "inherit", textAlign: "left" }}>
+              {rosterOn && (
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#94A3B8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  style={{ flexShrink: 0, transform: open[c.clientId] ? "rotate(90deg)" : "none", transition: "transform .12s" }}><path d="M9 18l6-6-6-6"/></svg>
+              )}
               <div style={{ width: 34, height: 34, borderRadius: 8, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#475569", flexShrink: 0 }}>
                 {(c.companyName || c.clientId).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase()}
               </div>
@@ -305,13 +356,19 @@ function AccountsTab({ viewing, onOpen, onEditUser, usersRefreshKey = 0 }) {
                             <button type="button" onClick={() => onEditUser(c, u)}
                               style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 9px", fontSize: 11 }}>Edit</button>
                             {/* Disabled without an email rather than hidden: "why is there no
-                                button here" is a worse question than a tooltip that answers it. */}
+                                button here" is a worse question than a tooltip that answers it.
+                                Same treatment for a support account (see supportOp above) — the
+                                tooltip says why, instead of the control quietly vanishing. */}
                             <button type="button" onClick={() => sendReset(c.clientId, u)}
-                              disabled={!u.email || !!resetBusy[u.userId]}
-                              title={u.email
+                              disabled={!u.email || !resetOn || !!resetBusy[u.userId]}
+                              title={supportOp === true
+                                ? "Support mode: a recovery link signs whoever opens it in as this person, which is the access support mode holds back. Ask a platform operator to send it."
+                                : supportOp === null
+                                ? "Checking your operator permissions…"
+                                : u.email
                                 ? `Email ${u.email} a link to set a new password`
                                 : "This login has no email address, so nothing can be sent to it"}
-                              style={{ ...S.btn("#F1F5F9", (!u.email || resetBusy[u.userId]) ? "#CBD5E1" : "#334155"), padding: "4px 9px", fontSize: 11, marginLeft: 5 }}>
+                              style={{ ...S.btn("#F1F5F9", (!u.email || !resetOn || resetBusy[u.userId]) ? "#CBD5E1" : "#334155"), padding: "4px 9px", fontSize: 11, marginLeft: 5 }}>
                               {resetBusy[u.userId] ? "Sending…" : "Send reset"}
                             </button>
                           </td>
@@ -1849,7 +1906,11 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
     try {
       let imageUrl = null;
       if (img) {
-        const up = await adminApi("upload_image", { clientId, base64: img.base64, contentType: img.contentType });
+        // `imageBase64` is the field name admin-catalog's upload_image reads (index.ts:492);
+        // `base64` was silently ignored there, so the request failed "No image data." and a
+        // style could only ever be created without its picture. The standalone admin app
+        // (admin.app.jsx) has always sent imageBase64 — this makes the portal agree with it.
+        const up = await adminApi("upload_image", { clientId, imageBase64: img.base64, contentType: img.contentType });
         imageUrl = (up && up.url) || null;
       }
       await adminApi("create_style", { clientId, label: name.trim(), ...(imageUrl ? { imageUrl } : {}) });

@@ -86,3 +86,68 @@ Deno.test("the refusal names a time the builder can act on", () => {
     assert(/8am/.test(v.reason), "and should say when they CAN send");
   }
 });
+
+// ── The 8pm states, swept in full ──────────────────────────────────────────────────────
+// The zone table is last-write-wins and the plain zone lists are written after the
+// legislated 8pm lists, so any code that appears in both quietly lost its early close and
+// was textable until 9pm. Nine did. Sweeping every 8pm code, rather than spot-checking one
+// per state, is what stops the next duplicate entry from reopening the hour in silence.
+const EARLY_EASTERN = [
+  "239", "305", "321", "352", "386", "407", "561", "656", "689", "727", "754", "772", "786",
+  "813", "863", "904", "941", "954", // FL
+  "203", "475", "860", "959",        // CT
+  "227", "240", "301", "410", "443", "667", // MD
+];
+const EARLY_CENTRAL = ["405", "539", "572", "580", "918"];          // OK
+const EARLY_PACIFIC = ["206", "253", "360", "425", "509", "564"];   // WA
+
+Deno.test("every legislated 8pm area code really does close at 8pm", () => {
+  // 01:00 UTC = 20:00 EST, 02:00 UTC = 20:00 CST, 04:00 UTC = 20:00 PST (January).
+  for (const c of EARLY_EASTERN) {
+    assert(!quietHoursVerdict(c, JAN(1)).allowed, `${c} must be shut at 8pm Eastern`);
+  }
+  for (const c of EARLY_CENTRAL) {
+    assert(!quietHoursVerdict(c, JAN(2)).allowed, `${c} must be shut at 8pm Central`);
+  }
+  for (const c of EARLY_PACIFIC) {
+    assert(!quietHoursVerdict(c, JAN(4)).allowed, `${c} must be shut at 8pm Pacific`);
+  }
+});
+
+Deno.test("the 8pm states hold in July too — the close is legislated, not seasonal", () => {
+  // 00:00 UTC = 20:00 EDT, 01:00 UTC = 20:00 CDT, 03:00 UTC = 20:00 PDT.
+  for (const c of EARLY_EASTERN) {
+    assert(!quietHoursVerdict(c, JUL(0)).allowed, `${c} must be shut at 8pm Eastern in summer`);
+  }
+  for (const c of EARLY_CENTRAL) {
+    assert(!quietHoursVerdict(c, JUL(1)).allowed, `${c} must be shut at 8pm Central in summer`);
+  }
+  for (const c of EARLY_PACIFIC) {
+    assert(!quietHoursVerdict(c, JUL(3)).allowed, `${c} must be shut at 8pm Pacific in summer`);
+  }
+});
+
+Deno.test("only the closing hour moved — the 8pm states are still open at 7pm", () => {
+  // 00:00 UTC = 19:00 EST, 01:00 UTC = 19:00 CST, 03:00 UTC = 19:00 PST.
+  for (const c of EARLY_EASTERN) {
+    assert(quietHoursVerdict(c, JAN(0)).allowed, `${c} is inside the window at 7pm Eastern`);
+  }
+  for (const c of EARLY_CENTRAL) {
+    assert(quietHoursVerdict(c, JAN(1)).allowed, `${c} is inside the window at 7pm Central`);
+  }
+  for (const c of EARLY_PACIFIC) {
+    assert(quietHoursVerdict(c, JAN(3)).allowed, `${c} is inside the window at 7pm Pacific`);
+  }
+});
+
+Deno.test("a duplicated 8pm code is refused with the 8pm sentence, not the 9pm one", () => {
+  // 860 is Connecticut and also sat in the plain Eastern list. The builder reading the
+  // refusal has to be told the real deadline, or they will try again at 8:30 and fail again.
+  const v = quietHoursVerdict("860", JAN(1));
+  assert(!v.allowed);
+  if (!v.allowed) {
+    assertEquals(v.localHour, 20);
+    assert(/8pm/.test(v.reason), "the refusal should name 8pm as the close");
+    assert(!/9pm/.test(v.reason), "and must not offer 9pm to a state that closes at 8");
+  }
+});

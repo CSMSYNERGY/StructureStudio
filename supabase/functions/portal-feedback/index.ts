@@ -144,6 +144,28 @@ function toClientStatus(boardId: string, labelId: unknown, labelText: unknown): 
   return undefined;
 }
 
+// `refresh` is a READ the tenant triggers, so it may only ever carry a status change
+// FORWARD. During the parallel run, Projects (portal-projects) writes the client-facing
+// status without touching Monday, so Monday's label is legitimately stale for those
+// items — re-applying it would walk the tenant's own submission backwards once per
+// "Check for updates" click, indefinitely, with no way for them to stop it.
+//
+// Monday's status cell value carries its own `changed_at`, and every writer of
+// feedback_submissions.status (webhook, this function, portal-projects' propagateStatus)
+// stamps status_changed_at, so the two timestamps order the writes: only a Monday change
+// made AFTER the stored one wins. That keeps the documented last-writer-wins divergence
+// intact — a genuine later drag in Monday still lands — while a stale re-read cannot
+// overwrite anything. Missing either timestamp (a row from before status_changed_at was
+// stamped, or a cell Monday returns without one) falls back to applying it, which is what
+// keeps this a safety net for a webhook that never arrived.
+function mondayChangeIsNewer(mondayChangedAt: unknown, storedChangedAt: unknown): boolean {
+  if (typeof mondayChangedAt !== "string" || typeof storedChangedAt !== "string") return true;
+  const m = Date.parse(mondayChangedAt);
+  const s = Date.parse(storedChangedAt);
+  if (!Number.isFinite(m) || !Number.isFinite(s)) return true;
+  return m > s;
+}
+
 // A Monday update reaches the tenant ONLY when the team prefixes it with /client.
 // Everything else stays internal and is never stored on our side at all.
 const CLIENT_MARKER = /^\s*\/client\b[:\s-]*/i;
@@ -206,8 +228,10 @@ function statusAfterPush(kind: "bug" | "feature"): string {
 // updating ONLY the tenant mirror (feedback_submissions); it never touches pm_items.
 // A status dragged in Monday therefore updates what the tenant sees but not the
 // Projects board, and a later Projects status change overwrites the mirror — last
-// writer wins. The team works in Projects; cutover (MONDAY_PUSH_DISABLED=1, then
-// stripping the Monday code) ends the divergence.
+// writer wins. Last WRITER: `refresh` is a tenant-triggered read and is forward-only
+// (mondayChangeIsNewer), so re-reading a stale Monday label is not a write and can
+// never undo the Projects side. The team works in Projects; cutover
+// (MONDAY_PUSH_DISABLED=1, then stripping the Monday code) ends the divergence.
 // deno-lint-ignore no-explicit-any
 async function mirrorToProjects(admin: any, row: any): Promise<void> {
   try {
@@ -524,7 +548,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (action === "refresh") {
     if (!token) return json({ ok: true, refreshed: 0 });
     const { data: rows } = await admin.from("feedback_submissions")
-      .select("id, monday_item_id, status")
+      .select("id, monday_item_id, status, status_changed_at")
       .eq("client_id", clientId)
       .not("monday_item_id", "is", null)
       .order("created_at", { ascending: false })
@@ -564,9 +588,16 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
         (c: any) => c.id === BOARDS.bug.colStatus || c.id === BOARDS.feature.colStatus,
       );
       let cellIndex: unknown = null;
-      try { cellIndex = statusCell?.value ? JSON.parse(statusCell.value)?.index : null; } catch { /* text fallback */ }
+      // `changed_at` rides in the same status cell value as `index` — it is what makes
+      // this refresh forward-only instead of authoritative (see mondayChangeIsNewer).
+      let cellChangedAt: unknown = null;
+      try {
+        const parsed = statusCell?.value ? JSON.parse(statusCell.value) : null;
+        cellIndex = parsed?.index ?? null;
+        cellChangedAt = parsed?.changed_at ?? null;
+      } catch { /* text fallback */ }
       const mapped = statusCell ? toClientStatus(itemBoard, cellIndex, statusCell.text) : undefined;
-      if (mapped && mapped !== row.status) {
+      if (mapped && mapped !== row.status && mondayChangeIsNewer(cellChangedAt, row.status_changed_at)) {
         await admin.from("feedback_submissions").update({
           status: mapped,
           status_changed_at: new Date().toISOString(),

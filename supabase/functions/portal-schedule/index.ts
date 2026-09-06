@@ -118,6 +118,27 @@ const cors = {
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 }
+
+/**
+ * A DELIBERATE refusal thrown from deep inside a branch rather than returned — "that id
+ * isn't a uuid", "that row isn't yours". The catch-all at the bottom answers these 4xx,
+ * which is what they are, and withErrorLog leaves them alone.
+ *
+ * EVERYTHING ELSE that reaches that catch is a FAULT: a PostgREST or storage error thrown
+ * by one of the ~40 `if (error) throw error` lines, or a bug in this file. Those used to be
+ * answered 400 as well — and a 400 is below withErrorLog's minStatus, so a broken query for
+ * a whole tenant left NO row in app_errors and no trace anywhere but the console. They now
+ * answer 500 so the fault queue actually sees them. The response BODY shape is unchanged
+ * (`{ error }`), which is the only part the portal reads.
+ */
+class Refusal extends Error {
+  readonly status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "Refusal";
+    this.status = status;
+  }
+}
 const isUuid = (v: unknown) => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
 const num = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -180,6 +201,40 @@ async function appearanceFrom(admin: any, clientId: string, selections: any, pai
   return out;
 }
 
+// ── WHOLE-SET READS ARE PAGED, NOT CAPPED ───────────────────────────────────────────────
+// PostgREST answers at most `db-max-rows` rows per request (1000 on this project) and a
+// hand-written `.limit(500)` caps it harder still. Both truncate SILENTLY: no error, no
+// marker on the response, nothing in app_errors. That is survivable for a list someone
+// scrolls; it is not survivable for the four reads this helper is used on, because every
+// one of them is a WHOLE-SET read that the answer is computed from:
+//   • the build tray and the delivery pool ARE their candidate sets, so a row past the cap
+//     is a building that has silently left the schedule;
+//   • the pool's stops read is an EXCLUSION set, so a row past the cap re-offers a building
+//     that is already on a load — the "Add to load…" button that 409s every time.
+// And the caps were on UNORDERED queries, so which rows were lost was not even stable.
+//
+// `make` is a factory because a PostgREST builder is single-use; the caller must give it a
+// deterministic .order() (range paging over an unordered query repeats and skips rows).
+const PAGE_ROWS = 1000; // = PostgREST's own max-rows, so a full page means "there may be more"
+const MAX_PAGES = 40;   // 40k rows of one table for one tenant is a runaway, not a workload
+async function fetchAll(
+  // deno-lint-ignore no-explicit-any
+  make: (from: number, to: number) => PromiseLike<{ data: any[] | null; error: any }>,
+  // deno-lint-ignore no-explicit-any
+): Promise<{ data: any[] | null; error: any }> {
+  // deno-lint-ignore no-explicit-any
+  const rows: any[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_ROWS;
+    const res = await make(from, from + PAGE_ROWS - 1);
+    if (res.error) return { data: null, error: res.error };
+    const got = res.data ?? [];
+    rows.push(...got);
+    if (got.length < PAGE_ROWS) break;
+  }
+  return { data: rows, error: null };
+}
+
 Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -237,10 +292,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
 
   // deno-lint-ignore no-explicit-any
   const requireRow = async (table: string, id: unknown, label: string): Promise<any> => {
-    if (!isUuid(id)) throw new Error(`Invalid ${label} id.`);
+    if (!isUuid(id)) throw new Refusal(`Invalid ${label} id.`);
     const { data, error } = await admin.from(table).select("*").eq("id", id).eq("client_id", clientId).maybeSingle();
     if (error) throw error;
-    if (!data) throw new Error(`${label} not found.`);
+    if (!data) throw new Refusal(`${label} not found.`);
     return data;
   };
 
@@ -388,17 +443,19 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
 
   // Stops whose building is not built yet (the built-before-delivered check).
   //
-  // TWO ways a stop can be unbuilt, and it used to catch only the first:
+  // THREE ways a stop can be unbuilt, and it used to catch only the first:
   //   * its linked build job is not in a kind='done' stage;
   //   * it has NO build job but its inventory unit is below `built` on the ladder. That case
   //     sailed straight through, because the query filtered to stops with a build_job_id. It
   //     matters more now than it did: a unit can be sold before it is finished, and the
   //     buyer's delivery can be scheduled the same day — so "not built yet" is a live state
   //     for a stop with no job, not a theoretical one.
+  //   * it has NEITHER, only a design code — see the third block below.
   // deno-lint-ignore no-explicit-any
   const unbuiltStops = async (loadId: string): Promise<any[]> => {
     const { data: allStops, error } = await admin
-      .from("delivery_stops").select("id, stop_order, serial, customer_name, build_job_id, inventory_unit_id")
+      .from("delivery_stops")
+      .select("id, stop_order, serial, customer_name, build_job_id, inventory_unit_id, design_short_code")
       .eq("client_id", clientId).eq("load_id", loadId);
     if (error) throw error;
     if (!allStops?.length) return [];
@@ -440,6 +497,55 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
             buildStage: LIFECYCLE_LABEL[lc], buildDue: null,
           });
         }
+      }
+    }
+
+    // THE THIRD WAY, and the one that used to sail straight through both blocks above: a
+    // stop carrying ONLY a design code — no job id, no unit id. Two routes to one:
+    //   * add_stop's bare-designShortCode branch, which never sets build_job_id;
+    //   * ANY stop whose build job was later deleted — delivery_stops.build_job_id is
+    //     `on delete set null` (090), so the link silently becomes null and the stop stops
+    //     being checked at all.
+    // Either way the building is still whatever the board says it is, and skipping it hands
+    // a delivery right (which the Driver preset grants) the power to mark an unbuilt
+    // building delivered with no override and no owner/admin in the loop.
+    //
+    // Resolved through the DESIGN CODE rather than the missing job id. A tenant who really
+    // does skip the build board has no job for that code and keeps today's behaviour —
+    // nothing to judge, nothing blocked.
+    const codeOnly = allStops.filter((s) => !s.build_job_id && !s.inventory_unit_id && s.design_short_code);
+    if (codeOnly.length) {
+      const codes = [...new Set(codeOnly.map((s) => String(s.design_short_code)))];
+      const { data: codeJobs, error: cErr } = await admin
+        .from("build_jobs").select("design_short_code, stage_id, due_date")
+        .eq("client_id", clientId).in("design_short_code", codes);
+      if (cErr) throw cErr;
+      const extraStageIds = [...new Set((codeJobs ?? []).map((j) => j.stage_id))].filter((id) => id && !kindOf[id]);
+      if (extraStageIds.length) {
+        const { data: extraStages, error: eErr } = await admin
+          .from("schedule_stages").select("id, kind, name").in("id", extraStageIds);
+        if (eErr) throw eErr;
+        for (const st of extraStages ?? []) kindOf[st.id] = st;
+      }
+      // A code is built as soon as ANY of its jobs is done (a warranty rebuild adds a second
+      // job; the finished original still means the building exists).
+      const doneCodes = new Set<string>();
+      const pendingByCode: Record<string, { stageId: string; dueDate: string | null }> = {};
+      for (const j of codeJobs ?? []) {
+        const c = String(j.design_short_code);
+        if (kindOf[j.stage_id]?.kind === "done") { doneCodes.add(c); continue; }
+        if (!pendingByCode[c]) pendingByCode[c] = { stageId: String(j.stage_id), dueDate: j.due_date ?? null };
+      }
+      for (const s of codeOnly) {
+        const c = String(s.design_short_code);
+        if (doneCodes.has(c)) continue;
+        const pending = pendingByCode[c];
+        if (!pending) continue; // no build card for this building at all
+        out.push({
+          stopId: s.id, stopOrder: s.stop_order, serial: s.serial,
+          customerName: s.customer_name, buildJobId: null,
+          buildStage: kindOf[pending.stageId]?.name ?? null, buildDue: pending.dueDate,
+        });
       }
     }
     return out;
@@ -503,7 +609,11 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         team,
         crews,
       ] = await Promise.all([
-        admin.from("build_jobs").select("*").eq("client_id", clientId).order("position"),
+        // All four whole-set reads are PAGED (see fetchAll) — the board and its tray are the
+        // sets themselves, so a silent cap here removes buildings from the schedule.
+        // The id tie-break is what makes range paging safe: `position` is not unique.
+        fetchAll((from, to) => admin.from("build_jobs").select("*")
+          .eq("client_id", clientId).order("position").order("id").range(from, to)),
         // `.is("inventory_unit_id", null)` is the ROUTING RULE, not a tidy-up: an estimate
         // quoted from a lot building must never appear here as a new build to schedule. The
         // building already exists (or is already being built as a spec unit), so a second job
@@ -511,19 +621,22 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         // SOLD = INVOICED (Carolyn 2026-08-08) — an accepted quote is not a sale yet, and
         // the shop never starts a build before the invoice exists. Widening this back to
         // include "accepted" puts unsold buildings in the tray.
-        admin.from("designs").select("short_code, contact, selections, status")
+        fetchAll((from, to) => admin.from("designs").select("short_code, contact, selections, status")
           .eq("client_id", clientId).eq("status", "invoiced").is("inventory_unit_id", null)
-          .limit(500),
+          .order("short_code").range(from, to)),
         // EVERY unit without a build job belongs in the tray — it IS the approval step
         // (migration 105). There is no accepted_at flag any more: a requested building sits
         // in the tray, and dragging it onto the board is the one human decision that moves it
         // to In Queue. Sale state is deliberately NOT filtered either: a building can be sold
         // before it is built, and selling it does not build it — dropping sold units out of
         // the tray would quietly stop them being made.
-        admin.from("inventory_units").select("id, serial, design_short_code, sale_state, sold_first_name")
-          .eq("client_id", clientId).limit(500),
-        admin.from("repairs").select("id, repair_no, customer_name, description, serial, status")
-          .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500),
+        fetchAll((from, to) => admin.from("inventory_units")
+          .select("id, serial, design_short_code, sale_state, sold_first_name")
+          .eq("client_id", clientId).order("id").range(from, to)),
+        fetchAll((from, to) => admin.from("repairs")
+          .select("id, repair_no, customer_name, description, serial, status")
+          .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"])
+          .order("id").range(from, to)),
         getTeam(),
         getCrews(),
       ]);
@@ -717,26 +830,30 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // carrying the buyer's design code), and open repairs without a stop.
       //
       // ⏱ Waves, for the reason documented on build_board — this was the heaviest read in
-      // the portal at ~12 round trips in single file. Note the stops read below is
-      // deliberately UNBOUNDED: the full stop history is what the exclusion sets are built
-      // from, and a truncated list silently re-offers buildings that are already scheduled.
-      // Do not add a .limit() to it.
+      // the portal at ~12 round trips in single file. Note the stops read below carries the
+      // full stop history: it is what the exclusion sets are built from, and a truncated list
+      // silently re-offers buildings that are already scheduled. Never put a .limit() on it —
+      // it used to have none, which is NOT the same as being unbounded, because PostgREST
+      // caps an unpaged read on its own. It is paged now (fetchAll); keep it that way.
       const stagesAll = await getStages();
       const stageById = Object.fromEntries(stagesAll.map((s) => [s.id, s]));
 
       // ── Wave A: everything keyed only by the tenant ──
       const [stopsRes, jobsAllRes, soldRes, locsRes, openRepairsRes, territories, drivers] =
         await Promise.all([
-          admin.from("delivery_stops")
+          fetchAll((from, to) => admin.from("delivery_stops")
             .select("build_job_id, inventory_unit_id, repair_id, design_short_code, delivered_at, territory_id, dest_city, dest_zip")
-            .eq("client_id", clientId),
-          admin.from("build_jobs").select("*").eq("client_id", clientId).neq("source", "repair").limit(500),
-          admin.from("inventory_units")
+            .eq("client_id", clientId).order("id").range(from, to)),
+          fetchAll((from, to) => admin.from("build_jobs").select("*")
+            .eq("client_id", clientId).neq("source", "repair").order("id").range(from, to)),
+          fetchAll((from, to) => admin.from("inventory_units")
             .select("id, serial, design_short_code, sold_design_short_code, sold_first_name, location_id, sale_state")
-            .eq("client_id", clientId).eq("sale_state", "sold").limit(500),
+            .eq("client_id", clientId).eq("sale_state", "sold").order("id").range(from, to)),
           admin.from("builder_locations").select("id, name, city").eq("client_id", clientId),
-          admin.from("repairs").select("id, repair_no, customer_name, description, serial, status")
-            .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"]).limit(500),
+          fetchAll((from, to) => admin.from("repairs")
+            .select("id, repair_no, customer_name, description, serial, status")
+            .eq("client_id", clientId).in("status", ["requested", "approved", "in_progress"])
+            .order("id").range(from, to)),
           getTerritories(),
           getDrivers(),
         ]);
@@ -998,7 +1115,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       // inventory unit is below `built`, which is reachable the moment a spec build is sold
       // before it is finished. An unbuilt building must not be markable as delivered whether
       // or not somebody made a build card for it.
-      if (stop.build_job_id || stop.inventory_unit_id) {
+      // design_short_code is in the list for the same reason: a stop can be left holding
+      // nothing else — a bare-code order stop, or one whose job was deleted out from under
+      // it (`on delete set null`) — and unbuiltStops resolves that case through the code.
+      if (stop.build_job_id || stop.inventory_unit_id || stop.design_short_code) {
         const unbuilt = await unbuiltStops(stop.load_id);
         if (unbuilt.some((u) => u.stopId === stop.id)) {
           // Staff has no override path — that's an admin call (decision 11).
@@ -1065,10 +1185,20 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const stage = payload?.stageId
         ? await requireRow("schedule_stages", payload.stageId, "Stage")
         : (stages.find((s) => s.kind === "queue" && !s.archived) ?? stages[0]);
+      // ENTERING A DONE STAGE IS COMPLETING — however the job got there. move_job and
+      // complete_job both stamp completed_at, log the activity line and mint the building
+      // serial; creating a job straight into a done stage (the board offers "add to this
+      // column", and the action is callable directly) did none of the three. The result was
+      // a job the board draws as Built with no completion date, nothing in its history, and
+      // an order left without the serial that goes on the physical tag — a state no other
+      // path can produce and nothing downstream repairs.
+      const createdDone = stage.kind === "done";
+      const createdAt = new Date().toISOString();
 
       const row: Record<string, unknown> = {
         client_id: clientId,
         stage_id: stage.id,
+        completed_at: createdDone ? createdAt : null,
         position: Date.now(),
         source,
         title: str(payload?.title),
@@ -1170,6 +1300,10 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
         throw insErr;
       }
       await act("build_job", job.id, "created", { detail: `${source}${job.serial ? ` · serial #${job.serial}` : ""}` });
+      if (createdDone) {
+        await act("build_job", job.id, "completed", { to: stage.id, detail: "created in a finished stage" });
+        await mintBuildingSerial(job, createdAt);
+      }
       return json({ job });
     }
 
@@ -1975,6 +2109,11 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
 
     return json({ error: `Unknown action "${action}".` }, 400);
   } catch (e) {
-    return json({ error: (e as Error).message ?? "Unexpected error." }, 400);
+    // A refusal is the product declining and stays a 4xx. Anything else is a fault and must
+    // answer 5xx — see the Refusal class for why answering 400 hid every database and
+    // storage failure this function has ever had from app_errors.
+    if (e instanceof Refusal) return json({ error: e.message }, e.status);
+    const err = e as { message?: string };
+    return json({ error: err?.message ?? "Unexpected error." }, 500);
   }
 }));

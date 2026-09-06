@@ -49,6 +49,28 @@ const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"])
 // phoneKey moved to _shared/phoneKey.ts (174) — see the note in customer-accept.
 
 /**
+ * A document link leaves this function only when it names an object in THIS project's own
+ * public storage.
+ *
+ * `designs.image_url` is written by the anon-callable save_design RPC (migration 104). That
+ * sanitiser pins the object PATH and deliberately NOT the host, which is the right trade
+ * where the value is only ever used to name one of this design's own objects server-side —
+ * but it means a stored value can read as a floor-plan URL and still point at any origin.
+ * The customer page hands whatever comes back straight to an anchor, and its own check is
+ * scheme-only, so the host has to be settled HERE, on the way out: the builder-branded
+ * "PDF" button must not be able to open somewhere that isn't ours.
+ *
+ * Fail-closed — with no SUPABASE_URL in the environment nothing matches, so a link is
+ * missing rather than unchecked.
+ */
+const STORAGE_ORIGIN = Deno.env.get("SUPABASE_URL") ?? "";
+const OWN_STORAGE_PREFIX = STORAGE_ORIGIN ? `${STORAGE_ORIGIN}/storage/v1/object/public/` : "";
+function ownStorageUrl(u: unknown): string | null {
+  const s = typeof u === "string" ? u.trim() : "";
+  return OWN_STORAGE_PREFIX && s.startsWith(OWN_STORAGE_PREFIX) ? s : null;
+}
+
+/**
  * The tax breakdown a customer sees on their own card (migration 148) — the same pools the
  * PDF prints, so the screen and the document they were emailed cannot disagree.
  *
@@ -248,7 +270,10 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
       createdAt: d.created_at,
       total: totalFromSnapshot(d?.estimate_lines),
       // SS mode: the 3-sheet quote document beats the bare floor plan when it exists.
-      pdfUrl: (ssMode && d.ss_quote_pdf_url) ? d.ss_quote_pdf_url : (d.image_url || null),
+      // Both go through ownStorageUrl — a value that isn't one of our own stored objects
+      // yields no link at all, and the SS document losing the gate still falls back to the
+      // floor plan rather than silently dropping the button.
+      pdfUrl: (ssMode ? ownStorageUrl(d.ss_quote_pdf_url) : null) ?? ownStorageUrl(d.image_url),
       // GHL's hosted estimate page (Accept/Reject live there); null-safe when no estimate.
       acceptUrl: estimateUrl(d.ghl_estimate_id),
       // SS-mode accept happens HERE (customer-accept, migration 124). These four fields
