@@ -1,5 +1,21 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>Loading…</title>
+<!-- Open the connection to Supabase while the page is still parsing. This is the page a
+     shopper lands on, and nothing renders until get_config comes back — without this the
+     call that gates the whole designer pays DNS + TCP + TLS before it can even ask, which
+     on a phone is most of the wait. Same pair portal.html carries, for the same reason.
+     `crossorigin` is required, not decoration: supabase-js issues non-credentialed CORS
+     requests, and those can only reuse a connection opened in the anonymous pool — drop the
+     attribute and the browser warms a socket the app never touches. -->
+<link rel="preconnect" href="https://jzeamjbhdrsbygdnphbm.supabase.co" crossorigin/>
+<link rel="dns-prefetch" href="https://jzeamjbhdrsbygdnphbm.supabase.co"/>
+<!-- The address field in the Customer Information panel loads the Google Maps JS API
+     (loadGoogleMapsPlaces), and that panel is part of the first render, not a later step —
+     so the lookup happens on nearly every visit. DNS only, deliberately not a preconnect:
+     the panel is gated on the tenant's contactFields, and a warmed socket nobody uses is
+     the waste this pair exists to avoid. Note you will not find this host by grepping the
+     sources: Google's own bootstrap snippet assembles it as "maps." + "google" + "apis.com". -->
+<link rel="dns-prefetch" href="https://maps.googleapis.com"/>
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1080px;margin:0 auto}</style>
 </head><body><div id="root"></div>
@@ -24,8 +40,8 @@
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
 
-<script defer src="/structure-studio.component.compiled.js?v=29e30aa2" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
-<script defer src="/index.mount.compiled.js?v=3a00b23a" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script><script data-ss-app="designer">
+<script defer src="/structure-studio.component.compiled.js?v=738251b0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/index.mount.compiled.js?v=7e2093e9" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script><script data-ss-app="designer">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The three /vendor/ tags above are this page's only library dependencies, and the app
    itself arrives as COMPILED, defer'd classic scripts (built offline by scripts/compile.mjs

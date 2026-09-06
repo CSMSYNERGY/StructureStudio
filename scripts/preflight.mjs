@@ -34,6 +34,16 @@
 //      between index.html and portal.html; whether each hash matches its artifact's real
 //      bytes is checked by the artifact drift gate (recompile-and-diff via compile.mjs),
 //      which also refuses a stale or hand-edited artifact.
+//   3b. The artifacts are MINIFIED (since 2026-09-06), which the drift gate alone cannot
+//      police: a minifier that renamed a window.* publish or moved the boot flag out of first
+//      position changes the recompiled bytes and the committed bytes together, so the byte
+//      compare stays green while the boot machinery is dead. Three invariants are therefore
+//      asserted on the shipped text — the __ssBootBlocked guard is the first thing each
+//      wrapper touches, __ssAppBooted is the LAST statement of each app artifact's guarded
+//      body, and every cross-script window.* publish is still present by name. Plus the
+//      minifier version pin: terser's output is deterministic per version, so a mismatched
+//      copy would report every artifact as permanently STALE, blaming sources that are
+//      perfectly fresh.
 //   4. The dependency boot guard is present on all three pages, byte-identical across them,
 //      linted with the same correctness rules as the sources (its body swallows every
 //      runtime error by design, so a typo inside is a silent no-op that byte-identity alone
@@ -709,21 +719,60 @@ const load = () => Object.fromEntries([
   ["StructureStudio.jsx", read("StructureStudio.jsx")],
 ]);
 
-// ── Compiled artifacts: the drift gate ───────────────────────────────────────────────────
+// ── Compiled artifacts: the drift gate, the minifier pin, and the shape gate ─────────────
 // The pages ship artifacts compiled OFFLINE from the sources linted above (scripts/
-// compile.mjs, using the vendored babel-standalone as the compiler). Recompile-and-diff is
-// deliberately the freshness rule — strictly stronger than any manifest bookkeeping, since
-// a hand-edited artifact with self-consistent bookkeeping still fails a byte compare. Also
-// covers the content-hash ?v= busters on every page. Runs on real disk files, like the
-// deno steps, so it lives outside run(files).
+// compile.mjs, using the vendored babel-standalone as the compiler and terser as the
+// minifier). Recompile-and-diff is deliberately the freshness rule — strictly stronger than
+// any manifest bookkeeping, since a hand-edited artifact with self-consistent bookkeeping
+// still fails a byte compare. Also covers the content-hash ?v= busters on every page. Runs
+// on real disk files, like the deno steps, so it lives outside run(files).
+//
+// Two things the byte compare cannot do on its own, both added with minification
+// (2026-09-06):
+//   • The PIN. terser's output is deterministic per version, so an unpinned or mismatched
+//     copy makes every artifact look permanently STALE to whoever has the other one — a
+//     failure whose message would otherwise point at the sources, which are fine.
+//   • The SHAPE. A minifier that renamed a window.* publish, or hoisted the boot flag out of
+//     first position, would change source-derived bytes and artifact bytes TOGETHER: the
+//     drift gate stays green while the boot machinery is dead. So the three runtime
+//     invariants are asserted on the shipped text (compile.mjs: checkArtifactShape).
 async function artifactCheck() {
-  const { checkArtifacts, compileSource } = await import("./compile.mjs");
-  // Vacuity guard, the lesson this script keeps re-learning: a compiler that silently
-  // stopped compiling must not read as "everything is fresh".
-  if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
-    return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
+  const { checkArtifacts, checkArtifactShape, compileSource, installedTerserVersion, TERSER_VERSION, PROBE_SOURCE } =
+    await import("./compile.mjs");
+
+  const installed = installedTerserVersion();
+  if (installed === null) {
+    return ["terser is not installed — scripts/compile.mjs cannot build the artifacts, so nothing "
+      + "below could be checked. Run `npm install` (package-lock.json is gitignored, so it is "
+      + "`npm install`, not `npm ci`)."];
   }
-  return checkArtifacts();
+  if (installed !== TERSER_VERSION) {
+    return [`terser ${installed} is installed but package.json pins ${TERSER_VERSION} — the minifier's `
+      + "output is deterministic per version and the drift gate byte-compares, so this would report "
+      + "every artifact as STALE no matter how many times they were rebuilt. Run `npm install`."];
+  }
+
+  // Vacuity guard, the lesson this script keeps re-learning: a compiler that silently
+  // stopped compiling must not read as "everything is fresh". Wrapped, because compileSource
+  // now has a dependency that can be absent and a throw here would print a stack, not a fix.
+  try {
+    if (!compileSource(PROBE_SOURCE, "probe.jsx").includes("React.createElement")) {
+      return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
+    }
+  } catch (e) {
+    return [`compile self-check failed: ${e && e.message ? e.message : e}`];
+  }
+
+  const problems = checkArtifacts();
+  // The shape gate reads what is COMMITTED — the bytes that actually ship. When an artifact is
+  // stale the drift gate above has already said so; skipping missing files keeps one cause from
+  // printing twice.
+  const committed = {};
+  for (const t of TARGETS) {
+    if (existsSync(join(root, t.out))) committed[t.out] = read(t.out).replace(/\r\n/g, "\n");
+  }
+  problems.push(...checkArtifactShape(committed));
+  return problems;
 }
 
 // ── my-quotes.html: the customer's sales-tax breakdown ───────────────────────────────────
@@ -1657,14 +1706,75 @@ if (process.argv.includes("--self-test")) {
   console.log("self-test passed: the three libraries must be vendored, identical, present, and not "
     + "CDN-loaded — while exceljs stays allowed");
 
+  // ── The minifier pin and the artifact shape gate ───────────────────────────
+  // These exist BECAUSE the drift gate cannot see them: a minifier that renamed a window.*
+  // publish, or that stopped putting the boot flag first, would produce the same wrong bytes
+  // on both sides of the byte compare. A gate nobody can prove fires is the shape this file
+  // has been bitten by twice, so each invariant is bent on a copy and asserted to complain.
+  {
+    const { checkArtifactShape, installedTerserVersion, TERSER_VERSION } = await import("./compile.mjs");
+
+    // The pin is only a pin while package.json agrees with it EXACTLY. A caret slipped in
+    // here and the whole argument for pinning — deterministic bytes, so the drift gate means
+    // something — stops holding, silently, on the next person's `npm install`.
+    const pinned = (JSON.parse(read("package.json")).devDependencies || {}).terser;
+    if (pinned !== TERSER_VERSION || !/^\d+\.\d+\.\d+$/.test(String(pinned))) {
+      console.error(`self-test FAILED: package.json pins terser "${pinned}" but scripts/compile.mjs `
+        + `expects exactly "${TERSER_VERSION}" — same version, no range prefix`);
+      process.exit(1);
+    }
+    const installed = installedTerserVersion();
+    if (installed !== TERSER_VERSION) {
+      console.error(`self-test FAILED: terser ${installed === null ? "is not installed" : installed + " is installed"}, `
+        + `but ${TERSER_VERSION} is pinned — run \`npm install\``);
+      process.exit(1);
+    }
+
+    const committed = Object.fromEntries(TARGETS.map((t) => [t.out, read(t.out).replace(/\r\n/g, "\n")]));
+    const quiet = checkArtifactShape(committed);
+    if (quiet.length) {
+      console.error("self-test FAILED: the committed artifacts do not pass the shape gate:");
+      for (const p of quiet) console.error("  " + p);
+      process.exit(1);
+    }
+    const fires = (label, files, needle) => {
+      const hits = checkArtifactShape(files).filter((e) => e.includes(needle));
+      if (!hits.length) {
+        console.error(`self-test FAILED: ${label} did not trip the artifact shape gate`);
+        process.exit(1);
+      }
+    };
+    // 1. The boot flag renamed away — the exact thing a property-mangling misconfiguration
+    //    would do, and the thing that would leave the boot guard unable to neutralise anything.
+    const noGuard = { ...committed };
+    noGuard["portal.app.compiled.js"] = noGuard["portal.app.compiled.js"].replace("__ssBootBlocked", "__ssBootBlockedGone");
+    fires("a renamed __ssBootBlocked flag", noGuard, "first thing the artifact's wrapper does");
+    // 2. A statement smuggled in AFTER the sentinel: the app would report "booted" while code
+    //    that had not run yet still decided whether it really had.
+    const lateSentinel = { ...committed };
+    const sentinel = lateSentinel["admin.app.compiled.js"].match(/window\.__ssAppBooted\s*=\s*(?:true|!0)\s*;?/)[0];
+    lateSentinel["admin.app.compiled.js"] = lateSentinel["admin.app.compiled.js"]
+      .replace(sentinel, sentinel.replace(/;?$/, ";") + "window.__ssAfterTheSentinel=1;");
+    fires("a statement after the __ssAppBooted sentinel", lateSentinel, "last statement of the guarded body");
+    // 3. A window.* publish renamed: two <script> tags that share no lexical scope silently
+    //    stop talking to each other. The replacement must not CONTAIN the original name —
+    //    "window.ssLogErrorX" still passes an includes() check, which is how a fixture ends up
+    //    proving nothing.
+    const lostPublish = { ...committed };
+    lostPublish["admin.app.compiled.js"] = lostPublish["admin.app.compiled.js"].split("window.ssLogError").join("window.ssLostError");
+    fires("a renamed window.ssLogError publish", lostPublish, "missing from the built artifact");
+  }
+  console.log("self-test passed: terser is pinned to one exact version in both places, and the shape "
+    + "gate fires on a renamed boot flag, a late __ssAppBooted sentinel and a lost window.* publish");
+
   // ── The artifact drift gate ────────────────────────────────────────────────
   // Fire direction: a source edited without recompiling must produce different bytes than
   // the committed artifact (proven in memory — the real gate does this same compare on
   // disk). Quiet direction: the pristine repo must check clean. Vacuity direction: the
   // compiler must actually compile JSX, or "no drift" means "the gate is dead".
   {
-    const { checkArtifacts, compileSource } = await import("./compile.mjs");
-    if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
+    const { checkArtifacts, compileSource, PROBE_SOURCE } = await import("./compile.mjs");
+    if (!compileSource(PROBE_SOURCE, "probe.jsx").includes("React.createElement")) {
       console.error("self-test FAILED: the vendored Babel produced no JSX output — the drift gate is dead");
       process.exit(1);
     }

@@ -94,6 +94,28 @@ function RowMenu({ items, label = "More actions" }) {
   );
 }
 
+// ── TWO KEYS OUT OF THE PLAN, NOT THE PLAN ──────────────────────────────────────────────
+// `designs.selections` is the WHOLE design: every placed item, its position, its options —
+// commonly tens of kilobytes a row. The Designs and Contacts lists read exactly two things
+// out of it, `style` and `size`, to draw one "Barn 12x24" cell; they used to pull the entire
+// blob for every design in the tenant to do it, so a few hundred designs moved megabytes to
+// paint two columns, and `design_versions` paid the same toll a second time.
+//
+// PostgREST projects json keys server-side (`alias:column->>key`), so the two values arrive
+// as two short strings. `withListSelections` then rebuilds the `{ selections: { style, size } }`
+// shape the rows already had, which is why nothing downstream — the facets, the search, the
+// sort, the pipeline cards, the version rows — had to learn about this.
+//
+// Anything that needs the FULL selections fetches the row it is opening and always did: the
+// version diff in the contact drawer comes from portal-settings `contact_activity`, the
+// record view and the designer load the design itself. Operator view-as (fetchDesigns) is a
+// service-role path with its own shape and is left exactly as it was.
+const SEL_LIST_COLS = "sel_style:selections->>style, sel_size:selections->>size";
+function withListSelections(r) {
+  const { sel_style, sel_size, ...rest } = r;
+  return { ...rest, selections: { style: sel_style || "", size: sel_size || "" } };
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -134,19 +156,44 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // toggle: `view` also survives in this component across a refresh of the entitlement, and
   // a builder who was mid-board when their subscription lapsed must not keep the board.
   const shownView = crmUnlocked ? view : "list";
+  // Cache-seeded so returning to Designs paints at once and refreshes behind it (see
+  // ssTabCache in 01-core, and LeadsTable/Orders which already do this). Operator view-as
+  // reads through a service-role path and is left uncached, same rule as Contacts.
+  const seeded = () => (fetchDesigns ? null : ssCacheGet("rest", "designs", clientId));
+  const [rows, setRows] = useState(() => (seeded() || {}).rows || null); // null = loading
+  const [error, setError] = useState(null);
+  const [vmap, setVmap] = useState(() => (seeded() || {}).vmap || {});   // short_code -> versions (newest first)
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
+  //
+  // Scoped to the units the loaded rows actually point at, rather than every unit the tenant
+  // has ever stocked: a lot with hundreds of buildings was read in full to label the handful
+  // of designs that came from one. Nothing here is a filter — an id with no serial yet just
+  // renders the chip without a number, exactly as it does before this resolves.
   const [unitSerials, setUnitSerials] = useState({});
+  const unitIdKey = useMemo(() => {
+    const ids = new Set();
+    (rows || []).forEach((r) => { if (r.inventory_unit_id) ids.add(r.inventory_unit_id); });
+    Object.keys(vmap).forEach((code) => (vmap[code] || []).forEach((v) => { if (v.inventory_unit_id) ids.add(v.inventory_unit_id); }));
+    return [...ids].sort().join(",");
+  }, [rows, vmap]);
   useEffect(() => {
+    const ids = unitIdKey ? unitIdKey.split(",") : [];
+    if (ids.length === 0) { setUnitSerials((p) => (Object.keys(p).length ? {} : p)); return undefined; }
     let off = false;
-    sb.from("inventory_units").select("id, serial").eq("client_id", clientId)
-      .then(({ data }) => { if (!off && data) setUnitSerials(Object.fromEntries(data.map((u) => [u.id, u.serial]))); },
-            () => {});
+    // Chunked because the id list rides in the URL — one `in.(…)` over hundreds of uuids is
+    // a query string long enough to be rejected by the proxy rather than by PostgREST.
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    Promise.all(chunks.map((c) => sb.from("inventory_units").select("id, serial").eq("client_id", clientId).in("id", c).then((r) => r, () => ({ data: [] }))))
+      .then((res) => {
+        if (off) return;
+        const map = {};
+        res.forEach(({ data }) => (data || []).forEach((u) => { map[u.id] = u.serial; }));
+        setUnitSerials(map);
+      }, () => {});
     return () => { off = true; };
-  }, [clientId]);
-  const [rows, setRows] = useState(null); // null = loading
-  const [error, setError] = useState(null);
-  const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
+  }, [unitIdKey, clientId]);
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
   const [query, setQuery] = useState("");        // free-text search across all fields
   const [pdf, setPdf] = useState(null);          // { url, title } — the pop-up viewer
@@ -175,23 +222,26 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // fetched at the very END of this function — behind the GHL sync below — so the history
     // a row expands to show did not exist until an eight-second call nothing about it needed
     // had finished.
+    // Only `selections.style` and `selections.size` are read here — see SEL_LIST_COLS above
+    // for why the blob itself never crosses the wire for a list.
     const [dRes, vRes] = await Promise.all([
       sb.from("designs")
-        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
+        .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("design_versions")
-        .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
+        .select(`short_code, version, created_at, ${SEL_LIST_COLS}, image_url, inventory_unit_id`)
         .eq("client_id", clientId)
         .order("version", { ascending: false })
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
-    const list = (dRes.data || []).filter(notInventory);
+    const list = (dRes.data || []).map(withListSelections).filter(notInventory);
     setRows(list); // show cached statuses immediately
     const map = {};
-    (vRes.data || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    (vRes.data || []).forEach((v0) => { const v = withListSelections(v0); (map[v.short_code] = map[v.short_code] || []).push(v); });
     setVmap(map);
+    ssCachePut("rest", "designs", clientId, { rows: list, vmap: map });
     // Refresh fulfillment status from GHL (read-only projection). Non-fatal: if the sync
     // errors or GHL isn't configured, the cached designs.status values above stay shown.
     // LAST on purpose — everything above is already on screen before this starts.
@@ -199,7 +249,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
         const statuses = sync && sync.statuses;
-        if (statuses) setRows((rs) => (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r));
+        if (statuses) {
+          // ⚠️ MERGE INTO WHATEVER IS ON SCREEN NOW, never into the `list` this run captured.
+          // `load` has four triggers (mount/refreshKey, invoice send, delete confirm) and no
+          // cancellation, and the call above is the slow one — so a superseded run can land
+          // after a newer one. Writing the captured list back would RESURRECT rows the newer
+          // run already dropped: delete A, then delete B inside the window, and the older
+          // sync repaints B with a live Open/Invoice/Delete menu — and pins it in the tab
+          // cache for the 10-minute TTL. A functional update can only ever mis-set a status
+          // on a row that is still there, which is recoverable; putting a deleted design back
+          // in front of someone is not. The cache is written from the same merged value for
+          // the same reason.
+          setRows((rs) => {
+            const merged = (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r);
+            ssCachePut("rest", "designs", clientId, { rows: merged, vmap: map });
+            return merged;
+          });
+        }
       } catch (_e) { /* keep cached statuses */ }
     }
   }, [fetchDesigns]);
@@ -828,8 +894,10 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // Additive — a failure there must never block the design list, which is why its result
     // is read defensively rather than destructured with the designs error.
     const [dRes, clRes] = await Promise.all([
+      // Style and size only (SEL_LIST_COLS) — this list groups people, and the two values it
+      // folds into a lead's searchable text are the only part of the plan it ever reads.
       sb.from("designs")
-        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id")
+        .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, contact_id`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("captured_leads")
@@ -838,7 +906,7 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
-    list = (dRes.data || []).filter(notInventoryLead);
+    list = (dRes.data || []).map(withListSelections).filter(notInventoryLead);
     browsing = clRes.data || [];
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);

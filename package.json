@@ -1,7 +1,7 @@
 {
   "name": "structurestudio-dev",
   "private": true,
-  "description": "Dev tooling only - the DEPLOY has no build step (compiled artifacts are committed; `npm run compile` regenerates them from the .jsx sources using the vendored babel-standalone as the offline compiler). These devDependencies exist solely for scripts/preflight.mjs, the pre-push correctness gate.",
+  "description": "Dev tooling only - the DEPLOY has no build step (compiled artifacts are committed; `npm run compile` regenerates them from the .jsx sources using the vendored babel-standalone as the offline compiler, then minifies with terser). eslint and globals are scripts/preflight.mjs, the pre-push correctness gate; terser is scripts/compile.mjs and is PINNED EXACTLY - the drift gate byte-compares artifacts, so two people on different terser patch releases would each see the other's artifacts as permanently stale.",
   "scripts": {
     "compile": "node scripts/compile.mjs",
     "preflight": "node scripts/preflight.mjs",
@@ -9,6 +9,7 @@
   },
   "devDependencies": {
     "eslint": "^9.0.0",
-    "globals": "^15.0.0"
+    "globals": "^15.0.0",
+    "terser": "5.51.2"
   }
 }

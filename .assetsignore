@@ -33,6 +33,16 @@ SCHEDULING_SCOPE.md
 INTERIOR_SCOPE.md
 STRUCTURESTUDIO_3D_PLAN.md
 vendor/README.md
+# The OFFLINE compiler, and the only file in vendor/ that must NOT be served.
+# `npm run compile` (scripts/compile.mjs) loads it from DISK in Node, so it stays
+# in the repo — never .gitignore it, never delete it. No page has referenced it
+# since 2026-08-13, when the app moved to committed compiled artifacts, but it
+# kept uploading anyway and answered 200 on every product host: 2.85 MB of public
+# surface nothing fetches (caught 2026-09-06). Preflight already refuses a
+# babel-standalone <script> tag on the three pages; this is the same rule applied
+# to the file itself. The other three vendor/*.min.js ARE served — the pages load
+# React, ReactDOM and supabase-js from /vendor/ and must keep answering 200.
+vendor/babel-standalone-7.23.9.min.js
 wrangler.jsonc
 wrangler.beta.jsonc
 .assetsignore

@@ -107,6 +107,19 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const r = await resolveTenant(req, admin, {
     gates: GATES,

@@ -6,10 +6,23 @@
 // THE COMPILER IS THE VENDORED vendor/babel-standalone-7.23.9.min.js, loaded in
 // Node — the exact build that used to run in the browser, with the exact options
 // its script-tag runner used (presets react+env, the three legacy plugins). Parity
-// is therefore by construction, not by matching version numbers across two npm
-// packages, and the repo gains zero new dependencies. The ONE deliberate
-// divergence: sourceMaps off (the runner inlined them; a committed artifact would
-// double in size for a map pointing at a public source anyway).
+// of the TRANSFORM is therefore by construction, not by matching version numbers
+// across two npm packages. One deliberate divergence there: sourceMaps off (the
+// runner inlined them; see NO SOURCE MAPS below).
+//
+// THE OUTPUT IS THEN MINIFIED (2026-09-06). The transform is still the runner's, but
+// what gets written is no longer its default printout: Babel drops comments and
+// squeezes whitespace (OUTPUT_OPTIONS), then the wrapped artifact goes through terser,
+// which renames LOCAL bindings only. Two reasons, and the second is the sharper one.
+// Speed: about a quarter of the two large artifacts was retained source comments, and
+// RAW size is what the browser's parser pays for on the main thread before anything
+// renders. Reliability: the boot_app_missing rows that commit 39e84b5 traced to
+// truncated chunked transfers of these very files track SIZE, so every byte removed
+// narrows that window too.
+//
+// NO SOURCE MAPS, still: a map is 1-1.5x the artifact, changes on every compile, and
+// this repo commits its artifacts. keep_fnames/keep_classnames are on instead, so an
+// app_errors stack trace still names the function that threw.
 //
 // WHY COMMITTED ARTIFACTS, NOT A DEPLOY-TIME BUILD: beta deploys are git-driven
 // Workers Builds and production has a manual-LF-worktree fallback — a build step
@@ -69,6 +82,38 @@ const RUNNER_OPTIONS = {
   sourceMaps: false,
   babelrc: false,
   configFile: false,
+};
+
+// How the transformed code is PRINTED. Kept out of RUNNER_OPTIONS on purpose: that
+// constant is the record of what the browser runner did and has to stay readable as
+// one, and neither of these changes a single semantic — they change the text.
+//   comments: false — the sources are heavily commented and Babel copies every comment
+//     into the artifact. That was ~500KB across the two large artifacts (about a
+//     quarter of their bytes) of prose no browser needs.
+//   compact: true — Babel's default is `compact: "auto"`, which turns whitespace
+//     squeezing on only above a 500KB threshold, so the small artifacts shipped
+//     formatted and the large ones did not, for no reason a reader could see.
+const OUTPUT_OPTIONS = { comments: false, compact: true };
+
+// THE MINIFIER, PINNED EXACTLY (no caret, deliberately). terser's output is
+// deterministic for a given version + options, and the drift gate byte-compares
+// artifacts — so two people on different patch releases would each see the other's
+// artifacts as STALE, forever, with nothing on screen explaining why. package.json
+// carries this same exact string and preflight refuses a mismatch. terser is pure JS
+// (no platform binary, no postinstall download), which is what lets it sit in a repo
+// whose only other dev dependencies are eslint and globals.
+export const TERSER_VERSION = "5.51.2";
+
+// Mangling renames LOCAL bindings only. `mangle.properties` stays OFF and must: every
+// window.* publish, every field name in an edge function's JSON and every React prop is
+// a property name, and renaming those breaks silently and everywhere. keep_fnames /
+// keep_classnames preserve the names an app_errors stack trace is read by. No `ecma`
+// override either — terser's default of 5 is what stops it from printing syntax newer
+// than the ES5 Babel's `env` preset just produced.
+const TERSER_OPTIONS = {
+  compress: { passes: 2, keep_fnames: true, keep_classnames: true },
+  mangle: { keep_fnames: true, keep_classnames: true },
+  format: { comments: false },
 };
 
 // The portal app, split into ORDERED PARTS (2026-08-19). They are concatenated here and
@@ -133,20 +178,59 @@ function babel() {
   return _babel;
 }
 
+// The installed terser's version, or null when it is not installed at all. Exported so
+// preflight can report both cases in its own voice rather than by catching an exception.
+export function installedTerserVersion() {
+  try {
+    return require("terser/package.json").version;
+  } catch {
+    return null;
+  }
+}
+
+let _terser = null;
+function terser() {
+  if (!_terser) {
+    const version = installedTerserVersion();
+    if (version === null) {
+      throw new Error("terser is not installed — the artifacts cannot be minified. Run `npm install`.");
+    }
+    if (version !== TERSER_VERSION) {
+      throw new Error(`terser ${version} is installed but package.json pins ${TERSER_VERSION}. `
+        + "Different minifier versions emit different bytes and the artifact drift gate "
+        + "byte-compares, so this would read as permanent staleness. Run `npm install`.");
+    }
+    _terser = require("terser");
+  }
+  return _terser;
+}
+
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const lf = (s) => s.replace(/\r\n/g, "\n");
 
 // Compile one source text to its full artifact text (banner + wrapper included).
+//
+// The minifier runs over the WRAPPED text, not over Babel's output: the wrapper is what
+// gives the ~75 top-level components a function scope, and renaming a binding is only
+// safe — and only worth anything — inside one. The banner rides in as terser's
+// `preamble` so it survives `comments: false`.
 export function compileSource(srcText, srcName) {
   const normalized = lf(srcText);
-  const res = babel().transform(normalized, { ...RUNNER_OPTIONS, filename: srcName });
-  return "// GENERATED FILE — do not edit. Compiled from " + srcName
+  const res = babel().transform(normalized, { ...RUNNER_OPTIONS, ...OUTPUT_OPTIONS, filename: srcName });
+  const banner = "// GENERATED FILE — do not edit. Compiled from " + srcName
     + " (sha256 " + sha256(normalized).slice(0, 12) + ")\n"
-    + "// by scripts/compile.mjs using vendored babel-standalone 7.23.9. Rebuild: npm run compile\n"
-    + ";(function () {\n"
+    + "// by scripts/compile.mjs: vendored babel-standalone 7.23.9 + terser " + TERSER_VERSION
+    + ". Rebuild: npm run compile";
+  const wrapped = ";(function () {\n"
     + "if (window.__ssBootBlocked) return; // the boot guard neutralises compiled scripts via this flag\n"
     + res.code
     + "\n}).call(window);\n";
+  const min = terser().minify_sync(wrapped, {
+    ...TERSER_OPTIONS,
+    format: { ...TERSER_OPTIONS.format, preamble: banner },
+  });
+  if (min.error) throw min.error;
+  return min.code + "\n";
 }
 
 const read = (f) => readFileSync(join(root, f), "utf8");
@@ -175,6 +259,81 @@ export function buildAll() {
   return { artifacts, hashes };
 }
 
+// The vacuity probe both gates compile with. It ASSIGNS TO A GLOBAL rather than binding a
+// local (`const x = <a/>;`, what this used to be) because the minifier is entitled to drop
+// an unused local — and a probe the minifier dead-strips would read as "the compiler is
+// broken" and take both gates down with a message pointing at the wrong thing entirely.
+export const PROBE_SOURCE = "window.__ssProbe = <a/>;";
+
+// ── The artifact SHAPE gate ──────────────────────────────────────────────────────────────
+//
+// The drift gate below proves an artifact matches its source. It cannot prove the artifact
+// still has the runtime properties the boot machinery depends on, because a minifier that
+// quietly renamed one of them would change source and artifact together and the byte compare
+// would stay happy. So these are asserted directly, on the shipped text.
+//
+// All three checks are written to pass BOTH the un-minified shape (`if (window.__ssBootBlocked)
+// return;` … `window.__ssAppBooted = true;`) and terser's rewrite of it, so the gate survives a
+// minifier version bump without being rewritten — it is about the shape, not about terser.
+const ARTIFACT_BANNER = /^(?:\/\/[^\n]*\n)+/;
+
+// 1. The boot guard's neutralise mechanism must be the first thing the wrapper touches.
+//    Terser prints the `if (…) return;` as `if(!window.__ssBootBlocked){…}` and, for a small
+//    enough body, as `window.__ssBootBlocked||(…)`; both are accepted, anything that runs
+//    BEFORE the flag is read is not.
+const GUARD_FIRST =
+  /^\s*[;!]?\(?function\s*\(\s*\)\s*\{\s*(?:"use strict";\s*)?(?:if\s*\(\s*!?\s*window\.__ssBootBlocked\s*\)|!?\s*window\.__ssBootBlocked\s*(?:\|\||&&|\?))/;
+
+// 2. The DOMContentLoaded sentinel must still be the LAST statement of the guarded body —
+//    the `}` is what proves "last": nothing follows it inside its block. (Terser prints the
+//    babel helper FUNCTION DECLARATIONS after that brace; declarations hoist, so they cannot
+//    run first, and they are outside the guarded block by then anyway.)
+const SENTINEL_LAST = /window\.__ssAppBooted\s*=\s*(?:true|!0)\s*;?\s*\}/;
+
+// 3. Every cross-script handoff goes through an explicit window.* publish — each artifact is
+//    its own IIFE and shares no lexical scope with the others, so these NAMES are the whole
+//    interface between them. Property names are never mangled (see TERSER_OPTIONS), and this
+//    is the assertion that says so out loud. Listed per artifact rather than derived from the
+//    sources, because a source mention can be a comment and comments no longer ship.
+const ARTIFACT_PUBLISHES = {
+  "structure-studio.component.compiled.js": ["window.StructureStudio", "window.ssAllowedOrigin", "window.ssLogError"],
+  "index.mount.compiled.js": ["window.StructureStudio", "window.ssAllowedOrigin", "window.ssLogError", "window.ssBootFail", "window.__ssAppBooted"],
+  "portal.app.compiled.js": ["window.StructureStudio", "window.ssLogError", "window.__ssAppBooted"],
+  "admin.app.compiled.js": ["window.ssLogError", "window.__ssAppBooted"],
+};
+
+// Which artifacts are an APP (they mount something and publish the sentinel) as opposed to
+// the shared designer module, which is only ever loaded by one of them.
+const APP_ARTIFACTS = ["index.mount.compiled.js", "portal.app.compiled.js", "admin.app.compiled.js"];
+
+// Takes the artifact texts as a map so the caller can hand it the committed files OR a
+// deliberately broken copy — the gate is only worth having if it can be proven to fire.
+export function checkArtifactShape(artifacts) {
+  const problems = [];
+  for (const t of TARGETS) {
+    const text = artifacts[t.out];
+    if (text === undefined) continue; // missing entirely: the drift gate names it
+    if (!GUARD_FIRST.test(text.replace(ARTIFACT_BANNER, ""))) {
+      problems.push(`${t.out}: the \`window.__ssBootBlocked\` guard is no longer the first thing the `
+        + "artifact's wrapper does — that flag is how the dependency boot guard neutralises "
+        + "compiled scripts, and code above it runs on a page the guard has already given up on");
+    }
+    if (APP_ARTIFACTS.includes(t.out) && !SENTINEL_LAST.test(text)) {
+      problems.push(`${t.out}: \`window.__ssAppBooted\` is not the last statement of the guarded body — `
+        + "the boot guard's DOMContentLoaded check reads that sentinel to mean \"this app ran to "
+        + "completion\", so setting it anywhere earlier turns a broken app back into a silent blank page");
+    }
+    for (const name of ARTIFACT_PUBLISHES[t.out] || []) {
+      if (!text.includes(name)) {
+        problems.push(`${t.out}: \`${name}\` is missing from the built artifact — the artifacts share no `
+          + "lexical scope, so a lost or renamed window.* publish breaks the handoff between two "
+          + "<script> tags with nothing at compile time to notice");
+      }
+    }
+  }
+  return problems;
+}
+
 // The drift gate: recompile everything and byte-compare against what is committed.
 // Returns a list of human-readable problems (empty = fresh).
 export function checkArtifacts() {
@@ -187,7 +346,7 @@ export function checkArtifacts() {
   }
   // Vacuity guard: a broken require of the vendored compiler must never read as
   // "everything is fresh". Prove the compiler actually compiles JSX.
-  if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
+  if (!compileSource(PROBE_SOURCE, "probe.jsx").includes("React.createElement")) {
     return ["compile self-check failed: the vendored Babel produced no JSX output — the drift gate cannot run"];
   }
   for (const t of TARGETS) {

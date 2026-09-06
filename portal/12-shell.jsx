@@ -19,6 +19,46 @@ function DesignsLegacySub({ sub, navigate }) {
   return null;
 }
 
+// ── Nav rail glyphs ───────────────────────────────────────────────────────────
+// MODULE SCOPE, not a Dashboard local. These are ~22 static SVG trees with nothing
+// from the component in them, and building them inside the body rebuilt every one of
+// them on every render of the shell — a tab switch, a token refresh, a picker toggle.
+// Built once at load instead; React elements are immutable, so sharing them is exactly
+// what they are for. Keyed by tab id: navItem/soonItem look the glyph up by the same id
+// the router uses, so a tab without an entry renders its label with no icon rather than
+// throwing.
+const ICONS = {
+  admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
+  designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+  quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
+  accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
+  // Kanban columns of descending height — the section is named Pipeline now, and the old
+  // staggered grid read as "a dashboard of things" rather than a board of stages.
+  designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
+  // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
+  // took that glyph in the same week, and two column icons in one rail read as one thing.
+  projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
+  contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
+  pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
+  "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
+  colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
+  settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  billing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+  "on-demand-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>,
+  "build-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>,
+  "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+  "inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>,
+  "repairs": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
+  // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
+  // "orders", so the two read as different things in the rail.
+  "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
+  "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
+  "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
+  "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+  "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
+};
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -99,8 +139,7 @@ function Dashboard({ session }) {
     let cancelled = false;
     // ⚠️ A FAILED rpc IS NOT AN ANSWER OF `false`. supabase-js RESOLVES `{data, error}`
     // rather than rejecting, so the old `({ data })` destructure read a 403 or a 5xx as a
-    // plain "not an operator" — and since this effect re-runs on every auth event (see the
-    // entitlement comment below: onAuthStateChange mints a new session object each time),
+    // plain "not an operator" — and since this effect re-runs whenever a new token lands,
     // one bad answer mid-session unmounted AdminShell at the render below and binned the
     // staged work the keep-mounted comment there exists to protect, then remounted it blank
     // on its default sub with nothing recorded anywhere. The 403 is reachable: 051 revoked
@@ -110,7 +149,14 @@ function Dashboard({ session }) {
     // the entitlement fetch. Still fails CLOSED on a cold load, where false is the initial.
     sb.rpc("is_operator").then(({ data, error }) => { if (!cancelled && !error) setIsOperator(!!data); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [session]);
+    // ⏱ KEYED ON THE TOKEN, NOT THE SESSION OBJECT — the same reason spelled out on the
+    // entitlement effect below. onAuthStateChange mints a NEW session object on every auth
+    // event (INITIAL_SESSION, then SIGNED_IN, then each refresh) and PortalApp stores it, so
+    // `[session]` re-ran this rpc — and its two siblings, and the profile read — several
+    // times over during a single cold boot for one unchanged answer. The token is a string:
+    // equal tokens compare equal, a real rotation still re-asks, and the non-answer posture
+    // above is untouched.
+  }, [session.access_token]);
   // viewing = { clientId, companyName } while an operator has another tenant's portal
   // open. Designs/Contacts then read through operator-portal:get_portal (service-role,
   // audit-logged); statuses shown are the CACHED values (sync-design-status is
@@ -155,7 +201,8 @@ function Dashboard({ session }) {
     let cancelled = false;
     sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setIsSupportOp(!!data); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [session]);
+    // Token-keyed, exactly as is_operator above — see the note there.
+  }, [session.access_token]);
 
   // THE SECOND DOOR INTO PROJECTS (migration 183). True for an operator, and ALSO for a CSM
   // Synergy team member granted the `projects` area on Settings → Team — someone who has no
@@ -184,7 +231,10 @@ function Dashboard({ session }) {
     let cancelled = false;
     sb.rpc("can_open_projects").then(({ data, error }) => { if (!cancelled && !error) setCanProjects(!!data); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [session]);
+    // Token-keyed, exactly as its two siblings above — see the note on is_operator. The
+    // three-state null start is unaffected: nothing here answers sooner or later than it
+    // did, it simply stops being asked four more times for the same token.
+  }, [session.access_token]);
 
   // Only ever true INSIDE a tenant. On the operator's own portal a support account is just
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
@@ -422,6 +472,31 @@ function Dashboard({ session }) {
     // tenant null — "Loading your business…" forever. The run must complete; only the
     // injectable status call carries the poisoning risk, so it alone is guarded below.
     if (viewing) return;
+    // ⏱ THE BOOTSTRAP `status` CALL IS ISSUED HERE, IN THE EFFECT'S FIRST SYNCHRONOUS TICK,
+    // BESIDE the client_users read below rather than two awaits behind it. It never needed
+    // that mapping: resolveTenant maps user → tenant server-side from the JWT alone. Stacked
+    // sequentially they made boot a strict waterfall — client_users, then client_configs,
+    // then status — with nothing on screen but "Loading your business…" until the last hop
+    // landed, which is the floor under every "the portal is slow" report.
+    //
+    // ⚠️ THIS SATISFIES, RATHER THAN DROPS, WHAT THE OLD PLACEMENT WAS GUARDING. The worry
+    // was that view-as can arm mid-flight and the wrapper would then inject targetClientId,
+    // scoping this call to the VIEWED tenant and poisoning tenant.access with its map (audit
+    // 2026-08-20). The wrapper reads ssTargetClientId SYNCHRONOUSLY, before its first await
+    // (01-core.jsx says so in as many words), so a call issued in this tick with nothing
+    // armed can never be injected by an arming that happens later — the answer is provably
+    // the caller's own tenant no matter when it lands. `armedAtIssue` records that in the
+    // same tick and is what the branch below tests, instead of re-reading a global whose
+    // value at await-time no longer describes this call. Nothing is issued at all when
+    // view-as is ALREADY armed, exactly as before.
+    const armedAtIssue = ssTargetClientId;
+    // `.then(ok, fail)` rather than a bare promise: this is issued before anything awaits it,
+    // and an invoke that rejects in the gap would be an unhandled rejection. A failure
+    // resolves to the same `{data:null}` shape the wrapper's own no-session guard returns,
+    // so the retry branch below reads it identically.
+    const bootStatus = armedAtIssue ? null
+      : sb.functions.invoke("portal-settings", { body: { action: "status" } })
+        .then((r) => r, () => ({ data: null }));
     (async () => {
       // limit(1)+array instead of maybeSingle(): maybeSingle() ERRORS when >1 row
       // matches (a duplicate/multi-tenant client_users row), which would lock the
@@ -459,13 +534,11 @@ function Dashboard({ session }) {
         mapping = retry.data && retry.data[0];
         if (!mapping) { setTenant("none"); return; }
       }
-      let businessName = mapping.client_id;
-      // client_configs is now column-structured (no monolithic `config` blob);
-      // read the dedicated company_name column for the dashboard heading.
-      const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
-      if (cfg && cfg.company_name) {
-        businessName = cfg.company_name;
-      }
+      // Null until something names the business; `mapping.client_id` is the last-resort
+      // heading, applied at setTenant. Kept as an explicit null rather than seeded with the
+      // slug so "nobody answered" and "this tenant is literally called that" stay distinct —
+      // the fallback read below keys off it.
+      let businessName = null;
       // Per-area access (migration 100) comes from the SERVER's resolved map, not from
       // client_users.access — that column holds only the deviations from the title preset,
       // and resolving it here would mean a second copy of PRESETS in the browser that
@@ -520,17 +593,33 @@ function Dashboard({ session }) {
       let access = null;
       let prefs = null;
       try {
-        // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
-        // have armed the injection by now — and this call scoped to the viewed tenant is
-        // exactly the poisoning above. Skip it instead: access stays null (the generous
-        // fallback), and the `viewing` dep refetches the real map on exit.
-        if (!ssTargetClientId) {
-          const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+        // Issued at the top of the effect, not here — see the note there for why that is
+        // safe against a view-as arming mid-flight. `bootStatus` is null exactly when
+        // view-as was ALREADY armed at issue time, which is the case the old
+        // `if (!ssTargetClientId)` guard covered: nothing is asked, access stays null (the
+        // generous fallback), and the `viewing` dep refetches the real map on exit.
+        if (bootStatus) {
+          const { data: st } = await bootStatus;
           if (st && st.access) access = st.access;
           // Rides the same bootstrap call as `access` on purpose: a default view that lands
           // a round trip late renders the wrong tab and then jumps, which reads worse than
           // having no setting at all.
           if (st && st.prefs) prefs = st.prefs;
+          // …and so does the heading. `status` already reads client_configs server-side and
+          // hands back branding.companyName, so the separate client_configs SELECT that used
+          // to sit above was a third sequential round trip for a column this response was
+          // carrying all along.
+          //
+          // Guarded on the echoed clientId because the two answers can legitimately name
+          // different tenants: limit(1) above takes the FIRST client_users row (audit #F6,
+          // duplicate/multi-tenant rows are real), while resolveTenant picks its own. Naming
+          // the other business in the topbar would be worse than the slug, so an echo that
+          // disagrees falls through to the direct read below. An older backend that echoes no
+          // clientId at all still passes — this contract only ever grew.
+          if (st && st.branding && st.branding.companyName
+              && (!st.clientId || st.clientId === mapping.client_id)) {
+            businessName = st.branding.companyName;
+          }
           // No map back is a FAILED call, never "this tenant has none": `status` is the open
           // bootstrap action and resolveTenant fills every area for every title. The invoke
           // wrapper RETURNS `{data:null}` rather than throwing — the no-session guard does so
@@ -546,11 +635,31 @@ function Dashboard({ session }) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
               if (again.data && again.data.prefs) prefs = again.data.prefs;
+              if (again.data && again.data.branding && again.data.branding.companyName
+                  && (!again.data.clientId || again.data.clientId === mapping.client_id)) {
+                businessName = again.data.branding.companyName;
+              }
             }
           }
         }
       } catch (_e) { /* keep the fallback */ }
-      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access, prefs });
+      // FALLBACK ONLY. Reached when `status` was skipped (view-as already armed), failed
+      // both times, or came back for a different tenant than the mapping above named — never
+      // on the happy path, where the branding rode the bootstrap call. client_configs is
+      // column-structured (no monolithic `config` blob), so this is the dedicated
+      // company_name column for the dashboard heading, exactly as before.
+      if (!businessName) {
+        try {
+          const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
+          if (cfg && cfg.company_name) businessName = cfg.company_name;
+        } catch (_e) { /* the slug below is a perfectly good heading */ }
+      }
+      // The boot is over at this line: everything past it renders. Marked so the waterfall
+      // this effect used to be stays measurable from a real page rather than from a stopwatch
+      // (performance.mark is wrapped because a hardened browser can make it throw, and a
+      // measurement must never be the thing that blanks the portal).
+      try { performance.mark("ss:tenant-ready"); } catch (_e) {}
+      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs });
     })();
   }, [session.access_token, viewing]);
 
@@ -560,9 +669,9 @@ function Dashboard({ session }) {
   // Deno isolate costs ~2.5 SECONDS before the function runs its first query — measured
   // against this project, and the largest single component of "the schedule tab is slow".
   //
-  // Fire-and-forget, and deliberately behind a delay: the boot chain (client_users →
-  // client_configs → status, plus billing and the profile read below) owns the first moment
-  // of the page, and a warm-up that competes with it would trade a fast first tab for a slow
+  // Fire-and-forget, and deliberately behind a delay: the boot calls (client_users and
+  // status in parallel, plus billing and the profile read below) own the first moment of the
+  // page, and a warm-up that competes with them would trade a fast first tab for a slow
   // first paint. A module-level flag keeps it to once per page rather than once per
   // Dashboard mount (view-as remounts this component).
   useEffect(() => {
@@ -591,7 +700,10 @@ function Dashboard({ session }) {
       } catch (_e) { /* a missing profile must never block the portal */ }
     })();
     return () => { cancelled = true; };
-  }, [session]);
+    // Token-keyed, same reason as the three rpcs above (see is_operator). This one was the
+    // loudest of the four in a boot trace, because it is a portal-settings INVOKE: every
+    // repeat woke the same isolate the tenant effect was already waiting on.
+  }, [session.access_token]);
 
   const signOut = () => sb.auth.signOut();
 
@@ -860,37 +972,6 @@ function Dashboard({ session }) {
   const shownBusiness = viewing ? (viewing.companyName || viewing.clientId) : tenant.businessName;
   const tenantInitials = String(shownBusiness || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
-  const ICONS = {
-    admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
-    designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
-    quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
-    accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
-    // Kanban columns of descending height — the section is named Pipeline now, and the old
-    // staggered grid read as "a dashboard of things" rather than a board of stages.
-    designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
-    // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
-    // took that glyph in the same week, and two column icons in one rail read as one thing.
-    projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
-    contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
-    orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
-    pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
-    "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
-    colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
-    settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
-    billing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
-    "on-demand-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>,
-    "build-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>,
-    "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
-    "inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>,
-    "repairs": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
-    // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
-    // "orders", so the two read as different things in the rail.
-    "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
-    "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
-    "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
-    "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
-    "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
-  };
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it
