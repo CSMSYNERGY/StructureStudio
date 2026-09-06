@@ -399,8 +399,45 @@ function Studio3DStatus({ clientId, canAdmin, navigate }) {
 // surface: no toolbar, no canvas, no estimate. `setup3d` is the same contract PortalApp
 // already builds -- it is null unless the caller may administer the tenant AND the tenant
 // holds the view_3d grant, so this tab degrades to an explanation rather than an empty box.
+// ── The designer module, on demand ───────────────────────────────────────────────────────
+// It is no longer a <script> in portal.html (see the ss/designer-src note there): 437 KB that
+// backs one tab was being downloaded, parsed and executed on every Orders, Billing and
+// Settings page load. window.ssLoadDesigner() injects it the first time a designer surface
+// renders, and 01-core prefetches it once the portal is idle, so this hook is normally
+// answering from cache rather than starting a download.
+//
+// THREE states, not two. `null` while it is coming is NOT the same as "it failed", and
+// rendering the old "the designer failed to load — refresh the page" message during a normal
+// load would tell every user their designer is broken for as long as the fetch takes.
+//
+// ⚠️ THIS MUST BE CALLED BEFORE ANY EARLY RETURN in its component. Both callers below used to
+// guard on `if (!SS) return ...` as their first statement; a hook underneath that guard runs
+// on some renders and not others, which is React error #310 and a white screen for the whole
+// page — this repo has shipped that bug before.
+function useDesigner() {
+  const [state, setState] = useState(() => (window.StructureStudio ? "ready" : "loading"));
+  useEffect(() => {
+    if (window.StructureStudio) return;
+    let alive = true;
+    window.ssLoadDesigner()
+      .then(() => { if (alive) setState("ready"); })
+      .catch(() => { if (alive) setState("failed"); });
+    return () => { alive = false; };
+  }, []);
+  // Read the global rather than closing over the resolved value: it is the same object, and
+  // this keeps the "already loaded" first render free of any promise at all.
+  return { SS: state === "ready" ? window.StructureStudio : null, failed: state === "failed" };
+}
+
+// Shown while the module is in flight. Deliberately plain text and no spinner animation: on a
+// warm cache this is on screen for a frame or two, and a spinner that flashes reads as
+// breakage.
+function DesignerLoading() {
+  return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading the designer…</div>;
+}
+
 function DesignerSettings({ clientId, setup3d = null }) {
-  const SS = window.StructureStudio;
+  const { SS, failed } = useDesigner();
   const card = { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: "16px 18px", marginBottom: 14 };
   return (
     // 1240 matches .ss-inner's own cap (portal.html), so this reads "as wide as every other
@@ -413,7 +450,10 @@ function DesignerSettings({ clientId, setup3d = null }) {
           Give each building style its own 3D look so what customers spin on screen matches the
           buildings you actually sell. Set once per style — the designer picks it up everywhere.
         </p>
-        {!SS && (
+        {!SS && !failed && (
+          <div style={{ fontSize: 13, color: "#64748B" }}>Loading the designer…</div>
+        )}
+        {failed && (
           <div style={{ fontSize: 13, color: "#64748B" }}>
             The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)
           </div>
@@ -436,9 +476,13 @@ function DesignerSettings({ clientId, setup3d = null }) {
 }
 
 function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, view3d = false, onOpenOrder = null, canPushInvoice = false }) {
-  const SS = window.StructureStudio;
+  // Hook FIRST — see useDesigner's note. The two returns below are exactly the early guards
+  // that make putting anything stateful under them a white screen.
+  const { SS, failed } = useDesigner();
   if (!SS) {
-    return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>;
+    return failed
+      ? <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>
+      : <DesignerLoading />;
   }
   return (
     <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>

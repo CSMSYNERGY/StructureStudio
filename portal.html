@@ -173,8 +173,29 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      blank. index.html keeps its relative src because it is only ever served from the root.
      (Everything else here — favicon, manifest, apple-touch-icon, sw.js — was already
      root-absolute, which is why this was the only casualty.) -->
-<script defer src="/structure-studio.component.compiled.js?v=738251b0" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
-<script defer src="/portal.app.compiled.js?v=85e7b543" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<!-- ⚠️ NOT A LOADED SCRIPT. `type="ss/designer-src"` is an unknown script type, so the
+     browser neither fetches nor executes this tag — it exists ONLY to carry the designer
+     module's URL, cache-buster and all, to window.ssLoadDesigner() in 01-core.jsx, which
+     injects the real tag the first time somebody opens a designer surface.
+
+     WHY. The module is 437 KB of JavaScript (110 KB over the wire). It backs ONE tab, and
+     the portal deliberately survives without it (01-core logs boot_component_missing and
+     DesignerTab renders its own message) — but every Orders, Billing, Settings and Schedule
+     page load was still paying to download, parse and execute all of it. Loading it on
+     demand takes ~110 KB and its whole parse cost off the boot path of every other page.
+
+     The bytes are NOT deferred to the click: the loader prefetches them once the portal is
+     idle, so opening the Designer tab reads a warm cache rather than starting a download.
+
+     KEEPING THE `src="...compiled.js?v=..."` SHAPE IS THE POINT. scripts/compile.mjs
+     rewrites every such attribute to the artifact's content hash and refuses to build when
+     one has drifted; a rel="prefetch" href= would have fallen outside that and gone stale
+     silently — the exact failure the busters exist to prevent.
+
+     index.html is UNCHANGED and must stay that way: there the module IS the page, so it
+     loads eagerly and its absence is a boot failure, not a degraded tab. -->
+<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=738251b0"></script>
+<script defer src="/portal.app.compiled.js?v=eff5d0a3" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

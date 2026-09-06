@@ -119,9 +119,75 @@ window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; 
 // What was missing is that the degraded tab was SILENT — a tenant loses the designer and
 // nobody finds out. One row, at block scope rather than inside DesignerTab, so it cannot fire
 // twice on a re-render and is not a side effect in render.
-if (!window.StructureStudio) {
-  ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not", "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only" });
+// — and it is now loaded ON DEMAND, so the check above moved with it. The tag in
+// portal.html carries type="ss/designer-src": the browser ignores it, and this loader reads
+// the URL (content hash and all) off it and injects the real script the first time a designer
+// surface renders. Firing boot_component_missing at boot would now be a lie on EVERY page
+// load, so it fires only when an actual load attempt fails — which is the case that was
+// worth knowing about in the first place.
+//
+// ONE in-flight promise, cached forever. Two designer surfaces can mount at once
+// (DesignerTab and DesignerSettings), a tab can be opened, closed and reopened, and none of
+// that may start a second download.
+let ssDesignerLoad = null;
+
+function ssDesignerSrc() {
+  const tag = document.querySelector('script[type="ss/designer-src"]');
+  // Never guess an unbusted URL as a fallback: a missing tag means the page shipped wrong,
+  // and fetching /structure-studio.component.compiled.js with no ?v= would serve whatever a
+  // CDN or service worker had cached from a previous release — a stale designer is worse
+  // than an honest failure message.
+  return tag ? tag.getAttribute("src") : null;
 }
+
+window.ssLoadDesigner = function () {
+  if (window.StructureStudio) return Promise.resolve(window.StructureStudio);
+  if (ssDesignerLoad) return ssDesignerLoad;
+  const src = ssDesignerSrc();
+  ssDesignerLoad = new Promise((resolve, reject) => {
+    if (!src) return reject(new Error("no ss/designer-src tag in the page"));
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => {
+      // A 200 that published nothing is the shape a truncated or HTML-substituted asset
+      // takes — onload fires either way, so presence of the global is the only real proof.
+      if (window.StructureStudio) resolve(window.StructureStudio);
+      else reject(new Error("the module loaded but published no StructureStudio global"));
+    };
+    s.onerror = () => reject(new Error("the module failed to load"));
+    document.head.appendChild(s);
+  });
+  ssDesignerLoad.catch((e) => {
+    // Let the next attempt retry: a designer that failed once on a flaky network must not be
+    // dead for the rest of the session, and the user's retry is a page-level refresh away
+    // either way.
+    ssDesignerLoad = null;
+    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
+  });
+  return ssDesignerLoad;
+};
+
+// PREFETCH, not defer-to-click. The bytes are off the boot path but still arrive while the
+// portal sits idle, so opening the Designer tab reads a warm cache instead of starting a
+// 110 KB download under a spinner. rel="prefetch" is deliberately the LOWEST priority the
+// platform offers — it yields to every request the visible page makes.
+//
+// requestIdleCallback where it exists (not Safari), a timer everywhere else. Either way it is
+// after first paint, which is the only property that matters.
+(function () {
+  const warm = () => {
+    if (window.StructureStudio || ssDesignerLoad) return;
+    const src = ssDesignerSrc();
+    if (!src) return;
+    const l = document.createElement("link");
+    l.rel = "prefetch";
+    l.as = "script";
+    l.href = src;
+    document.head.appendChild(l);
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(warm, { timeout: 4000 });
+  else setTimeout(warm, 2500);
+})();
 // ── Operator "view as" tenant override (transport-level) ──────────────────────
 // While an operator has another tenant's portal open, every portal-settings /
 // portal-billing / sync-design-status call must act on THAT tenant. This is a property of

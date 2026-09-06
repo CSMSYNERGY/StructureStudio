@@ -602,12 +602,21 @@ function run(files) {
           + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
           + "only the sentinel to notice. Use a leading /");
       }
-      if (!/\sdefer\b/.test(attrs)) {
+      // THE ONE EXEMPTION, and it is not a loophole: `type="ss/designer-src"` is an unknown
+      // script type, so the browser never fetches or executes the tag — it is a URL carrier
+      // for window.ssLoadDesigner(), which injects the real script on demand. `defer` and
+      // `async` describe when a script RUNS, and this one never runs, so both rules are
+      // vacuous here. The shape is still held to root-absolute above (the loader copies the
+      // src verbatim, so /portal/settings/... would break exactly as it did for a real tag)
+      // and is separately required to be BACKED BY A LOADER below — removing the eager
+      // tag without one would otherwise pass every check and ship a dead Designer tab.
+      const isSrcPointer = /\stype="ss\/designer-src"/.test(attrs);
+      if (!isSrcPointer && !/\sdefer\b/.test(attrs)) {
         errors.push(`${f}: compiled tag for "${t[2]}" is missing \`defer\` — without it the script `
           + "executes mid-parse, before the boot guard has run, so a failed library gets the old "
           + "blank-page throw instead of the failure screen");
       }
-      if (/\sasync\b/.test(attrs)) {
+      if (!isSrcPointer && /\sasync\b/.test(attrs)) {
         errors.push(`${f}: compiled tag for "${t[2]}" carries \`async\` — async abandons document `
           + "order, so the page's mount can run before the shared component has published itself");
       }
@@ -621,6 +630,30 @@ function run(files) {
     if (comp < 0) {
       errors.push(`${f}: no /structure-studio.component.compiled.js tag — this page mounts the `
         + "shared module and cannot work without it");
+    } else if (f === "portal.html" && /<script[^>]*type="ss\/designer-src"/.test(files[f])) {
+      // The portal loads the designer ON DEMAND. index.html is deliberately NOT allowed to do
+      // this: there the module IS the page, so an eager tag in document order is the whole
+      // contract, and the branch below still holds it to that.
+      //
+      // Two halves have to hold together or the Designer tab dies in a way nothing notices:
+      // the page must not ALSO load it eagerly (that restores the cost this removed while
+      // looking correct), and the loader must be in the bundle. `portal.app.jsx` here is the
+      // VIRTUAL concatenation of PORTAL_PARTS, not a file on disk — which is the point: a
+      // part dropped from that list is exactly how this breaks, and it disappears from this
+      // text the moment it does.
+      if (/<script[^>]*\sdefer[^>]*src="\/structure-studio\.component\.compiled\.js/.test(files[f])) {
+        errors.push("portal.html: the designer is BOTH an on-demand source pointer and loaded "
+          + "eagerly — the eager tag makes the loader pointless and the page still pays "
+          + "the 437 KB parse the pointer exists to avoid");
+      }
+      // ASSIGNMENT, not a mention. `includes("window.ssLoadDesigner")` was satisfied by
+      // 06-3d.jsx's CALL SITE, so renaming the definition left the check green and the
+      // loader undefined - the precise failure this is here to catch.
+      if (!/window\.ssLoadDesigner\s*=/.test(files["portal.app.jsx"])) {
+        errors.push('portal.html points at the designer with type="ss/designer-src" (nothing '
+          + "loads it) but no portal part defines window.ssLoadDesigner — the Designer tab "
+          + "would render its failure message forever. Check 01-core.jsx is still in PORTAL_PARTS");
+      }
     } else if (own >= 0 && comp > own) {
       errors.push(`${f}: the shared component tag sits AFTER the page's own app tag — deferred `
         + "scripts run in document order, so the mount would run before StructureStudio exists`");
