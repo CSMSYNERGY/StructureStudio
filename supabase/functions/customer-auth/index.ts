@@ -6,6 +6,7 @@ import {
   TwilioApiError,
   TwilioNotConfigured,
   twCheckVerification,
+  twilioConfigured,
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import { mintSession, revokeSession } from "../_shared/customerSession.ts";
@@ -56,6 +57,10 @@ import { clientIp } from "../_shared/adminGate.ts";
 //
 // Send and fail counters share ONE rolling window: a bucket whose window_started_at is
 // older than the window reads as zeroed and resets on its next write.
+//
+// A send is COUNTED BY CLAIMING IT, not by writing back what was read — see reserveSendSlot.
+// Reading a count, checking it and later storing read+1 is not a cap at all under concurrent
+// requests, and the tenant-wide backstop above is worth only as much as its counter.
 const THROTTLE_WINDOW_MS = 15 * 60_000; // counters and the lockout both use 15 minutes
 const LOCKOUT_MS = 15 * 60_000;
 const MAX_SENDS_PER_PHONE = 3; // codes texted to one phone per window (per tenant)
@@ -70,11 +75,14 @@ const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are r
 // OWN DOMAIN, so it arrives from the same sender that sent the quote.
 //
 // ⚠️ THE SESSION IS STILL KEYED ON THE PHONE. customer_sessions.phone_digits is NOT NULL and
-// the whole quote lookup is phone-based, so a verified email is RESOLVED to the phone on that
-// customer's most recent design. Proving control of the address the quote was sent to is the
-// same claim as proving control of the number it was sent to — but if no design carries that
-// address there is no identity to mint, and the honest answer is that we have no quotes for
-// it. That answer is only ever given AFTER the code is proven, which is what keeps the
+// the whole quote lookup is phone-based, so a verified email is RESOLVED to a phone through
+// the tenant's designs. That resolution is the weak joint of this channel and is guarded
+// accordingly — designs.contact is written by whoever submitted the design, the anonymous
+// designer included, so it is a claim about a number and never proof of one. See the rules
+// at the resolution itself: only a design the customer would recognise as a quote may supply
+// an identity, and a number another address already answers to supplies none. If nothing
+// resolves, no identity is minted and the honest answer is that we have no quotes for that
+// address. That answer is only ever given AFTER the code is proven, which is what keeps the
 // NO ENUMERATION rule intact: the send path behaves identically for every address.
 //
 // ⚠️ Unlike the SMS path, WE hold this code — Twilio Verify holds its own. See
@@ -115,6 +123,10 @@ type BucketState = {
   /** Effective counts: a bucket whose window has expired reads as zero. */
   sendCount: number;
   failCount: number;
+  /** The send_count actually STORED on the row — not zeroed for an expired window. It is
+   *  the compare-and-swap token reserveSendSlot matches on, so it has to be the literal
+   *  value in the row rather than the effective one. 0 when there is no row yet. */
+  rawSendCount: number;
   /** Parsed lock for the in-the-future test; the raw ISO is written back unchanged. */
   lockedUntilMs: number | null;
   lockedUntilIso: string | null;
@@ -138,8 +150,8 @@ async function readBucket(sb: any, bucket: string): Promise<BucketState | null> 
   }
   if (!data) {
     return {
-      bucket, sendCount: 0, failCount: 0, lockedUntilMs: null, lockedUntilIso: null,
-      windowExpired: false, windowStartIso: null,
+      bucket, sendCount: 0, failCount: 0, rawSendCount: 0, lockedUntilMs: null,
+      lockedUntilIso: null, windowExpired: false, windowStartIso: null,
     };
   }
   const started = Date.parse(String(data.window_started_at ?? ""));
@@ -148,6 +160,7 @@ async function readBucket(sb: any, bucket: string): Promise<BucketState | null> 
   return {
     bucket,
     sendCount: windowExpired ? 0 : Number(data.send_count) || 0,
+    rawSendCount: Number(data.send_count) || 0,
     failCount: windowExpired ? 0 : Number(data.fail_count) || 0,
     lockedUntilMs: Number.isFinite(lockedMs) ? lockedMs : null,
     lockedUntilIso: data.locked_until ?? null,
@@ -156,19 +169,23 @@ async function readBucket(sb: any, bucket: string): Promise<BucketState | null> 
   };
 }
 
-/** Upsert one bucket. Counts default to the EFFECTIVE values in `s`, so saving a bucket
- *  whose window expired naturally resets it: the window restarts now and whichever
- *  counter isn't named drops to zero. Best-effort — the same free-pass rule as the
- *  read: a dropped write costs one uncounted send/fail, never the request. */
+/** Upsert one bucket's FAIL counter or lockout. Counts default to the EFFECTIVE values in
+ *  `s`, so saving a bucket whose window expired naturally resets it: the window restarts
+ *  now and whichever counter isn't named drops to zero. Best-effort — the same free-pass
+ *  rule as the read: a dropped write costs one uncounted fail, never the request.
+ *
+ *  ⚠️ SENDS ARE NOT COUNTED HERE. There is deliberately no `send` option: writing back a
+ *  count read earlier is what let concurrent requests share one slot, and reserveSendSlot
+ *  below owns that counter now. Two ways to write send_count is how one of them drifts. */
 async function saveBucket(
   sb: any,
   s: BucketState,
-  next: { send?: number; fail?: number; lockMs?: number },
+  next: { fail?: number; lockMs?: number },
 ): Promise<void> {
   const nowIso = new Date().toISOString();
   const { error } = await sb.from("customer_otp_throttle").upsert({
     bucket: s.bucket,
-    send_count: next.send ?? s.sendCount,
+    send_count: s.sendCount,
     fail_count: next.fail ?? s.failCount,
     window_started_at: s.windowExpired || !s.windowStartIso ? nowIso : s.windowStartIso,
     locked_until: next.lockMs != null
@@ -177,6 +194,115 @@ async function saveBucket(
     updated_at: nowIso,
   });
   if (error) console.warn(`customer-auth: throttle write failed: ${error.message}`);
+}
+
+/** What a slot claim decided. 'unknown' is the free pass — see reserveSendSlot. */
+type SlotVerdict = "ok" | "over" | "unknown";
+
+/** Swaps one claim will try before giving the request a free pass. Each round costs a
+ *  primary-key read plus one conditional update, and a round is only ever spent when
+ *  another request claimed the same bucket in between — so this is the width of a
+ *  simultaneous burst the counter stays exact through, traded against the latency the
+ *  unluckiest caller in that burst pays. */
+const CLAIM_ATTEMPTS = 12;
+
+/**
+ * Claim ONE send slot in `bucket`, enforcing `max`.
+ *
+ * ⚠️ WHY THIS EXISTS AND saveBucket DOES NOT SUFFICE. Reading a counter, checking it against
+ * a cap and later writing `read + 1` is not a limit at all once two requests overlap: both
+ * read the same low value, both pass the check, both send, and both write the SAME number.
+ * The counter never climbs, so neither the caps nor the lockout that depends on them ever
+ * bite — the send budget is effectively unbounded to anyone willing to pipeline. That is
+ * worst for the tenant-wide bucket, which the header calls the one cap a caller rotating
+ * x-forwarded-for cannot escape, and which is what bounds a tenant's messaging spend.
+ *
+ * The claim is therefore a COMPARE-AND-SWAP: the update matches only while the row still
+ * holds the count this request read, so exactly one of N simultaneous claims lands on each
+ * value and the losers re-read a higher one. `customer_otp_throttle` has no atomic increment
+ * (migration 108 is deliberately "just the counters"), so the primary key and the matched
+ * count are the whole serialisation.
+ *
+ * Rules kept from the read/write pair it replaces:
+ *   * FREE PASS ON FAILURE. A read or write that ERRORS returns 'unknown' and the caller
+ *     sends anyway — capture-lead's rule. Failing closed would let one bad query lock every
+ *     legitimate shopper out of every tenant's portal, which is worse than losing the cap.
+ *     Contention we cannot resolve inside the retry budget is treated the same way, and
+ *     that is the honest limit of this fix: a burst wider than CLAIM_ATTEMPTS arriving in
+ *     the same instant still overshoots once, because only one swap can land per round and
+ *     the rest are let through rather than refused. What it buys is that the count now
+ *     genuinely CLIMBS, so the overshoot is a single bounded spike instead of an unbounded
+ *     one — after it the bucket is at its cap and stays there for the rest of the window,
+ *     which is what a 15-minute pumping run actually runs into.
+ *   * WINDOW ROLLOVER STILL ZEROES. A bucket whose window lapsed restarts at one send and
+ *     no fails, exactly as saveBucket's expired branch does.
+ *   * NEVER A LOCK. `locked_until` is not named in either statement, so a claim can neither
+ *     set nor clear one — the tenant bucket stays cap-only (053's rationale, migration 108).
+ *   * The bucket name never reaches a log line: phone buckets embed the digits and email
+ *     buckets the address.
+ *
+ * `seed` is the state the caller already read for its cheap pre-check, reused as the first
+ * attempt so the happy path costs no extra read.
+ */
+async function reserveSendSlot(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  bucket: string,
+  max: number,
+  seed: BucketState | null,
+): Promise<SlotVerdict> {
+  let s = seed;
+  for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+    // A seed of null is "the caller's read failed", not "no seed" — read again rather than
+    // inheriting that failure, so one flaky read costs a cap check and not the counter too.
+    if (attempt > 0 || s === null) s = await readBucket(sb, bucket);
+    if (s === null) return "unknown"; // the read itself failed — free pass
+    if (s.sendCount >= max) return "over";
+    const nowIso = new Date().toISOString();
+    if (s.windowStartIso === null) {
+      // No row yet: the INSERT is the claim, and a racing insert loses on the primary key.
+      const { error } = await sb.from("customer_otp_throttle").insert({
+        bucket, send_count: 1, fail_count: 0, window_started_at: nowIso, updated_at: nowIso,
+      });
+      if (!error) return "ok";
+      // 23505 = another request inserted this bucket first, which IS the serialisation
+      // working — re-read and swap instead. Anything else is a broken write: free pass,
+      // and no retry storm against a table that is not answering.
+      if (error.code !== "23505") {
+        console.warn(`customer-auth: throttle claim insert failed: ${error.message}`);
+        return "unknown";
+      }
+      continue;
+    }
+    const patch = s.windowExpired
+      ? { send_count: 1, fail_count: 0, window_started_at: nowIso, updated_at: nowIso }
+      : { send_count: s.rawSendCount + 1, updated_at: nowIso };
+    const { data, error } = await sb.from("customer_otp_throttle")
+      .update(patch).eq("bucket", bucket).eq("send_count", s.rawSendCount).select("bucket");
+    if (error) {
+      console.warn(`customer-auth: throttle claim failed: ${error.message}`);
+      return "unknown";
+    }
+    if (Array.isArray(data) && data.length > 0) return "ok";
+    // Lost the swap: another send landed in this window. Re-read and try again.
+  }
+  return "unknown";
+}
+
+/** Hand one claimed slot back, for the case where the provider refused OUTRIGHT and nothing
+ *  was delivered. Best-effort and never fatal: a release that loses its compare-and-swap
+ *  simply leaves the send counted, and over-counting is the safe direction for a cap. */
+async function releaseSendSlot(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  bucket: string,
+): Promise<void> {
+  const s = await readBucket(sb, bucket);
+  if (s === null || s.windowStartIso === null || s.rawSendCount <= 0) return;
+  const { error } = await sb.from("customer_otp_throttle")
+    .update({ send_count: s.rawSendCount - 1, updated_at: new Date().toISOString() })
+    .eq("bucket", bucket).eq("send_count", s.rawSendCount);
+  if (error) console.warn(`customer-auth: throttle release failed: ${error.message}`);
 }
 
 Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
@@ -217,12 +343,39 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     .select("client_id").eq("client_id", clientId).maybeSingle();
   if (!cfg) return json({ error: "Unknown builder link." }, 404);
 
-  // ── EMAIL CHANNEL: handled entirely below, then returns ─────────────────────────────
-  // Kept as its own branch rather than threaded through the phone path because almost
-  // nothing is shared: a different identity, a different transport, a different code store.
-  // Interleaving them would make both harder to read and each other's failure modes.
+  // ── EMAIL CHANNEL: TURNED OFF 2026-09-06, and it must stay off until the identity model
+  // below changes. ───────────────────────────────────────────────────────────────────────
+  //
+  // The channel proves an EMAIL ADDRESS and then mints the session on a PHONE it read off a
+  // design's `contact` blob. That blob is written by `save_design`, which is granted to anon
+  // and stores it verbatim — so the phone is a claim by whoever filed the design, never a
+  // proven fact. Pair your own address with someone else's number, verify a code to your own
+  // inbox, and the session you get is theirs: `customer-quotes` lists every design matching
+  // that phone and `customer-accept` will sign their invoice on it.
+  //
+  // ⚠️ THE DEFENCES BELOW IN handleEmailChannel ARE REAL BUT NOT SUFFICIENT, so do not read
+  // them as a reason to re-open this. Skipping draft/inventory rows stops nothing an attacker
+  // does — `save_design` writes `coalesce(p_status,'sent')`, so OMITTING the status field
+  // files the plant as 'sent'. The contradiction rule (a number whose designs disagree about
+  // the address supplies no identity) is the one that bites, and it cannot fire for a tenant
+  // that does not collect email at all: every contact is phone-only, nothing contradicts, and
+  // the plant resolves.
+  //
+  // Cost of turning it off: none measured. Zero email codes had ever been issued on this
+  // project when it was disabled (`select count(*) from customer_email_otps` = 0; all 15
+  // customer sessions came through SMS), and the SMS channel — where the OTP proves the very
+  // phone the session is keyed on — is unaffected.
+  //
+  // To re-open it, mint the session on the VERIFIED ADDRESS instead of back-resolving to a
+  // phone: `customer_sessions.phone_digits` (NOT NULL, migration 108) needs to become
+  // nullable beside an `email_lower`, and `customer-quotes` / `customer-accept` /
+  // `customer-pay` need to match on the address when the session is email-keyed. Then delete
+  // this block. Everything under handleEmailChannel is left intact for that work.
   if (channel === "email") {
-    return await handleEmailChannel(sb, req, action, body, clientId);
+    return refusal({
+      error: "Signing in by email isn't available right now — use your mobile number and " +
+             "we'll text you a code.",
+    });
   }
 
   const phoneRaw = typeof body?.phone === "string" ? body.phone.trim().slice(0, 40) : "";
@@ -244,12 +397,16 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     // attribution + a brake on naive scripts — the forge-proof cap is the tenant bucket
     // below (audit 2026-08-20). Requests carrying no header pool under "unknown".
     const ip = clientIp(req);
-    const phoneBucket = await readBucket(sb, phoneBucketKey);
-    const ipBucket = await readBucket(sb, `ip:${ip}`);
+    // Named once: the pre-check read and the claim below MUST address the same rows, and a
+    // second copy of either template is how they would quietly stop doing so.
+    const ipBucketKey = `ip:${ip}`;
     // 'sends:tenant:<slug>' cannot collide with a phone bucket — even for a tenant whose
     // slug is literally "sends", a phone key ends in ':<10 digits>' and this one never
     // does — nor with an 'ip:' bucket.
-    const tenantBucket = await readBucket(sb, `sends:tenant:${clientId}`);
+    const tenantBucketKey = `sends:tenant:${clientId}`;
+    const phoneBucket = await readBucket(sb, phoneBucketKey);
+    const ipBucket = await readBucket(sb, ipBucketKey);
+    const tenantBucket = await readBucket(sb, tenantBucketKey);
 
     // An unexpired lockout short-circuits before any count math. (The tenant bucket never
     // carries a lock — cap-only, see the header.)
@@ -274,6 +431,17 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       return json({ error: MSG_TOO_MANY_CODES }, 429);
     }
 
+    // ⚠️ THE DEPLOYMENT CHECK COMES BEFORE ANY SLOT IS CLAIMED. Sign-in by text being
+    // switched off is a property of the deployment's Twilio credentials, not of this
+    // request, so on a deployment without them EVERY caller would arrive here — and the
+    // portal asks for the SMS channel by default. Claiming a slot first would let those
+    // requests spend the tenant's send budget having sent nothing, and that budget is SHARED
+    // with the email channel, which exists precisely for the days SMS cannot send. The same
+    // refusal is repeated inside the catch below as belt-and-braces.
+    if (!twilioConfigured()) {
+      return refusal({ error: MSG_NOT_CONFIGURED });
+    }
+
     // The tenant's own name brands the code text (see twSanitizeBrand). Read here rather
     // than at the tenant check above so a `verify_code` call never pays for it — only the
     // send needs it. Best-effort by construction: `client_settings` is service-role-only and
@@ -293,13 +461,36 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       brand = typeof name === "string" ? name : "";
     }
 
+    // ── Claim the three send slots, THEN send ──────────────────────────────────────────
+    // The cap above is a read-then-check and cannot bind on its own (see reserveSendSlot).
+    // The claim sits HERE, after every exit that sends nothing and immediately before the
+    // provider call, because the atomicity the cap needs is only required around the send
+    // itself — a claim taken earlier would charge the tenant's shared budget for requests
+    // that never sent anything.
+    const slots = await Promise.all([
+      reserveSendSlot(sb, phoneBucketKey, MAX_SENDS_PER_PHONE, phoneBucket),
+      reserveSendSlot(sb, ipBucketKey, MAX_SENDS_PER_IP, ipBucket),
+      reserveSendSlot(sb, tenantBucketKey, MAX_SENDS_PER_TENANT, tenantBucket),
+    ]);
+    // No lockout is written here: the pre-check above owns that escalation and sees the
+    // breached count on the next request. The tenant bucket is never locked at all.
+    if (slots.some((v) => v === "over")) return json({ error: MSG_TOO_MANY_CODES }, 429);
+    const claimed = [phoneBucketKey, ipBucketKey, tenantBucketKey]
+      .filter((_b, i) => slots[i] === "ok");
+
     try {
       await twStartVerification(e164, brand);
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
+        await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
         return refusal({ error: MSG_NOT_CONFIGURED });
       }
       if (e instanceof TwilioApiError) {
+        // A permanent refusal means the provider sent NOTHING — give the slots back rather
+        // than letting cheap, guaranteed-to-fail requests exhaust a real tenant's budget.
+        // A transient failure keeps them: a send may well have gone out, and over-counting
+        // is the safe direction for a cap.
+        if (e.permanent) await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
         if (e.code === 60203) {
           // Twilio's own max-send lock — the verification is frozen until its TTL, so
           // surface the same "wait it out" message as our lockout.
@@ -322,10 +513,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       throw e; // not a Twilio shape — let withErrorLog record it as unhandled
     }
 
-    // Sent. Count it in all THREE buckets (best-effort — the free-pass rule again).
-    if (phoneBucket) await saveBucket(sb, phoneBucket, { send: phoneBucket.sendCount + 1 });
-    if (ipBucket) await saveBucket(sb, ipBucket, { send: ipBucket.sendCount + 1 });
-    if (tenantBucket) await saveBucket(sb, tenantBucket, { send: tenantBucket.sendCount + 1 });
+    // Sent — and already counted in all three buckets by the claim above.
 
     // Housekeeping (adminGate.ts's pattern, audit 2026-08-20): an XFF-rotating caller
     // writes one junk 'ip:<forged>' row per request that is never read again — without a
@@ -436,9 +624,12 @@ async function handleEmailChannel(
 
   if (action === "request_code") {
     const ip = clientIp(req);
+    // Named once, as on the phone path: the pre-check and the claim must address the same rows.
+    const ipBucketKey = `ip:${ip}`;
+    const tenantBucketKey = `sends:tenant:${clientId}`;
     const emailBucket = await readBucket(sb, emailBucketKey);
-    const ipBucket = await readBucket(sb, `ip:${ip}`);
-    const tenantBucket = await readBucket(sb, `sends:tenant:${clientId}`);
+    const ipBucket = await readBucket(sb, ipBucketKey);
+    const tenantBucket = await readBucket(sb, tenantBucketKey);
 
     const now = Date.now();
     if ((emailBucket?.lockedUntilMs ?? 0) > now || (ipBucket?.lockedUntilMs ?? 0) > now) {
@@ -513,6 +704,20 @@ async function handleEmailChannel(
     if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
       return refusal({ error: MSG_EMAIL_NOT_CONFIGURED });
     }
+    // ── Claim the three send slots, THEN send ──────────────────────────────────────────
+    // Same compare-and-swap claim as the phone path, in the same place and for the same
+    // reason: last, after the not-configured refusals and the code store, immediately before
+    // the provider call. Everything above this line can refuse having sent nothing, and the
+    // IP and TENANT buckets are shared with the SMS path — spending them on a non-send would
+    // take the budget away from the channel that IS working. A stored code that is then
+    // refused a slot is simply unused; the next request replaces it.
+    const slots = await Promise.all([
+      reserveSendSlot(sb, emailBucketKey, MAX_SENDS_PER_PHONE, emailBucket),
+      reserveSendSlot(sb, ipBucketKey, MAX_SENDS_PER_IP, ipBucket),
+      reserveSendSlot(sb, tenantBucketKey, MAX_SENDS_PER_TENANT, tenantBucket),
+    ]);
+    if (slots.some((v) => v === "over")) return json({ error: MSG_TOO_MANY_CODES }, 429);
+
     const mail = emailOtpBody(brand, issued.code);
     try {
       await rsSendEmail({
@@ -535,9 +740,7 @@ async function handleEmailChannel(
       return json({ error: "Something went wrong sending the code — try again." }, 502);
     }
 
-    if (emailBucket) await saveBucket(sb, emailBucket, { send: emailBucket.sendCount + 1 });
-    if (ipBucket) await saveBucket(sb, ipBucket, { send: ipBucket.sendCount + 1 });
-    if (tenantBucket) await saveBucket(sb, tenantBucket, { send: tenantBucket.sendCount + 1 });
+    // Sent — and already counted in all three buckets by the claim above.
 
     // {ok:true} regardless — see NO ENUMERATION in the header.
     return json({ ok: true });
@@ -594,25 +797,71 @@ async function handleEmailChannel(
   if (emailBucket) await saveBucket(sb, emailBucket, { fail: 0 });
 
   // ── Resolve the address to the phone identity the portal is built on ────────────────
-  // designs.contact->>'email' is the address the quote was sent to. Newest first, because a
-  // customer who changed number should land on the one they use now.
+  // ⚠️ designs.contact IS A CLAIM, NOT EVIDENCE. Every design write goes through
+  // save_design, which the anonymous designer may call, and the contact blob is stored
+  // verbatim — so "a design in this tenant carries my address" says only that SOMEBODY typed
+  // that pair, not that the number beside the address belongs to whoever proved the address.
+  // Handing the newest such row's phone straight to mintSession would make the whole portal's
+  // ownership model (customer-quotes, customer-accept and customer-pay all authorise on
+  // phone_digits alone) rest on a field a stranger can write.
+  //
+  // The address must therefore resolve to a number this tenant's own records do not
+  // CONTRADICT. Two rules, both cheap:
+  //   1. only a design the customer would recognise as their quote may supply an identity.
+  //      'inventory' is the builder's own stock and 'draft' is the silent capture a visitor
+  //      never knowingly created — customer-quotes hides both, so neither could ever have
+  //      produced a portal to sign in to.
+  //   2. every other design carrying that same number must agree on the address. A number
+  //      that already answers to a different address in this tenant is spoken for, and the
+  //      honest answer is the noQuotes one below. A blank address claims nothing, so it
+  //      never contradicts.
+  // A number that fails rule 2 is skipped rather than fatal, so a customer who changed
+  // number still falls through to the older one they own.
+  //
+  // Tenant-wide read, matched in code: PostgREST cannot state the normalize-to-digits
+  // expression both sides of a phone comparison need (customer-quotes carries the same note),
+  // and the limit(200) this replaces silently truncated a busy tenant's older designs into
+  // the noQuotes answer.
   const { data: matches } = await sb.from("designs")
-    .select("contact, created_at")
+    .select("contact, created_at, status")
     .eq("client_id", clientId)
-    .order("created_at", { ascending: false })
-    .limit(200);
+    .order("created_at", { ascending: false });
+  // deno-lint-ignore no-explicit-any
+  const designRows = (matches ?? []) as any[];
+  const contactEmail = (c: Record<string, unknown>) => normalizeEmail(String(c.email ?? ""));
+  const contactPhone = (c: Record<string, unknown>) => {
+    const raw = String(c.phone ?? "").replace(/\D/g, "");
+    return raw.length === 11 && raw.startsWith("1") ? raw.slice(1) : raw;
+  };
+
+  // Every address this tenant's designs carry for a given number, built in one pass so the
+  // contradiction test below is a lookup rather than a rescan.
+  const addressesByPhone = new Map<string, Set<string>>();
+  for (const d of designRows) {
+    if (d?.status === "inventory") continue;
+    const c = (d?.contact ?? {}) as Record<string, unknown>;
+    const ten = contactPhone(c);
+    const addr = contactEmail(c);
+    if (ten.length !== 10 || !addr) continue;
+    const seen = addressesByPhone.get(ten);
+    if (seen) seen.add(addr);
+    else addressesByPhone.set(ten, new Set([addr]));
+  }
+
   let digits = "";
   let foundName: string | null = null;
-  for (const d of (matches ?? [])) {
+  for (const d of designRows) {
+    if (d?.status === "draft" || d?.status === "inventory") continue;
     const c = (d?.contact ?? {}) as Record<string, unknown>;
-    if (normalizeEmail(String(c.email ?? "")) !== email) continue;
-    const raw = String(c.phone ?? "").replace(/\D/g, "");
-    const ten = raw.length === 11 && raw.startsWith("1") ? raw.slice(1) : raw;
-    if (ten.length === 10) {
-      digits = ten;
-      foundName = typeof c.name === "string" && c.name.trim() ? c.name.trim().slice(0, 80) : null;
-      break;
-    }
+    if (contactEmail(c) !== email) continue;
+    const ten = contactPhone(c);
+    if (ten.length !== 10) continue;
+    // The matched design contributed this address itself, so more than one means another
+    // address also answers to this number.
+    if ((addressesByPhone.get(ten)?.size ?? 0) > 1) continue;
+    digits = ten;
+    foundName = typeof c.name === "string" && c.name.trim() ? c.name.trim().slice(0, 80) : null;
+    break;
   }
 
   if (!digits) {

@@ -1267,6 +1267,12 @@ function ProjectsTab({ sub, onSub }) {
     return hit ? hit.id : null;
   }, [snapshot, savedViews]);
 
+  // Declared HERE, above its first reader (viewDirty, next line). The portal parts are
+  // compiled by Babel with preset-env, which lowers const to var - a declaration placed
+  // after a reader in the same function body is hoisted-undefined rather than a TDZ
+  // error, so the read silently yields undefined on every render instead of throwing.
+  const filtersOn = q.trim() !== "" || Object.values(facets).some((v) => v != null) || whenCond !== "any";
+
   // Anything worth naming: filters OR the way the board is arranged.
   const viewDirty = filtersOn || view.groupBy !== "groups" || view.sortKey !== "name"
     || view.sortDir !== "asc" || (view.hiddenCols || []).length > 0;
@@ -1348,7 +1354,6 @@ function ProjectsTab({ sub, onSub }) {
     });
   }, [data, q, facets, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, whenColId, ctx]);
 
-  const filtersOn = q.trim() !== "" || Object.values(facets).some((v) => v != null) || whenCond !== "any";
   const openItem = openItemId && data ? data.items.find((i) => i.id === openItemId) : null;
 
   const facetCols = data ? data.columns.filter((c) => pmType(c).facet) : [];

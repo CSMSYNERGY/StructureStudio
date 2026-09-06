@@ -446,6 +446,16 @@ function Dashboard({ session }) {
         // emptiness proves nothing. Ask again now that a token demonstrably exists, and
         // believe only this second answer.
         const retry = await sb.from("client_users").select("client_id, role").limit(1);
+        // ⚠️ A FAILED read is not an answer of "no tenant" either, and reading only `.data`
+        // erased that distinction. postgrest-js RESOLVES `{data: null, error}` on a dropped
+        // connection or a 5xx rather than rejecting, and getSession() answers from local
+        // storage with no network at all — so one connectivity blip spanning both reads used
+        // to land a real owner on the terminal card above, telling them exactly the falsehood
+        // the comment there refuses to tell, with nothing under it but Sign Out. Only a CLEAN
+        // read of zero rows may become "none". On a failed one, stay on "Loading your
+        // business…": this effect is keyed on session.access_token, so the next token re-runs
+        // it. One extra read is the whole budget here — do not add a retry loop.
+        if (retry.error) return;
         mapping = retry.data && retry.data[0];
         if (!mapping) { setTenant("none"); return; }
       }
@@ -674,7 +684,23 @@ function Dashboard({ session }) {
     // base64 inside a 256MB / 2s worker), so the browser writes straight into the PRIVATE
     // `models` bucket with the builder's own session — the same route portal.html already uses
     // for feedback attachments, and the RLS policy in 094 confines it to their own folder.
-    onUploadModel: async (file, styleValue) => {
+    //
+    // NULL WHILE VIEWING ANOTHER TENANT, which hides the scan card entirely — the designer
+    // gates the whole card on this callback. This is the one capability here that does NOT
+    // go through portal-settings: it is a DIRECT write into the private bucket with the
+    // caller's own session, and 094's insert policy confines that write to the folder named
+    // by the CALLER's own client_users row — storage RLS never sees targetClientId, and
+    // sb.storage is not in SS_TENANT_SCOPED_FNS. An operator's row names the operator's own
+    // tenant, so the path built from the viewed tenant could never match and storage refused
+    // every one of these uploads with a raw "new row violates row-level security policy" —
+    // a control that cannot work, failing in a language nobody can act on. 151 names this
+    // exact trap ("would appear to work in every test done as an owner") and explicitly
+    // refuses the tempting cure, a bypass policy on the bucket; the real fix is a signed
+    // upload URL minted by portal-settings, where resolveTenant — not the caller's own row —
+    // decides the prefix. Until then, offer the control only where it works. The AI calibration and
+    // walk-around-video paths beside it all run through portal-settings and are gated on
+    // their own callbacks, so they keep working in view-as.
+    onUploadModel: viewing ? null : async (file, styleValue) => {
       // supabase-js IGNORES the contentType option when the body is a Blob (it builds a
       // FormData and reads Blob.type), and a .glb usually arrives as application/octet-stream
       // or "". Re-tag it with a zero-copy slice so the stored mime matches the bucket's
@@ -748,7 +774,9 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;
     },
-  }), [canAdmin, view3dUnlocked, effClientId]);
+    // `viewing` is listed because onUploadModel now reads it. effClientId moves with it in
+    // practice, but leaning on that would make a stale upload handler a one-line edit away.
+  }), [canAdmin, view3dUnlocked, effClientId, viewing]);
 
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
@@ -883,6 +911,18 @@ function Dashboard({ session }) {
   //   * entitlement === null means "still loading" and must NOT read as off, or every page
   //     load would flash an upgrade card at a paying customer (same reason gateLocked
   //     tolerates null).
+  //
+  // ⚠️ THE TENANT BRANCH SAYS THE OPPOSITE OF THAT SENTENCE, and it must keep saying it until
+  // the server can answer for these keys. Audit 2026-09-06 (F052) proposed making null read as
+  // ON, which is the right shape for a gate that is only presentation — but it is NOT the shape
+  // for `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
+  // ANYWHERE: portal-billing's PAID_ONLY_FEATURES set decides who may subscribe, and nothing
+  // re-checks those two on the actions themselves. Null-reads-on would hand every tenant the
+  // paid scheduler and QuickBooks for the whole load window, and permanently after one failed
+  // status call, because the fetch stores only a SUCCESSFUL answer and is keyed on the access
+  // token. Fail-closed on a paid feature beats fail-open; the real repair is a third state
+  // (loading, which shows neither the feature nor its upsell) plus a server-side check for
+  // those two keys, and that is a bigger change than a boolean.
   // Support resolves the VIEWED tenant's subscription — the whole point of the flag. A null
   // viewedCtx is STILL LOADING, never "off", the same rule the operator branch already uses:
   // flashing an upgrade card at a paying builder mid support call is the worse failure.

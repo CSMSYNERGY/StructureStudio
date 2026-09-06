@@ -3838,6 +3838,27 @@ function DriversTerritoriesCard() {
             </div>
           );
         })}
+
+        {/* ── Former drivers. "Remove driver" only clears is_driver — the profile row stays
+               (and stays active), because it carries the truck, deck, width and territories
+               and is what past loads point at. list_drivers still returns it, but the trucks
+               list above hides it and the "Who drives it?" picker skips anyone who already
+               holds a profile (one profile per login), so without this line a driver removed
+               by mistake could not be brought back from the portal at all. Restoring keeps
+               their truck exactly as it was. ── */}
+        {(data.drivers || []).filter((p) => !p.is_driver).length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <span style={{ ...S.lbl, marginBottom: 0 }}>Former drivers</span>
+            {(data.drivers || []).filter((p) => !p.is_driver).map((p) => (
+              <div key={p.id} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", border: "1px solid #E2E8F0", borderRadius: 10, padding: "8px 11px", marginTop: 6, background: "#FBFCFE", opacity: 0.7 }}>
+                <strong style={{ fontSize: 13 }}>{p.display_name || nameOfU[p.user_id] || "Driver"}</strong>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: "#64748B", flex: 1, minWidth: 120 }}>{p.truck_name || "no truck yet"}</span>
+                <button type="button" disabled={busy} style={{ ...S.btn("#F0FDF4", "#15803D"), padding: "4px 9px", fontSize: 11 }}
+                  onClick={() => saveDriver(p.id, { isDriver: true })}>Make a driver again</button>
+              </div>
+            ))}
+          </div>
+        )}
       </>)}
     </div>
   );

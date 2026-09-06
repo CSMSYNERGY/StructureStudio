@@ -35,7 +35,9 @@ import { rsGetReceivedEmail, resendConfigured, ResendApiError } from "../_shared
 // helper's docstring before receiving is switched on: four of the five provider fields it
 // returns are true SMTP-envelope fields, but Resend's `received_for` — the only one that
 // resolves anything on the provider we ship on — is parsed out of Received HEADERS, and
-// whether a sender can plant one has not been tested.
+// whether a sender can plant one has not been tested. That same field is the ONLY thing the
+// enrichment fetch below is permitted to hand Stage A, because the metadata webhook may not
+// carry it; every other fetched field is body, headers or display.
 //
 // ⚠️ THIS FUNCTION MUST NEVER SEND MAIL. It stores a row and returns 200. An auto-reply, a
 // forward or a generated bounce would turn a spam run at a published reply address into US
@@ -88,11 +90,39 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // post a body keeps working untouched and costs no extra request. Enrichment is
   // BEST-EFFORT: if the fetch fails we still store what the webhook gave us, because a
   // reply filed with a missing body beats a reply dropped on the floor.
+  //
+  // ⚠️ ONE RETRY, AND IT IS THE BODY'S ONLY SECOND CHANCE. rsFetch has no retry of its own;
+  // we answer 200 on every authenticated path (see the header — a non-2xx here buys a retry
+  // storm, not a repair); a provider does not redeliver a 2xx; and the
+  // (client_id, message_id) index would reject the second copy if one ever arrived. So a
+  // single 429 / 5xx / dropped connection that this loop fails to absorb blanks a customer's
+  // reply for good, and blanks the headers B2 threads on with it. ResendApiError.permanent
+  // already carries the provider's own verdict on whether an identical request fails
+  // identically, so a permanent refusal is not retried — that is a configuration fault for a
+  // human, not a wobble to ride out.
   const looksMetadataOnly = !m.text && !m.html && !m.body_plain && !m.body_html && !m.plain;
   const receivedId = typeof m.email_id === "string" ? m.email_id : "";
   if (looksMetadataOnly && receivedId && resendConfigured()) {
-    try {
-      const full = await rsGetReceivedEmail(receivedId);
+    let full: Awaited<ReturnType<typeof rsGetReceivedEmail>> | null = null;
+    let failure: unknown = null;
+    let retried = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        full = await rsGetReceivedEmail(receivedId);
+        failure = null;
+        break;
+      } catch (e) {
+        failure = e;
+        if (attempt > 0 || !(e instanceof ResendApiError) || e.permanent) break;
+        retried = true;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    if (full) {
+      // The webhook's own copy still wins on every field; the fetch only fills a gap.
+      const webhookReceivedFor = Array.isArray(m.received_for)
+        ? (m.received_for.length ? m.received_for : null)
+        : (m.received_for || null);
       m = {
         ...m,
         text: full.text || m.text,
@@ -100,14 +130,30 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
         headers: Object.keys(full.headers).length ? full.headers : m.headers,
         subject: m.subject || full.subject,
         message_id: m.message_id || full.messageId,
+        // ⚠️ THE ONE FETCHED FIELD STAGE A IS ALLOWED TO SEE, and only because it is the
+        // very `received_for` envelopeRecipients already reads: the metadata webhook may
+        // omit it, and on Resend it is the only field that resolves a tenant at all, so
+        // without this every ordinary reply files under the unattributed sentinel where no
+        // screen can reach it. Arriving over a different transport does NOT upgrade its
+        // grade of evidence — the open forgery question in envelopeRecipients' docstring
+        // stands unchanged, and answering it is still owed before receiving goes live.
+        // NOTHING ELSE FROM THE FETCH MAY FEED STAGE A, above all not `full.to`, whose
+        // forgeability is the ⛔ in that same docstring.
+        received_for: webhookReceivedFor ?? full.receivedFor,
       };
-    } catch (e) {
+    } else {
       await logEdgeError({
         fn: "email-inbound", req, clientId: null, code: "inbound_body_fetch_failed",
         message: `could not fetch the received email body: ${
-          e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
+          failure instanceof ResendApiError
+            ? `resend ${failure.status}/${failure.name_ || "unknown"}`
+            : String((failure as Error)?.message ?? failure)
         }`,
-        context: { receivedId },
+        // `retried` separates a blip we could not ride out from a refusal that repeating
+        // would not fix. The row is stored blank either way and nothing in the product ever
+        // fills it in, so this is the repair ticket: `receivedId` is what a human reads the
+        // body back from (GET /emails/receiving/{id}) before updating the row by hand.
+        context: { receivedId, retried },
       });
     }
   }
