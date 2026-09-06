@@ -1876,10 +1876,17 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
     // columns. Repurposing them as "the main address" and adding delivery as the new pair
     // would silently re-point every existing stop at a billing address, on live data, with
     // nothing raising.
-    billingStreet: (data.contact && data.contact.bill_street) || "",
-    billingCity: (data.contact && data.contact.bill_city) || "",
-    billingState: (data.contact && data.contact.bill_state) || "",
-    billingZip: (data.contact && data.contact.bill_zip) || "",
+    // ⚠️ THE COLUMNS ARE `billing_*`, NOT `bill_*`. This read said `bill_street` until the
+    // migration was applied and the live column list checked — a wrong key here does not
+    // throw, it resolves to undefined and falls through to "", so the field renders EMPTY
+    // while the row underneath holds a real address. The write path uses different names
+    // again (`billingStreet`, the wire shape crm_save_contact takes), so a builder would have
+    // typed an address, saved it successfully, and watched it vanish on reload — with no
+    // error anywhere and the data sitting safely in the table the whole time.
+    billingStreet: (data.contact && data.contact.billing_street) || "",
+    billingCity: (data.contact && data.contact.billing_city) || "",
+    billingState: (data.contact && data.contact.billing_state) || "",
+    billingZip: (data.contact && data.contact.billing_zip) || "",
   });
   const saveContact = async () => {
     if (!edit) return;
