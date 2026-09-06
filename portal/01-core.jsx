@@ -637,19 +637,83 @@ const SETTINGS_TAB_AREA = {
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
   "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
 
-// 'own' (commissions) counts as read — see canRead in _shared/access.ts. Kept deliberately
-// tiny and mirrored rather than imported: portal.html has no module loader, and the SERVER
-// is the enforcement point, so a drift here costs a wrong tab and never wrong access.
+// 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
+// commissions ("your own payouts") and, since migration 193, contacts ("the customers you
+// own or follow"). Kept deliberately tiny and mirrored rather than imported: portal.html has
+// no module loader, and the SERVER is the enforcement point, so a drift here costs a wrong
+// tab and never wrong access.
 function ssCanRead(access, area) {
   const v = access && access[area];
   return v === "view" || v === "edit" || v === "own";
 }
-// The write half. 'own' is NOT write: it means "your own commission rows", a read scope, and
-// treating it as edit would let a rep act on an area they can only look at. Mirrored from
-// canWrite in _shared/access.ts for the same reason ssCanRead is — the server enforces, this
-// only decides what is worth rendering.
+// The write half. 'own' is NOT write: it is a read SCOPE — "your own commission rows", "your
+// own customers" — and treating it as edit would let a rep act on rows they may only look
+// at. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead is.
+//
+// This is also what hides the contact editor, the note box, the activity form and the
+// SMS/email composers from someone on contacts:'own': every one of those actions is gated
+// contacts:'edit' server-side, so rendering them would be offering a button that 403s.
 function ssCanWrite(access, area) {
   return !!access && access[area] === "edit";
+}
+
+// ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
+//
+// TAB_AREA above answers "may this person open this page". This answers a question the
+// portal has never had to ask before: "and are they seeing all of it?"
+//
+// Carolyn, 2026-09-04 @1:02:16, on a builder whose salespeople are independent dealers: "he
+// also doesn't want them to see each other's quotes either … they would only see the list,
+// the pipelines or the quotes that they have created themselves … if the owner wants the
+// employees to see, then they just toggle the button in the settings." The button is the
+// `contacts` switch on the Team screen, and its new setting is 'own'.
+//
+// ⚠️ THE AREA THAT SCOPES A LIST IS NOT THE AREA THAT REVEALS IT, and that is the whole
+// reason this is a second registry rather than a flag on TAB_AREA. Carolyn, same call
+// @1:09:30: "we do not ever assign deals. We only assign contacts and followers." A design
+// has no assignee; it is visible because its CUSTOMER is. So the Pipeline is REVEALED by
+// `designs` and SCOPED by `contacts`, and mapping a tab to one area for both questions would
+// have quietly made the wrong switch do the work.
+//
+// ⚠️ THIS IS A COURTESY, exactly as the nav is. The rows are already gone by the time they
+// reach here — migration 193's restrictive policies narrow the browser's own PostgREST reads
+// (Pipeline, Contacts, browsing leads) and portal-settings narrows what it returns, because
+// the service role is BYPASSRLS and gets nothing from those policies. What this registry is
+// for is EXPLAINING a short list, so a rep whose pipeline just halved reads a sentence
+// instead of filing a bug.
+const ROW_SCOPE_AREA = {
+  designs: "contacts",     // the Pipeline: designs, scoped by whose customer they belong to
+  contacts: "contacts",    // the customer list itself
+  orders: "contacts",      // orders_designs is filtered server-side by the same rule
+  inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
+};
+
+// Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
+// _shared/access.ts, and the only place the literal 'own' is compared for a row scope here.
+//
+// Owners can never be narrowed and no check for that is needed at this altitude either: the
+// server resolves an owner to 'edit' on every area before consulting their stored map, so
+// `access.contacts` is never 'own' in a map the portal was handed.
+function ssOwnRowsOnly(access, area) {
+  return !!access && access[area] === "own";
+}
+
+// Is the list on this tab currently showing only the caller's own rows?
+function ssRowScoped(access, tab) {
+  const area = ROW_SCOPE_AREA[tab];
+  return !!area && ssOwnRowsOnly(access, area);
+}
+
+// The sentence to put above a scoped list. Returns null when nothing is being hidden, so a
+// caller can render it unconditionally.
+//
+// It names the RULE ("assigned to you or following") rather than a count, deliberately: a
+// count would have to come from a second, unscoped read, which is the leak this whole
+// feature exists to close.
+function ssRowScopeNote(access, tab) {
+  if (!ssRowScoped(access, tab)) return null;
+  return "You're seeing the customers assigned to you or that you're following. "
+    + "Ask an owner or admin if you need to see everyone's.";
 }
 function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
@@ -1559,17 +1623,46 @@ const ssTabCache = new Map();
 // shape as ssTargetClientId above, so a tab deep in the tree can key its cache correctly
 // without every component in between growing a prop it does not otherwise use.
 let ssCurrentUserId = null;
-function ssSetCurrentUser(id) {
-  if (id !== ssCurrentUserId) { ssCurrentUserId = id || null; ssTabCache.clear(); }
+// ...and HOW MUCH of the tenant they were allowed to see when those payloads were fetched.
+// A permission change does not sign anybody out, so without this a rep an owner has just
+// moved to contacts:'own' keeps painting the full customer list from cache for up to
+// SS_TAB_CACHE_MAX_AGE — server-side narrowing that the browser then undoes from memory.
+//
+// `null` means "not told", which keys exactly as this cache always has: every existing
+// caller passes one argument and is unchanged. Pass the resolved access map's contacts level
+// (ssOwnRowsOnly's input) once the status call has landed.
+let ssCurrentRowScope = null;
+function ssSetCurrentUser(id, rowScope = null) {
+  if (id !== ssCurrentUserId || rowScope !== ssCurrentRowScope) {
+    ssCurrentUserId = id || null;
+    ssCurrentRowScope = rowScope || null;
+    ssTabCache.clear();
+  }
+}
+// The row scope alone, because WHO you are and WHICH ROWS you may see arrive in different
+// components at different times: the user id lands in PortalApp when auth resolves, and the
+// resolved access map lands in Dashboard when the status call returns — usually a second or
+// two later, and again whenever an owner flips somebody's Contacts switch.
+//
+// Without this the scope could only ever be set at sign-in, when it is not known yet, so a
+// narrowed rep would keep serving the full list out of the tab cache for up to its 10-minute
+// max age. Idempotent, and it clears the cache only on an actual change — which is what makes
+// it safe to call during a render, the same property ssTargetClientId relies on. It touches no
+// React state, so it cannot provoke the re-render loop that shape normally invites.
+function ssSetRowScope(rowScope) {
+  const next = rowScope || null;
+  if (next !== ssCurrentRowScope) { ssCurrentRowScope = next; ssTabCache.clear(); }
 }
 
 // The key carries WHO as well as WHAT. Tenant, because an operator viewing another builder
 // must never see the previous one's rows; user id, because portal-commissions scopes
 // list_entries to the CALLER (a rep sees only their own lines, and rates are hidden unless
 // they may see them), so a payload keyed by tenant alone would leak across a sign-out and
-// sign-in on the same machine.
+// sign-in on the same machine; and the row scope, because the SAME person on the SAME tenant
+// gets a different set of rows before and after an owner flips their Contacts switch.
 function ssCacheKey(fn, action, tenant) {
-  return (ssCurrentUserId || "anon") + "|" + (tenant || "own") + "|" + fn + "|" + action;
+  return (ssCurrentUserId || "anon") + "|" + (tenant || "own")
+    + (ssCurrentRowScope ? "|" + ssCurrentRowScope : "") + "|" + fn + "|" + action;
 }
 function ssCacheGet(fn, action, tenant) {
   if (!SS_TAB_CACHE_ON) return null;

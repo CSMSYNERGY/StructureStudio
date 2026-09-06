@@ -12,6 +12,17 @@
 // THE RULE THAT MATTERS: the UI hiding a tab is a courtesy, not a control. Every action
 // in every function must call requireAccess() before it reads or writes, because anyone
 // can call these endpoints directly with a valid session.
+//
+// ── ONE LEVEL IS ABOUT ROWS, NOT TABS (2026-09-05) ──────────────────────────────────────
+// `contacts: 'own'` narrows WHICH ROWS a person sees, not which pages. Everything above
+// still applies to it, and it needs a third enforcement point the rest of this module does
+// not: the level says "narrow", and the narrowing itself lives in
+//   1. RLS       — migration 193's restrictive policies, for the lists the browser reads
+//                  straight from PostgREST (designs / crm_contacts / captured_leads);
+//   2. the edge  — every function runs service-role and therefore BYPASSRLS, so RLS
+//                  contributes NOTHING there and the filter is added by hand at the read;
+//   3. the browser — portal/01-core.jsx's row-scope registry, a courtesy like the nav.
+// Change the meaning of 'own' and all three move together. See ownContactsOnly() below.
 
 export type Level = "none" | "view" | "edit" | "own";
 export type Title = "owner" | "admin" | "sales_rep" | "crew_leader" | "driver";
@@ -74,7 +85,39 @@ export const AREAS: Area[] = [
   // ── Workspace ────────────────────────────────────────────────────────────
   { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
   { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
-  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired",           levels: RVE },
+  // 'own' = see only the customers you are ASSIGNED TO or FOLLOWING — and, because a quote
+  // belongs to a customer and not to a rep, only those customers' designs and browsing leads.
+  //
+  // WHY (Carolyn, 2026-09-04, 1:02:16–1:04:27, describing a builder she is onboarding whose
+  // salespeople are independent dealers): "he also doesn't want them to see each other's
+  // quotes either … they would only see the list, the pipelines or the quotes that they have
+  // created themselves. Only the owner would see 'okay, this customer went through employee
+  // B and C' … Now, if the owner wants the employees to see, then they just toggle the
+  // button in the settings and they will be able to see." THIS SWITCH IS THAT BUTTON.
+  //
+  // ⚠️ THE CONTACTS LEVEL SCOPES THE DESIGNS LIST, NOT THE `designs` LEVEL — and that is her
+  // model rather than a shortcut (same call, 1:09:30): "we do not ever assign deals. We only
+  // assign contacts and followers … if they are not assigned to or following that customer,
+  // they can't see anything of it." A design has no assignee and is not getting one; it is
+  // visible because its CUSTOMER is. So `designs` keeps none/view/edit and answers "may you
+  // open the Pipeline at all", while this row answers "whose rows are in it".
+  //
+  // ⚠️ 'own' IS A READ SCOPE, EXACTLY AS IT IS ON COMMISSIONS. RANK puts it level with
+  // 'view', so canEdit() is false for it and every contacts:'edit' action — the contact
+  // editor, notes, activities, SMS, email, customer files — is REFUSED for someone set to
+  // 'own'. That is a consequence, not an oversight, and it is written down here so the next
+  // reader does not "fix" it by hand: Carolyn asked about SEEING, four times in three
+  // sentences, and making 'own' a write scope would mean per-row ownership checks on eleven
+  // write actions plus a level that outranks 'view' — neither of which she has been asked
+  // for. A builder who needs dealers that can WORK their own records but see nobody else's
+  // is a second decision, and it is hers.
+  //
+  // ADDED to the vocabulary rather than replacing 'view'. effectiveAccess DISCARDS a stored
+  // override whose level is not in the area's list, so dropping 'view' would silently drop
+  // every stored {"contacts":"view"} back to the title preset — 'none' for a crew leader —
+  // on the next page load, with nothing anywhere to notice.
+  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired — 'Own only' hides other reps' customers",
+    levels: ["none", "own", "view", "edit"] },
   { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
   { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
   // Amending a SIGNED order. Split out of `orders` (Carolyn, 2026-09-01: "Change Orders is
@@ -217,6 +260,26 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
 }
 
 /**
+ * Contacts only: is this caller limited to the customers they OWN or FOLLOW?
+ *
+ * The one place the literal 'own' is compared for this area, so the three enforcement points
+ * (RLS, the edge filters, the browser registry) cannot come to mean different things. It
+ * answers a narrower question than canRead/canEdit and deliberately does not overlap them:
+ * 'own' still READS (canRead is true — RANK puts it level with 'view') and still cannot
+ * WRITE (canEdit is false). All this adds is "…but only some of the rows".
+ *
+ * OWNERS CANNOT REACH IT and that is structural, not a check here: effectiveAccess()
+ * short-circuits `role === "owner"` to 'edit' on every area before a stored map is ever
+ * consulted, so an owner's contacts level is never the string 'own' no matter what is in
+ * client_users.access. The SQL twin (area_level_for) short-circuits the same way, and both
+ * the RLS resolver and the edge filters are built on top of that rather than re-testing the
+ * role — a filter that forgets owners are absolute empties the owner's own dashboard.
+ */
+export function ownContactsOnly(access: Record<string, Level>): boolean {
+  return access.contacts === "own";
+}
+
+/**
  * May `granter` hand `level` on `area` to someone else?
  *
  * Two rules, both load-bearing:
@@ -226,6 +289,13 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
  *   2. NOBODY GRANTS ABOVE THEMSELVES — an admin without QuickBooks cannot give QuickBooks
  *      to anyone, including themselves. Without this the whole model is decorative: any
  *      admin could self-promote to everything in two clicks and nothing would record it.
+ *   3. AN 'own' HOLDER PASSES ON 'own', NEVER 'view'. Rule 2 alone does not cover this:
+ *      RANK deliberately scores 'own' and 'view' the SAME (both are "may read"), so
+ *      `RANK[view] <= RANK[own]` is true and an admin an owner had deliberately narrowed to
+ *      contacts:'own' could hand a rep the whole customer list — widening past their own
+ *      scope, which is exactly what rule 2 exists to forbid. It never surfaced before
+ *      because commissions is the only other 'own' area and its vocabulary has no 'view' to
+ *      pass on. Row scope is not a rank, so it needs its own line.
  */
 export function mayGrant(
   granterRole: string | null | undefined,
@@ -238,7 +308,9 @@ export function mayGrant(
   if (!a.levels.includes(level)) return false;
   if (granterRole === "owner") return true;
   if (a.ownerGranted) return false;
-  return RANK[level] <= RANK[granterAccess[area] ?? "none"];
+  const held = granterAccess[area] ?? "none";
+  if (held === "own" && level !== "own" && level !== "none") return false;
+  return RANK[level] <= RANK[held];
 }
 
 /**

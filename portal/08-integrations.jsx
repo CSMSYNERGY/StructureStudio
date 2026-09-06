@@ -1436,8 +1436,16 @@ const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
 // Commissions speaks a different language from the rest: its three settings are about WHOSE
 // payouts you see, not how much you can change. "Everyone's" is the honest word for the top
 // of that row — calling it "Edit" invites an owner to grant it thinking it means edit rights.
+// ⚠️ EVERY AREA THAT ADDS A NON-STANDARD LEVEL NEEDS A LINE HERE. The fallback is `|| lv`,
+// which renders the raw slug — so a new level does not throw, it just puts a switch reading
+// "own" in front of a builder. `contacts` gained one on 2026-09-05 and did exactly that until
+// this line landed.
 function ssLevelLabel(areaKey, lv) {
   if (areaKey === "commissions") return ({ none: "No access", own: "Own only", edit: "Everyone's" })[lv] || lv;
+  // Contacts reads all four: 'own' narrows which CUSTOMERS a person sees, and unlike
+  // commissions it sits alongside a real 'view' rather than replacing it — dropping 'view'
+  // would have silently demoted everyone already stored on it.
+  if (areaKey === "contacts") return ({ none: "No access", own: "Own only", view: "View", edit: "Edit" })[lv] || lv;
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
@@ -2577,7 +2585,7 @@ function CommissionsReport({ clientId }) {
   );
 }
 
-// ── MY VIEW — the one settings card that configures the PERSON, not the business ────
+// ── MY VIEW — the settings that configure the PERSON, not the business ───────────
 // Carolyn, 2026-08-28 @42:00: "I'm trying to think which I want to have the default. I want
 // them to be able to decide if they want the default. I don't want it to always be list.
 // They can decide to set their default to be pipeline or list, whichever one that they want."
@@ -2590,39 +2598,134 @@ function CommissionsReport({ clientId }) {
 // big scope is allowing them to organize their cards in the way that they want them to be."
 // The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
 // waiting; the UI is not built because she scoped it out.
+//
+// ⚠️ THE REPLY-TO CARD BELOW DOES NOT WORK YET, and it says so on screen when it doesn't.
+// save_prefs rebuilds prefs from a WHITELIST and writes the result over the whole column, so
+// `replyToEmail` is accepted and discarded until the server edit in
+// .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
+// deliberately shipped first so the two can land independently.
 function MyViewSettings({ prefs, onSaved }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // ── The reply-to card's own state ───────────────────────────────────────────────
+  // Seeded from prefs but NOT re-synced to it, deliberately: a save that the server refuses
+  // to persist (see commit) must leave what the person typed on screen next to the message
+  // explaining what happened, rather than silently reverting to the stored value and looking
+  // like nothing was ever entered.
+  const [addr, setAddr] = useState(((prefs && prefs.replyToEmail) || ""));
+  const [addrBusy, setAddrBusy] = useState(false);
+  const [addrMsg, setAddrMsg] = useState(null);
+  const savedAddr = (prefs && prefs.replyToEmail) || "";
+
+  // One writer for both cards. save_prefs takes the WHOLE prefs map and replaces the stored
+  // blob with it, so every save has to carry the keys it is not changing -- hence the spread.
+  const commit = async (patch) => {
+    const body = { action: "save_prefs", prefs: { ...(prefs || {}), ...patch } };
+    const { data, error } = await sb.functions.invoke("portal-settings", { body });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    // Hand the saved map back so the shell stops serving the stale one -- otherwise the
+    // setting only takes effect on the next full reload, which reads as not having saved.
+    if (onSaved) onSaved(data && data.prefs);
+    return (data && data.prefs) || null;
+  };
+
   const save = async (next) => {
     setVal(next); setBusy(true); setMsg(null);
-    try {
-      const body = { action: "save_prefs", prefs: { ...(prefs || {}), designsView: next } };
-      const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      // Hand the saved map back so the shell stops serving the stale one -- otherwise the
-      // setting only takes effect on the next full reload, which reads as not having saved.
-      if (onSaved) onSaved(data && data.prefs);
-      setMsg({ ok: "Saved." });
-    } catch (e) { setMsg({ err: e.message }); }
+    try { await commit({ designsView: next }); setMsg({ ok: "Saved." }); }
+    catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
+
+  // Same shape the server applies to a recipient address in crm_send_email. Checked here so
+  // a typo is caught while the person is still looking at the field -- server-side it is
+  // dropped silently, which would read as the setting refusing to save for no reason.
+  const looksLikeEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+
+  const saveAddr = async () => {
+    const next = addr.trim();
+    if (next && !looksLikeEmail(next)) { setAddrMsg({ err: "That doesn't look like an email address." }); return; }
+    setAddrBusy(true); setAddrMsg(null);
+    try {
+      const back = await commit({ replyToEmail: next });
+      const kept = (back && back.replyToEmail) || "";
+      // ⚠️ THE WHITELIST CHECK, and it is not defensive padding -- it is the one signal that
+      // separates "saved" from "accepted and thrown away". save_prefs rebuilds the prefs blob
+      // from a fixed list of keys and writes the result over the whole column, so a key it
+      // does not know is dropped with an { ok: true } response and no error anywhere. Until
+      // the server edit in .temp/HANDOFF-reply-to-prefs.md lands, EVERY save of this field
+      // takes that path. Reporting it plainly costs four lines; not reporting it costs
+      // somebody an afternoon on a setting that says "Saved." and does nothing.
+      if (next && kept !== next) {
+        setAddrMsg({ err: "Saved, but this server build didn't keep the address — replies will keep going to your login email for now. Tell CSM Synergy." });
+      } else {
+        setAddrMsg({ ok: next ? "Saved." : "Cleared — replies go to your login email." });
+      }
+    } catch (e) { setAddrMsg({ err: e.message }); }
+    setAddrBusy(false);
+  };
+
   return (
-    <div style={S.card}>
-      <div style={S.h2}>How the Pipeline tab opens</div>
-      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-        Your own default, not the business's — everyone on your team picks their own. Opening a
-        direct link to a list or a board still shows whichever the link names.
-      </p>
-      <div style={{ display: "flex", gap: 8 }}>
-        {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
-          <button key={k} disabled={busy} onClick={() => save(k)}
-            style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
-            {label}
-          </button>
-        ))}
+    <div>
+      <div style={S.card}>
+        <div style={S.h2}>How the Pipeline tab opens</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Your own default, not the business's — everyone on your team picks their own. Opening a
+          direct link to a list or a board still shows whichever the link names.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
+            <button key={k} disabled={busy} onClick={() => save(k)}
+              style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
-      {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+
+      {/* ── WHERE REPLIES GO — Carolyn 2026-09-04 @35:06 ────────────────────────────
+          "the company has to set up their domain to work. And then every user should be able
+          to go in and say, when somebody replies to an email, send it here. But that should
+          be in their profile."
+
+          Her word was "profile", and this card is in My View rather than the profile dialog.
+          Both are per-person and both save through a "self"-gated action; My View is the
+          screen that already exists for "settings that configure the person, not the
+          business", which is what this is. Worth revisiting with her -- noted in
+          .temp/HANDOFF-reply-to-prefs.md rather than decided here.
+
+          ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
+          address: the customer's reply reaches this address AND the customer's record in
+          StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
+          behaviour, which is what she was comparing us to, and the first person to notice a
+          reply still landing in the app would reasonably call it a bug. */}
+      <div style={S.card}>
+        <div style={S.h2}>Where replies to your emails go</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          When you email a customer from StructureStudio and they hit Reply, their reply lands on
+          the customer's record here — and, if you fill this in, in your own inbox at the same
+          time. Leave it blank to use the email address you sign in with.
+        </p>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <input
+            type="email"
+            value={addr}
+            disabled={addrBusy}
+            onChange={(e) => { setAddr(e.target.value); setAddrMsg(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") saveAddr(); }}
+            placeholder="you@yourcompany.com"
+            style={{ ...S.input, flex: 1, minWidth: 220, opacity: addrBusy ? 0.6 : 1 }}
+          />
+          <button
+            onClick={saveAddr}
+            disabled={addrBusy || addr.trim() === savedAddr}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (addrBusy || addr.trim() === savedAddr) ? 0.5 : 1 }}>
+            Save
+          </button>
+        </div>
+        {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+      </div>
     </div>
   );
 }

@@ -952,6 +952,17 @@ function Dashboard({ session }) {
   const myAccess = supportView
     ? ((viewedCtx && viewedCtx.access) || ((tenant && tenant !== "none") ? tenant.access : null))
     : ((tenant && tenant !== "none") ? tenant.access : null);
+  // The tab cache has to know WHICH ROWS this map allows, not just who is asking. `contacts`
+  // gained an 'own' level on 2026-09-05 that narrows the rows every contact-and-design read
+  // returns, so the same person on the same tenant gets a different payload before and after
+  // an owner flips their switch — and a payload cached under the old scope would keep serving
+  // the full list for up to the cache's 10-minute max age.
+  //
+  // Render-time on purpose, and safe for the same reason ssTargetClientId's assignment is: it
+  // mutates a module variable and clears a Map, touches no React state, and no-ops unless the
+  // value actually changed. It cannot live with the ssSetCurrentUser calls in PortalApp —
+  // those run when AUTH resolves, and this map does not exist until the status call returns.
+  ssSetRowScope(myAccess ? myAccess.contacts : null);
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design

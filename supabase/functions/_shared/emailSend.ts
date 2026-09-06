@@ -62,21 +62,26 @@ export type TenantMail = {
   // only because 'login_code' was added next to it); 'login_code' is migration 167.
   kind: "estimate" | "invoice" | "test" | "acceptance" | "change_order" | "conversation" | "login_code";
   /**
-   * FALLBACK reply address — used only when the tenant has no ACTIVE inbound domain.
+   * The HUMAN reply address(es) for this send — the staff member who is writing, or whoever
+   * the tenant wants a customer to reach. One address or several.
    *
-   * ⚠️ Its meaning changed: this is no longer "where a reply goes". sendTenantEmail now
+   * ⚠️ ITS MEANING CHANGED TWICE. It began as "where a reply goes"; it then became a
+   * FALLBACK, used only when the tenant had no active inbound domain, because sendTenantEmail
    * derives a routable address on the tenant's own inbound subdomain
-   * (`d.<short_code>@reply.<domain>`) and that WINS when it exists, so a reply lands in the
-   * portal instead of a personal inbox. Pass a real human's address here for the — currently
-   * universal — case where inbound is not configured; there is still no business_email
-   * column to default one from (checked 2026-08-21), so the caller has to say who.
+   * (`d.<short_code>@reply.<domain>`) and that WON outright. Since 2026-09-06 it is neither:
+   * both addresses are put in Reply-To together (see the combine below), so a customer's
+   * reply reaches the portal AND the person. It is no longer only reachable when inbound is
+   * off, so a caller that passes a staff address is now advertising it on every send.
+   *
+   * There is still no `business_email` column to default one from (checked 2026-08-21), so
+   * the caller has to say who.
    *
    * It matters most on the platform-fallback path, whose From is no-reply@ on a domain with
    * no MX — under RFC 5321 an A record with no MX becomes an implicit MX, so a customer who
    * replies gets a multi-day queue and then a bounce, and the builder never learns they
    * tried.
    */
-  replyTo?: string;
+  replyTo?: string | string[];
   /** Design short code; null/absent for kind 'test'. */
   shortCode?: string | null;
   /** Who this is about, when there is no design — the CRM composer's case. Used only to
@@ -105,6 +110,66 @@ function formatFrom(name: string | null | undefined, addr: string): string {
   if (!clean) return addr;
   const escaped = clean.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${escaped}" <${addr}>`;
+}
+
+/**
+ * Every reply address one email should carry, in the order a mail client meets them —
+ * de-duplicated, empties dropped, and each argument allowed to be one address or several.
+ *
+ * ORDER IS THE WHOLE DESIGN DECISION HERE, because Reply-To is not reliably a list to every
+ * reader. RFC 5322 defines it as an address-list and a conformant client offers all of them,
+ * but real clients disagree, and some honour only the FIRST entry. So the first slot is not
+ * a preference — it is what the least capable reader will do, and the caller must order for
+ * that reader rather than for the standard.
+ *
+ * ⚠️ THE CRM ROUTING ADDRESS GOES FIRST, and it is worth knowing why, because the
+ * request that produced this feature argues for the opposite. Carolyn, 2026-09-04 @35:06,
+ * comparing us to GoHighLevel: "the company has to set up their domain to work. And then
+ * every user should be able to go in and say, when somebody replies to an email, send it
+ * here. But that should be in their profile." That is an ask for the PERSON's address, so
+ * putting the machine address first looks like ignoring her. It is not, and the tie is broken
+ * on which failure is recoverable:
+ *
+ *   Degraded client honours only the routing address → the reply lands on the customer's
+ *     record in the portal. The rep does not get it in their own inbox, but nothing is lost:
+ *     the conversation feed shows it, and that is exactly the behaviour that shipped before
+ *     this change, so nobody is worse off than they were.
+ *   Degraded client honours only the person's address → the reply lands in one rep's
+ *     personal mailbox and the portal never sees it. The customer's record has a hole in it
+ *     that no one can find, the builder cannot answer "what did we tell them?", and a rep who
+ *     leaves takes the thread with them.
+ *
+ * The second is unrecoverable and silent, so the durable record takes the first slot. Both
+ * addresses are still advertised, which is the thing that was actually being asked for.
+ *
+ * Case-insensitive de-duplication, first spelling wins: a tenant whose staff address IS their
+ * routing address must not be listed twice (the customer would see the same address twice in
+ * their reply line and think we are broken). The comparison is lowercased because no mail
+ * system anyone uses treats a local part case-sensitively, but the address is EMITTED as it
+ * was given — `Jane.Doe@example.com` reaches the customer's screen the way Jane writes it.
+ *
+ * NO CAP, deliberately. The inputs are structurally bounded — one derived routing address plus
+ * whatever a single one of our own call sites passes — and a silent truncation here would be
+ * the exact failure this whole feature exists to remove: an address that was configured, did
+ * not error, and never arrived.
+ */
+export function combineReplyTo(
+  ...parts: (string | string[] | null | undefined)[]
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    for (const raw of Array.isArray(part) ? part : [part]) {
+      if (typeof raw !== "string") continue;
+      const addr = raw.trim();
+      if (!addr) continue;
+      const key = addr.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(addr);
+    }
+  }
+  return out;
 }
 
 /** Ledger-safe error text, capped ~300 chars. A ResendApiError becomes the enum-ish
@@ -141,7 +206,7 @@ export async function sendTenantEmail(
       .select(
         "email_provider, email_domain_status, email_domain, email_from_local, " +
           "email_from_name, business_name, beta_mode, beta_email, " +
-          // For the routing Reply-To below. Read here rather than by the caller so all ten
+          // For the routing Reply-To below. Read here rather than by the caller so all twelve
           // send paths get it from one place instead of one of them getting it by hand.
           "inbound_domain, inbound_status, " +
           // Who issues the paperwork — see the guard below.
@@ -238,25 +303,52 @@ export async function sendTenantEmail(
       { shortCode: mail.shortCode, contactId: mail.contactId },
     );
 
-    // ── Reply-To ────────────────────────────────────────────────────────────────────
-    // A routable address on the TENANT'S OWN inbound subdomain, so a reply comes back into
-    // the portal and the customer only ever sees the builder's domain.
+    // ── Reply-To ─────────────────────────────────────────────────────────
+    // BOTH addresses, not one: the routable address on the TENANT'S OWN inbound subdomain
+    // (so the reply comes back into the portal, and the customer only ever sees the builder's
+    // domain) AND whatever human address the caller passed.
     //
-    // THIS LIVES HERE, NOT AT THE CALL SITES, and that is the fix. It used to be computed by
-    // hand inside portal-settings' crm_send_email — one of TEN sendTenantEmail call sites —
-    // so a customer replying to their QUOTE, by far the likeliest reply in the product, was
-    // never routed anywhere. Every document send already passes shortCode, so deriving it
-    // here lights up all ten paths with no caller plumbing and no way to forget the next one.
+    // THE DERIVATION LIVES HERE, NOT AT THE CALL SITES, and that is the older fix this must
+    // not undo. The routing address used to be computed by hand inside portal-settings'
+    // crm_send_email — one of TWELVE sendTenantEmail call sites (this comment said "ten"
+    // until 2026-09-06; the real count is three in customer-accept, seven in portal-settings,
+    // two in submit-estimate) — so a customer replying to their QUOTE, by far the likeliest
+    // reply in the product, was never routed anywhere. Every document send already passes
+    // shortCode, so deriving it here lights up all twelve paths with no caller plumbing and
+    // no way to forget the next one.
     //
-    // The caller's explicit replyTo is the FALLBACK, not an override: it is the staff
-    // member's own address, which reaches a human immediately but never appears in the
-    // portal. A verified inbound domain beats it; anything less loses to it (buildReplyAddress
-    // returns null unless the domain is genuinely 'active').
-    const replyTo = buildReplyAddress(
-      (s as Record<string, unknown>).inbound_domain,
-      (s as Record<string, unknown>).inbound_status,
-      { shortCode: mail.shortCode, contactId: mail.contactId },
-    ) ?? mail.replyTo;
+    // ⚠️ WHAT CHANGED 2026-09-06, AND WHAT THE CUSTOMER WILL ACTUALLY SEE. This was a `??`:
+    // the routing address won outright and the caller's human address was reachable ONLY on
+    // tenants with no active inbound domain. Carolyn, 2026-09-04 @35:06: "the company has to
+    // set up their domain to work. And then every user should be able to go in and say, when
+    // somebody replies to an email, send it here. But that should be in their profile." An
+    // either/or cannot express that — the moment the company's domain works, the person's
+    // choice stops mattering — so the two are combined instead.
+    //
+    // THIS IS A REAL BEHAVIOUR CHANGE, VISIBLE TO THE CUSTOMER, not an internal refactor. On a
+    // tenant with inbound active AND a caller-supplied address, a customer who hits Reply now
+    // gets TWO recipients on their reply — the token address `d.ss-xxxx@reply.builder.com`
+    // beside the rep's own — and the message is delivered to both. Three consequences someone
+    // will eventually ask about: the machine-looking token address is now DISPLAYED to
+    // customers rather than merely being replied to; a rep who hits Reply-All is mailing the
+    // CRM as well as the customer; and a customer who deletes one of the two before sending
+    // silently opts out of whichever it was. All are inherent to what was asked for. If the
+    // visible token address turns out to be unacceptable, the fix is a prettier local part,
+    // not a return to the either/or.
+    //
+    // combineReplyTo (read its comment — the ORDER is the load-bearing part) owns the ordering
+    // rule, the de-duplication and the empty-drop. buildReplyAddress still returns null unless
+    // the inbound domain is genuinely 'active', so a pending domain contributes nothing and the
+    // human address stands alone — exactly as before, which is what keeps a customer's reply
+    // out of a bounce queue.
+    const replyTo = combineReplyTo(
+      buildReplyAddress(
+        (s as Record<string, unknown>).inbound_domain,
+        (s as Record<string, unknown>).inbound_status,
+        { shortCode: mail.shortCode, contactId: mail.contactId },
+      ),
+      mail.replyTo,
+    );
 
     // ── Send, then record the outcome on the claimed row ────────────────────────────
     let messageId: string;
@@ -267,7 +359,7 @@ export async function sendTenantEmail(
         subject: mail.subject,
         html: mail.html,
         ...(mail.text ? { text: mail.text } : {}),
-        ...(replyTo ? { replyTo } : {}),
+        ...(replyTo.length ? { replyTo } : {}),
         ...(threadId ? { headers: { "Message-ID": threadId } } : {}),
         // Resend has no Tag/Metadata split — tags carry both, and rsSendEmail sanitizes
         // them to Resend's charset so a dotted tenant slug degrades the TAG rather than

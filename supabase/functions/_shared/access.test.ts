@@ -32,6 +32,7 @@ import {
   type Level,
   mayGrant,
   mayGrantMap,
+  ownContactsOnly,
   PRESETS,
   roleForTitle,
   sanitizeAccess,
@@ -364,4 +365,47 @@ Deno.test("accessMetadata HIDES internal-only areas by default", () => {
   // what lets the server resolve a stored grant regardless of who asked for the grid.
   assert(AREA_KEYS.includes("projects"));
   assertEquals(accessMetadata({ internal: false }).areas.map((a) => a.key).includes("projects"), false);
+});
+
+// ─── contacts:'own' (2026-09-05, migration 193) ──────────────────────────────────────────
+// The FIRST level that narrows ROWS rather than tabs, which is why it gets its own block.
+// Carolyn's dealer client, 09-04 @1:02:16: "he also doesn't want them to see each other's
+// quotes either." The rule is enforced in three places -- RLS, the edge functions' own
+// filters, and the client -- and these pin the resolver half the other two read from.
+Deno.test("contacts:'own' resolves, reads, and does NOT write", () => {
+  const a = effectiveAccess("user", "sales_rep", { contacts: "own" });
+  assertEquals(a.contacts, "own", "a stored 'own' must survive resolution");
+  assert(canRead(a, "contacts"), "'own' is a READ level -- the rep sees their own customers");
+  assertFalse(canEdit(a, "contacts"), "'own' must never satisfy an edit gate");
+  assert(ownContactsOnly(a), "the one place 'own' is compared for this area");
+});
+
+// The reason 'own' was ADDED beside 'view' instead of replacing it: every stored
+// {"contacts":"view"} would otherwise fall back to the title preset with nothing logged --
+// 'none' for a crew leader, i.e. a silent revocation dressed as a refactor.
+Deno.test("contacts:'view' still resolves after 'own' was added", () => {
+  const a = effectiveAccess("user", "crew_leader", { contacts: "view" });
+  assertEquals(a.contacts, "view");
+  assert(canRead(a, "contacts"));
+  assertFalse(ownContactsOnly(a), "'view' is everyone's customers, not own-only");
+});
+
+// Property 1 from the header, at the one place a new level could break it: an owner's stored
+// map is ignored ENTIRELY. A hostile or stale {"contacts":"own"} on an owner must not narrow
+// the person who is supposed to be able to see "this customer went through employee B and C".
+Deno.test("an owner carrying a stored contacts:'own' is still unrestricted", () => {
+  const a = effectiveAccess("owner", "owner", { contacts: "own" });
+  assertEquals(a.contacts, "edit");
+  assertFalse(ownContactsOnly(a), "owners are absolute in every layer, this one included");
+});
+
+// RANK scores 'own' and 'view' equally, so the generic "you may pass on what you hold" rule
+// would have let an admin an owner had narrowed to 'own' hand a rep the FULL list -- widening
+// by delegation, which is the escalation nobody looks for.
+Deno.test("an 'own' holder cannot grant 'view' on contacts", () => {
+  assertFalse(mayGrant("user", { contacts: "own" }, "contacts", "view"),
+    "passing on more than you hold is the whole thing mayGrant exists to stop");
+  assert(mayGrant("user", { contacts: "own" }, "contacts", "own"),
+    "passing on exactly what you hold stays allowed");
+  assert(mayGrant("owner", {}, "contacts", "view"), "an owner is unaffected");
 });

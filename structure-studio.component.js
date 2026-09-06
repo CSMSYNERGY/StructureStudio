@@ -8374,6 +8374,11 @@ async function ssExtractOrbitFrames(file, onStep) {
   }
 }
 
+// How many photos one generation may carry. A cap, not a target: every entry is a real image
+// the model has to read, so an unbounded set is an unbounded bill on a button whose whole
+// purpose is to be pressed sparingly. Twelve is three per side, which is the shape Carolyn
+// described on 2026-09-04 ("three from the back, three from this side...").
+const CAL_PHOTO_MAX = 12;
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
   // ── Which surface is this? THE discriminator between the two mounts of this module ──
@@ -11230,7 +11235,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // REAL buildings, and get_config is the call the anonymous customer page makes, so they
       // are no longer in that payload. The portal re-fetches them over its authenticated
       // session below; the standalone ?admin=1 path has no session and so starts blank.
-      photos: (s.d3Photos || []).concat(["", "", "", ""]).slice(0, 4),
+      // FOUR IS A FLOOR, NOT A CEILING (2026-09-04). Carolyn asked for the slots back and for
+      // the builder to be able to grow the set: "they need to go and get another photo that
+      // gets a better view of what is not showing correctly ... but then they also need to be
+      // able to remove. The one that, oh, no, that one is not working." A fixed four could
+      // express neither. The first four keep their walk-around meaning; anything past them is
+      // a deliberate extra.
+      photos: (() => { const p = (s.d3Photos || []).filter((u) => typeof u === "string"); return p.length >= 4 ? p.slice(0, CAL_PHOTO_MAX) : p.concat(["", "", "", ""]).slice(0, 4); })(),
     });
     // Put the preview on a representative building instead of the component's 10x12 default
     // (sel.size starts "", so the [sel.size] effect has never fired on this surface and
@@ -11262,6 +11273,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
   const calSetColor = (k, v) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, colors: { ...p.spec.colors, [k]: v } } }));
   const calSetPhoto = (i, v) => setAdminCal((p) => { const ph = p.photos.slice(); ph[i] = v; return { ...p, photos: ph }; });
+  // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
+  // also just remove one."
+  //
+  // REMOVE SPLICES PAST THE FOURTH, AND BLANKS WITHIN IT. Splicing slot 1 of 4 would renumber
+  // Left side into Front under the builder; blanking an EXTRA would leave a hole that reads as
+  // "this view is missing" forever, when the whole point of an extra is that it is optional.
+  const calAddPhoto = () => setAdminCal((p) => (p.photos.length >= CAL_PHOTO_MAX ? p : { ...p, photos: p.photos.concat("") }));
+  const calRemovePhoto = (i) => setAdminCal((p) => {
+    if (i < 4) { const ph = p.photos.slice(); ph[i] = ""; return { ...p, photos: ph }; }
+    return { ...p, photos: p.photos.filter((_, n) => n !== i) };
+  });
   // A drafted spec MERGES into the draft rather than replacing it: the model reports only
   // what the photos actually show, so anything it leaves out keeps the value the editor
   // (or the style default) already had.
@@ -11338,6 +11360,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdminCalMsg({ ok: true, msg: "Photo uploaded." });
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Upload failed" });
+    } finally { setAdminCalBusy(false); }
+  };
+
+  // ─── Generate the shape from the photo set ────────────────────────────────────────────
+  // The button Carolyn asked for at 17:00: "once they have changed it, there will be a, like,
+  // basically a generate button. And this is where we're going to charge them the 20 bucks
+  // every time they generate."
+  //
+  // The CHARGE is not decided here and must not be. `calibrate_style_ai` takes the wallet
+  // hold server-side, ordered after the daily cap and before the model call, and the wallet
+  // deliberately FAILS CLOSED — the inverse of everything else in this codebase, because
+  // failing open means performing a paid service free with no record of it. A browser button
+  // that thought it knew the price would be a second opinion about money.
+  //
+  // ⚠️ SERVER CAP. `calibrate_style_ai` reads at most FOUR photos on the default source (the
+  // video source raises it to eight). Carolyn asked for three per side, which is twelve, and
+  // for a generation that reads the video AND the photos together. Until the server is
+  // widened this button says out loud how many will actually be read rather than quietly
+  // sending twelve and drafting from four — silent truncation reads as "it used everything"
+  // and is exactly how a builder concludes the AI is bad at its job.
+  const CAL_PHOTOS_READ = 4;
+  const calGenerateFromPhotos = async () => {
+    if (adminCalBusy || adminCalVideo.busy) return;
+    const urls = adminCal.photos.filter(Boolean);
+    if (!urls.length) { setAdminCalMsg({ ok: false, msg: "Add at least one photo first." }); return; }
+    if (!(setup3d && setup3d.onDraftFromPhotos)) return;
+    setAdminCalBusy(true); setAdminCalMsg(null);
+    try {
+      const d3 = await setup3d.onDraftFromPhotos(urls, adminCal.styleValue);
+      applyDraftedSpec(d3);
+      const used = Math.min(urls.length, CAL_PHOTOS_READ);
+      const dropped = urls.length - used;
+      setAdminCalMsg({ ok: true, msg: `Read ${used} photo${used === 1 ? "" : "s"}${dropped ? ` (the other ${dropped} were not used — the server reads ${CAL_PHOTOS_READ} at a time)` : ""}. Preview it, adjust anything, then Save.` });
+    } catch (e) {
+      setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those photos." });
     } finally { setAdminCalBusy(false); }
   };
 
@@ -12494,7 +12551,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // them, and seeing what the model actually looked at is the whole reason a builder trusts
   // the drafted shape. `d3_photos` and upload_style_photo stay exactly as they are; only the
   // manual entry path and the photo-draft button are removed.
-  const photoLabels = ["View 1", "View 2", "View 3", "View 4"];
+  // Named sides, not "View 1". Carolyn 2026-09-04 @16:05: "we put a thing in here that says,
+  // you know, front side, left side, right side. And it tells them to get a photo of that."
+  // A builder shooting their own building needs to be told WHAT to shoot; four numbered boxes
+  // told them only how many. The first four are the walk-around's own four views, which is why
+  // an imported video still lands in them.
+  const photoLabels = ["Front", "Left side", "Right side", "Back"];
+  const calPhotoLabel = (i) => photoLabels[i] || ("Extra " + (i - 3));
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
@@ -12947,20 +13010,64 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 );})}
               </div>
               <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                {/* READ-ONLY. These are the frames the walk-around video produced, shown so a
-                    builder can see what the model actually looked at -- not slots to fill in.
-                    Nothing renders at all before a video has been read, rather than four
-                    empty boxes implying there is something to do here. */}
-                {adminCalVideo.count > 0 && photoLabels.map((side, i) => (
-                  adminCal.photos[i] ? (
-                    <div key={side} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>
-                      {side}
-                      <div style={{ marginTop: 3 }}>
-                        <img src={adminCal.photos[i]} alt={side} style={{ width: "100%", maxWidth: 120, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
-                      </div>
+                {/* EDITABLE AGAIN as of 2026-09-04, and this REVERSES a deliberate removal.
+                    The comment here used to read: "READ-ONLY. These are the frames the
+                    walk-around video produced, shown so a builder can see what the model
+                    actually looked at -- not slots to fill in. Nothing renders at all before a
+                    video has been read, rather than four empty boxes implying there is
+                    something to do here." That was right on 2026-08-25, when the four manual
+                    slots were removed on Ahsan's own instruction from the 08-24 call and the
+                    video became the one way in.
+
+                    Carolyn reopened it on 09-04 (15:27-17:22) after seeing what a customer's
+                    video actually produces: labelled slots a builder is TOLD to fill, the
+                    ability to add another photo for an angle that came out wrong, the ability
+                    to remove one that is not helping, and a Generate button. The old reasoning
+                    was not wrong about staging four photographs -- it is that "one way in"
+                    cost accuracy she is not willing to trade: "I want to give them as accurate
+                    of a building as possible."
+
+                    A video import still fills the first four; they are the same four views. */}
+                {adminCal.photos.map((url, i) => (
+                  <div key={"cal-photo-" + i} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                      <span>{calPhotoLabel(i)}</span>
+                      {(url || i >= 4) && (
+                        <button type="button" onClick={() => calRemovePhoto(i)} disabled={adminCalBusy}
+                          title={i < 4 ? "Clear this view" : "Remove this photo"}
+                          style={{ background: "none", border: "none", padding: 0, cursor: adminCalBusy ? "wait" : "pointer", color: "#B45309", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>×</button>
+                      )}
                     </div>
-                  ) : null
+                    <div style={{ marginTop: 3 }}>
+                      {url ? (
+                        <img src={url} alt={calPhotoLabel(i)} style={{ width: "100%", maxWidth: 120, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
+                      ) : (
+                        <div style={{ width: "100%", maxWidth: 120, height: 72, borderRadius: 4, border: "1px dashed #FCD34D", background: "#FFFBEB", display: "flex", alignItems: "center", justifyContent: "center", color: "#B45309", fontSize: 10.5, fontWeight: 600, textAlign: "center", padding: 4, boxSizing: "border-box" }}>
+                          Straight on, whole building in frame
+                        </div>
+                      )}
+                    </div>
+                    {/* Upload needs the host's authenticated session; the public ?admin=1 page
+                        has none, so it keeps pasting a URL. Same split calUploadPhoto makes. */}
+                    {setup3d && setup3d.onUploadPhoto ? (
+                      <label style={{ display: "inline-block", marginTop: 4, fontSize: 11, fontWeight: 700, color: adminCalBusy ? "#CBD5E1" : "#92400E", cursor: adminCalBusy ? "wait" : "pointer" }}>
+                        {url ? "Replace" : "Add photo"}
+                        <input type="file" accept="image/*" disabled={adminCalBusy} style={{ display: "none" }}
+                          onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) calUploadPhoto(i, f); }} />
+                      </label>
+                    ) : (
+                      <input value={url || ""} placeholder="https://…/photo.jpg" onChange={(e) => calSetPhoto(i, e.target.value)}
+                        style={{ ...S.input, marginTop: 4, fontSize: 11, padding: "4px 6px" }} />
+                    )}
+                  </div>
                 ))}
+                {adminCal.photos.length < CAL_PHOTO_MAX && (
+                  <button type="button" onClick={calAddPhoto} disabled={adminCalBusy}
+                    title="Add another angle — use this when a part of the building did not come out right"
+                    style={{ border: "1px dashed #FCD34D", background: "#FFFBEB", color: "#92400E", borderRadius: 4, fontWeight: 700, fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer", minHeight: 96, fontFamily: "inherit" }}>
+                    + Another angle
+                  </button>
+                )}
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {/* The sample building the preview renders on. calibrationOnly ONLY, for the
@@ -13000,11 +13107,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Disabled with a reason when the Anthropic key is not set on the server: the
                     browser cannot see an edge secret, so `aiReady` from the catalog action is the
                     only way to avoid offering a button that always fails. */}
-                {/* "Draft from photos (AI)" removed 2026-08-25 with the four manual slots it
-                    fed. One way in -- the walk-around video -- rather than two paths to the
-                    same spec, one of which asked a builder to stage four photographs.
-                    calibrateFromPhotos and onDraftFromPhotos remain wired for the operator
-                    scan path; only this entry point is gone. */}
+                {/* THE GENERATE BUTTON IS BACK (2026-09-04), and the comment it replaces is
+                    kept here because the reversal is the point. It read: "\"Draft from photos
+                    (AI)\" removed 2026-08-25 with the four manual slots it fed. One way in --
+                    the walk-around video -- rather than two paths to the same spec, one of
+                    which asked a builder to stage four photographs. calibrateFromPhotos and
+                    onDraftFromPhotos remain wired for the operator scan path; only this entry
+                    point is gone."
+
+                    That last sentence is why this is a small change rather than a rebuild:
+                    the capability never left, only its button did. Carolyn restored the ask on
+                    09-04 and settled the cost question in the same breath -- "I'm not so
+                    concerned about that. What I am most concerned about is to give them as
+                    accurate of a building as possible, even if it's, then yes, then combine
+                    all of the sources." */}
+                {setup3d && setup3d.onDraftFromPhotos && scan.aiReady !== false && adminCal.photos.some(Boolean) && (
+                  <button onClick={calGenerateFromPhotos} disabled={adminCalBusy || adminCalVideo.busy}
+                    title="Read this building's shape from the photos above"
+                    style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                    {adminCalBusy ? "Working…" : "✨ Generate 3D from these photos"}
+                  </button>
+                )}
                 <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
                   {adminCalBusy ? "Saving…" : (setup3d ? "Save 3D look" : "Save to config")}
                 </button>

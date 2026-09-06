@@ -45,7 +45,10 @@ import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 
-import type { GateTable } from "../_shared/access.ts";
+// ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
+// filters it drives are below, in the handler — RLS cannot do this job here, because every
+// client this function builds is the SERVICE ROLE and the service role is BYPASSRLS.
+import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -762,6 +765,105 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // customer does not have.
   const entitlementExempt = Boolean(operator && !operator.supportOnly);
 
+  // ══ ROW SCOPE — contacts:'own' (migration 193) ═══════════════════════════════════════
+  //
+  // Carolyn, 2026-09-04 @1:02:16, on a builder whose salespeople are independent dealers:
+  // "he also doesn't want them to see each other's quotes either … they would only see the
+  // list, the pipelines or the quotes that they have created themselves." And @1:09:30, the
+  // model she settled on: "we do not ever assign deals. We only assign contacts and
+  // followers … if they are not assigned to or following that customer, they can't see
+  // anything of it." So a design is visible because its CUSTOMER is, and there is exactly
+  // one predicate — public.crm_contact_visible_to — for the whole feature.
+  //
+  // ⚠️ THE RLS POLICIES IN 193 DO NOTHING IN THIS FILE. `admin` is built from
+  // SUPABASE_SERVICE_ROLE_KEY and the service role is BYPASSRLS: every restrictive policy
+  // 193 installs is skipped for every query below. Those policies exist for the lists the
+  // BROWSER reads straight from PostgREST (portal/02-sales.jsx's Pipeline, Contacts and
+  // browsing-leads reads). Anything that reaches a customer's rows through THIS function is
+  // filtered here, by hand, or it is not filtered at all.
+  //
+  // ⚠️ OWNERS ARE ABSOLUTE AND THAT IS WHY THERE IS NO ROLE CHECK HERE. effectiveAccess()
+  // short-circuits role === 'owner' to 'edit' on every area before a stored map is consulted,
+  // so `access.contacts` is never the string 'own' for an owner, whatever is in their row.
+  // The same holds for an operator in view-as (a full map) and for a support operator (the
+  // viewed owner's map). Re-testing the role here would be a second copy of that rule, and
+  // the version of this filter that forgets it empties the owner's own dashboard.
+  const ownContacts = ownContactsOnly(access);
+
+  /**
+   * Which of these contact ids may this caller see? Returns null when the check itself
+   * failed — callers must dbFail on null and MUST NOT fall back to "show everything",
+   * which would turn a transient database error into a silent widening.
+   *
+   * Answers through public.crm_visible_contact_ids so the edge filter and the RLS policies
+   * run the SAME predicate rather than two transcriptions of it. One round trip whatever the
+   * list length, and over POST, so there is no URL-length ceiling on a 2000-row Orders tab.
+   */
+  const visibleContactIds = async (
+    ids: (string | null | undefined)[],
+  ): Promise<Set<string> | null> => {
+    const want = [...new Set(ids.filter((v): v is string => !!v))];
+    // Not narrowed: every id asked about is visible. Returned without a round trip, because
+    // this is every caller on every tenant until an owner sets the switch on one person.
+    if (!ownContacts) return new Set(want);
+    if (!want.length) return new Set();
+    const { data, error } = await admin.rpc("crm_visible_contact_ids", {
+      p_client_id: clientId,
+      p_user_id: userId,
+      p_ids: want,
+    });
+    if (error) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: error.code ?? "contact_scope_failed",
+        message: `crm_visible_contact_ids failed: ${error.message ?? "unknown"}`,
+        context: { action, ids: want.length },
+      }).catch(() => {});
+      return null;
+    }
+    return new Set((data as string[] | null) ?? []);
+  };
+
+  /**
+   * Keep only the design/lead rows whose customer this caller may see. The rows must already
+   * carry `contact_id` — add it to the projection rather than doing a second read.
+   *
+   * A NULL contact_id is DROPPED, and that is edge case 2 of migration 193 rather than an
+   * accident of the Set lookup: crm_ensure_contact returns NULL for a submission carrying
+   * neither a phone nor an email, so the row has no customer to be assigned to and no
+   * follower to inherit. Nothing to own means nobody but the people who are never narrowed.
+   */
+  const visibleDesignRows = async <T extends { contact_id?: string | null }>(
+    rows: T[],
+  ): Promise<T[] | null> => {
+    if (!ownContacts) return rows;
+    const ids = await visibleContactIds(rows.map((d) => d.contact_id));
+    if (!ids) return null;
+    return rows.filter((d) => !!d.contact_id && ids.has(d.contact_id));
+  };
+
+  /**
+   * The same narrowing for a caller that holds SHORT CODES and no rows — it resolves each
+   * code to its design's contact_id first. Codes that name no design on this tenant fall out
+   * here too, which is the right answer for a list the browser supplied.
+   */
+  const visibleShortCodes = async (codes: string[]): Promise<string[] | null> => {
+    if (!ownContacts) return codes;
+    if (!codes.length) return [];
+    const { data, error } = await admin.from("designs")
+      .select("short_code, contact_id").eq("client_id", clientId).in("short_code", codes);
+    if (error) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: error.code ?? "contact_scope_failed",
+        message: `short-code scope read failed: ${error.message ?? "unknown"}`,
+        context: { action, codes: codes.length },
+      }).catch(() => {});
+      return null;
+    }
+    const kept = await visibleDesignRows((data ?? []) as { short_code: string; contact_id: string | null }[]);
+    if (!kept) return null;
+    return kept.map((d) => d.short_code);
+  };
+
   // ── Record that a building has been sold ────────────────────────────────────────
   // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
   // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in
@@ -993,6 +1095,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? payload.prefs as Record<string, any> : {};
     const clean: Record<string, unknown> = {};
     if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // A person's own reply-to address (Carolyn 2026-09-04 @35:06: "every user should be able to
+    // go in and say, when somebody replies to an email, send it here. But that should be in
+    // their profile"). It is ADVERTISED TO CUSTOMERS — sendTenantEmail puts it in Reply-To
+    // alongside the CRM routing address — so it is validated rather than merely trimmed, and an
+    // unusable value is DROPPED rather than stored: a malformed address in a header is a send
+    // Resend may 422 outright, and a 422 is a permanent verdict, so the whole email is lost
+    // rather than retried.
+    //
+    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
+    // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
+    // not merely fail to save — it is DESTROYED by the next save from any screen, including
+    // someone changing their Pipeline default on the same card. Every future per-user pref has
+    // to be added here or it silently evaporates.
+    //
+    // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
+    // string is how the UI clears it, and correctly arrives here as "drop the key".
+    if (typeof raw.replyToEmail === "string") {
+      const addr = raw.replyToEmail.trim().slice(0, 320);
+      if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) clean.replyToEmail = addr;
+    }
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -4116,9 +4238,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       codes.length
         ? admin.from("designs").select("short_code, selections, image_url, paint_colors").in("short_code", codes).eq("client_id", clientId)
         : Promise.resolve({ data: [], error: null } as any),
+      // ── ROW SCOPE (migration 193) ────────────────────────────────────────────────────
+      // contact_id is selected so the estimates list can be narrowed below. These are the
+      // QUOTES customers have taken on a lot building and each one carries `contact` — the
+      // buyer's name — so on contacts:'own' a rep would read every colleague's live deal off
+      // the Inventory tab, which the sales_rep preset grants at inventory:'view'.
       unitIds.length
         ? admin.from("designs")
-          .select("short_code, inventory_unit_id, contact, status, ghl_estimate_number, created_at")
+          .select("short_code, inventory_unit_id, contact_id, contact, status, ghl_estimate_number, created_at")
           .eq("client_id", clientId).in("inventory_unit_id", unitIds).order("created_at", { ascending: false })
         : Promise.resolve({ data: [], error: null } as any),
     ]);
@@ -4145,8 +4272,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const masterByCode = new Map<string, MasterRow>(
       ((mastersRes.data ?? []) as MasterRow[]).map((d): [string, MasterRow] => [d.short_code, d]),
     );
+    // ⚠️ ONLY THE ESTIMATES ARE NARROWED — NOT `mastersRes`. A master is the builder's OWN
+    // building on their OWN lot: it has no customer, its contact_id is null, and running it
+    // through the same filter would drop every unit's style, size, image and colours from
+    // the Inventory tab for anyone on contacts:'own'. That is the "don't filter blindly"
+    // case, and the two reads sit four lines apart, so it is worth saying out loud.
+    const visibleEsts = await visibleDesignRows((estRes.data ?? []) as { contact_id?: string | null; inventory_unit_id: string }[]);
+    if (!visibleEsts) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     const estsByUnit = new Map<string, any[]>();
-    for (const d of estRes.data ?? []) {
+    for (const d of visibleEsts as any[]) {
       const list = estsByUnit.get(d.inventory_unit_id) ?? [];
       list.push({
         shortCode: d.short_code,
@@ -4363,9 +4497,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     let codes: string[] = [];
     let designs: any[] = [];
 
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // A caller on contacts:'own' may open only the customers they own or follow, and only
+    // the designs of those customers. Checked HERE and not by RLS, because this function is
+    // service-role and therefore BYPASSRLS — see the ownContacts block at the top.
+    //
+    // ⚠️ THE REFUSAL IS THE EXISTING 404, WORD FOR WORD, and that is deliberate. Carolyn's
+    // rule is "they can't see anything of it" — a distinct "that customer belongs to another
+    // rep" would confirm the customer exists, which is a thing about another rep's pipeline
+    // and is exactly what the builder asked us to stop leaking. The record page is reached
+    // by clicking a list this same rule has already filtered, so the honest 403 would only
+    // ever be produced by a stale tab or a hand-typed id.
     if (kind === "contact") {
       const { data: c } = await admin.from("crm_contacts").select("*").eq("client_id", clientId).eq("id", id).maybeSingle();
       if (!c) return json({ error: "That contact no longer exists." }, 404);
+      const seen = await visibleContactIds([c.id]);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (!seen.has(c.id)) return json({ error: "That contact no longer exists." }, 404);
       contact = c;
       const { data: ds } = await admin.from("designs")
         // ss_invoice_sent_at drives whether the record page draws the Build and Delivery
@@ -4394,6 +4542,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("short_code", id).maybeSingle();
       if (!d) return json({ error: "That design no longer exists." }, 404);
+      // The design branch of the same rule. A design with contact_id NULL is refused here
+      // for everyone on 'own' — edge case 2: crm_ensure_contact returned NULL because the
+      // submission carried neither a phone nor an email, so there is no customer to own it.
+      const seen = await visibleDesignRows([d]);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (!seen.length) return json({ error: "That design no longer exists." }, 404);
       designs = [d];
       codes = [d.short_code];
       // The CRM record for the person behind this design — only for someone entitled to the
@@ -4634,14 +4788,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "crm_feed") {
-    const codes = Array.isArray(payload.codes) ? payload.codes.map((c: unknown) => String(c).slice(0, 32)).slice(0, 200) : [];
-    // CONTACT SCOPE, same rule as crm_record above and for the same reason: this action's
-    // `any` gate is satisfied by designs:view, and `contactId` is what widens the feed from
-    // "these designs" to "this person's whole history" — their notes, both mail directions,
-    // both text directions and the files they uploaded. Ignored rather than refused: the
-    // designs half of the request is legitimate and still answers, and the caller's own
-    // record page already hides the person's card.
-    const contactId = (payload.contactId && canRead("contacts")) ? String(payload.contactId).slice(0, 64) : null;
+    const rawCodes = Array.isArray(payload.codes) ? payload.codes.map((c: unknown) => String(c).slice(0, 32)).slice(0, 200) : [];
+    // ── TWO SCOPES, LAYERED. They arrived from two sessions the same night and they are not
+    // alternatives — they narrow along different axes, and taking either alone leaves a hole.
+    //
+    // AREA SCOPE first: this action's `any` gate is satisfied by designs:view, and
+    // `contactId` is what widens the feed from "these designs" to "this person's whole
+    // history" — their notes, both mail directions, both text directions and the files they
+    // uploaded. Somebody with no contacts access at all must not get that by asking here.
+    // Ignored rather than refused: the designs half of the request is legitimate and still
+    // answers, and the caller's own record page already hides the person's card.
+    const rawContactId = (payload.contactId && canRead("contacts")) ? String(payload.contactId).slice(0, 64) : null;
+    // ROW SCOPE second (migration 193): and of the customers they CAN see, only the ones
+    // assigned to or followed by them. BOTH inputs come straight from the browser and both
+    // address other people's rows, so both are narrowed. This is the action that would
+    // otherwise stay wide open after crm_record was fixed — the record page fetches its feed
+    // separately, so a caller on contacts:'own' could post any short code or any contact id
+    // here and read that customer's whole record, just without its header.
+    //
+    // A contact that is not theirs is DROPPED rather than refused, and the feed is built from
+    // whatever survives (nothing, usually). Refusing outright would make this endpoint an
+    // existence oracle for contact ids, which is the same leak in a different shape.
+    const codes = await visibleShortCodes(rawCodes);
+    if (!codes) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    const seen = await visibleContactIds([rawContactId]);
+    if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    const contactId = rawContactId && seen.has(rawContactId) ? rawContactId : null;
     const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true });
     return json({ ok: true, feed });
   }
@@ -5077,6 +5249,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const addr = u?.user?.email;
       if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
     } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
+    // The person's OWN choice beats their login address (Settings → My View). A login and the
+    // address someone wants customer replies at are often different — a shared `office@` login,
+    // a personal alias, a role address — which is the gap Carolyn was describing.
+    //
+    // Their auth email stays the fallback: someone who has never opened that card must not lose
+    // the reply address they have had all along. Read from client_users keyed on the JWT's
+    // userId and NEVER on anything in the body, the same rule the auth lookup above follows —
+    // which is why this is a second query rather than a field the browser could send.
+    //
+    // save_prefs validates this on the way IN, so it is not re-validated here. If that
+    // whitelist is ever relaxed, re-validate at this end too: it goes into a mail header.
+    try {
+      const { data: pu } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId ?? "").maybeSingle();
+      const own = (pu?.prefs as Record<string, unknown> | null)?.replyToEmail;
+      if (typeof own === "string" && own.includes("@")) replyTo = own.trim();
+    } catch (_) { /* fall through to the auth email */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
@@ -5277,9 +5466,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "contact_activity") {
-    const codes: string[] = Array.isArray(payload?.codes)
+    const rawCodes: string[] = Array.isArray(payload?.codes)
       ? payload.codes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 50)
       : [];
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // The codes are caller-supplied, so they are narrowed BEFORE any of the four reads
+    // below rather than after: `codes` also drives the GHL estimate lookup and the
+    // invoice_sends read, and filtering only the returned designs would leave those two
+    // answering about somebody else's customer.
+    const codes = await visibleShortCodes(rawCodes);
+    if (!codes) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     if (codes.length === 0) return json({ ok: true, designs: [], versions: [], estimates: {} });
 
     const [dRes, vRes] = await Promise.all([
@@ -6381,13 +6577,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     // The order document needs the priced snapshot and the configuration it was priced from;
     // the list needs only enough to label a row. Two shapes, one gate, neither caller-chosen.
+    //
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // contact_id joins the projection for one reason: it is what the row filter keys on, and
+    // resolving it here costs nothing where a second query would cost a round trip carrying
+    // up to 2000 short codes. Both shapes return `contact` — the customer's name, phone and
+    // email — so a rep on contacts:'own' holding orders:'view' would otherwise read every
+    // customer in the business off the Orders tab, which is the exact leak this action was
+    // created to close for crew leaders and drivers one gate up.
     const cols = detail
-      ? "short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact"
-      : "short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at";
+      ? "short_code, contact_id, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact"
+      : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at";
     const { data, error } = await admin.from("designs")
       .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
     if (error) return dbFail(req, clientId, "read the designs for these orders", error);
-    return json({ ok: true, designs: data || [] });
+    const visible = await visibleDesignRows((data || []) as { contact_id?: string | null }[]);
+    if (!visible) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    return json({ ok: true, designs: visible });
   }
 
   // service-role only, so this is its portal projection).

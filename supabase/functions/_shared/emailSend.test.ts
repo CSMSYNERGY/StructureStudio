@@ -12,7 +12,7 @@
  * (the pre-push gate runs this for you with exactly those flags — see scripts/preflight.mjs)
  */
 
-import { sendTenantEmail, type TenantMail } from "./emailSend.ts";
+import { combineReplyTo, sendTenantEmail, type TenantMail } from "./emailSend.ts";
 
 // Local assertions rather than jsr:@std/assert, deliberately. The pre-push gate runs this
 // file, and a gate that needs a registry fetch fails closed on an offline machine — which
@@ -24,6 +24,16 @@ function assertEquals<T>(actual: T, expected: T, msg = ""): void {
   if (actual !== expected) {
     throw new Error(`Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
       + (msg ? ` — ${msg}` : ""));
+  }
+}
+/** assertEquals compares with `!==`, so two equal arrays fail it on identity alone. Reply-To
+ *  is now an ordered LIST, and order is the property most worth pinning (see combineReplyTo),
+ *  so element-wise it is — including a length check, or a dropped trailing address passes. */
+function assertArrayEquals(actual: unknown, expected: unknown[], msg = ""): void {
+  const got = JSON.stringify(actual);
+  const want = JSON.stringify(expected);
+  if (got !== want) {
+    throw new Error(`Expected ${want}, got ${got}` + (msg ? ` — ${msg}` : ""));
   }
 }
 
@@ -376,15 +386,25 @@ Deno.test("an estimate send routes replies back into the portal", async () => {
   }
 });
 
-Deno.test("the routing address BEATS a caller's replyTo, and only when inbound is active", async () => {
+Deno.test("the routing address and the caller's replyTo BOTH ride, routing first", async () => {
   setup();
   try {
-    // Caller passes a staff address; a verified inbound domain outranks it, because a reply
-    // in the portal beats a reply in one person's inbox.
+    // ⚠️ THIS TEST WAS INVERTED ON 2026-09-06, and its old name is worth keeping in mind:
+    // "the routing address BEATS a caller's replyTo". It did — the code was a `??`, so the
+    // staff address was reachable ONLY on a tenant with no active inbound domain. Carolyn
+    // 2026-09-04 @35:06 asked for a person's own reply address to work once the COMPANY's
+    // domain is set up, which is precisely the case that `??` excluded, so the either/or is
+    // now a combine. What survives unchanged is the second half below: 'pending' contributes
+    // nothing, because a reply to an unproven MX bounces at the customer.
     let fetches = stubFetch(() => jsonResponse(OK_SEND));
     let db = stubAdmin({ settings: INBOUND_ON });
     await sendTenantEmail(db.admin, CLIENT_ID, { ...MAIL, replyTo: "staff@example.com" });
-    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to, "d.ss-test123456@reply.example.com");
+    assertArrayEquals(
+      JSON.parse(fetches[0].body ?? "{}").reply_to,
+      ["d.ss-test123456@reply.example.com", "staff@example.com"],
+      "both addresses ride, and the CRM routing address is FIRST — a mail client that honours "
+        + "only the first entry must still file the reply on the customer's record",
+    );
 
     // 'pending' must LOSE to the staff address. A domain whose MX is unproven sends the
     // customer's reply into a bounce, and the builder never learns they tried — strictly
@@ -400,6 +420,127 @@ Deno.test("the routing address BEATS a caller's replyTo, and only when inbound i
     db = stubAdmin({ settings: VERIFIED });
     await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
     assert(!("reply_to" in JSON.parse(fetches[0].body ?? "{}")), "omitted, not null");
+  } finally {
+    teardown();
+  }
+});
+
+// ── combineReplyTo — the two-address Reply-To (Carolyn 2026-09-04 @35:06) ──────────────
+// The unit is exercised directly as well as through sendTenantEmail, because the property
+// that matters most — ORDER — is invisible in a one-address send, and one-address sends are
+// every send in the product today. A regression here would ship looking perfectly healthy.
+
+Deno.test("combineReplyTo: both present → routing first, person second", () => {
+  assertArrayEquals(
+    combineReplyTo("d.ss-abc@reply.builder.com", "sarah@builder.com"),
+    ["d.ss-abc@reply.builder.com", "sarah@builder.com"],
+    "the durable record takes the first slot; a client that reads only one entry must file "
+      + "the reply on the customer's record rather than in one person's inbox",
+  );
+});
+
+Deno.test("combineReplyTo: only one present → that one alone, from either side", () => {
+  assertArrayEquals(combineReplyTo("d.ss-abc@reply.builder.com", undefined),
+    ["d.ss-abc@reply.builder.com"], "no person configured");
+  assertArrayEquals(combineReplyTo(null, "sarah@builder.com"),
+    ["sarah@builder.com"], "inbound not active — buildReplyAddress returns null");
+});
+
+Deno.test("combineReplyTo: neither present → empty, so the caller can omit the key entirely", () => {
+  assertArrayEquals(combineReplyTo(null, undefined), []);
+  assertArrayEquals(combineReplyTo(), []);
+  // Empty and whitespace-only strings are addresses in name only. They must not survive as
+  // list entries: `reply_to: ["", "sarah@x.com"]` is a malformed header, not a degraded one.
+  assertArrayEquals(combineReplyTo("", "   ", "	"), []);
+});
+
+Deno.test("combineReplyTo: duplicates collapse, case-insensitively, keeping the first spelling", () => {
+  // The tenant whose staff address IS the address the CRM routes to. Listing it twice puts
+  // the same recipient on the customer's screen twice, which reads as a broken system.
+  assertArrayEquals(
+    combineReplyTo("sales@builder.com", "sales@builder.com"),
+    ["sales@builder.com"],
+  );
+  // Compared lowercased, EMITTED as written: no mail system anyone uses treats a local part
+  // case-sensitively, but Jane's address should reach the customer the way Jane writes it.
+  assertArrayEquals(
+    combineReplyTo("Jane.Doe@Builder.com", "jane.doe@builder.com", "sarah@builder.com"),
+    ["Jane.Doe@Builder.com", "sarah@builder.com"],
+  );
+  // Surrounding whitespace is not a distinguishing feature either — a pasted address from a
+  // settings field routinely carries some.
+  assertArrayEquals(
+    combineReplyTo("  d.ss-abc@reply.builder.com  ", "d.ss-abc@reply.builder.com"),
+    ["d.ss-abc@reply.builder.com"],
+  );
+});
+
+Deno.test("combineReplyTo: a caller may pass an array, and it keeps its own order", () => {
+  assertArrayEquals(
+    combineReplyTo("d.ss-abc@reply.builder.com", ["sarah@builder.com", "manager@builder.com"]),
+    ["d.ss-abc@reply.builder.com", "sarah@builder.com", "manager@builder.com"],
+  );
+  // Mixed junk inside an array is dropped element-wise rather than poisoning the whole list.
+  assertArrayEquals(
+    combineReplyTo(null, ["", "sarah@builder.com", "   ", "sarah@BUILDER.com"]),
+    ["sarah@builder.com"],
+  );
+  // No cap: nothing here truncates, because a silently dropped address is the exact failure
+  // this feature exists to remove. If a cap is ever wanted it belongs at the call site, loud.
+  const many = Array.from({ length: 12 }, (_v, i) => `p${i}@builder.com`);
+  assertEquals(combineReplyTo("d.ss-abc@reply.builder.com", many).length, 13);
+});
+
+Deno.test("a send with BOTH addresses puts an array on the wire, routing first", async () => {
+  setup();
+  try {
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    const res = await sendTenantEmail(db.admin, CLIENT_ID, {
+      ...MAIL,
+      replyTo: "sarah@builder.com",
+    });
+    assert(res.sent, "must send");
+    assertArrayEquals(
+      JSON.parse(fetches[0].body ?? "{}").reply_to,
+      ["d.ss-test123456@reply.example.com", "sarah@builder.com"],
+      "Resend documents reply_to as accepting an array of strings",
+    );
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a send with ONE address still puts a bare string on the wire", async () => {
+  setup();
+  try {
+    // The rollout property. Every send in the product today carries exactly one reply
+    // address, so widening the type must not change one byte of what they post — otherwise a
+    // wire diff during the rollout means nothing and a real change hides in the noise.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    await sendTenantEmail(db.admin, CLIENT_ID, MAIL);
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to,
+      "d.ss-test123456@reply.example.com", "a one-address list is NOT sent as [\"…\"]");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a caller's duplicate of the routing address is not advertised twice", async () => {
+  setup();
+  try {
+    // A tenant could plausibly configure the routing address as somebody's reply-to, and the
+    // customer must not see the same recipient listed twice on their reply.
+    const fetches = stubFetch(() => jsonResponse(OK_SEND));
+    const db = stubAdmin({ settings: INBOUND_ON });
+    await sendTenantEmail(db.admin, CLIENT_ID, {
+      ...MAIL,
+      replyTo: "D.SS-TEST123456@Reply.Example.com",
+    });
+    assertEquals(JSON.parse(fetches[0].body ?? "{}").reply_to,
+      "d.ss-test123456@reply.example.com",
+      "de-duplicated down to one, so it collapses back to a bare string");
   } finally {
     teardown();
   }
