@@ -950,8 +950,15 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // delete-then-insert left when the insert failed (audit 2026-08-19). Rows whose
         // expiry is unchanged are skipped entirely, which is what preserves their
         // granted_by/granted_at/note.
+        // Compare INSTANTS, not strings. PostgREST returns timestamptz as
+        // "...T23:59:59.999+00:00" while the incoming value is normalised through
+        // toISOString() ("...Z"), so a string compare called EVERY dated grant "changed"
+        // on every save and re-upserted it -- rewriting granted_by and wiping note, the
+        // exact loss the paragraph above says this skip prevents. A stored value that
+        // will not parse yields NaN, which compares unequal, so garbage still gets rewritten.
+        const ms = (v: unknown) => (v == null ? null : Date.parse(String(v)));
         const changed = rows.filter((r: any) =>
-          !existing.has(r.feature) || existing.get(r.feature) !== r.expires_at);
+          !existing.has(r.feature) || ms(existing.get(r.feature)) !== ms(r.expires_at));
         if (changed.length) {
           const { error: upErr } = await sb.from("client_feature_grants")
             .upsert(changed, { onConflict: "client_id,feature" });

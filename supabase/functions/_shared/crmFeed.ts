@@ -114,7 +114,18 @@ export async function buildCrmFeed(
   clientId: string,
   opts: { codes: string[]; contactId?: string | null; limit?: number; isAdmin?: boolean },
 ): Promise<FeedEvent[]> {
-  const codes = (opts.codes || []).filter(Boolean).slice(0, 200);
+  // A code is hand-joined into a PostgREST `or=` string in three of the reads below, where a
+  // comma or a paren is GRAMMAR, not data: one crafted entry closes the `in.(...)` list and
+  // appends a clause of the caller's choosing, and `contact_id.not.is.null` widens the read to
+  // every conversation in the tenant. That matters because crm_feed takes `codes` straight from
+  // the request body behind a gate designs:view alone satisfies, and that branch deliberately
+  // IGNORES contactId for a caller without contacts:view - so this is the one thing standing
+  // between a designs-only caller and the contact half the branch means to withhold.
+  // Dropped rather than escaped: a real code is `SS-` + the look-alike-free alphabet
+  // (migration 002), so nothing legitimate is being thrown away. Shape is NOT whitelisted on
+  // purpose - a single legacy row that failed to match would silently empty that design's whole
+  // feed, which is the failure this file keeps trying to stay out of.
+  const codes = (opts.codes || []).filter((c) => c && !/[,()"]/.test(String(c))).slice(0, 200);
   const out: FeedEvent[] = [];
   const push = (e: FeedEvent) => { if (e.at) out.push(e); };
 
@@ -339,9 +350,22 @@ export async function buildCrmFeed(
       meta: {
         from: r.from_email,
         inbound: true,
-        senderVerified: r.spam_verdict == null
-          ? null
-          : !/(?:spam|virus)=(?!PASS)|(?:spf|dkim|dmarc)=(?!pass)/i.test(String(r.spam_verdict)),
+        // TOKENISED, not one regex with a word boundary. The first version wrote `\b` into
+        // this file through a script and got a literal 0x08 BACKSPACE byte instead, so the
+        // lookahead could never match, the test always passed, and senderVerified was always
+        // false - every reply would have worn the NOT VERIFIED chip, which is precisely the
+        // badge-fatigue this design set out to avoid. Nothing threw; the unit test passed
+        // because it exercised a retyped copy of the regex rather than this file.
+        //
+        // No parseable token means UNKNOWN, not verified: a verdict string we cannot read is
+        // not a verdict we may vouch for.
+        senderVerified: (() => {
+          if (r.spam_verdict == null) return null;
+          const toks = String(r.spam_verdict).toLowerCase()
+            .match(/(?:spam|virus|spf|dkim|dmarc)=[a-z0-9_-]+/g);
+          if (!toks || !toks.length) return null;
+          return toks.every((t) => t.endsWith("=pass"));
+        })(),
         senderVerdict: r.spam_verdict ?? null,
       },
     });

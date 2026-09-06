@@ -405,7 +405,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     if (!paymentId) return json({ error: "paymentId is required." }, 400);
 
     const { data: p, error: pErr } = await admin.from("payments")
-      .select("id, order_id, amount_cents, gateway, gateway_txn_id, voided_at, funding_state")
+      .select("id, order_id, amount_cents, note, gateway, gateway_txn_id, voided_at, funding_state")
       .eq("client_id", clientId).eq("id", paymentId).maybeSingle();
     if (pErr) return dbFail(req, clientId, "load that payment", pErr);
     if (!p) return json({ error: "Payment not found." }, 404);
@@ -460,11 +460,17 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const nowIso = new Date().toISOString();
     const full = refundCents === Number(p.amount_cents);
+    // A partial refund leaves the row live and refundable again, so the next one used to
+    // OVERWRITE this note — and the retref it names is the only record of that refund
+    // anywhere in the database (the audit line above carries the ORIGINAL txn's retref).
+    // Append instead, newest last, capped so repeated refunds cannot grow the row forever.
+    const refundLine = `Refunded $${(refundCents / 100).toFixed(2)} on ${nowIso.slice(0, 10)} (ref ${out.retref ?? "?"})`;
+    const priorNote = typeof p.note === "string" ? p.note.trim() : "";
     const { error: uErr } = await admin.from("payments")
       .update({
         voided_at: full ? nowIso : null,
         void_reason: full ? `refunded $${(refundCents / 100).toFixed(2)}` : null,
-        note: `Refunded $${(refundCents / 100).toFixed(2)} on ${nowIso.slice(0, 10)} (ref ${out.retref ?? "?"})`,
+        note: (priorNote ? `${priorNote}\n${refundLine}` : refundLine).slice(-2000),
         amount_cents: full ? Number(p.amount_cents) : Number(p.amount_cents) - refundCents,
         funding_updated_at: nowIso,
       })

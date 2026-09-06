@@ -2021,8 +2021,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Only attach a URL that points at THIS tenant's floor-plans prefix — never a caller-supplied
   // external URL — so an attacker can't graft arbitrary links onto a tenant's branded estimate.
   const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+  // TRAVERSAL, NOT JUST A PREFIX (audit 2026-09-07). `startsWith` alone accepts
+  // `<prefix>../<other-tenant>/file.pdf`: every consumer of these URLs — GHL's attachment
+  // fetcher, the customer's mail client, quotePdf's server-side fetch and the portal's <img>
+  // — resolves the dot-segments first, so the object actually served sits OUTSIDE this
+  // tenant's folder and someone else's public file gets grafted onto this tenant's branded
+  // quote. `new URL` resolves the same segments (including the %2e spellings) before the
+  // comparison, so a string that passes can only ever resolve inside the prefix. Returns the
+  // caller's own string unchanged so nothing downstream sees a re-encoded value, and returns
+  // null — never a 4xx — on failure: a shopper must not be blocked by a field they did not
+  // knowingly send, exactly as an absent URL behaves today.
+  const tenantStorageUrl = (value: unknown): string | null => {
+    const raw = String(value ?? "");
+    if (!raw.startsWith(expectedPdfPrefix)) return null;
+    try {
+      return new URL(raw).href.startsWith(expectedPdfPrefix) ? raw : null;
+    } catch {
+      return null; // unparsable — treat as absent
+    }
+  };
   const estimateAttachments: any[] = [];
-  if (imageUrl && String(imageUrl).startsWith(expectedPdfPrefix)) {
+  if (tenantStorageUrl(imageUrl)) {
     estimateAttachments.push({
       id: designId,
       name: `${designId}.pdf`,
@@ -2282,11 +2301,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).
     // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
     // URL, since this one is fetched server-side.
-    const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    const planUrl = tenantStorageUrl(imageUrl);
     // The plain-image twins for the order screen's sidebar cards (migration 127) — same
     // prefix guard, persisted below. SS branch only, so the CRM path never writes them.
-    const planImg = planImageUrl && String(planImageUrl).startsWith(expectedPdfPrefix) ? String(planImageUrl) : null;
-    const view3dImg = view3dImageUrl && String(view3dImageUrl).startsWith(expectedPdfPrefix) ? String(view3dImageUrl) : null;
+    const planImg = tenantStorageUrl(planImageUrl);
+    const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
 
     let quotePdfUrl: string | null = null;
@@ -2433,13 +2452,45 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
             .eq("id", existingCo.id);
           if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal };
-          else console.warn("change order update failed:", coErr.message);
+          else {
+            // DURABLE, not console-only. The revision is already on the design (the pre-CO
+            // persist above), so a failed CO write leaves a signed order carrying lines the
+            // customer never acknowledged and nothing pending to stop send_invoice — and this
+            // project's runtime console stream is not reliably queryable, so app_errors is the
+            // only place triage would ever see it. Still not fatal: the customer is waiting and
+            // the revision is real, so the send continues exactly as before.
+            console.warn("change order update failed:", coErr.message);
+            await logEdgeError({
+              fn: "submit-estimate", req, clientId, code: "change_order_write_failed",
+              message: `change order update failed for ${designId}: ${coErr.message}`,
+              context: {
+                designId: String(designId),
+                coId: existingCo.id,
+                coNo: existingCo.co_no,
+                totalBefore: oldTotal,
+                totalAfter: newTotal,
+              },
+            });
+          }
         } else {
           const { data: coRow, error: coErr } = await supabase.from("change_orders")
             .insert({ client_id: clientId, short_code: designId, source: "design_edit", ...coFields })
             .select("co_no").maybeSingle();
           if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription, totalBefore: oldTotal };
-          else console.warn("change order insert failed:", coErr.message);
+          else {
+            // Same reasoning as the update arm above: no pending CO means an unacknowledged
+            // revision is invoiceable, and console.warn is not queryable here.
+            console.warn("change order insert failed:", coErr.message);
+            await logEdgeError({
+              fn: "submit-estimate", req, clientId, code: "change_order_write_failed",
+              message: `change order insert failed for ${designId}: ${coErr.message}`,
+              context: {
+                designId: String(designId),
+                totalBefore: oldTotal,
+                totalAfter: newTotal,
+              },
+            });
+          }
         }
       }
     }
@@ -2811,7 +2862,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             estimateUrl: hostedUrl,
             // Same tenant-prefix guard as the estimate attachment in step 8 — never a
             // caller-supplied external URL in a customer's email.
-            pdfUrl: imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null,
+            pdfUrl: tenantStorageUrl(imageUrl),
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
           });

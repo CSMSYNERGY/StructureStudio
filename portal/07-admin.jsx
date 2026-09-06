@@ -1663,7 +1663,7 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
     setLinkBusy(true); setLinkResult(null);
     try {
       const r = await adminApi("link_owner", { clientId, email: addr, role, ...(reassign ? { reassign: true } : {}) });
-      const roleLabel = (r && r.role === "user") ? "team member (Designs & Leads only)" : "admin";
+      const roleLabel = (r && r.role === "user") ? "sales rep" : "owner";
       setLinkResult({ email: addr, roleLabel, created: !!(r && r.created), emailSent: !!(r && r.emailSent), setupLink: (r && r.setupLink) || null, movedFrom: reassign && reassignFrom ? reassignFrom.fromClient : null });
       setEmail(""); setReassignFrom(null);
       onFlash({ ok: `“${addr}” ${reassign ? "reassigned to" : "linked to"} ${label} as ${roleLabel}.` });
@@ -1748,9 +1748,17 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
           </div>
           <div style={{ width: 200 }}>
             <label style={S.lbl}>Role</label>
+            {/* These labels name the role this form actually creates. "Admin — full access" minted
+                an OWNER — settings_billing edit, and mayGrant lets them pass Billing on — while the
+                flash said "admin", so an operator asked to add an office manager could not see the
+                mismatch against the OWNER chip on the Accounts tab (audit 2026-09-06). Do NOT add an
+                "admin" option here: link_owner writes no `title`, so role='admin' would store a null
+                title and effectiveAccess would resolve it as the sales_rep preset.
+                And "Designs & Leads only" undersold role='user': with no `title` it resolves to the
+                sales_rep preset — orders:'edit' (payments, finalize) and own commissions. */}
             <select value={role} onChange={(e) => setRole(e.target.value)} style={S.input}>
-              <option value="owner">Admin — full access</option>
-              <option value="user">Team member — Designs &amp; Leads only</option>
+              <option value="owner">Owner — full access, including Billing</option>
+              <option value="user">Sales Rep — designs, contacts, orders, own commission</option>
             </select>
           </div>
           <button type="button" onClick={() => link(false)} disabled={!emailOk || linkBusy}

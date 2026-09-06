@@ -572,11 +572,18 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
   // for a sold unit's SALE stop (which carries the buyer's design code). Never touches
   // draft/inventory master rows (the status filter below); the sync-design-status
   // delivered_at fence keeps GHL from downgrading it.
+  //
+  // `whenIso` is THE STOP'S OWN delivery time, not the time this ran. mark_load_delivered
+  // re-runs this for every stop when the dispatcher closes the load — including stops a
+  // driver already marked delivered days earlier — so stamping now() there dragged the
+  // customer's delivery date forward to whenever the paperwork got done. Callers pass the
+  // stop's existing delivered_at when it has one, so that re-run rewrites the same value
+  // and still repairs a design whose earlier write-back failed.
   // deno-lint-ignore no-explicit-any
-  const writeBackDelivered = async (stop: any) => {
+  const writeBackDelivered = async (stop: any, whenIso: string = new Date().toISOString()) => {
     if ((stop.source !== "order" && stop.source !== "inventory") || !stop.design_short_code) return;
     await admin.from("designs")
-      .update({ status: "delivered", delivered_at: new Date().toISOString() })
+      .update({ status: "delivered", delivered_at: whenIso })
       .eq("client_id", clientId)
       .eq("short_code", stop.design_short_code)
       .in("status", ["sent", "accepted", "invoiced", "delivered"]);
@@ -1128,7 +1135,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const now = new Date().toISOString();
       await admin.from("delivery_stops").update({ delivered_at: now, updated_at: now })
         .eq("id", stop.id).eq("client_id", clientId);
-      await writeBackDelivered(stop);
+      await writeBackDelivered(stop, now);
       await act("stop", stop.id, "delivered");
       // Last stop delivered → the load is delivered.
       const { data: remaining } = await admin
@@ -1250,6 +1257,18 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
               + `build queue. Schedule its delivery instead.`,
           }, 409);
         }
+        // build_jobs_one_per_design (087:75) is the real guard against a second card for the
+        // same building — but it fires on the INSERT, i.e. AFTER take_next_serial() has burned
+        // a number that the 23505 branch below then throws away. The invariant at the top of
+        // this file (075's rule) is that a rejected payload must not burn one, and a gap is
+        // permanent: the counter can never be wound back past a used number. The duplicate is
+        // easy to produce — the tray card stays draggable until the board reloads — so ask
+        // first. Same predicate as the index, so this refuses nothing the insert would allow;
+        // the 23505 handler stays as the race backstop.
+        const { data: dupeJobs, error: dupeErr } = await admin.from("build_jobs")
+          .select("id").eq("client_id", clientId).eq("design_short_code", design.short_code).limit(1);
+        if (dupeErr) throw dupeErr;
+        if (dupeJobs?.length) return json({ error: "That building is already on the build schedule." }, 409);
         row.design_short_code = design.short_code;
         row.customer_name = row.customer_name ?? str((design.contact as Record<string, unknown>)?.name);
         row.building_label = row.building_label ?? str(buildingLabelFrom(design.selections as Record<string, unknown>));
@@ -1338,12 +1357,18 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       const done = stages.find((s) => s.kind === "done" && !s.archived);
       if (!done) return json({ error: "No finished stage exists." }, 400);
       const now = new Date().toISOString();
+      // The build date is the FIRST completion, not the last press of the button. The serial's
+      // first block is that date and mintBuildingSerial only ever mints once, so re-completing
+      // an already-done job must not move the job's date away from the number already printed
+      // on the tag. Same rule move_job has always applied on the drag path (`job.completed_at
+      // ?? now`); complete_job was the one done-path that re-dated instead of preserving.
+      const completedAt = job.completed_at ?? now;
       const { error } = await admin.from("build_jobs")
-        .update({ stage_id: done.id, completed_at: now, updated_at: now })
+        .update({ stage_id: done.id, completed_at: completedAt, updated_at: now })
         .eq("id", job.id).eq("client_id", clientId);
       if (error) throw error;
       await act("build_job", job.id, "completed", { from: job.stage_id, to: done.id });
-      await mintBuildingSerial(job, now);
+      await mintBuildingSerial(job, completedAt);
       // Finishing the last shop job for a repair PROMPTS closing the repair — it does not
       // close it (SCHEDULING_SCOPE.md: "prompts, not forces"). The repair's own status is
       // the customer-facing truth and may still be waiting on a part or a payment.
@@ -1903,7 +1928,7 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
             await admin.from("delivery_stops").update({ delivered_at: now, updated_at: now })
               .eq("id", stop.id).eq("client_id", clientId);
           }
-          await writeBackDelivered(stop);
+          await writeBackDelivered(stop, stop.delivered_at ?? now);
         }
         await admin.from("delivery_loads").update({
           status: "delivered", completed_at: now,

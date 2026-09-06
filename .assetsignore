@@ -65,3 +65,24 @@ tests
 playwright.config.mjs
 test-results
 playwright-report
+
+# Untracked working-tree files .gitignore anticipates but this list did not cover.
+# assets.directory is "." in all three wrangler configs, so a MANUAL deploy uploads
+# whatever is on disk — and manual is not hypothetical: wrangler.beta2.jsonc is
+# manual-only, and wrangler.beta.jsonc/wrangler.jsonc both document `npx wrangler
+# deploy` as the Workers-Builds-down fallback. Git-driven Builds never sees these
+# files, so a fallback deploy from a real checkout is the only path that would have
+# served them — at /.env, /backup.zip, /_archive/... . NOT a cleanup: no file in the
+# repo matches any pattern below (verified 2026-09-06), so no served asset changes.
+# Mirrors .gitignore. supabase/.temp is deliberately absent — already covered twice,
+# by `supabase` and `.temp` above.
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.zip
+_archive/
+.env
+.env.*

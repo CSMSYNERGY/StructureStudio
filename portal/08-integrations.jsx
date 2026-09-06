@@ -2098,12 +2098,23 @@ function CommissionsReport({ clientId }) {
       setErr(null);
       setReconciling(true);
       // 1. Paint the ledger as it stands. This is the leg that used to wait behind compute.
-      try { await refreshEntries(); }
+      let painted = null;
+      try { painted = await refreshEntries(); }
       catch (e) { setErr(e.message); setData({ entries: [] }); }
-      // 2. Reconcile from GHL behind the paint, then repaint. A rep's compute 403s and is
-      //    ignored — they only ever read their own rows.
-      try { await call({ action: "compute" }); await refreshEntries(); }
-      catch (_e) { /* non-owner or transient — the painted rows stand */ }
+      // 2. Reconcile from GHL behind the paint, then repaint — but ONLY for someone the
+      //    server says may run it. compute is gated on canSeeRates (portal-commissions), so
+      //    a rep's call was a guaranteed 403 on every single mount, and the invoke wrapper
+      //    files every 4xx as severity='info'. A refusal that fires by construction for the
+      //    whole team is precisely what the `having count(*) > 20` triage query is meant to
+      //    catch, so this one drowned that signal instead of reporting anything.
+      //    ⚠️ Keyed off the response we JUST received, never off `data` — that is seeded
+      //    from ssCacheGet and can be another session's copy. And it still runs whenever
+      //    that response is missing (a failed read): an owner's reconcile is the money path
+      //    and must never be skipped just because we could not vouch for the caller.
+      if (!painted || painted.canSeeRates) {
+        try { await call({ action: "compute" }); await refreshEntries(); }
+        catch (_e) { /* transient, or a caller we could not vouch for — the painted rows stand */ }
+      }
       setReconciling(false);
     })().finally(() => { inflight.current = null; });
     inflight.current = run;

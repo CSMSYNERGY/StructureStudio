@@ -2315,6 +2315,15 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
     .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
   const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+  // Two questions, deliberately not one. The DOCUMENT's staging logic means the design_edit
+  // CO specifically - it feeds discardStaged, the amendment trail and the `!pendingCo` drift
+  // exception, and void_change_order restores from snapshot_before, which a manual CO never
+  // writes. The INVOICE gate does not: send_invoice refuses on ANY pending_ack CO
+  // (portal-settings :7068, source-blind), as does the list-level 'CO pending' chip. So a
+  // manual CO raised from Change orders used to leave a live green 'Create & send invoice'
+  // that only ever bought a 409 after the confirm dialog - and an info row in app_errors
+  // every time. Source-blind HERE and nowhere else.
+  const anyPendingCo = (cos || []).find((c) => c.status === "pending_ack") || null;
   // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
   // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
   // the operator has to be told the remedy is "regenerate", not "wait" (migration 136).
@@ -2752,9 +2761,9 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 </div>
               )}
             </div>
-          : pendingCo
+          : anyPendingCo
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
             </div>
           : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
               <button type="button" disabled={anyBusy}

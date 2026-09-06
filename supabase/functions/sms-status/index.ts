@@ -27,14 +27,16 @@ type Patch = {
  * Twilio MessageStatus → what we store. Exported and pure so the preflight gate can test
  * it offline, exactly as postmark-events' mapEvent is.
  *
- * `queued`/`accepted`/`sending` are deliberately NOT mapped: the row is already 'sent' from
- * the send path, and writing a status that means "even less far along than what we have"
- * would make a delivered message flicker backwards if callbacks arrive out of order.
+ * `queued`/`accepted`/`sending`/`sent` are deliberately NOT mapped: the row is already 'sent'
+ * from the send path, and writing a status that means "even less far along than what we have"
+ * would make a delivered message flicker backwards if callbacks arrive out of order — Twilio
+ * does deliver them out of order, and `sent` landing after `delivered` is the common pair.
+ * `sent` is safe to drop because smsSend.ts writes provider_sid and status:'sent' in ONE
+ * update, so every row a callback can match is already at least 'sent'; an unmapped status
+ * returns null and the `if (!sid || !patch) return ok()` guard below 200s without a write.
  */
 export function mapStatus(status: string, errorCode: string | null): Patch | null {
   switch (status) {
-    case "sent":
-      return { status: "sent" };
     case "delivered":
       return { status: "delivered", delivered_at: new Date().toISOString() };
     case "undelivered":

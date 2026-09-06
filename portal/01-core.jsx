@@ -93,7 +93,13 @@ function ssLogError(source, message, code, context, severity) {
         p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: ssResolvedClientId || params.get("client") || null,
-        p_url: location.href.slice(0, 600),
+        // Fragment stripped, never the query string. A password-reset/invite landing is
+        // `/portal#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
+        // the END of _getSessionFromURL — so a boot_component_missing row, a window.onerror or an
+        // unhandledrejection firing first put the account's email, sub and a truncated token in
+        // this column. `?view=` MUST survive: it is what tells triage a row was written inside an
+        // operator view-as session (see the attribution latch in the invoke wrapper below).
+        p_url: String(location.href).split("#")[0].slice(0, 600),
         p_context: context || null,
         p_severity: severity || "error",
       }),
@@ -483,7 +489,11 @@ const TAB_META = {
   releases: ["What's New", "Latest features and fixes"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
-  "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
+  // Not "— coming soon" any more: RealTime Pricing shipped 2026-08-28 inside Settings →
+  // Structures. This string is the page-header subtitle (12-shell.jsx), and it sits directly
+  // above a card that already says the feature is available — so leaving it made the one page
+  // a deep link lands on contradict itself. The other three teasers keep the suffix.
+  "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices"],
   "build-schedule": ["Build Schedule", "Track buildings from order to done"],
   "delivery-schedule": ["Delivery Schedule", "Plan truck loads and manage deliveries"],
   "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
@@ -541,10 +551,20 @@ function ssIsBetaHost() {
   return /(^|\.)beta(-[a-z0-9-]+)?(\.|--)/.test(h);
 }
 
-// The four teaser tabs the Coming Soon group points at. On a production host the nav
+// The three teaser tabs the Coming Soon group points at. On a production host the nav
 // group is hidden AND these routes clamp (hiding a nav item does not remove its route —
 // TAB_META is what grants routability, and bookmarked deep links exist).
-const SS_SOON_TABS = ["on-demand-pricing", "rent-to-own-contracts", "reports", "self-serve-display-units"];
+//
+// ⛔ "on-demand-pricing" is NOT one of them any more, and must not come back. RealTime
+// Pricing left the Coming Soon group on 2026-08-28 and shipped inside Settings → Structures;
+// 12-shell.jsx kept its route and its landing card "for old deep links" — but the id stayed
+// in this array, and the clamp below runs BEFORE every role check, `canAdmin` included. So a
+// production owner who bookmarked the tab while it was in the nav was bounced to Pipeline
+// with no pointer to the feature they pay for, and could not reach the card 12-shell.jsx
+// renders for exactly that person. quickbooks and view-3d got the same nav-entry-removed
+// treatment and were correctly never listed here; this now matches them. The other three
+// stay clamped on production (Carolyn 2026-08-27, "Go ahead and do it, yes").
+const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units"];
 
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.

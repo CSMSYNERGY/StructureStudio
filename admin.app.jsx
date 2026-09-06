@@ -931,7 +931,22 @@ function AdminApp() {
                         </div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                           <input readOnly value={linkResult.setupLink} onFocus={(e) => e.target.select()} style={{ ...S.input, flex: 1, minWidth: 260, fontSize: 12 }} />
-                          <button onClick={() => { (navigator.clipboard && navigator.clipboard.writeText(linkResult.setupLink)); flash({ ok: "Setup link copied." }); }} style={S.btn(ACCENT, "#FFF")}>Copy link</button>
+                          {/* Await the write and flash from the OUTCOME. Fired unawaited this
+                              reported "copied" even when the write rejected -- the operator pasted
+                              nothing into the email and the builder never got their login. This is
+                              the handler portal/07-admin.jsx:1685 and portal/08-integrations.jsx:577
+                              name as the lesson they fixed. A missing navigator.clipboard (insecure
+                              context) is the FAILURE branch, not a silent success; the read-only
+                              input above stays on screen either way so the link can always be
+                              selected by hand. Everything is caught inside, so the handler never
+                              rejects into the unhandledrejection logger at :61. */}
+                          <button onClick={async () => {
+                            try {
+                              if (!navigator.clipboard) throw new Error("clipboard unavailable");
+                              await navigator.clipboard.writeText(linkResult.setupLink);
+                              flash({ ok: "Setup link copied." });
+                            } catch (_e) { flash({ err: "Couldn't copy the setup link — select it in the box above and copy it by hand." }); }
+                          }} style={S.btn(ACCENT, "#FFF")}>Copy link</button>
                         </div>
                       </div>
                     ) : (

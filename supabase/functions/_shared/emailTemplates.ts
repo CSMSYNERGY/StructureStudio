@@ -318,9 +318,13 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     : "";
 
   // Tenant copy, if they wrote any. Values are escaped for the HTML path; the plain-text
-  // path below uses the raw ones.
+  // path below uses the raw ones. `building` is oneLine()'d only here, in the token map:
+  // it is assembled from caller-supplied style/size labels with a bare trim(), and a
+  // tenant subject containing {building} would otherwise put a CR/LF straight back into
+  // a Subject header — the one thing tenantCopy() already strips from the template. The
+  // detail row and the plain-text line keep the raw value; a break there is only ugly.
   const copy = tenantCopy(input.templateCopy, word === "quote" ? "quote" : "estimate");
-  const tokens = { business: name, number: num, total: money, building, customer: oneLine(input.customerName ?? "") };
+  const tokens = { business: name, number: num, total: money, building: oneLine(building), customer: oneLine(input.customerName ?? "") };
   const introRaw = copy.intro
     ? fillTokens(copy.intro, tokens)
     : `Thank you for designing your building with ${name}. Your ${word} is ready.`;

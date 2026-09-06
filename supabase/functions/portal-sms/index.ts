@@ -753,6 +753,19 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "advance": {
+        // ⚠️ can_bill, NOT just can_write. A brand registration is billed per POST, and
+        // this branch is reachable in VIEW-AS: resolveTenant hands a PLATFORM operator
+        // canEdit = () => can_write and never consults requireBilling here — portal-sms cannot
+        // pass requireBilling, because it is evaluated for the whole invocation and would 403
+        // an operator's `status` polling and blank the panel. Without this line a
+        // can_write / can_bill=false operator spends the VIEWED tenant's wallet. Migration 056:
+        // "Adding an operator should never silently grant the ability to charge a client's
+        // card." Same per-action shape admin-catalog uses. Tenant owners and owner-granted
+        // admins have ctx.operator === null and are unaffected; support operators are already
+        // refused upstream by settings_billing:'none'.
+        if (r.ctx.operator && !r.ctx.operator.canBill) {
+          return json({ error: "This operator account cannot change billing." }, 403);
+        }
         if (!trustHubConfigured()) {
           return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
         }
@@ -798,6 +811,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "buy_number": {
+        // ⚠️ can_bill, NOT just can_write — a number bills monthly at Twilio from the
+        // moment it is bought, and this takes a wallet hold. See the same guard on `advance`
+        // above for why resolveTenant cannot do this for us.
+        if (r.ctx.operator && !r.ctx.operator.canBill) {
+          return json({ error: "This operator account cannot change billing." }, 403);
+        }
         if (!trustHubConfigured()) return json({ error: "Text messaging is not switched on yet." }, 503);
         const reg = await load();
         if (!reg.messaging_service_sid || reg.status === "none") {
@@ -806,8 +825,20 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         const wanted = String(p.phoneNumber ?? "").trim();
         if (!/^\+1\d{10}$/.test(wanted)) return json({ error: "Choose a number from the search results." }, 400);
 
-        // ⚠️ ONE LIVE NUMBER PER TENANT, enforced here AND by a partial unique index. The
-        // inbound webhook resolves the tenant from the To number and nothing else.
+        // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS COUNT IS THE ONLY THING ENFORCING IT.
+        // This comment used to claim a partial unique index backed it up. It does not.
+        // 165_sms_registration.sql has sms_numbers_live_unique on (phone_number) — one TENANT
+        // per number, which is what stops two builders sharing an inbound number — and
+        // sms_numbers_client_idx on (client_id), which is NOT unique. So this is a read-then-act
+        // check with no lock, unlike `advance`, which single-flights on advance_lock_until:
+        // two concurrent buys of DIFFERENT numbers both see 0 and both rent, and the tenant
+        // keeps whichever landed last in client_settings.sms_number while the platform pays
+        // monthly for the other. Do NOT delete this check believing the database repeats it.
+        // To make the invariant real: add a partial unique index on (client_id) where
+        // released_at is null, and handle the 23505 on the insert below by releasing the wallet
+        // hold AND the just-purchased number at Twilio — otherwise a duplicate rental becomes
+        // an orphaned one.
+        // The inbound webhook resolves the tenant from the To number and nothing else.
         const { count } = await admin.from("sms_numbers")
           .select("id", { count: "exact", head: true })
           .eq("client_id", clientId).is("released_at", null);
@@ -946,9 +977,13 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           return json({
             ok: true, verdict: "valid",
             tokenLength: tok.length,
-            // Proves it authenticated against the account we think we are, not some other one.
-            accountSid: String(body?.sid ?? ""),
-            friendlyName: String(body?.friendly_name ?? ""),
+            // Proves it authenticated against the account we think we are, not some other one —
+            // ⚠️ COMPARED SERVER-SIDE AND RETURNED AS A BOOLEAN. The SID and the account name
+            // themselves must not travel: this action is reachable by any tenant holding
+            // settings_billing:'edit', and the caller only ever needs the verdict. The header
+            // note above ("only a verdict, a length and a Twilio error code travel") was always
+            // the intended contract; returning the account identity had quietly broken it.
+            sameAccount: String(body?.sid ?? "") === acct,
             detail: "Twilio accepted this token for this account, so inbound webhook signature validation will work.",
           });
         }

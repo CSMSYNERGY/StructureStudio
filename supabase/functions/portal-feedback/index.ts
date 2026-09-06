@@ -396,14 +396,23 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
 
     // An attachment must live under this tenant's own prefix — the storage policy
     // enforces it on write, and this re-checks it before we hand the path to Monday.
+    // The `..` test is what makes the prefix test mean anything: storage-js drops the
+    // path straight into a URL and the fetch layer normalises `<me>/../<victim>/x` down
+    // to another tenant's object, which we would then read with the SERVICE key. Same
+    // guard as portal-schedule's photo path and portal-settings' .glb path.
     let attachmentPath: string | null = body.attachmentPath ? String(body.attachmentPath) : null;
-    if (attachmentPath && !attachmentPath.startsWith(clientId + "/")) {
+    if (attachmentPath && (!attachmentPath.startsWith(clientId + "/") || attachmentPath.includes(".."))) {
       return json({ error: "Attachment does not belong to this account." }, 403);
     }
 
     const meta = user.user_metadata || {};
+    // Identity comes from the VERIFIED user, never the body — the auth-model note at the
+    // top of this file is what makes "Submitted by" trustworthy in the Monday item and in
+    // My Submissions. A body field here let any member file as somebody else; no caller
+    // has ever sent one. The ladder down to the email local part and "Unknown" stays:
+    // submitter_name is NOT NULL (migration 054).
     const submitterName = String(
-      body.submitterName || meta.full_name || meta.name || (user.email || "").split("@")[0] || "Unknown",
+      meta.full_name || meta.name || (user.email || "").split("@")[0] || "Unknown",
     ).slice(0, 120);
 
     const ins = await admin.from("feedback_submissions").insert({
@@ -445,6 +454,22 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       const upd = await admin.from("feedback_submissions")
         .update({ monday_item_id: itemId, monday_error: null, status: statusAfterPush(kind), updated_at: new Date().toISOString() })
         .eq("id", row.id).select().single();
+      // The Monday item EXISTS from here on. If the link-back fails the row reads as
+      // never-pushed with no error: the webhook matches on monday_item_id, refresh skips
+      // a null one, and retry_push would create a SECOND item (create_item is not
+      // idempotent). So record the orphan's id for whoever triages it. Best-effort and
+      // never re-thrown — falling into the catch below would write monday_error and tell
+      // the tenant the push failed while their item is live on the board.
+      if (upd.error) {
+        console.error("Monday link-back failed for submission", row.id, "item", itemId, upd.error.message);
+        try {
+          await admin.from("feedback_submissions")
+            .update({ monday_error: `push ok but link not saved (Monday item ${itemId}): ${upd.error.message}` })
+            .eq("id", row.id);
+        } catch (e2) {
+          console.error("orphan link-back note not saved for submission", row.id, e2 instanceof Error ? e2.message : String(e2));
+        }
+      }
       await mirrorToProjects(admin, { ...row, monday_item_id: itemId });  // backfill the Monday id
       return json({ ok: true, submission: upd.data ?? row, pushed: true });
     } catch (e) {

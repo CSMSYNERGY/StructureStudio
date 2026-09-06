@@ -321,7 +321,12 @@ function Dashboard({ session }) {
     if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
     if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
     try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
-  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
+    // `canProjects` is in this list because `gatesResolved` above READS it. Left out, a
+    // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
+    // a non-admin on /portal/admin, where projects is not what is being refused — never
+    // re-runs this effect: `wanted.current` stays set, the replaceState never happens, and
+    // the address bar keeps a path that bounces again on every reload.
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
