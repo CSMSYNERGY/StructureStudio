@@ -1371,6 +1371,29 @@ const fnError = async (err) => {
   return m;
 };
 
+// ─── Status pill ───
+// The tinted lozenge that says what a design's status IS — distinct from StatusChips below,
+// which are the FILTER controls (outlined, dotted, and carrying counts). This markup was
+// written out three times before it was a component: the Pipeline list's Status cell, the
+// Contacts list, and the Orders estimate column. Two of those are here; Contacts and Orders
+// keep their own because they label things this enum does not cover (Contacts' synthetic
+// "browsing" group, Orders' own estimate states).
+//
+// `small` is the board-card size. A pipeline card is 190px wide at its narrowest and the
+// pill shares a line with a date and a quote number, so the full-size pill (12px text,
+// 4x12 padding) pushes the quote number onto its own line at that width.
+function StatusPill({ status, small = false }) {
+  const st = normStatus(status);
+  const c = STATUS_COLORS[st];
+  return (
+    <span style={{
+      background: c.bg, color: c.fg, borderRadius: 20, whiteSpace: "nowrap", fontWeight: 700,
+      padding: small ? "1px 7px" : "4px 12px",
+      fontSize: small ? 10.5 : 12,
+    }}>{STATUS_LABELS[st]}</span>
+  );
+}
+
 // ─── Status filter chips (Designs + Contacts) ───
 // Carolyn, 2026-06-18: filters so a client can tell leads from customers at a glance — the
 // urgency came from Junior Barns selling three buildings in one day.

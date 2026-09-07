@@ -543,9 +543,17 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                         <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>
                           {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
                         </div>
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3, display: "flex", justifyContent: "space-between", gap: 6 }}>
+                        {/* Status pill on every card (Carolyn, 2026-09-07). Note it repeats
+                            the column: CRM_STAGE_FOR_STATUS is 1:1, so every card in
+                            "Proposal Made" is Sent and every card in "Contract Signed" is
+                            Accepted. It earns its place as a TRANSLATION — the columns carry
+                            Carolyn's Pipedrive stage names, the pill carries the status the
+                            rest of the product shows — and it stops being redundant the day a
+                            second status maps into one stage. */}
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          <StatusPill status={r.status} small />
                           <span>{fmtDate(r.created_at)}</span>
-                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                          {r.ss_quote_number || r.ghl_estimate_number ? <span style={{ marginLeft: "auto" }}>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
                         </div>
                       </button>
                     );
@@ -611,11 +619,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                     </td>
                     {/* SS quote numbers render verbatim (prefix included); EST- is GHL's. */}
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : (r.ss_quote_number || "—")}</td>
-                    <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return (
-                      <span style={{ whiteSpace: "nowrap" }}>
-                        <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>
-                      </span>
-                    ); })()}</td>
+                    <td style={S.td}><StatusPill status={r.status} /></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {/* Opens IN THE PORTAL designer — never the public page, which now
                           silently captures leads and saves drafts; staff browsing a
