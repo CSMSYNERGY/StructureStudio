@@ -1168,13 +1168,25 @@ const listMigrations = () => {
 // Both were inert only by luck — no policy happened to key on either — and "inert by luck" is
 // not a property you get to keep.
 //
-// WHAT THIS COVERS: the area KEY SET and each area's LEVEL VOCABULARY, both directions.
-// WHAT IT DELIBERATELY DOES NOT: the PRESETS / k_presets tables. `PRESETS.owner` is computed
-// (`Object.fromEntries(AREA_KEYS.map(...))`), so it cannot be read statically the way the rest
-// can, and a regex that silently skipped the computed row would report a clean preset diff
-// while covering three titles out of five. That gap is real and named here rather than
-// papered over — the second drift above is a preset drift and this rule would NOT catch it.
-// Closing it needs the TS evaluated, not scanned.
+// WHAT THIS COVERS: the area KEY SET and each area's LEVEL VOCABULARY, both directions —
+// and, since 2026-09-07, the TITLE KEY SET across all THREE copies of it: `TITLES` in
+// access.ts, `k_presets` in the SQL, and the `when p_title in (...)` CASE inside the same SQL
+// function. Migration 218 took the titles from five to ten and every one of those lists is
+// hand-maintained, so the drift this rule exists for became five times more likely in a
+// single commit.
+//
+// WHY THE THIRD COPY MATTERS AND IS NOT PEDANTRY: the CASE is normTitle's mirror, and a title
+// present in k_presets but missing from it does not error — it falls through to `sales_rep`
+// and resolves that preset instead. A Scheduler would silently read a rep's rows. The two SQL
+// lists sit fifty lines apart in one file and are trivially updated one at a time.
+//
+// WHAT IT STILL DOES NOT COVER: the preset LEVELS (does sales_rep hold orders at view or
+// edit?). `PRESETS.owner` is computed (`Object.fromEntries(AREA_KEYS.map(...))`), so the table
+// cannot be read statically the way the areas can, and a regex that silently skipped the
+// computed row would report a clean diff while covering nine titles out of ten. The second
+// drift above is a preset-LEVEL drift and this rule would still NOT catch it. Closing that
+// needs the TS evaluated, not scanned. What is closed is the failure that actually deletes
+// access: a title one side has never heard of.
 //
 // The SQL side is discovered as "the newest migration that actually DEFINES area_level_for",
 // never the highest-numbered file: the NNN prefix stopped being unique on beta (183 is used
@@ -1247,17 +1259,28 @@ function checkAreaMirror(files, inject = null) {
     return errors;
   }
   if (inject && inject.sql) best = { file: best.file, src: inject.sql };
-  const kAt = best.src.indexOf("k_areas");
-  const open = kAt < 0 ? -1 : best.src.indexOf("$j$", kAt);
-  const close = open < 0 ? -1 : best.src.indexOf("$j$", open + 3);
-  if (close < 0) {
-    errors.push(`${best.file}: cannot read the k_areas $j$…$j$ literal — re-anchor `
-      + "checkAreaMirror() in scripts/preflight.mjs");
+  // ⚠️ ANCHORED ON THE DECLARATION, never the bare word. A migration's own HEADER COMMENT
+  // routinely names k_areas and k_presets while explaining what it changed — 218's does, twice
+  // — and `indexOf("k_presets")` then lands in prose, so the following `$j$` opens the WRONG
+  // literal. That is not a hypothetical: the first cut of the title rule read k_areas as the
+  // preset table and reported all twenty AREAS as unknown job titles. The self-test caught it.
+  const jsonAfter = (decl) => {
+    const at = new RegExp(decl + "\\s+constant\\s+jsonb\\s*:=").exec(best.src);
+    if (!at) return null;
+    const open = best.src.indexOf("$j$", at.index);
+    const close = open < 0 ? -1 : best.src.indexOf("$j$", open + 3);
+    return close < 0 ? null : best.src.slice(open + 3, close);
+  };
+
+  const areasJson = jsonAfter("k_areas");
+  if (areasJson === null) {
+    errors.push(`${best.file}: cannot read the \`k_areas constant jsonb :=\` $j$…$j$ literal — `
+      + "re-anchor checkAreaMirror() in scripts/preflight.mjs");
     return errors;
   }
   let sqlAreas;
   try {
-    const parsed = JSON.parse(best.src.slice(open + 3, close));
+    const parsed = JSON.parse(areasJson);
     sqlAreas = new Map(Object.entries(parsed).map(([k, v]) => [k, (v.levels || []).join("|")]));
   } catch (e) {
     errors.push(`${best.file}: k_areas is not valid JSON (${e.message}) — the SQL resolver `
@@ -1284,6 +1307,86 @@ function checkAreaMirror(files, inject = null) {
         + "ahead of the code.");
     }
   }
+
+  // ── TITLES: three copies of one list ──────────────────────────────────────────────
+  // Same shape of check as the areas above, and the same both-directions rule. Anchored on
+  // the colon for the same reason AREAS is — a bare-name indexOf matches any rename.
+  const titlesMatch = /export\s+const\s+TITLES\s*:/.exec(ts);
+  const titlesAt = titlesMatch ? titlesMatch.index : -1;
+  const titlesEnd = titlesAt < 0 ? -1 : ts.indexOf("\n];", titlesAt);
+  if (titlesAt < 0 || titlesEnd < 0) {
+    errors.push(`${TS}: cannot find the \`export const TITLES\` array — it was renamed or `
+      + "reshaped, so the job-title mirror is now unchecked; re-anchor it in "
+      + "scripts/preflight.mjs rather than trusting a clean run");
+    return errors;
+  }
+  const tsTitles = new Set(
+    [...ts.slice(titlesAt, titlesEnd).matchAll(/\{\s*key:\s*"([a-z_]+)"/g)].map((m) => m[1]),
+  );
+  if (!tsTitles.size) {
+    errors.push(`${TS}: parsed ZERO titles out of TITLES — the entry shape changed and the `
+      + "job-title mirror is now blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  const presetsJson = jsonAfter("k_presets");
+  if (presetsJson === null) {
+    errors.push(`${best.file}: cannot read the \`k_presets constant jsonb :=\` $j$…$j$ literal `
+      + "— re-anchor checkAreaMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  let sqlTitles;
+  try {
+    sqlTitles = new Set(Object.keys(JSON.parse(presetsJson)));
+  } catch (e) {
+    errors.push(`${best.file}: k_presets is not valid JSON (${e.message}) — the SQL resolver `
+      + "will fail at apply time");
+    return errors;
+  }
+
+  for (const t of tsTitles) {
+    if (!sqlTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" exists in ${TS} but NOT in `
+        + `${best.file}'s k_presets. area_level_for resolves it to 'none' for EVERY area, so `
+        + "anyone holding that title reads empty lists through RLS while passing every "
+        + "edge-function gate. Add it to the SQL mirror in this same commit.");
+    }
+  }
+  for (const t of sqlTitles) {
+    if (!tsTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" exists in ${best.file}'s `
+        + `k_presets but NOT in ${TS}. Either it was removed from the app and left in SQL, or `
+        + "the SQL is ahead of the code.");
+    }
+  }
+
+  // The THIRD copy: normTitle's mirror. A title missing here does not error — it silently
+  // resolves as `sales_rep`, which is worse than the k_presets case because the person gets
+  // a real preset that is not theirs.
+  // Searched from the function body onward for the same reason as above — a header comment
+  // quoting the CASE would otherwise be read as the CASE.
+  const bodyAt = best.src.search(/create\s+or\s+replace\s+function\s+public\.area_level_for/i);
+  const caseMatch = /when\s+p_title\s+in\s*\(([\s\S]*?)\)/i.exec(best.src.slice(Math.max(bodyAt, 0)));
+  if (!caseMatch) {
+    errors.push(`${best.file}: cannot find area_level_for's \`when p_title in (...)\` CASE — `
+      + "normTitle's SQL mirror is now unchecked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const caseTitles = new Set([...caseMatch[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
+  for (const t of tsTitles) {
+    if (!caseTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" is in ${TS} but missing from `
+        + `${best.file}'s \`when p_title in (...)\` CASE. That is normTitle's mirror: the title `
+        + "does not error, it falls through to the sales_rep preset. Add it beside k_presets.");
+    }
+  }
+  for (const t of caseTitles) {
+    if (!tsTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" is in ${best.file}'s normTitle `
+        + `CASE but not in ${TS}'s TITLES.`);
+    }
+  }
+
   return errors;
 }
 
@@ -2238,8 +2341,58 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a renamed AREAS export reported clean instead of blind");
     process.exit(1);
   }
+  // (e) FIRES when a TITLE exists in TS but not in the SQL presets. This is the drift that
+  //     migration 218 made five times more likely, and it is the one that empties a screen.
+  const dropTitle = amSql.replace(/^\s*"crew_leader":\s*\{[^}]*\},?\s*$/m, "");
+  if (dropTitle === amSql) {
+    console.error("self-test FAILED: could not remove a title from k_presets — the shape "
+      + "changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropTitle })
+        .some((e) => /job title "crew_leader" exists in .* but NOT in/.test(e))) {
+    console.error("self-test FAILED: a title missing from k_presets did not fire");
+    process.exit(1);
+  }
+  // (f) FIRES when a title is in k_presets but missing from normTitle's CASE — the copy that
+  //     resolves someone as a sales_rep instead of erroring.
+  // Scoped to the CASE itself. A bare /'crew_leader'/ replace hits PART 1's CHECK constraint
+  // first (218 lists every title there too) and leaves the CASE untouched, so the assertion
+  // would pass while testing nothing.
+  const dropFromCase = amSql.replace(/(when\s+p_title\s+in\s*\()[\s\S]*?(\))/i,
+    "$1'owner','admin','office_staff','sales_manager','sales_rep','dealer','scheduler',"
+    + "'crew_member','driver'$2");
+  if (dropFromCase === amSql) {
+    console.error("self-test FAILED: could not remove a title from the normTitle CASE — the "
+      + "anchor moved and this assertion is inert");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropFromCase })
+        .some((e) => /missing from .*`when p_title in \(\.\.\.\)` CASE/.test(e))) {
+    console.error("self-test FAILED: a title missing from the normTitle CASE did not fire");
+    process.exit(1);
+  }
+  // (g) IS NOT FOOLED BY PROSE. A migration header that merely NAMES k_presets must not
+  //     become the thing parsed — the first cut of this rule read k_areas as the preset table
+  //     and reported every area as an unknown job title.
+  const prosed = "-- this migration rewrites k_presets and k_areas, see below\n" + amSql;
+  const prosedErrors = checkAreaMirror(amFiles, { sql: prosed });
+  if (prosedErrors.length) {
+    console.error("self-test FAILED: a header comment naming k_presets/k_areas broke the "
+      + "parse — the rule is anchoring on prose:");
+    for (const e of prosedErrors) console.error("  " + e);
+    process.exit(1);
+  }
+  // (h) REFUSES TO RUN BLIND on a renamed TITLES export, exactly as (d) does for AREAS.
+  if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const TITLES", "export const TITLES_RENAMED") })
+        .some((e) => /cannot find the `export const TITLES` array/.test(e))) {
+    console.error("self-test FAILED: a renamed TITLES export reported clean instead of blind");
+    process.exit(1);
+  }
   console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
-    + "missing from SQL and on a level-vocabulary mismatch, and refuses to run blind");
+    + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
+    + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
+    + "blind on a renamed AREAS or TITLES export");
 
   process.exit(0);
 }

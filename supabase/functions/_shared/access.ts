@@ -25,7 +25,9 @@
 // Change the meaning of 'own' and all three move together. See ownContactsOnly() below.
 
 export type Level = "none" | "view" | "edit" | "own";
-export type Title = "owner" | "admin" | "sales_rep" | "crew_leader" | "driver";
+export type Title =
+  | "owner" | "admin" | "office_staff" | "sales_manager" | "sales_rep"
+  | "dealer" | "scheduler" | "crew_leader" | "crew_member" | "driver";
 
 /** One switch on the Team screen. `levels` is the vocabulary for THAT row — commissions
  *  is deliberately different from the rest, so the grid is data-driven rather than
@@ -198,12 +200,38 @@ export const AREAS: Area[] = [
 export const AREA_KEYS: string[] = AREAS.map((a) => a.key);
 const AREA_BY_KEY = new Map(AREAS.map((a) => [a.key, a]));
 
+/**
+ * The job titles a builder picks from, in DESCENDING order of authority — the Team screen
+ * renders the pills in this order, so it is the reading order of the whole model.
+ *
+ * Ten of them since 2026-09-07 (Carolyn: "Owner, Office Staff, Sales Manager, Sales Rep,
+ * Dealer, Crew Leader, Crew Member, Scheduler, Driver"). Her nine did not include ADMIN, and
+ * her decision was to KEEP it rather than fold it into Office Staff: admin is not just a
+ * label here — it is the only title that may hold a granted Billing switch (see ownerGranted)
+ * and roleForTitle maps it to the coarse role='admin' that older RLS policies read. Retitling
+ * every existing admin would have moved real people's access on a rename.
+ *
+ * ⚠️ ADDING A TITLE IS A THREE-PLACE CHANGE and two of them fail SILENTLY:
+ *   1. here + PRESETS below;
+ *   2. `k_presets` inside area_level_for() — the SQL twin the RESTRICTIVE RLS policies read.
+ *      A title missing there resolves to 'none' for EVERY area, so the person passes every
+ *      edge-function gate and then reads empty lists with error === null;
+ *   3. client_users_title_check — a hardcoded CHECK constraint (100_user_access.sql:53,
+ *      re-issued by 207). A title missing there cannot be SAVED at all.
+ * scripts/preflight.mjs now compares this list against k_presets in both directions, which
+ * covers (2); (3) has no guard, so read 207's header before adding the eleventh.
+ */
 export const TITLES: { key: Title; label: string; blurb: string }[] = [
-  { key: "owner",       label: "Owner",       blurb: "Everything, always — cannot be reduced" },
-  { key: "admin",       label: "Admin",       blurb: "Runs the business day to day; an owner can grant Billing" },
-  { key: "sales_rep",   label: "Sales Rep",   blurb: "Sells: designs, quotes, contacts, own commission" },
-  { key: "crew_leader", label: "Crew Leader", blurb: "Runs builds and repairs" },
-  { key: "driver",      label: "Driver",      blurb: "Runs deliveries" },
+  { key: "owner",         label: "Owner",         blurb: "Everything, always — cannot be reduced" },
+  { key: "admin",         label: "Admin",         blurb: "Runs the business day to day; an owner can grant Billing" },
+  { key: "office_staff",  label: "Office Staff",  blurb: "Quotes, orders and paperwork; keeps business details current" },
+  { key: "sales_manager", label: "Sales Manager", blurb: "Runs the sales team and sees everyone's numbers" },
+  { key: "sales_rep",     label: "Sales Rep",     blurb: "Sells: designs, quotes, contacts, own commission" },
+  { key: "dealer",        label: "Dealer",        blurb: "Sells their own customers only — sees nobody else's" },
+  { key: "scheduler",     label: "Scheduler",     blurb: "Plans builds, deliveries and repairs" },
+  { key: "crew_leader",   label: "Crew Leader",   blurb: "Runs builds and repairs" },
+  { key: "crew_member",   label: "Crew Member",   blurb: "Sees their build board and repairs, changes nothing" },
+  { key: "driver",        label: "Driver",        blurb: "Runs deliveries" },
 ];
 
 /** A title's default switches. Anything a preset omits is "none" — new areas are therefore
@@ -220,6 +248,39 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     settings_team: "edit",
     settings_billing: "none",
   },
+  // The five titles below arrived together on 2026-09-07. Each one's shape is Carolyn's
+  // answer to "what should this person get the moment you pick the title", and the switches
+  // stay editable per person afterwards — a preset is a starting point, never a ceiling.
+  //
+  // Office staff run the paperwork: they process quotes, orders and change orders, keep the
+  // inventory list straight, and can SEE what is scheduled without moving anything. The two
+  // settings cards are the ones a business's paperwork actually depends on — the details that
+  // print on an estimate, and the accounting mappings. Team, Billing, Structures, Options,
+  // CRM and Email are all omitted, so they cannot reshape the product or the money.
+  //
+  // ⚠️ `designer` is deliberately absent: this title manages quote RECORDS, it does not build
+  // them. An office staffer who takes phone orders needs designer:'edit' switched on per
+  // person — one click on the Team screen — rather than every office staffer getting it.
+  office_staff: {
+    designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    change_orders: "edit",
+    build_schedule: "view", delivery_schedule: "view", repairs: "view", reports: "view",
+    settings_branding: "edit", settings_quickbooks: "edit",
+  },
+  // A sales rep plus the two things that make someone a MANAGER of reps: everyone's payout
+  // figures (commissions:'edit' is what seesAllPayouts() reads) and change orders, because
+  // re-opening a signed agreement is the call a manager gets pulled into. Reports:'edit'
+  // rather than 'view' — running the numbers is the job.
+  //
+  // NOTE this is the ONE new preset that hands out pay information by default, and it was
+  // asked for explicitly (Carolyn, 2026-09-07: "Everyone's payouts"). It runs against the
+  // grain of the commissions confidentiality rule, which otherwise assumes nothing about pay
+  // is visible unless an owner grants it per person — so if that rule ever tightens, this
+  // line is the one to revisit.
+  sales_manager: {
+    designer: "edit", designs: "edit", contacts: "edit", inventory: "view",
+    orders: "edit", change_orders: "edit", commissions: "edit", reports: "edit",
+  },
   sales_rep: {
     designer: "edit", designs: "edit", contacts: "edit",
     // orders:'edit' since 2026-09-01 (Carolyn): a rep should be able to edit, complete and
@@ -229,9 +290,39 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
     // the list is exhaustive when new areas must keep defaulting closed.
     inventory: "view", orders: "edit", commissions: "own",
   },
+  // The independent salesperson the contacts:'own' scope was built for (see the AREAS comment
+  // on `contacts`, quoting Carolyn on a builder whose reps are dealers: "he also doesn't want
+  // them to see each other's quotes either"). Identical to a sales rep except that the
+  // customer list — and therefore the designs and leads hanging off it — is narrowed to the
+  // customers they are assigned to or following.
+  //
+  // ⚠️ CONSEQUENCE, NOT AN OVERSIGHT: 'own' is a READ scope. RANK scores it level with 'view',
+  // so canEdit(contacts) is FALSE and a dealer cannot edit a contact, add a note, log an
+  // activity, or send SMS/email — on their own customers included. That is the documented
+  // behaviour of the level (see ownContactsOnly), and making it a write scope is a separate
+  // decision that belongs to Carolyn, not a bug to patch here. An owner who wants a
+  // particular dealer to work their records switches that one person to contacts:'edit'.
+  dealer: {
+    designer: "edit", designs: "edit", contacts: "own",
+    inventory: "view", orders: "edit", commissions: "own",
+  },
+  // Owns all three boards. Everything else is 'view' because a scheduler has to see WHAT they
+  // are scheduling and WHO it is for — the building on the order, the customer to call about
+  // a delivery window — without being able to change the sale.
+  scheduler: {
+    build_schedule: "edit", delivery_schedule: "edit", repairs: "edit",
+    designs: "view", contacts: "view", inventory: "view", orders: "view",
+  },
   crew_leader: {
     build_schedule: "edit", repairs: "edit",
     designs: "view", inventory: "view", orders: "view",
+  },
+  // Read-only on the two boards their leader runs: they see their jobs and what is coming,
+  // and cannot move a date, reassign a crew or close a job. Nothing else — the build card
+  // already carries the building spec (build_jobs snapshots style, size, roof and colours),
+  // so seeing the board does not require the design or the order behind it.
+  crew_member: {
+    build_schedule: "view", repairs: "view",
   },
   driver: {
     delivery_schedule: "edit",

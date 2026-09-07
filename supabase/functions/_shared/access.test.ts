@@ -37,6 +37,7 @@ import {
   roleForTitle,
   sanitizeAccess,
   seesAllPayouts,
+  TITLES,
 } from "./access.ts";
 
 Deno.test("owner is absolute — stored overrides cannot reduce them", () => {
@@ -452,4 +453,185 @@ Deno.test("an approver can pass Approve on; a raiser cannot", () => {
   assertEquals(mayGrant("user", approver, "change_order_approve", "edit"), true);
   const raiser = effectiveAccess("user", "sales_rep", { change_orders: "edit" });
   assertEquals(mayGrant("user", raiser, "change_order_approve", "edit"), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The five titles added 2026-09-07 (migration 218)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Carolyn asked for nine job titles and for each to seed sensible defaults "but we still
+// keep the override access that is already set". The second half is the part that can
+// regress invisibly — a preset is easy to eyeball, a preset-plus-override is not — so it is
+// pinned per title rather than once.
+
+Deno.test("every TITLE has a preset, and every preset key is a real area", () => {
+  // Guards the two directions a title can be half-added: named in TITLES with no preset (it
+  // silently resolves to all-none) or given a preset that no pill can select.
+  for (const t of TITLES) {
+    assert(PRESETS[t.key] !== undefined, `TITLES has ${t.key} but PRESETS does not`);
+  }
+  for (const key of Object.keys(PRESETS)) {
+    assert(TITLES.some((t) => t.key === key), `PRESETS has ${key} but TITLES does not`);
+  }
+  for (const [title, preset] of Object.entries(PRESETS)) {
+    for (const [area, level] of Object.entries(preset)) {
+      const a = AREAS.find((x) => x.key === area);
+      assert(a, `preset ${title} names unknown area ${area}`);
+      assert(
+        a.levels.includes(level as Level),
+        `preset ${title} gives ${area}=${level}, which is not in that area's vocabulary`,
+      );
+    }
+  }
+});
+
+Deno.test("office staff run the paperwork and cannot reshape the product", () => {
+  const a = effectiveAccess("user", "office_staff", null);
+  assertEquals(a.orders, "edit");
+  assertEquals(a.change_orders, "edit");
+  assertEquals(a.inventory, "edit");
+  assertEquals(a.settings_branding, "edit");
+  assertEquals(a.settings_quickbooks, "edit");
+  // Sees the boards, moves nothing on them.
+  assertEquals(a.build_schedule, "view");
+  assertEquals(a.delivery_schedule, "view");
+  assertFalse(canEdit(a, "build_schedule"));
+  // Deliberately absent — see the preset's own comment.
+  assertEquals(a.designer, "none");
+  assertEquals(a.commissions, "none");
+  assertEquals(a.settings_structures, "none");
+  assertEquals(a.settings_team, "none");
+  assertEquals(a.settings_billing, "none");
+});
+
+Deno.test("a sales manager sees everyone's payouts; a rep and a dealer see only their own", () => {
+  assert(seesAllPayouts(effectiveAccess("user", "sales_manager", null)));
+  assertFalse(seesAllPayouts(effectiveAccess("user", "sales_rep", null)));
+  assertFalse(seesAllPayouts(effectiveAccess("user", "dealer", null)));
+  // The manager's other two differences from a rep.
+  assertEquals(effectiveAccess("user", "sales_manager", null).change_orders, "edit");
+  assertEquals(effectiveAccess("user", "sales_manager", null).reports, "edit");
+});
+
+Deno.test("a dealer sees only their own customers — and that is a READ scope", () => {
+  const a = effectiveAccess("user", "dealer", null);
+  assert(ownContactsOnly(a));
+  assert(canRead(a, "contacts"));       // 'own' still reads
+  assertFalse(canEdit(a, "contacts"));  // ...and still cannot write. Documented, not a bug.
+  // Everything else is a sales rep.
+  assertEquals(a.designer, "edit");
+  assertEquals(a.orders, "edit");
+  assertEquals(a.commissions, "own");
+  assertFalse(ownContactsOnly(effectiveAccess("user", "sales_rep", null)));
+});
+
+Deno.test("a scheduler owns all three boards and can change no sale", () => {
+  const a = effectiveAccess("user", "scheduler", null);
+  assertEquals(a.build_schedule, "edit");
+  assertEquals(a.delivery_schedule, "edit");
+  assertEquals(a.repairs, "edit");
+  assertEquals(a.orders, "view");
+  assertEquals(a.designs, "view");
+  assertEquals(a.contacts, "view");
+  assertFalse(canEdit(a, "orders"));
+});
+
+Deno.test("a crew member reads the boards their leader runs, and nothing else", () => {
+  const a = effectiveAccess("user", "crew_member", null);
+  assertEquals(a.build_schedule, "view");
+  assertEquals(a.repairs, "view");
+  assertFalse(canEdit(a, "build_schedule"));
+  // The difference from a crew leader, stated as a difference.
+  const leader = effectiveAccess("user", "crew_leader", null);
+  assertEquals(leader.build_schedule, "edit");
+  assertEquals(leader.repairs, "edit");
+  for (const k of ["designs", "orders", "inventory", "contacts", "designer", "commissions"]) {
+    assertEquals(a[k], "none", `crew_member should not hold ${k}`);
+  }
+});
+
+Deno.test("THE OVERRIDES STILL WIN on every new title", () => {
+  // The half of Carolyn's request that must not regress: a preset is a starting point, and
+  // a stored deviation layers on top of it exactly as it did on the five older titles.
+  assertEquals(effectiveAccess("user", "dealer", { contacts: "edit" }).contacts, "edit");
+  assertEquals(effectiveAccess("user", "crew_member", { orders: "view" }).orders, "view");
+  assertEquals(effectiveAccess("user", "office_staff", { designer: "edit" }).designer, "edit");
+  assertEquals(effectiveAccess("user", "scheduler", { orders: "edit" }).orders, "edit");
+  // ...including taking one AWAY, which is the direction a preset cannot express.
+  assertEquals(effectiveAccess("user", "sales_manager", { commissions: "own" }).commissions, "own");
+});
+
+Deno.test("the three skips still apply to the new titles", () => {
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    // Team comes with the title; Billing is holdable only by an admin; an unknown area is
+    // never trusted out of the stored blob.
+    assertEquals(effectiveAccess("user", t, { settings_team: "edit" }).settings_team, "none");
+    assertEquals(effectiveAccess("user", t, { settings_billing: "edit" }).settings_billing, "none");
+    assertEquals(effectiveAccess("user", t, { no_such_area: "edit" }).no_such_area, undefined);
+    // ...and an out-of-vocabulary level is discarded rather than stored: 'own' is not in
+    // orders' vocabulary, so the preset stands.
+    const preset = PRESETS[t as keyof typeof PRESETS];
+    assertEquals(effectiveAccess("user", t, { orders: "own" }).orders, preset.orders ?? "none");
+  }
+});
+
+Deno.test("every new title is coarse role 'user' — none of them is a second admin", () => {
+  // roleForTitle feeds client_users.role, which older RLS policies read. A new title that
+  // resolved to 'admin' would hand out the Billing grant and the Team screen by accident.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(roleForTitle(t), "user");
+    assertEquals(effectiveAccess("user", t, null).settings_team, "none");
+  }
+  assertEquals(roleForTitle("admin"), "admin");
+  assertEquals(roleForTitle("owner"), "owner");
+});
+
+Deno.test("Approve Changes stayed denied by default when five titles were added", () => {
+  // 212's rule, re-pinned because 218 rewrote the same preset table: everyone starts at
+  // None except owners and admins.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(effectiveAccess("user", t, null).change_order_approve, "none");
+  }
+  assertEquals(effectiveAccess("admin", "admin", null).change_order_approve, "edit");
+});
+
+Deno.test("sanitizeAccess accepts the new titles and still refuses Billing on them", () => {
+  // A title the sanitizer does not recognise falls back to sales_rep, which would silently
+  // rewrite what an owner saved. Checked per title rather than inferred from normTitle.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(sanitizeAccess({ orders: "edit" }, t), { orders: "edit" });
+    assertEquals(sanitizeAccess({ settings_billing: "edit" }, t), {});
+    assertEquals(sanitizeAccess({ settings_team: "edit" }, t), {});
+  }
+});
+
+Deno.test("an owner may hand out any new title's whole preset; a sales manager may not", () => {
+  const owner = effectiveAccess("owner", "owner", null);
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(mayGrantMap("owner", owner, effectiveAccess("user", t, null)), null);
+  }
+  // Nobody grants above themselves. A sales manager holds inventory at 'view' and no
+  // settings at all, so they cannot mint an office staffer who edits either. mayGrantMap
+  // reports the FIRST area it refuses in AREA_KEYS order, and Inventory precedes the
+  // settings group — so this asserts both that the refusal happens and where.
+  const mgr = effectiveAccess("user", "sales_manager", null);
+  assertEquals(
+    mayGrantMap("user", mgr, effectiveAccess("user", "office_staff", null)),
+    "Inventory",
+  );
+  // ...and it is not only the first one it names. Asked area by area, a manager holds none
+  // of what makes office staff office staff.
+  assertFalse(mayGrant("user", mgr, "inventory", "edit"));
+  assertFalse(mayGrant("user", mgr, "settings_branding", "edit"));
+  assertFalse(mayGrant("user", mgr, "settings_quickbooks", "edit"));
+  assertFalse(mayGrant("user", mgr, "build_schedule", "view"));
+});
+
+Deno.test("a dealer's narrowed contacts scope cannot be widened by someone who shares it", () => {
+  // Rule 3 of mayGrant, exercised on the title the 'own' scope was built for: an admin whom
+  // an owner had deliberately narrowed to contacts:'own' cannot hand a dealer the whole list.
+  const narrowed = effectiveAccess("admin", "admin", { contacts: "own" });
+  assertFalse(mayGrant("admin", narrowed, "contacts", "view"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "edit"));
+  assert(mayGrant("admin", narrowed, "contacts", "own"));
 });

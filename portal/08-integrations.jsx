@@ -1472,12 +1472,23 @@ function ssSwitchLock(area, isOwner, title) {
   return null;
 }
 
+// One colour per job title, grouped so the Team table reads at a glance: purple/blue for the
+// two that run the business, green for everyone who sells, amber for everyone who builds,
+// indigo for everyone who moves buildings. Ten of them since 2026-09-07 — a title with no
+// entry here falls back to grey, which is legible but says nothing, so keep this in step with
+// TITLES in _shared/access.ts. (The server ships TITLES; this is presentation only, and a
+// missing colour is the one drift here that is genuinely harmless.)
 const TITLE_CHIP = {
-  owner:       ["#EDE9FE", "#5B21B6"],
-  admin:       ["#DBEAFE", "#1E40AF"],
-  sales_rep:   ["#DCFCE7", "#166534"],
-  crew_leader: ["#FEF3C7", "#92400E"],
-  driver:      ["#E0E7FF", "#3730A3"],
+  owner:         ["#EDE9FE", "#5B21B6"],
+  admin:         ["#DBEAFE", "#1E40AF"],
+  office_staff:  ["#E0F2FE", "#075985"],
+  sales_manager: ["#D1FAE5", "#065F46"],
+  sales_rep:     ["#DCFCE7", "#166534"],
+  dealer:        ["#ECFCCB", "#3F6212"],
+  scheduler:     ["#FAE8FF", "#86198F"],
+  crew_leader:   ["#FEF3C7", "#92400E"],
+  crew_member:   ["#FFEDD5", "#9A3412"],
+  driver:        ["#E0E7FF", "#3730A3"],
 };
 
 function ssInitials(name, email) {
@@ -1522,6 +1533,21 @@ function ssAccessSummary(m, meta) {
   if (m.title === "admin" && lvl("settings_billing") !== "none" &&
       areas.every((a) => a.key === "settings_billing" || lvl(a.key) === (adminPreset[a.key] || "none"))) {
     return "All tabs · Settings incl. Billing";
+  }
+  // ...and the same courtesy for the other eight titles, generically. Before 2026-09-07 only
+  // Admin had a shorthand and everyone else got the itemised list, which was tolerable at
+  // five titles and is not at ten: an untouched Office Staff itemises eleven area names into
+  // a table cell. Anyone sitting exactly on their preset is described by the preset.
+  //
+  // ⚠️ IT MUST FALL THROUGH THE MOMENT ANYTHING DEVIATES. This column is what an owner scans
+  // to answer "what can Dana actually do?", so a person carrying a single override has to
+  // look different from one who does not — "Standard Dealer" on someone who has been handed
+  // Structures would be the exact lie the column exists to prevent. Compared against the
+  // RESOLVED map, so an override that merely restates the preset correctly reads as standard.
+  const ownPreset = presets[m.title];
+  if (ownPreset && areas.every((a) => lvl(a.key) === (ownPreset[a.key] || "none"))) {
+    const label = ((meta && meta.titles) || []).find((t) => t.key === m.title);
+    if (label) return "Standard " + label.label;
   }
   const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
   const parts = [];
@@ -1791,7 +1817,10 @@ function CommissionTeamInner() {
   // migration 100 and has no title yet, so an older account never renders a blank cell.
   const titleChip = (m, titles) => {
     const t = (titles || []).find((x) => x.key === m.title);
-    const c = { owner: ["#EDE9FE", "#5B21B6"], admin: ["#DBEAFE", "#1E40AF"] }[m.title] || ["#F1F5F9", "#475569"];
+    // Reads TITLE_CHIP rather than its own two-entry copy. That copy predated the other
+    // eight titles and would have rendered every one of them the same grey, in the column
+    // whose whole job is telling them apart.
+    const c = TITLE_CHIP[m.title] || ["#F1F5F9", "#475569"];
     return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{t ? t.label : (m.role || "user")}</span>;
   };
   const sw = (on) => <span style={{ display: "inline-block", width: 34, height: 20, borderRadius: 20, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s" }}><span style={{ position: "absolute", top: 2, [on ? "right" : "left"]: 2, width: 16, height: 16, borderRadius: "50%", background: "#FFF" }} /></span>;

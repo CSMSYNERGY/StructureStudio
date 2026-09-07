@@ -286,11 +286,49 @@ VOCABULARY, in both directions, against whichever migration most recently *defin
 SQL, fires on a level mismatch, and refuses to run blind if `AREAS` is renamed. If it fires, add
 the area to the SQL in the same commit rather than bypassing it.
 
-⚠️ **What it still does NOT cover: `PRESETS` ↔ `k_presets`** — and the sales_rep `orders` drift
-above is a preset drift, so that one would still get through. `PRESETS.owner` is computed
-(`Object.fromEntries(AREA_KEYS.map(...))`), so it cannot be read statically the way the areas can,
-and a regex that skipped the computed row would report a clean diff while covering three titles out
-of five. Closing it needs the TypeScript evaluated, not scanned.
+✅ **Since 2026-09-07 it also compares the JOB TITLES, across all THREE copies of that list:**
+`TITLES` in access.ts, `k_presets` in the SQL, and the `when p_title in (...)` CASE inside the same
+SQL function (normTitle's mirror). Both directions, and the self-test proves each fires. The third
+copy earns its check: a title in `k_presets` but missing from the CASE does not error, it falls
+through to **`sales_rep`** and silently resolves someone else's preset.
+
+⚠️ **What it still does NOT cover: the preset LEVELS** (does sales_rep hold `orders` at view or
+edit?) — and the sales_rep `orders` drift above is exactly that, so it would still get through.
+`PRESETS.owner` is computed (`Object.fromEntries(AREA_KEYS.map(...))`), so the table cannot be read
+statically the way the areas can, and a regex that skipped the computed row would report a clean
+diff while covering nine titles out of ten. Closing it needs the TypeScript evaluated, not scanned.
+What IS closed is the failure that actually deletes access: a title one side has never heard of.
+
+### Ten job titles (migration 218, 2026-09-07)
+
+Carolyn asked for nine — *"Owner, Office Staff, Sales Manager, Sales Rep, Dealer, Crew Leader, Crew
+Member, Scheduler, Driver"* — and her decision was to **keep Admin as a tenth** rather than fold it
+into Office Staff, because admin is not merely a label: it is the only title that may HOLD a granted
+Billing switch (`ownerGranted`), and `roleForTitle` maps it to the coarse `role='admin'` that older
+policies read. Renaming it would have moved real people's access under cover of a relabel.
+
+The five new presets (reasoning lives beside each one in `access.ts`, decisions are Carolyn's):
+`office_staff` paperwork — designs/contacts/inventory/orders/change_orders edit, the three boards +
+reports view, branding + QuickBooks edit, **no designer**; `sales_manager` a rep plus change orders,
+reports edit and **everyone's payouts**; `dealer` a rep narrowed to `contacts:'own'`; `scheduler` all
+three boards edit, everything else view; `crew_member` build_schedule + repairs **view only**.
+Overrides are untouched — `client_users.access` stores deviations, so every switch set before this
+resolves exactly as it did, which migration 218's PART 3 asserts rather than claims.
+
+⛔ **Adding an eleventh title is a THREE-PLACE change and two of them fail silently.** `TITLES` +
+`PRESETS`; `k_presets` + the normTitle CASE (preflight now catches both); and
+**`client_users_title_check`**, a hardcoded CHECK re-issued by 218 — a title missing there cannot be
+SAVED at all, and nothing guards it. `176_operator_support_only.sql:26-29` flagged that trap in 2026-08
+and noted no code comment mentioned it; `TITLES`' own doc block does now.
+
+⛔ **`area_level_for`'s "current definition" is NOT 193, and this file said it was.** 218 was very
+nearly written against `193_contacts_own_scope.sql`, which would have `create or replace`d the
+`change_order_approve` area (added by **212**, hours earlier) straight back out — silently, since an
+unknown area returns `'none'` rather than raising. **Derive the newest definition, never read it off
+a doc:** `grep -l 'create or replace function public.area_level_for' supabase/migrations/*.sql`, and
+cross-check what is actually deployed with
+`select pg_get_functiondef('public.area_level_for(text,text,jsonb,text)'::regprocedure);` — the live
+database ran an area this clone's migrations 208-217 had never been committed with.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec
