@@ -2825,9 +2825,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // row, and a spec drafted from the first half of the walk. The response reports
     // `frames` for exactly that reason — a truncation that shows up in the UI is a bug you
     // can see, and this one otherwise looks like the model simply reading the shed wrong.
+    // 'combined' (2026-09-07, Ahsan: "I want the users to upload the video and images both
+    // after that we generate the 3D model") reads a walk-around's frames AND the builder's
+    // own photos in one call. It takes the VIDEO prompt, because a combined set still
+    // contains the walk-around and that prompt is the one that knows the roof was only ever
+    // seen from the ground — the single most important thing about this input.
+    //
+    // TWELVE is Carolyn's own number, 09-04 @13:53: "three from the back, three from this
+    // side, one three from this side, and three from this side."
     const fromVideo = payload.source === "video";
-    const photoUrls = sanitizePhotoUrls(payload.photoUrls, fromVideo ? 8 : 4);
+    const combined = payload.source === "combined";
+    const shapeFirst = fromVideo || combined;
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? 8 : 4);
     if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
+    // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
+    // drafted from part of the set — and the builder concludes the AI reads sheds badly. The
+    // caller is told what was actually read, for every source and not just video, so the UI
+    // can say so instead of guessing from a constant it has to keep in step by hand.
+    const sentCount = Array.isArray(payload.photoUrls) ? payload.photoUrls.filter(Boolean).length : 0;
+    const droppedCount = Math.max(0, sentCount - photoUrls.length);
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
 
@@ -2850,7 +2867,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: fromVideo ? "video" : "photos" }).select("id").single();
+    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" }).select("id").single();
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
@@ -2876,7 +2893,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the uploaded video". The $20 is priced off the video's Anthropic cost, and the photo
     // path is slated for removal.
     let holdId: number | null = null;
-    if (fromVideo) {
+    // CHARGED FOR COMBINED TOO (2026-09-07). 129 rode the charge on video alone for two
+    // reasons, and migration 206's header records both and why they no longer hold: the
+    // photo path is no longer 'slated for removal' (it came back on 09-04 at Carolyn's
+    // request), and pricing the accurate option higher is backwards from what she asked
+    // for. One press is one hold is one charge, whichever inputs it read.
+    if (shapeFirst) {
       const { data: hold, error: holdErr } = await admin
         .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
         .maybeSingle() as { data: any; error: any };
@@ -2996,14 +3018,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           model: "claude-sonnet-5",
           // The video prompt asks for an `observed` block on top of the spec, so it needs
           // the headroom. A truncated reply is unparseable, not partially useful.
-          max_tokens: fromVideo ? 900 : 700,
+          max_tokens: shapeFirst ? 900 : 700,
           messages: [{
             role: "user",
             content: [
               // URL sources: the photos live in public buckets, so Anthropic can fetch them
               // and we never proxy the bytes through this function.
               ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              { type: "text", text: fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
+              { type: "text", text: shapeFirst ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
             ],
           }],
         }),
@@ -3060,7 +3082,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `frames` makes a silent truncation visible; `observed` is the builder-facing note
     // about doors, windows and vents, which the spec has no field for; `balanceCents` lets
     // the panel show the new balance without a second round trip.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null, balanceCents });
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: shapeFirst ? parseObservedNotes(text) : null, balanceCents });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;

@@ -886,6 +886,25 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
       return data.d3;
     },
+    /* EVERYTHING THE BUILDER HAS, IN ONE CHARGED GENERATION (2026-09-07). Ahsan: "I want the
+       users to upload the video and images both after that we generate the 3D model."
+
+       A SEPARATE capability rather than a flag on the two above, for the reason their own
+       comment gives: this one returns the whole envelope (`frames` and `dropped` prove what
+       was actually read; `observed` carries what the model saw about doors and vents) and the
+       photo caller wants a bare spec. One function returning two shapes is how the wrong one
+       gets read.
+
+       It takes the VIDEO prompt server-side, because a combined set still contains the
+       walk-around and that prompt is the one that knows the roof was only ever seen from the
+       ground — the single most important fact about this input. Cap is 12, Carolyn's own
+       "three from each side". */
+    onDraftFromCombined: async (photoUrls, styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined" } });
+      if (error) throw new Error(error.message || "Generating failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
+      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
+    },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
     // raises the frame cap from four to eight.

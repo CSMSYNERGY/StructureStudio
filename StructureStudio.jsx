@@ -11449,21 +11449,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // widened this button says out loud how many will actually be read rather than quietly
   // sending twelve and drafting from four — silent truncation reads as "it used everything"
   // and is exactly how a builder concludes the AI is bad at its job.
-  const CAL_PHOTOS_READ = 4;
   const calGenerateFromPhotos = async () => {
     if (adminCalBusy || adminCalVideo.busy) return;
     const urls = adminCal.photos.filter(Boolean);
     if (!urls.length) { setAdminCalMsg({ ok: false, msg: "Add at least one photo first." }); return; }
-    if (!(setup3d && setup3d.onDraftFromPhotos)) return;
+    if (!(setup3d && setup3d.onDraftFromCombined)) return;
     setAdminCalBusy(true); setAdminCalMsg(null);
     try {
-      const d3 = await setup3d.onDraftFromPhotos(urls, adminCal.styleValue);
-      applyDraftedSpec(d3);
-      const used = Math.min(urls.length, CAL_PHOTOS_READ);
-      const dropped = urls.length - used;
-      setAdminCalMsg({ ok: true, msg: `Read ${used} photo${used === 1 ? "" : "s"}${dropped ? ` (the other ${dropped} were not used — the server reads ${CAL_PHOTOS_READ} at a time)` : ""}. Preview it, adjust anything, then Save.` });
+      // ONE CALL, EVERYTHING THEY HAVE. A walk-around import fills the first four slots and
+      // the builder's own photos sit beyond them, so this ONE array already IS "the video
+      // and the images both" — there is nothing to merge here, which is exactly why the
+      // slots were kept as a single list rather than two.
+      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue);
+      applyDraftedSpec(res.d3);
+      // THE SERVER SAYS WHAT IT READ. This used to guess from a local constant that had to
+      // be kept in step with the edge function by hand, and a count that drifts is worse
+      // than no count — it reports a truncation that did not happen, or hides one that did.
+      const used = res.frames || urls.length;
+      const dropped = res.dropped || 0;
+      setAdminCalMsg({ ok: true, msg: `Read ${used} view${used === 1 ? "" : "s"}${dropped ? ` (${dropped} more were not used — twelve is the most one generation reads)` : ""}. Colours and cladding are untouched — preview it, adjust anything, then Save.` });
     } catch (e) {
-      setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those photos." });
+      setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });
     } finally { setAdminCalBusy(false); }
   };
 
@@ -13183,11 +13189,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     concerned about that. What I am most concerned about is to give them as
                     accurate of a building as possible, even if it's, then yes, then combine
                     all of the sources." */}
-                {setup3d && setup3d.onDraftFromPhotos && scan.aiReady !== false && adminCal.photos.some(Boolean) && (
+                {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && adminCal.photos.some(Boolean) && (
                   <button onClick={calGenerateFromPhotos} disabled={adminCalBusy || adminCalVideo.busy}
-                    title="Read this building's shape from the photos above"
+                    title="Read this building's shape from every view above — the walk-around frames and your own photos together"
                     style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
-                    {adminCalBusy ? "Working…" : "✨ Generate 3D from these photos"}
+                    {adminCalBusy ? "Working…" : "✨ Generate 3D from these views"}
                   </button>
                 )}
                 <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
