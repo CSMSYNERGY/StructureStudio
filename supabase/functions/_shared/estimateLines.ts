@@ -550,31 +550,42 @@ function amendedTax(baseTax: any, extra: any[]): any | null {
 /**
  * The three `orders` money columns as they stand once a change order has been acknowledged.
  *
- * WHY THIS IS NOT `total_cents = co.total_after_cents`, which is what the acknowledging
- * writers did until 2026-09-07:
+ * ONE ARITHMETIC. This is amendedInvoiceDocument with the order deliberately NOT supplied, so
+ * nothing reconciles against the figure being replaced — the document the customer will be
+ * shown and the ledger the builder will read are computed by the same code from the same
+ * inputs, which is the only way they cannot drift.
  *
- *   1. IT DROPS EVERY EARLIER FEE. `total_after_cents` is "the whole order total after this
- *      change", computed by totalFromSnapshot from the design's lines — and a fee is never
- *      in those lines (it cannot be; submit-estimate rebuilds them from the catalog on every
- *      edit). So acknowledging CO-2 would overwrite the total with a figure that has never
- *      heard of CO-1's fee, silently refunding it. Hence the sum over ALL acknowledged rows.
- *   2. IT LEAVES pretax_subtotal_cents AND tax_cents BEHIND. Migration 148 made the three
+ * WHY NOT `total_cents = co.total_after_cents`, which is what the acknowledging writers did
+ * until 2026-09-07. Three separate silent failures:
+ *
+ *   1. IT DROPS EVERY EARLIER FEE. `total_after_cents` is computed by totalFromSnapshot from
+ *      the design's LINES, and a fee is never in those lines (it cannot be — submit-estimate
+ *      rebuilds them from the catalog on every edit). Acknowledging CO-2 therefore overwrote
+ *      the total with a figure that had never heard of CO-1's fee, silently refunding it.
+ *   2. IT DROPS EVERY EARLIER MANUAL CHANGE ORDER. Same reason, and worse: a manual change
+ *      moves the total without touching the lines at all. On the beta order this was proved
+ *      against, two acknowledged manual changes worth $650 sat on top of a $3,400 design —
+ *      and one design edit afterwards would have reset the order to the design's own total,
+ *      erasing both. The walk below recognises what the snapshot already prices and bills
+ *      only what it does not.
+ *   3. IT LEAVES pretax_subtotal_cents AND tax_cents BEHIND. Migration 148 made the three
  *      columns a set that must agree, and send_invoice hands `pretax_subtotal_cents` to
  *      amendedInvoiceDocument as the figure the printed lines are reconciled against. Move
- *      the total alone and the invoice reconciles against a stale pre-tax number, printing an
- *      "Order adjustment" row worth the difference on the customer's bill.
+ *      the total alone and the invoice grows an "Order adjustment" row on the customer's bill.
  *
- * THE SPLIT IS TAKEN FROM THE SNAPSHOT, NOT RE-DERIVED. `agreedSnap` is the design as
- * acknowledged (change_orders_stamp_agreed has already moved accepted_snapshot forward for a
- * design_edit CO by the time this is called), so its own pre-tax/tax split is the right one.
- * Anything `total_after_cents` holds ON TOP of that snapshot total is a MANUAL change order's
- * typed figure, which has no line behind it to tax — it goes to pre-tax, exactly where the
- * document puts its row.
+ * `agreedSnap` must be the design as acknowledged — change_orders_stamp_agreed has already
+ * moved accepted_snapshot forward by the time this is called — and `allAcknowledged` must
+ * include the change just acknowledged, with its fee columns selected.
  *
- * pretax + tax === total by construction, not by a later subtraction that could disagree.
+ * ⚠️ ONE THING THIS DOES NOT RESOLVE, because it was never decided: a MANUAL change order's
+ * total is a figure a rep typed, with no line behind it to tax. It is carried into the pre-tax
+ * column, which is where the document prints its row — so on a TAXED order with a manual
+ * change the document's tax row and this tax column differ by the tax on that row. Untaxed
+ * orders (every manual change order that exists today) are exact. Naming it here rather than
+ * inventing an answer inside a money function.
  *
- * Returns null when `total_after_cents` is null — there is nothing to write, and writing a
- * fabricated zero over a real order total would be the worst outcome available.
+ * Returns null when there is no usable snapshot — nothing to write, and writing a fabricated
+ * zero over a real order total would be the worst outcome available.
  *
  * ⚠️ Duplication ledger — importers, ALL of which must be redeployed together:
  *      customer-accept/index.ts   (the customer signs the change)
@@ -584,39 +595,19 @@ export function orderCentsAfterAck(
   // deno-lint-ignore no-explicit-any
   agreedSnap: any,
   allAcknowledged: AcknowledgedChangeOrder[] | null | undefined,
-  justAcknowledged: AcknowledgedChangeOrder,
 ): { totalCents: number; pretaxCents: number; taxCents: number | null } | null {
-  const after = Number(justAcknowledged?.total_after_cents);
-  if (justAcknowledged?.total_after_cents == null || !Number.isFinite(after)) return null;
+  if (!agreedSnap || !Array.isArray(agreedSnap.lines)) return null;
 
-  const snapMoney = orderCentsFromSnapshot(agreedSnap);
-  const snapTotal = snapMoney?.totalCents ?? Math.round(after);
-  const snapPretax = snapMoney?.pretaxCents ?? Math.round(after);
-  const snapTax = snapMoney?.taxCents ?? null;
+  // null, not the order's own total: reconciling against the number being replaced would
+  // make this function agree with whatever was already there, which is not a calculation.
+  const doc = amendedInvoiceDocument(agreedSnap, allAcknowledged ?? [], null);
+  const taxAmount = doc.tax == null || doc.tax.amount == null ? null : Number(doc.tax.amount);
 
-  // Whatever the acknowledged total holds beyond the snapshot it was taken against.
-  const manualDelta = Math.round(after) - snapTotal;
-
-  let feeCents = 0;
-  let feeTaxCents = 0;
-  for (const co of allAcknowledged ?? []) {
-    const f = Number(co?.fee_cents);
-    if (Number.isFinite(f) && f > 0) feeCents += Math.round(f);
-    const t = Number(co?.fee_tax_cents);
-    if (Number.isFinite(t) && t > 0) feeTaxCents += Math.round(t);
-  }
-  // An untaxed order cannot owe tax on a fee. The trigger already stamps 0 there (it needs a
-  // rate off the snapshot to stamp anything else), so this only ever discards a zero — but a
-  // money column is the wrong place to find that out empirically.
-  if (snapTax == null) feeTaxCents = 0;
-
-  const pretaxCents = snapPretax + manualDelta + feeCents;
-  const taxCents = snapTax == null ? null : snapTax + feeTaxCents;
-  return {
-    totalCents: pretaxCents + (taxCents ?? 0),
-    pretaxCents,
-    taxCents,
-  };
+  const pretaxCents = Math.round(doc.total * 100);
+  const taxCents = taxAmount == null || !Number.isFinite(taxAmount)
+    ? null
+    : Math.max(0, Math.round(taxAmount * 100));
+  return { totalCents: pretaxCents + (taxCents ?? 0), pretaxCents, taxCents };
 }
 
 /**

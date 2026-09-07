@@ -229,7 +229,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     const { data: ackedNow } = await admin.from("change_orders")
       .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("status", "acknowledged");
-    const projected = orderCentsAfterAck(coDesign.estimate_lines, [...(ackedNow ?? []), co], co);
+    const projected = orderCentsAfterAck(coDesign.estimate_lines, [...(ackedNow ?? []), co]);
     const newTotal = projected == null
       ? (co.total_after_cents == null ? null : co.total_after_cents / 100)
       : projected.totalCents / 100;
@@ -352,7 +352,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
           .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
           .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("status", "acknowledged"),
       ]);
-      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? [], co);
+      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
       if (money != null) {
         const { error: totErr } = await admin.from("orders")
           .update({

@@ -331,73 +331,84 @@ Deno.test("a MANUAL change order on a taxed order still gets its own row", () =>
 });
 
 // ── The order's money once a change is acknowledged (2026-09-07) ────────────────────────
-// The writers used to set total_cents = co.total_after_cents and nothing else. Two things
-// were wrong with that and both are silent: a second acknowledged change refunds the first
-// one's FEE (total_after_cents is computed from lines a fee can never be in), and
-// pretax_subtotal_cents is left behind — which is the figure send_invoice reconciles the
-// printed invoice lines against, so the customer's bill grows an "Order adjustment" row.
+// The writers used to set total_cents = co.total_after_cents and nothing else. Three things
+// were wrong with that and all three are silent: a later change refunds an earlier one's FEE
+// and erases every earlier MANUAL change (total_after_cents is computed from the design's
+// lines, which neither of those is in), and pretax_subtotal_cents is left behind — the figure
+// send_invoice reconciles the printed invoice lines against, so the bill grows an anonymous
+// "Order adjustment" row. It is now the SAME call that builds the invoice document.
+
+// A design edit, acknowledged: the lines already price it, and the CO records the
+// tax-inclusive totals either side (10,100 + 717.75 => 10,400 + 739.50).
+const ACKED_EDIT = { co_no: 1, description: "Widened the doors", total_before_cents: 1081775, total_after_cents: 1113950 };
 
 Deno.test("acknowledging a change writes all three columns, and they agree", () => {
-  // A taxed design edit: the design now prices 10,400 + 739.50 tax.
-  const co = { co_no: 1, total_after_cents: 1113950 };
-  const m = orderCentsAfterAck(TAXED_AMENDED, [co], co)!;
-  eq("total", m.totalCents, 1113950);
+  const m = orderCentsAfterAck(TAXED_AMENDED, [ACKED_EDIT])!;
   eq("pretax", m.pretaxCents, 1040000);
   eq("tax", m.taxCents, 73950);
+  eq("total", m.totalCents, 1113950);
   eq("pretax + tax = total, by construction", m.pretaxCents + (m.taxCents ?? 0), m.totalCents);
 });
 
 Deno.test("the fee is added to the order, in the right two columns", () => {
-  const co = { co_no: 1, total_after_cents: 1113950, fee_cents: 15000, fee_tax_cents: 1088 };
-  const m = orderCentsAfterAck(TAXED_AMENDED, [co], co)!;
+  const co = { ...ACKED_EDIT, fee_cents: 15000, fee_taxable: true, fee_tax_cents: 1088 };
+  const m = orderCentsAfterAck(TAXED_AMENDED, [co])!;
   eq("pretax carries the fee", m.pretaxCents, 1055000);
   eq("tax carries the fee's frozen tax", m.taxCents, 75038);
   eq("total", m.totalCents, 1130038);
 });
 
 Deno.test("THE BUG: a second change must not refund the first one's fee", () => {
-  // CO-1 charged a $150 fee and was acknowledged. CO-2 is acknowledged now; its
-  // total_after_cents is computed from the design's lines and has never heard of that fee.
-  const co1 = { co_no: 1, total_after_cents: 1113950, fee_cents: 15000, fee_tax_cents: 1088 };
-  const co2 = { co_no: 2, total_after_cents: 1113950, fee_cents: 15000, fee_tax_cents: 1088 };
-  const naive = co2.total_after_cents;
-  const m = orderCentsAfterAck(TAXED_AMENDED, [co1, co2], co2)!;
-  eq("the naive write would have dropped both fees", naive, 1113950);
+  // CO-1 charged a $150 fee and was acknowledged. CO-2 is acknowledged now, and its
+  // total_after_cents is computed from the design's lines — it has never heard of that fee.
+  const co1 = { co_no: 1, total_before_cents: 1081775, total_after_cents: 1113950, fee_cents: 15000, fee_taxable: true, fee_tax_cents: 1088 };
+  const co2 = { co_no: 2, total_before_cents: 1113950, total_after_cents: 1113950, fee_cents: 15000, fee_taxable: true, fee_tax_cents: 1088 };
+  eq("what the naive write would have stored", co2.total_after_cents, 1113950);
+  const m = orderCentsAfterAck(TAXED_AMENDED, [co1, co2])!;
   eq("both fees are still owed", m.totalCents, 1113950 + 2 * (15000 + 1088));
   eq("pretax holds both fee amounts", m.pretaxCents, 1040000 + 30000);
   eq("tax holds both frozen taxes", m.taxCents, 73950 + 2176);
 });
 
-Deno.test("a MANUAL change order's typed figure lands in pre-tax, where its row is", () => {
-  // The lines are unchanged (that is what manual means), so anything above the snapshot's own
-  // total is the rep's number — and the document prints it as a pre-tax line.
-  const co = { co_no: 1, total_before_cents: 1113950, total_after_cents: 1143950 };
-  const m = orderCentsAfterAck(TAXED_AMENDED, [co], co)!;
-  eq("the $300 went to pre-tax", m.pretaxCents, 1040000 + 30000);
-  eq("the accepted tax is not re-derived", m.taxCents, 73950);
-  eq("total is exactly what was acknowledged", m.totalCents, 1143950);
+Deno.test("THE OTHER BUG: a design edit must not erase the manual changes above it", () => {
+  // The live beta shape, in its own amounts: a $3,400 cabin with two acknowledged MANUAL
+  // change orders worth $650 on top, then a design edit. total_after_cents on that edit is
+  // the DESIGN's total — 3,400 — so storing it would have quietly wiped both manual changes
+  // off the order and refunded $650 nobody agreed to refund.
+  const cabin = snap([["Cabin (8x12)", 1, 3400]]);
+  const manual1 = { co_no: 1, description: "Added a 4' side door", total_before_cents: 340000, total_after_cents: 365000 };
+  const manual2 = { co_no: 2, description: "Upgraded to a metal roof", total_before_cents: 365000, total_after_cents: 405000 };
+  const edit = { co_no: 3, description: "Moved a window", total_before_cents: 340000, total_after_cents: 340000, fee_cents: 15000 };
+  const m = orderCentsAfterAck(cabin, [manual1, manual2, edit])!;
+  eq("the naive write would have stored the design's own total", edit.total_after_cents, 340000);
+  eq("both manual changes survive, and the fee lands", m.totalCents, 340000 + 25000 + 40000 + 15000);
+  eq("untaxed, so it is all pre-tax", m.pretaxCents, 420000);
+  eq("and tax stays NULL", m.taxCents, null);
 });
 
-Deno.test("an untaxed order keeps a NULL tax column, and cannot owe tax on a fee", () => {
+Deno.test("an untaxed order keeps a NULL tax column — 'not taxed' is not 'taxed at zero'", () => {
   const plain = { version: 1, discount: 0, lines: TAXED_AMENDED.lines };
-  const co = { co_no: 1, total_after_cents: 1040000, fee_cents: 15000, fee_tax_cents: 1088 };
-  const m = orderCentsAfterAck(plain, [co], co)!;
-  eq("tax stays NULL — 'not taxed' is not 'taxed at zero'", m.taxCents, null);
-  eq("pretax is the whole of it", m.pretaxCents, 1055000);
-  eq("and the stray frozen tax is discarded rather than invented into the total", m.totalCents, 1055000);
-});
-
-Deno.test("no acknowledged total = nothing is written, rather than a fabricated zero", () => {
-  eq("null", orderCentsAfterAck(TAXED_AMENDED, [], { co_no: 1, total_after_cents: null }), null);
-  eq("missing", orderCentsAfterAck(TAXED_AMENDED, [], { co_no: 1 }), null);
-});
-
-Deno.test("no snapshot at all: the acknowledged total is taken at its word", () => {
-  const co = { co_no: 1, total_after_cents: 500000, fee_cents: 10000 };
-  const m = orderCentsAfterAck(null, [co], co)!;
-  eq("total", m.totalCents, 510000);
-  eq("pretax", m.pretaxCents, 510000);
+  const co = { co_no: 1, total_before_cents: 1010000, total_after_cents: 1040000, fee_cents: 15000 };
+  const m = orderCentsAfterAck(plain, [co])!;
   eq("tax", m.taxCents, null);
+  eq("pretax is the whole of it", m.pretaxCents, 1055000);
+  eq("total", m.totalCents, 1055000);
+});
+
+Deno.test("no usable snapshot = nothing is written, rather than a fabricated zero", () => {
+  eq("null snapshot", orderCentsAfterAck(null, [ACKED_EDIT]), null);
+  eq("no lines", orderCentsAfterAck({ discount: 0 }, [ACKED_EDIT]), null);
+});
+
+Deno.test("the ledger and the invoice document are the SAME number, not two agreeing ones", () => {
+  // The property the shared call buys. Whatever the order ends up holding, handing that
+  // pre-tax figure back to the document builder must reconcile with no adjustment row.
+  const co = { ...ACKED_EDIT, fee_cents: 15000, fee_taxable: true, fee_tax_cents: 1088, fee_label: "Change order fee" };
+  const m = orderCentsAfterAck(TAXED_AMENDED, [co])!;
+  const doc = amendedInvoiceDocument(TAXED_AMENDED, [co] as any, m.pretaxCents);
+  eq("no adjustment row", doc.lines.some((l: any) => l.kind === "adjustment"), false);
+  eq("the document foots to the stored pre-tax figure", Math.round(doc.total * 100), m.pretaxCents);
+  eq("and its tax is the stored tax", Math.round(Number(doc.tax.amount) * 100), m.taxCents);
 });
 
 if (failures) throw new Error(`${failures} assertion(s) failed`);

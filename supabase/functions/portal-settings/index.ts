@@ -7158,7 +7158,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: ackedNow } = await admin.from("change_orders")
       .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
       .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged");
-    const projected = orderCentsAfterAck(d.estimate_lines, [...(ackedNow ?? []), co], co);
+    const projected = orderCentsAfterAck(d.estimate_lines, [...(ackedNow ?? []), co]);
     const newTotal = projected == null ? null : projected.totalCents / 100;
 
     // ── REFUND OWED ──────────────────────────────────────────────────────────────────────
@@ -7259,7 +7259,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
           .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged"),
       ]);
-      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? [], co);
+      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
       if (money != null) {
         // total_source='manual' also shields it from sync-design-status' GHL repricer.
         const { error: totErr } = await admin.from("orders")
@@ -7591,12 +7591,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
-    // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption
-    // stamp further down, never as a baseline (see the header: it is the undo point).
+    // The live CO, if any. snapshot_before is still read — but ONLY for the adoption stamp
+    // further down, never as a baseline (see the header: it is the undo point).
+    //
+    // 'draft' JOINED 'pending_ack' HERE ON 2026-09-07, and it is not cosmetic. open_amendment
+    // creates a DRAFT and that is now the ordinary way a change on a signed order begins — so
+    // a rep who opens the amendment and then reaches for these dropdowns finds a row this
+    // lookup could not see, falls through to the INSERT below, and collides with the
+    // one-live-amendment index. The same widening submit-estimate's own lookup already got.
     const { data: existingCo } = await admin.from("change_orders")
-      .select("id, co_no, version_before, snapshot_before")
+      .select("id, co_no, status, version_before, snapshot_before")
       .eq("client_id", clientId).eq("short_code", shortCode)
-      .eq("status", "pending_ack").eq("source", "design_edit")
+      .in("status", ["draft", "pending_ack"]).eq("source", "design_edit")
       .limit(1).maybeSingle();
     // The baseline is what the customer AGREED to (153). It used to be
     // `snapshot_before ?? the live design`, and on a CO adopted from a designer resubmit
@@ -7727,7 +7733,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             // nothing else, so its behaviour is byte-identical to before 153.
             ...(existingCo.snapshot_before ? {} : { snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc } }),
           })
-          .eq("id", existingCo.id).eq("status", "pending_ack");
+          // A DRAFT STAYS A DRAFT. Staging prices the change; it does not decide that the
+          // customer should be asked to approve it — finalize_amendment does that, once the
+          // rep says they are finished. Sending a half-made change for signature because
+          // someone touched a dropdown is precisely the wrong direction to fail in.
+          .eq("id", existingCo.id).in("status", ["draft", "pending_ack"]);
         if (coErr) return dbFail(req, clientId, "update the change order", coErr);
         changeOrderId = existingCo.id; coNo = existingCo.co_no;
       } else {
@@ -7762,7 +7772,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       quoteNumber: String(d.ss_quote_number), snap: newSnap, planUrl: d.image_url,
     });
 
-    return json({ ok: true, changeOrderId, coNo, totalBefore, totalAfter, description, quotePdfUrl, pendingAck: !!changeOrderId });
+    // `pendingAck` drives the order screen's "waiting on the customer" copy, so a DRAFT must
+    // report false — nobody has been asked anything yet.
+    const stagedIsDraft = String(existingCo?.status ?? "") === "draft";
+    return json({ ok: true, changeOrderId, coNo, totalBefore, totalAfter, description, quotePdfUrl, pendingAck: !!changeOrderId && !stagedIsDraft, draft: stagedIsDraft });
   }
 
   // ── void_change_order: discard a staged-but-unsigned change (migration 127) ──
