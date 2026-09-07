@@ -827,7 +827,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const { data: orders } = await admin.from("orders")
           .select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId);
         const ords = orders || [];
-        if (ords.length === 0) return json({ ok: true, orders: 0, computed: 0, updated: 0 });
+        if (ords.length === 0) return json({ ok: true, orders: 0, computed: 0, updated: 0, removed: 0 });
         const codes = ords.map((o: any) => o.short_code).filter(Boolean);
 
         // designs → ghl_estimate_id (for the pre-tax fetch); invoice_sends → earner; members → rate; team → still-valid earners.
