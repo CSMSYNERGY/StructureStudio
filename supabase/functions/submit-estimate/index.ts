@@ -316,6 +316,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // rep's debug channel and not something an anonymous shopper should read back. It costs at
   // most one auth round trip, and only for a request that actually presents a user token.
   let staffCaller = false;
+  // MAY THIS PERSON AMEND A SIGNED ORDER? Separate from staffCaller on purpose: pricing a
+  // quote and re-opening an agreement the customer already committed to are different acts,
+  // and Carolyn granted them separately ("Change Orders is the only feature they shouldn't
+  // have unless given permission in the team settings"). Until 2026-09-07 this endpoint
+  // asked neither question — it raises its change orders as the SERVICE ROLE, so migration
+  // 188's per-person policy never applied to this path at all, and a rep with
+  // change_orders:none could open an accepted design from Pipeline, resubmit, and mint a
+  // change order the Team screen says they may not raise.
+  let mayAmendCaller = false;
   try {
     const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
     // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
@@ -350,6 +359,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         // The app_operators bypass stays: a platform operator in view-as has NO client_users
         // row on the tenant they are viewing, so there is no map to resolve for them.
         staffCaller = Boolean(opRes.data) || mayPrice;
+        mayAmendCaller = Boolean(opRes.data) ||
+          (memberRow
+            ? canEdit(effectiveAccess(memberRow.role, memberRow.title, memberRow.access), "change_orders")
+            : false);
       }
     }
   } catch (e) {
@@ -2437,15 +2450,46 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // Only on the post-acceptance path, because that is the only place a CO can be raised,
       // and it is a re-write of the same value the persist below sends — idempotent, so a
       // failure here changes nothing that the persist below does not already report durably.
+      // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07) ─────────────────
+      // BEFORE the first write, which is the whole point of putting it here. The design's
+      // priced revision lands two lines down and the guard trigger would refuse the change
+      // order a moment later — leaving the design revised, no change order recorded, and
+      // the customer's quote email already out. Refusing first leaves nothing half-done.
+      //
+      // Both answers come from the same places the rest of the system asks: the gate
+      // function migration 210 installed (which the change_orders trigger also calls, so a
+      // refusal here and a refusal there can never disagree), and the one permission model.
+      {
+        const { data: gate } = await supabase.rpc("order_amendment_gate", {
+          p_client_id: clientId, p_short_code: designId,
+        });
+        if (gate && (gate as Record<string, unknown>).open !== true) {
+          return json({
+            error: String((gate as Record<string, unknown>).reason ??
+              "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
+            reason: "locked",
+          }, 409);
+        }
+        if (!mayAmendCaller) {
+          return json({
+            error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
+            reason: "not_permitted",
+          }, 403);
+        }
+      }
+
       const { error: preCoErr } = await supabase.from("designs")
         .update({ estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines), updated_at: new Date().toISOString() })
         .eq("short_code", designId);
       if (preCoErr) console.warn("pre-change-order estimate_lines persist failed:", preCoErr.message);
       // Hoisted above the diff: the null-diff arm needs it too.
+      // Includes a DRAFT deliberately: open_amendment creates one and the rep then edits the
+      // design, so the row this resubmit belongs to already exists. Without 'draft' here the
+      // upsert below would try to insert a second live row and hit the one-live index.
       const { data: existingCo } = await supabase.from("change_orders")
         .select("id, co_no, version_before, snapshot_before")
         .eq("client_id", clientId).eq("short_code", designId)
-        .eq("status", "pending_ack").eq("source", "design_edit")
+        .in("status", ["draft", "pending_ack"]).eq("source", "design_edit")
         .limit(1).maybeSingle();
       const base = agreedBaseline(existingDesign);
       const coDescription = changeOrderDescription(base.lines, estimateLines);
@@ -2465,7 +2509,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
               status: "void",
               void_reason: "The design was resubmitted back to what the customer approved — nothing left to acknowledge.",
             })
-            .eq("id", existingCo.id).eq("status", "pending_ack");
+            // A DRAFT counts: a rep who opened a change, edited, and put everything back is
+            // the ordinary "undo" case, and leaving the draft open would hold the unlock they
+            // spent. The guard trigger's void branch releases it.
+            .eq("id", existingCo.id).in("status", ["draft", "pending_ack"]);
           if (voidErr) console.warn("change order auto-void failed:", voidErr.message);
         }
       } else {

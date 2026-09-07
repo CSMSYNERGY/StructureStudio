@@ -298,6 +298,20 @@ const GATES: GateTable = {
   // Discards a staged-but-unsigned change order, restoring the design as the customer
   // signed it (snapshot_before). Void with a reason, like the browser void.
   void_change_order: { area: "change_orders", level: "edit" },
+
+  // AMENDING A SIGNED ORDER (migrations 209-213).
+  // What the Change Order button has to know BEFORE it does anything: is this order open
+  // for change, under what authority, and what will it cost. A read, so it sits at `view`
+  // -- a rep who cannot raise one may still be shown why. This is the first consumer of
+  // change_orders:'view'; before it, the area had no read surface at all.
+  amendment_status: { area: "change_orders", level: "view" },
+  // The rep asks. Raising the request is part of raising the change.
+  request_order_unlock: { area: "change_orders", level: "edit" },
+  // The approver answers. THE ONLY ACTION ON THE NEW AREA -- this is the whole of what
+  // "Approve Changes" grants, which is why it is a separate switch from raising one.
+  decide_order_unlock: { area: "change_order_approve", level: "edit" },
+  // Spends the unlock and opens the draft the rep then edits.
+  open_amendment: { area: "change_orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -6669,6 +6683,250 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // The CO row already exists (raised by the SS resubmit path, or by the order card's
   // form); this only delivers the request-for-signature email. Idempotent — re-sending is
   // a duplicate email at worst, so it doubles as the "Resend" button.
+  // THE AMENDMENT GATE (migration 210).
+  // May this order be changed at all, and at what price? The SAME function the
+  // change_orders guard trigger asks on every insert, so the button, the document and the
+  // database can never answer differently -- three copies of this rule would drift, and the
+  // one that drifted would be the one that let a locked order through.
+  //
+  // It never raises and fails OPEN by design (see 210); a read failure here therefore
+  // reports open rather than locking a builder out of their own order.
+  const amendmentGate = async (shortCode: string): Promise<Record<string, unknown>> => {
+    const { data, error } = await admin.rpc("order_amendment_gate", {
+      p_client_id: clientId, p_short_code: shortCode,
+    });
+    if (error || !data) {
+      return { signed: false, open: true, authority: "free_window", unlock_id: null,
+               fee_cents: 0, fee_taxable: false, reason: "" };
+    }
+    return data as Record<string, unknown>;
+  };
+
+  // The person's own name, for the evidence rows below. Denormalised at write time on
+  // purpose -- an unlock has to still read correctly after the person is renamed or gone,
+  // which is 178's argument for recorded_by_name and 126's for verbal_rep_name.
+  const callerName = async (): Promise<string | null> => {
+    if (!userId) return null;
+    const { data } = await admin.from("client_users")
+      .select("full_name").eq("user_id", userId).maybeSingle();
+    const n = String(data?.full_name ?? "").trim();
+    return n || (userEmail ? String(userEmail) : null);
+  };
+
+  // amendment_status: everything the Change Order button needs before it acts.
+  if (action === "amendment_status") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const gate = await amendmentGate(shortCode);
+    const [liveRes, unlockRes, csRes] = await Promise.all([
+      admin.from("change_orders")
+        .select("id, co_no, status, source, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable, raised_under, created_at")
+        .eq("client_id", clientId).eq("short_code", shortCode)
+        .in("status", ["draft", "pending_ack"]).limit(1),
+      admin.from("order_unlocks")
+        .select("id, reason, requested_by_name, requested_at, decision, decided_by_name, decided_at, decision_note, expires_at")
+        .eq("client_id", clientId).eq("short_code", shortCode)
+        .is("consumed_at", null).is("released_at", null)
+        .order("created_at", { ascending: false }).limit(1),
+      admin.from("client_settings")
+        .select("co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label")
+        .eq("client_id", clientId).maybeSingle(),
+    ]);
+    // Soft on every leg: this read decides which BUTTON renders, and a blank screen is a
+    // worse answer than a conservative one.
+    return json({
+      ok: true,
+      gate,
+      amendment: liveRes.error ? null : (liveRes.data?.[0] ?? null),
+      unlock: unlockRes.error ? null : (unlockRes.data?.[0] ?? null),
+      policy: csRes.error || !csRes.data ? null : {
+        unlockRequired: csRes.data.co_unlock_required === true,
+        freeDays: Number(csRes.data.co_free_days ?? 0),
+        feeCents: Number(csRes.data.co_fee_cents ?? 0),
+        feeTaxable: csRes.data.co_fee_taxable === true,
+        feeLabel: String(csRes.data.co_fee_label ?? "Change order fee"),
+      },
+    });
+  }
+
+  // request_order_unlock: the rep asks.
+  if (action === "request_order_unlock") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    const reason = String(payload?.reason ?? "").trim().slice(0, 500);
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // The reason is not paperwork: it is what the approver reads before deciding, and it
+    // lands permanently on the order's amendment trail.
+    if (!reason) return json({ error: "Say what needs changing -- whoever unlocks it will read this." }, 400);
+
+    const gate = await amendmentGate(shortCode);
+    if (gate.open === true) {
+      return json({ ok: true, needed: false, reason: String(gate.reason ?? ""), gate });
+    }
+
+    // CLOSER #1 from 210: an unlock that expired unused is released here rather than
+    // blocking the next request, and the release says why. The partial unique index cannot
+    // carry `expires_at > now()` (now() is not immutable), which is what makes this the
+    // place that has to do it.
+    await admin.from("order_unlocks")
+      .update({ released_at: new Date().toISOString(), release_reason: "expired unused" })
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .eq("decision", "granted").is("consumed_at", null).is("released_at", null)
+      .lt("expires_at", new Date().toISOString());
+
+    // ⚠️ NO `.neq("decision", "declined")` HERE, and that is not an oversight. A WAITING
+    // request has decision NULL, and `decision <> 'declined'` is NULL for a NULL — three-
+    // valued logic drops the row rather than keeping it. That filter made this check blind to
+    // exactly the row it exists to find: the second request fell through to the insert and
+    // came back as a 500 from the one-open-unlock index. Filter in JS, where null is null.
+    const { data: openRows } = await admin.from("order_unlocks")
+      .select("id, decision, requested_by_name, requested_at, expires_at")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .is("consumed_at", null).is("released_at", null)
+      .limit(5);
+    const openRow = (openRows ?? []).filter((u) => u.decision !== "declined");
+    if (openRow?.[0]) {
+      return json({
+        ok: true, already: true, unlock: openRow[0],
+        message: openRow[0].decision === "granted"
+          ? "This order is already unlocked."
+          : "Someone has already asked to unlock this order.",
+      });
+    }
+
+    const name = await callerName();
+    const { data: row, error: insErr } = await admin.from("order_unlocks").insert({
+      client_id: clientId, short_code: shortCode,
+      requested_by: userId ?? null, requested_by_name: name,
+      requested_at: new Date().toISOString(), reason,
+    }).select("id, reason, requested_by_name, requested_at").maybeSingle();
+    // Belt and braces behind the check above: the index is the real claim, and losing a race
+    // to it means somebody else asked first — which is an answer, not a fault.
+    if (insErr) {
+      if (String(insErr.code) === "23505") {
+        return json({ ok: true, already: true, message: "Someone has already asked to unlock this order." });
+      }
+      return dbFail(req, clientId, "ask for that order to be unlocked", insErr);
+    }
+    await audit("unlock_requested", null, `design=${shortCode}`).catch(() => {});
+    return json({ ok: true, requested: true, unlock: row });
+  }
+
+  // decide_order_unlock: the approver answers.
+  // The ONLY action gated on change_order_approve. An approver may also unlock an order
+  // nobody has asked about -- the builder often decides the change is happening before the
+  // rep has typed anything -- so a missing request is created and granted in one step
+  // rather than refused.
+  if (action === "decide_order_unlock") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    const decision = payload?.decision === "declined" ? "declined" : "granted";
+    const note = String(payload?.note ?? "").trim().slice(0, 500) || null;
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: cs } = await admin.from("client_settings")
+      .select("co_unlock_hours").eq("client_id", clientId).maybeSingle();
+    const hours = Math.min(720, Math.max(1, Number(cs?.co_unlock_hours ?? 72)));
+    const nowIso = new Date().toISOString();
+    const expiresIso = new Date(Date.now() + hours * 3600_000).toISOString();
+    const name = await callerName();
+
+    const patch = {
+      decision, decided_by: userId ?? null, decided_by_name: name,
+      decided_at: nowIso, decision_note: note,
+      // A DECLINE HAS NO EXPIRY -- nothing is being granted. The grant_shape CHECK only
+      // demands expires_at of a 'granted' row.
+      expires_at: decision === "granted" ? expiresIso : null,
+    };
+
+    const { data: pending } = await admin.from("order_unlocks")
+      .select("id").eq("client_id", clientId).eq("short_code", shortCode)
+      .is("decision", null).is("consumed_at", null).is("released_at", null)
+      .order("created_at", { ascending: false }).limit(1);
+
+    let row;
+    if (pending?.[0]) {
+      const upd = await admin.from("order_unlocks").update(patch)
+        .eq("id", pending[0].id).select("id, decision, decided_by_name, decided_at, expires_at, decision_note").maybeSingle();
+      if (upd.error) return dbFail(req, clientId, "record that decision", upd.error);
+      row = upd.data;
+    } else {
+      if (decision === "declined") {
+        return json({ error: "There is nothing to decline -- nobody has asked to unlock this order." }, 400);
+      }
+      const ins = await admin.from("order_unlocks").insert({
+        client_id: clientId, short_code: shortCode,
+        reason: note ?? "Unlocked without a request", ...patch,
+      }).select("id, decision, decided_by_name, decided_at, expires_at, decision_note").maybeSingle();
+      // The one-open-unlock index is the concurrency claim; a duplicate means somebody
+      // else got there first, which is not an error the approver needs to see as one.
+      if (ins.error) {
+        if (String(ins.error.code) === "23505") {
+          return json({ ok: true, already: true, message: "This order is already unlocked." });
+        }
+        return dbFail(req, clientId, "unlock that order", ins.error);
+      }
+      row = ins.data;
+    }
+
+    await auditStrict(`unlock_${decision}`, null, `design=${shortCode} hours=${decision === "granted" ? hours : 0}`);
+    return json({ ok: true, unlock: row });
+  }
+
+  // open_amendment: spend the unlock, open the draft.
+  // The draft is the rep's workspace: invisible to the customer (customer-quotes shows
+  // pending_ack only) and deliberately not a block on invoicing. Everything that decides
+  // whether this is allowed -- and what it costs -- is stamped by the guard trigger from the
+  // gate, never read from this handler's caller.
+  if (action === "open_amendment") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: d } = await admin.from("designs")
+      .select("short_code, ss_quote_number, accepted_at")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (!d) return json({ error: "Design not found." }, 404);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
+
+    const { data: existing } = await admin.from("change_orders")
+      .select("id, co_no, status, fee_cents, fee_tax_cents, raised_under")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .in("status", ["draft", "pending_ack"]).limit(1);
+    if (existing?.[0]) {
+      return json({ ok: true, already: true, changeOrder: existing[0] });
+    }
+
+    const gate = await amendmentGate(shortCode);
+    if (gate.open !== true) {
+      return json({ error: String(gate.reason ?? "This order is signed and has to be unlocked first."), reason: "locked" }, 409);
+    }
+
+    // source 'design_edit': the rep is about to open the designer, and the description is
+    // GENERATED from the line diff when the amendment is finished -- never typed. A manual
+    // amendment converts on finalize; it cannot be decided here, before any editing.
+    const { data: co, error: coErr } = await admin.from("change_orders").insert({
+      client_id: clientId, short_code: shortCode, source: "design_edit", status: "draft",
+      description: "Change in progress",
+    }).select("id, co_no, status, raised_under, unlock_id, fee_cents, fee_tax_cents, fee_taxable").maybeSingle();
+    if (coErr) {
+      // The trigger's refusal is a sentence written for a person; pass it through rather
+      // than burying it under dbFail's generic label.
+      //
+      // ⚠️ MATCHED NARROWLY, against the gate's OWN sentence. A loose /unlock|signed/ test
+      // read a foreign-key error naming `order_unlocks` as a refusal and told the rep their
+      // order was locked, when the real answer was a bug in the trigger (see migration 214).
+      // Anything this does not recognise is a fault and must go through dbFail, where it is
+      // logged with its Postgres detail instead of being shown to a builder as policy.
+      const msg = String(coErr.message ?? "");
+      if (/has to unlock it|unlock it before it can be changed|This order is signed/i.test(msg)) {
+        return json({ error: msg, reason: "locked" }, 409);
+      }
+      if (String(coErr.code) === "23505") return json({ error: "Someone just opened a change on this order." }, 409);
+      return dbFail(req, clientId, "open that change", coErr);
+    }
+    await audit("amendment_opened", null, `design=${shortCode} co=${co?.co_no} under=${co?.raised_under}`).catch(() => {});
+    return json({ ok: true, changeOrder: co });
+  }
+
   if (action === "send_change_order") {
     const coId = String(payload?.changeOrderId ?? "").trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
@@ -6680,7 +6938,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
     if (co.status !== "pending_ack") {
-      return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided." }, 400);
+      return json({
+        error: co.status === "draft"
+          // A draft has no priced diff yet and the customer has never been told it exists.
+          ? "This change is still open -- finish it before sending it to the customer."
+          : co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided.",
+      }, 400);
     }
     const { data: d } = await admin.from("designs")
       .select("contact, ss_quote_number")
@@ -6833,8 +7096,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!d) return json({ error: "Design not found." }, 404);
     if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
     const dStatus = String(d.status || "");
-    if (dStatus === "invoiced" || dStatus === "delivered") {
-      return json({ error: "This order is already invoiced — its paperwork is frozen. Raise a manual change order instead." }, 400);
+    // WAS: a flat refusal on invoiced/delivered -- "its paperwork is frozen. Raise a manual
+    // change order instead." That single line is what made Carolyn's requirement false:
+    // "a change order can happen anytime throughout the process up until after delivery and
+    // final payment." The question is no longer WHICH STATUS the order is in but whether the
+    // builder's own rules leave it open -- the free window, or an unlock somebody granted.
+    // Same gate the trigger asks, so a refusal here and a refusal there always agree.
+    {
+      const gate = await amendmentGate(shortCode);
+      if (gate.open !== true) {
+        return json({
+          error: String(gate.reason ?? "This order is signed. Ask an admin or crew leader to unlock it."),
+          reason: "locked",
+        }, 409);
+      }
     }
     // deno-lint-ignore no-explicit-any
     const snap: any = d.estimate_lines;
@@ -7152,7 +7427,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
-    if (co.status !== "pending_ack") {
+    // A DRAFT IS DISCARDABLE -- that is what the rep's "Discard the change" does, and it is
+    // also what releases the unlock they spent (the guard trigger's void branch).
+    if (co.status !== "pending_ack" && co.status !== "draft") {
       return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged — it can't be discarded." : "This change order is already voided." }, 400);
     }
 
@@ -7194,10 +7471,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
-    const { error: voidErr } = await admin.from("change_orders")
+    const { data: voided, error: voidErr } = await admin.from("change_orders")
       .update({ status: "void", void_reason: reason })
-      .eq("id", co.id).eq("status", "pending_ack");
+      // Both live states: the guard above already refused anything else, and a DRAFT is the
+      // common case now — "Discard the change" is a rep throwing away their own workspace,
+      // and it is what hands back the unlock they spent. Left at pending_ack alone, the
+      // action returned a cheerful 200 having changed nothing (found in verification).
+      .eq("id", co.id).in("status", ["draft", "pending_ack"])
+      // .select() so a conditional update that matched NOTHING is an answer, not a silent
+      // success — ChangeOrdersCard's recordVerbal carries the same guard for the same reason
+      // (portal/04-orders.jsx). Without it this returned 200 while the change order sat
+      // untouched and the unlock stayed spent.
+      .select("id");
     if (voidErr) return dbFail(req, clientId, "void the change order", voidErr);
+    if (!voided || voided.length === 0) {
+      return json({ error: "That change moved while you were looking at it — reload the order." }, 409);
+    }
     return json({ ok: true, reverted, coNo: co.co_no });
   }
 
