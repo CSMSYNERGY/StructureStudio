@@ -170,6 +170,14 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // has ever stocked: a lot with hundreds of buildings was read in full to label the handful
   // of designs that came from one. Nothing here is a filter — an id with no serial yet just
   // renders the chip without a number, exactly as it does before this resolves.
+  // EXPECTED CLOSE DATE, edited from the card (Carolyn, 2026-09-07: "editable straight from
+  // the card"). `closeEdit` is the short_code whose date input is open — one at a time, so a
+  // stray click elsewhere on the board closes it rather than leaving several open.
+  //
+  // Operator view-as is READ-ONLY here: the write goes through portal-settings under the
+  // tenant's own JWT, and an operator's save would be attributed to the wrong tenant.
+  const [closeEdit, setCloseEdit] = useState(null);
+  const canEditClose = !viewingLabel && !fetchDesigns;
   const [unitSerials, setUnitSerials] = useState({});
   const unitIdKey = useMemo(() => {
     const ids = new Set();
@@ -239,7 +247,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
         // alone was wrong in a way nothing would have reported — keeping only the narrow
         // projection loses the Pipeline's ability to open a customer at all, and keeping only
         // this line silently re-inflates every list payload back to the blob.
-        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url`)
+        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, total_cents, expected_close_date`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("design_versions")
@@ -286,6 +294,34 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
   // so the list refetches without a manual Refresh click.
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  // Save an expected close date from the board (migration 206).
+  //
+  // Through portal-settings, NOT sb.from("designs").update(): the board READS designs over
+  // direct PostgREST, but the restrictive policies from 154/193 are select-only — there is no
+  // update policy on that table for a tenant, and there should not be one. Writes go through
+  // an action that resolves the tenant server-side.
+  //
+  // OPTIMISTIC, and deliberately so: this is one date on a card someone is scanning, and a
+  // full reload to show it would throw away their scroll position on a board they are reading.
+  // A failure repaints the old value and says so.
+  const saveCloseDate = useCallback(async (shortCode, value) => {
+    const iso = value || null;
+    setCloseEdit(null);
+    const prev = (rows || []).find((x) => x.short_code === shortCode)?.expected_close_date ?? null;
+    if (iso === prev) return;
+    setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)));
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
+        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
+      });
+      if (e) throw new Error(await fnError(e));
+      if (r && r.error) throw new Error(r.error);
+    } catch (err) {
+      setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: prev } : x)));
+      setError(err.message || "That close date did not save.");
+    }
+  }, [rows]);
 
   // Status chips. Counts are taken over ALL loaded rows (not the searched subset) so the
   // numbers don't shuffle while someone types — the chips describe the dataset, the search
@@ -524,8 +560,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
             {CRM_STAGES.map((st) => {
               const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
+              // 240px, up from 190 (Carolyn, 2026-09-07). The card carries a value, a status, a
+              // close date and two dated lines now; at 190px the labelled date row wraps —
+              // "Created Sep 2, 26 · Updated Sep 4, 26" needs ~187px of text against 172px of
+              // content box, measured.
+              //
+              // ⚠️ THE BOARD NOW SCROLLS SIDEWAYS ON A LAPTOP, and the claim that it would not
+              // (made when this width was proposed) was wrong. Six columns at 240 plus five
+              // 10px gaps is 1490px; the sidebar is 240px (.ss-side), so a 1500px screen leaves
+              // about 1260px of main. Five stages are visible and Delivered needs a scroll.
+              // That is not fixable by picking a smaller number — anything above ~195px has the
+              // same problem, so the real choice was "all six visible and cramped" or "roomy
+              // and scrolled", and Carolyn chose roomy. The board has always had overflowX
+              // auto, and every kanban she compared this to (Pipedrive) scrolls the same way.
               return (
-                <div key={st.kind} style={{ flex: "1 0 190px", minWidth: 190, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
+                <div key={st.kind} style={{ flex: "1 0 240px", minWidth: 240, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
                     <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
@@ -533,14 +582,30 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                   {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
                   {cards.map((r) => {
                     const c = r.contact || {}; const s = r.selections || {};
+                    const money = fmtMoneyWhole(r.total_cents);
+                    const closeIso = r.expected_close_date || null;
+                    // Local-midnight compare, not Date.parse of the bare yyyy-mm-dd (which is
+                    // parsed as UTC and reads as yesterday for anyone west of Greenwich — every
+                    // one of these builders). A date closing TODAY is not late.
+                    const overdue = !!closeIso && closeIso < new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+                    const editingClose = closeEdit === r.short_code;
                     return (
-                      <button key={r.short_code} type="button"
+                      <div key={r.short_code} style={{ position: "relative", marginBottom: 6 }}>
+                      <button type="button"
                         onClick={() => (onOpenRecord ? onOpenRecord(r.short_code, r.contact_id) : (onOpenDesign && onOpenDesign(r.short_code)))}
-                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 9px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {c.name || c.email || c.phone || "—"}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {c.name || c.email || c.phone || "—"}
+                          </span>
+                          {/* NULL is "No quote yet", never $0 — 104 of the 153 designs on the
+                              platform have no estimate lines at all (drafts, browsing leads), and
+                              a $0 pipeline card is a lie about a real deal. */}
+                          <span style={{ fontSize: 13, fontWeight: money ? 800 : 600, color: money ? "#1E293B" : "#94A3B8", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                            {money || "No quote yet"}
+                          </span>
                         </div>
-                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>
+                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
                         </div>
                         {/* Status pill on every card (Carolyn, 2026-09-07). Note it repeats
@@ -550,12 +615,48 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                             Carolyn's Pipedrive stage names, the pill carries the status the
                             rest of the product shows — and it stops being redundant the day a
                             second status maps into one stage. */}
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
                           <StatusPill status={r.status} small />
-                          <span>{fmtDate(r.created_at)}</span>
-                          {r.ss_quote_number || r.ghl_estimate_number ? <span style={{ marginLeft: "auto" }}>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                          {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                          {/* The close date is the reason this field exists: teal while there is
+                              still time, red the moment it passes. A date nobody is warned about
+                              is a date nobody acts on. Spacer only — the real control is the
+                              sibling button below, because a <button> inside a <button> is
+                              invalid HTML and swallows the card's own click. */}
+                          <span style={{ marginLeft: "auto", visibility: "hidden" }} aria-hidden="true">
+                            {closeIso ? fmtDateShort(closeIso) : "Set close"}
+                          </span>
+                        </div>
+                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", gap: 5, fontVariantNumeric: "tabular-nums" }}>
+                          <span>Created {fmtDateShort(r.created_at)}</span>
+                          <span style={{ opacity: 0.55 }}>·</span>
+                          <span>Updated {fmtDateShort(r.updated_at)}</span>
                         </div>
                       </button>
+                      {/* THE CLOSE-DATE CONTROL, a SIBLING of the card button and positioned over
+                          the spacer above it. Nesting it would be invalid HTML and every click on
+                          the date would also open the customer record. */}
+                      {editingClose ? (
+                        <input type="date" autoFocus defaultValue={closeIso || ""}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={(e) => saveCloseDate(r.short_code, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
+                          style={{ position: "absolute", right: 7, top: 46, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
+                      ) : (
+                        <button type="button" title={closeIso ? "Expected close — click to change" : "Set an expected close date"}
+                          onClick={(e) => { e.stopPropagation(); setCloseEdit(r.short_code); }}
+                          disabled={!canEditClose}
+                          style={{
+                            position: "absolute", right: 7, top: 47, zIndex: 2, border: "none", borderRadius: 4,
+                            padding: closeIso ? "0 4px" : "0 3px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
+                            cursor: canEditClose ? "pointer" : "default",
+                            background: overdue ? "#FEF2F2" : "transparent",
+                            color: closeIso ? (overdue ? "#DC2626" : "#1B7895") : "#CBD5E1",
+                          }}>
+                          {closeIso ? fmtDateShort(closeIso) : (canEditClose ? "+ close" : "—")}
+                        </button>
+                      )}
+                      </div>
                     );
                   })}
                 </div>

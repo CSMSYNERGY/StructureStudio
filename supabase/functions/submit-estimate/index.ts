@@ -12,7 +12,7 @@ import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { deHtml, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
@@ -2410,7 +2410,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // and it is a re-write of the same value the persist below sends — idempotent, so a
       // failure here changes nothing that the persist below does not already report durably.
       const { error: preCoErr } = await supabase.from("designs")
-        .update({ estimate_lines: estimateLines, updated_at: new Date().toISOString() })
+        .update({ estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines), updated_at: new Date().toISOString() })
         .eq("short_code", designId);
       if (preCoErr) console.warn("pre-change-order estimate_lines persist failed:", preCoErr.message);
       // Hoisted above the diff: the null-diff arm needs it too.
@@ -2583,6 +2583,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         ghl_contact_id: contactId,
         ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
         estimate_lines: estimateLines,
+        // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
+        total_cents: designTotalCents(estimateLines),
         ss_quote_number: ssQuoteNumber,
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
         ...(planImg ? { plan_image_url: planImg } : {}),
@@ -2972,6 +2974,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       ghl_estimate_number: estimateNumber || existingDesign.ghl_estimate_number || null,
       ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
       estimate_lines: estimateLines,
+      total_cents: designTotalCents(estimateLines),
       updated_at: new Date().toISOString(),
     })
     .eq("short_code", designId);

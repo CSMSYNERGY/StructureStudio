@@ -19,7 +19,7 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // push_to_invoice's phone precondition must use the SAME comparison sign_invoice will use to
 // decide whether the customer owns the invoice — see that module's duplication ledger.
 import { phoneKey } from "../_shared/phoneKey.ts";
@@ -246,6 +246,10 @@ const GATES: GateTable = {
   // recreates the 2026-08-02 bug exactly (estimate sent, link 403s, the building never
   // shows the estimate and never flips to Sold).
   link_design_to_unit: { area: "designs", level: "edit" },
+  // The pipeline board's expected close date (migration 206). designs:edit — the same area
+  // that gates every other write to a design, and one a Sales Rep holds, because setting a
+  // close date on your own quote is the whole point of the field.
+  set_expected_close: { area: "designs", level: "edit" },
   list_inventory:   { area: "inventory", level: "view" },
   save_inventory:   { area: "inventory", level: "edit" },
   update_inventory: { area: "inventory", level: "edit" },
@@ -2321,6 +2325,40 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // being deleted: run it after and a failure is unretryable, having thrown away the only
   // pointer to the thing left behind. The contact and opportunity are still untouched — they
   // outlive any single design (a repeat customer has several) and are not ours to remove.
+  // ── Expected close date, set from the pipeline board card (migration 206) ───────────
+  // The board reads `designs` over direct PostgREST, but 154/193's restrictive policies are
+  // SELECT-only and there is deliberately no tenant update policy on that table — so this is
+  // the write path, with the tenant resolved server-side and never taken from the body.
+  if (action === "set_expected_close") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!/^SS-[A-HJ-NP-Z2-9]{6,12}$/.test(shortCode)) return json({ error: "Unknown design." }, 400);
+
+    // null clears the date; anything else must be a real calendar date. The check is not
+    // cosmetic: `new Date("2026-02-31")` rolls into March rather than failing, so a typo
+    // would be stored as a date nobody chose.
+    const raw = payload?.expectedCloseDate;
+    let expected: string | null = null;
+    if (raw != null && String(raw).trim() !== "") {
+      const v = String(raw).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return json({ error: "That date isn't in a form we recognise." }, 400);
+      const d = new Date(v + "T00:00:00Z");
+      if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) {
+        return json({ error: "That date doesn't exist — check the day and month." }, 400);
+      }
+      // A pipeline forecast, not a history field. Bounded so a fat-fingered year cannot park
+      // a card in 2226 where no filter or sort will ever surface it again.
+      const year = Number(v.slice(0, 4));
+      if (year < 2000 || year > 2100) return json({ error: "Pick a close date within the next few years." }, 400);
+      expected = v;
+    }
+
+    const { error: updErr } = await admin.from("designs")
+      .update({ expected_close_date: expected })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (updErr) return dbFail(req, clientId, "save that close date", updErr);
+    return json({ ok: true, expectedCloseDate: expected });
+  }
+
   if (action === "delete_design") {
     // ── OWNER/ADMIN ONLY ──────────────────────────────────────────────────────────────
     // The screen has always said so ("a team member must not be able to destroy a customer
@@ -6906,7 +6944,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
     const newPaintColors = next.paintStatus === "Paint" ? { body: next.paintBody, trim: next.paintTrim } : { body: "", trim: "" };
     const { error: updErr } = await admin.from("designs")
-      .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, updated_at: nowIso })
+      // total_cents rides the snapshot it is derived from, in the SAME update (206), so the
+      // card can never show a figure from a quote revision that is no longer on the design.
+      .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, total_cents: designTotalCents(newSnap), updated_at: nowIso })
       .eq("client_id", clientId).eq("short_code", shortCode);
     if (updErr) return dbFail(req, clientId, "apply the change", updErr);
 
@@ -7005,6 +7045,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { error: restErr } = await admin.from("designs")
         .update({
           estimate_lines: before.estimateLines,
+          // Reverting the lines reverts the value with them — a discarded change order must
+          // not leave the card quoting the number it was discarded for.
+          total_cents: designTotalCents(before.estimateLines),
           selections: before.selections ?? undefined,
           paint_colors: before.paintColors ?? undefined,
           updated_at: new Date().toISOString(),

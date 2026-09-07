@@ -897,6 +897,28 @@ function fmtDate(iso) {
   try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
 }
+// "Sep 2, 26" — the pipeline card's date, where three of them share one 240px column and
+// "Sep 2, 2026" three times does not fit (Carolyn, 2026-09-07: "I want to have the date fields
+// on the cards to only have 2 digit year to allow for more space").
+//
+// KEEPS THE MONTH NAME rather than going to 9/2/26, which is two characters shorter. Numeric
+// dates are read day-first by half the world, and these three sit side by side where a
+// misread is silent — the month name is what makes that impossible. Carolyn chose this.
+//
+// ONE definition, not a format string inlined per call site: a card showing "Sep 2, 26" beside
+// a record showing "Sep 2, 2026" is the kind of drift nobody files a bug about.
+function fmtDateShort(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
+  catch { return iso; }
+}
+// A whole-dollar figure for the pipeline card. Cents are dropped on purpose — the card answers
+// "how big is this deal", not "what is on the invoice", and $7,507.50 costs three characters
+// that the close date needs. The record and the invoice still show the exact amount.
+function fmtMoneyWhole(cents) {
+  if (cents == null || !Number.isFinite(Number(cents))) return null;
+  return "$" + Math.round(Number(cents) / 100).toLocaleString("en-US");
+}
 // Capitalize each word of a building-style name for display. Designs store the style as
 // either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
 function titleCase(s) {

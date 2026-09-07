@@ -202,6 +202,24 @@ export function totalFromSnapshot(snap: any): number | null {
  * distinguishable from "taxed at 0%", which is the distinction the whole mandatory-rate setting
  * exists to preserve.
  */
+/**
+ * `designs.total_cents` from an estimate_lines snapshot (migration 206) — the figure the
+ * pipeline board card shows as the deal's value.
+ *
+ * A one-line wrapper on purpose, so the five call sites that write a snapshot name the thing
+ * they are storing instead of each repeating `?.totalCents ?? null`. It is deliberately the
+ * SAME arithmetic as orders.total_cents: a card and an order for one design must never show
+ * two different numbers, which is exactly the class of drift that hit the Orders screen on
+ * 2026-09-02 when a second implementation omitted tax.
+ *
+ * NULL when there are no lines, and that is load-bearing: the card renders NULL as "No quote
+ * yet". 15 of the 43 designs on structure-studio have no lines, and a $0 pipeline card is a
+ * lie about a real deal.
+ */
+export function designTotalCents(snap: unknown): number | null {
+  return orderCentsFromSnapshot(snap)?.totalCents ?? null;
+}
+
 export function orderCentsFromSnapshot(
   snap: any,
 ): { totalCents: number; pretaxCents: number; taxCents: number | null } | null {
