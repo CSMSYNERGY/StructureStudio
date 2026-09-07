@@ -474,7 +474,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
               </button>
             ))}
             <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
-              Everything you send shows up under <b>What's New → My Requests</b>, so you can track where it got to.
+              Everything you send shows up under <b>Support → My Requests</b>, so you can track where it got to.
             </div>
           </div>
         )}
@@ -487,7 +487,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
         {view === "done" && (
           <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
             Your request is logged and on our board. You can follow it under{" "}
-            <b>What's New → My Requests</b> — the status updates there as we work on it,
+            <b>Support → My Requests</b> — the status updates there as we work on it,
             and any reply we post shows up alongside it.
             {!pushed && (
               <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
@@ -904,7 +904,9 @@ function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin
   );
 }
 
-// ─── What's New: global product changelog (read-only; team-populated) ───
+// ─── Support: setup checklist, the tenant's own submissions, and the global product
+// changelog (read-only; team-populated). Renamed from "What's New" 2026-08-30 — the
+// changelog is now one view inside it, not the whole page. ───
 // `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
 // Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
 function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
@@ -1085,8 +1087,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   return (
     <div>
       <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none", marginBottom: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>What's New</div>
-        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Updates as they ship to your portal — try them out and send us feedback.</div>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>Support</div>
+        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Get set up, track anything you've sent us, and see what's shipped — try the new things out and tell us how they land.</div>
       </div>
 
       {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}

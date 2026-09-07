@@ -747,7 +747,7 @@ function Dashboard({ session }) {
   // Null-safe on purpose: the loading/no-tenant early returns sit BELOW setup3d (the
   // last hook), so this line also runs while tenant is still null / "none".
   const isAdmin = !!tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin");
-  // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+  // Non-admins are confined to the Designs + Leads lists, the Support tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
 
   // While VIEWING another tenant, operator status is the admin grant. isAdmin above
