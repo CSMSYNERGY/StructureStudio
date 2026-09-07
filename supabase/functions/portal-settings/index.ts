@@ -19,7 +19,7 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsAfterAck, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // push_to_invoice's phone precondition must use the SAME comparison sign_invoice will use to
 // decide whether the customer owns the invoice — see that module's duplication ledger.
 import { phoneKey } from "../_shared/phoneKey.ts";
@@ -280,7 +280,10 @@ const GATES: GateTable = {
   // Texts the customer the deep link to sign their invoice. Sends no money and creates no
   // paperwork — it re-delivers a document they already have — but it does spend the
   // tenant's A2P campaign, so it sits at the same altitude as sending the invoice itself.
-  text_sign_link:   { area: "orders", level: "edit" },
+  // A rep who may raise a change may also hand the customer the phone to sign it. Widened
+  // 2026-09-07: a signature on an AMENDED order goes through this same link, and gating it on
+  // orders:'edit' alone would have let someone open a change they could not then get signed.
+  text_sign_link:   { any: [{ area: "orders", level: "edit" }, { area: "change_orders", level: "edit" }] },
   // Emails a pending change order to the customer for signature (migration 126).
   // Moved off `orders` onto `change_orders` (2026-09-01) when reps gained orders:edit —
   // amending a signed agreement is the one order power that is granted separately.
@@ -312,6 +315,13 @@ const GATES: GateTable = {
   decide_order_unlock: { area: "change_order_approve", level: "edit" },
   // Spends the unlock and opens the draft the rep then edits.
   open_amendment: { area: "change_orders", level: "edit" },
+  // Prices the finished edit, writes the words from the line diff, and sends it. The rep is
+  // still the one raising the change -- the customer's answer is what comes next.
+  finalize_amendment: { area: "change_orders", level: "edit" },
+  // The rep records that the customer said yes, in the rep's own name. Deliberately NOT on
+  // the approve area: attesting is part of raising a change, not part of allowing one, and
+  // Carolyn asked for those to be separate switches.
+  attest_change_order: { area: "change_orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -6713,6 +6723,48 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return n || (userEmail ? String(userEmail) : null);
   };
 
+  // Money in a sentence a person reads. Matches customer-accept's fmtMoney character for
+  // character, so the consent text on a rep attestation and on a customer signature read
+  // alike in the evidence table -- they are the same event recorded by different people.
+  const usd = (n: number): string => {
+    const v = Math.round(n * 100) / 100;
+    const [int, frac] = Math.abs(v).toFixed(2).split(".");
+    return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+  };
+
+  // The customer's "here is what changed, please approve it" email. ONE definition, called by
+  // finalize_amendment (which sends it as part of finishing) and by send_change_order (the
+  // resend button). Two copies would drift the moment either grew a line.
+  // deno-lint-ignore no-explicit-any
+  const emailChangeOrder = async (co: any): Promise<{ sent: boolean; reason: string | null }> => {
+    const { data: d } = await admin.from("designs")
+      .select("contact, ss_quote_number")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    const to = String((d?.contact as { email?: unknown } | null)?.email ?? "").trim();
+    if (!isEmail(to)) return { sent: false, reason: "no email address on this design" };
+    const { data: cs } = await admin.from("client_settings")
+      .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+      .eq("client_id", clientId).maybeSingle();
+    const content = changeOrderEmail({
+      businessName: String(cs?.business_name ?? "").trim() || clientId,
+      logoUrl: cs?.business_logo_url,
+      phone: cs?.business_phone,
+      website: cs?.business_website,
+      quoteNumber: String(d?.ss_quote_number || co.short_code),
+      coNo: Number(co.co_no) || 0,
+      description: String(co.description || ""),
+      totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
+      totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+      reviewUrl: myQuotesUrl(clientId, req),
+      quoteTerms: cs?.quote_terms,
+    });
+    const outcome = await sendTenantEmail(admin, clientId, {
+      kind: "change_order", shortCode: co.short_code, to,
+      subject: content.subject, html: content.html, text: content.text,
+    });
+    return { sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") };
+  };
+
   // amendment_status: everything the Change Order button needs before it acts.
   if (action === "amendment_status") {
     const shortCode = String(payload?.shortCode ?? "").trim();
@@ -6882,7 +6934,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!shortCode) return json({ error: "A design code is required." }, 400);
 
     const { data: d } = await admin.from("designs")
-      .select("short_code, ss_quote_number, accepted_at")
+      .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
     if (!d) return json({ error: "Design not found." }, 404);
     if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
@@ -6900,12 +6952,33 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: String(gate.reason ?? "This order is signed and has to be unlocked first."), reason: "locked" }, 409);
     }
 
+    // THE UNDO POINT, stamped HERE rather than at the first save (2026-09-07). The rep is
+    // about to edit the real design in the real designer -- there is no shadow copy, which is
+    // what makes "change anything, including the drawing" true without a second designer. So
+    // the only record of what the order looked like before is the one taken now. Without it
+    // "Discard the change" voids the change order and leaves the EDIT on the design, which is
+    // the discard drift the order screen has been warning about since migration 127.
+    //
+    // Same column and same shape stage_order_attribute_change writes, and that handler already
+    // declines to overwrite an existing snapshot_before -- so a rep who opens the amendment and
+    // then uses the order-screen dropdowns still restores to the right place.
+    const undoPoint = {
+      estimateLines: d.estimate_lines, selections: d.selections, paintColors: d.paint_colors,
+    };
+    // What the customer last put their name to, for the CO's version_before. Same read
+    // stage_order_attribute_change makes; null is acceptable (older designs have no version).
+    const { data: acc } = await admin.from("design_acceptances").select("design_version")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .order("accepted_at", { ascending: false }).limit(1).maybeSingle();
+
     // source 'design_edit': the rep is about to open the designer, and the description is
     // GENERATED from the line diff when the amendment is finished -- never typed. A manual
     // amendment converts on finalize; it cannot be decided here, before any editing.
     const { data: co, error: coErr } = await admin.from("change_orders").insert({
       client_id: clientId, short_code: shortCode, source: "design_edit", status: "draft",
       description: "Change in progress",
+      snapshot_before: undoPoint,
+      version_before: acc?.design_version ?? null,
     }).select("id, co_no, status, raised_under, unlock_id, fee_cents, fee_tax_cents, fee_taxable").maybeSingle();
     if (coErr) {
       // The trigger's refusal is a sentence written for a person; pass it through rather
@@ -6927,6 +7000,299 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, changeOrder: co });
   }
 
+  // ── finalize_amendment: the rep is done editing; price it and ask the customer ─────────
+  //
+  // The draft becomes a real change order here, and every number on it is DERIVED. Nothing
+  // in the payload decides money or words: the description comes from the line diff
+  // (changeOrderDescription over the agreed baseline), the totals come from the snapshots
+  // either side of it, and the fee was stamped by the guard trigger when the change was
+  // opened and is frozen against every later write. A rep summarising their own change is
+  // how an acknowledgment drifts from the reality it is supposed to record.
+  if (action === "finalize_amendment") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, source, fee_cents, fee_tax_cents, fee_taxable, version_before")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status === "pending_ack") {
+      return json({ ok: true, already: true, changeOrder: co });
+    }
+    if (co.status !== "draft") {
+      return json({
+        error: co.status === "acknowledged"
+          ? "This change order is already acknowledged."
+          : "This change order was discarded — open a new one.",
+      }, 400);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, ss_quote_number, image_url, estimate_lines, accepted_snapshot, selections, paint_colors")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const agreed = agreedBaseline(d);
+    const description = changeOrderDescription(agreed.lines, d.estimate_lines);
+    const totalBefore = totalFromSnapshot(agreed.lines);
+    const totalAfter = totalFromSnapshot(d.estimate_lines);
+
+    // NOTHING CHANGED. Refuse rather than send the customer a change order describing no
+    // change — and say which of the two things to do about it, because a rep who opened this
+    // by mistake otherwise leaves a draft sitting on the order blocking the next one (the
+    // one-live-amendment index) with no idea why.
+    if (!description && totalBefore === totalAfter) {
+      return json({
+        error: "Nothing has changed on this order yet. Open the designer and make the change, or discard this one.",
+        reason: "no_change",
+      }, 400);
+    }
+
+    let versionAfter: number | null = null;
+    {
+      const { data: maxV } = await admin.from("design_versions").select("version")
+        .eq("short_code", co.short_code).order("version", { ascending: false }).limit(1).maybeSingle();
+      versionAfter = maxV?.version == null ? null : Number(maxV.version);
+    }
+
+    // `.eq("status","draft")` is the concurrency claim, not a formality: two reps on the same
+    // order would otherwise both "finish" it, and the second would rewrite words and money on
+    // a change the customer had already been emailed.
+    const { data: sent, error: updErr } = await admin.from("change_orders")
+      .update({
+        status: "pending_ack",
+        description: description ?? `Change to quote ${d.ss_quote_number ?? co.short_code}`,
+        total_before_cents: totalBefore == null ? null : Math.round(totalBefore * 100),
+        total_after_cents: totalAfter == null ? null : Math.round(totalAfter * 100),
+        version_after: versionAfter,
+      })
+      .eq("client_id", clientId).eq("id", co.id).eq("status", "draft")
+      .select("id, co_no, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable, short_code")
+      .maybeSingle();
+    if (updErr) return dbFail(req, clientId, "finish that change", updErr);
+    if (!sent) return json({ error: "Somebody else just finished this change." }, 409);
+
+    // The customer's quote PDF becomes the PROPOSAL — the document showing what they are
+    // being asked to approve, which is what it should show while an amendment is open. It is
+    // NOT the signed invoice: that lives at its own path and is never regenerated here, so
+    // nothing the customer has already put their name to is overwritten. The acceptance
+    // certificate on the quote is re-appended by regenerateQuotePdf itself.
+    const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, co.short_code, {
+      quoteNumber: String(d.ss_quote_number ?? co.short_code), snap: d.estimate_lines, planUrl: d.image_url,
+    });
+
+    const mail = await emailChangeOrder(sent);
+    await audit("amendment_finalized", null,
+      `design=${co.short_code} co=${sent.co_no} before=${totalBefore ?? "-"} after=${totalAfter ?? "-"} fee=${sent.fee_cents ?? 0}`).catch(() => {});
+    return json({
+      ok: true, changeOrder: sent, description: sent.description,
+      totalBefore, totalAfter, quotePdfUrl, sent: mail.sent, sendReason: mail.reason,
+    });
+  }
+
+  // ── attest_change_order: the rep records that the customer said yes ────────────────────
+  //
+  // MOVED OFF THE BROWSER (2026-09-07). The portal used to write `change_orders` directly
+  // under RLS for a verbal acknowledgment. That could never write the other half of the
+  // record: `design_acceptances` has SELECT policies and nothing else (migration 124), so
+  // writes are service-role only BY CONSTRUCTION — which is the entire safety argument behind
+  // rep-attested acceptance, and it cannot be honoured from a browser. Carolyn asked for a
+  // fresh signature on the amended order "or fill in the details we already have in place for
+  // it"; this is that second half, and it has to leave the same kind of evidence as the first.
+  //
+  // The row is subject='invoice' with revision = co_no (migration 213): the customer is
+  // approving the WHOLE revised order, not a document beside it. Revision 0 keeps the original
+  // signature verbatim; nothing is updated and nothing is deleted.
+  if (action === "attest_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    // When they said yes. Defaults to today; a rep recording yesterday's phone call should be
+    // able to say so, and the CHECK behind ack_method='verbal' demands the date either way.
+    const rawDate = String(payload?.conversationDate ?? "").trim();
+    const conversationDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+      ? rawDate
+      : new Date().toISOString().slice(0, 10);
+    if (conversationDate > new Date().toISOString().slice(0, 10)) {
+      return json({ error: "That conversation date is in the future." }, 400);
+    }
+
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status === "acknowledged") return json({ ok: true, already: true });
+    if (co.status !== "pending_ack") {
+      return json({
+        error: co.status === "draft"
+          ? "This change isn't finished yet — finish it before recording their approval."
+          : "This change order was discarded.",
+      }, 400);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, ss_quote_number, image_url, contact, estimate_lines, accepted_snapshot")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    // WHO IS ATTESTING. From the verified session, never from the body — the
+    // change_orders.verbal_recorded_by posture, and design_acceptances_rep_named_check
+    // refuses the insert without it anyway. Denormalised because this row is evidence: it has
+    // to still read correctly after the person is renamed or gone.
+    const recordedByName = (await callerName()) ?? "";
+    if (!recordedByName.trim()) {
+      return json({ error: "We couldn't tell who is recording this. Sign out and back in, then try again." }, 400);
+    }
+
+    // ── THE NUMBER THEY AGREED TO ────────────────────────────────────────────────────────
+    // The whole amended order, fee included — not the change in isolation. This is the figure
+    // that goes into a sentence standing as the customer's approval, so it is computed from
+    // the same helper the acknowledging write will use a moment later rather than from a
+    // second arithmetic that could disagree with the money actually recorded.
+    const { data: ackedNow } = await admin.from("change_orders")
+      .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+      .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged");
+    const projected = orderCentsAfterAck(d.estimate_lines, [...(ackedNow ?? []), co], co);
+    const newTotal = projected == null ? null : projected.totalCents / 100;
+
+    // ── REFUND OWED ──────────────────────────────────────────────────────────────────────
+    // Carolyn: show a cheaper-than-paid order as a refund owed. The customer should learn
+    // that at the moment their approval is recorded, not from a balance card weeks later.
+    let settledCents = 0;
+    {
+      const { data: ord } = await admin.from("orders").select("id")
+        .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+      if (ord?.id) {
+        const { data: pays } = await admin.from("payments")
+          .select("amount_cents, funding_state, voided_at")
+          .eq("client_id", clientId).eq("order_id", ord.id);
+        for (const pmt of Array.isArray(pays) ? pays : []) {
+          if (pmt.voided_at) continue;
+          if (pmt.funding_state === "pending" || pmt.funding_state === "returned") continue;
+          settledCents += Number(pmt.amount_cents) || 0;
+        }
+      }
+    }
+    const refundCents = projected == null ? 0 : Math.max(0, settledCents - projected.totalCents);
+
+    const quoteNo = String(d.ss_quote_number || co.short_code);
+    const coLabel = `CO-${co.co_no}`;
+    const feeCents = Number(co.fee_cents) || 0;
+    const feeTaxCents = Number(co.fee_tax_cents) || 0;
+
+    // The consent text is the durable evidence, composed HERE and stored verbatim. It is
+    // written in the REP's voice throughout and ends with the clause that makes it honest —
+    // that sentence is the difference between a record and a forged signature.
+    const consentText =
+      `${recordedByName} recorded ${String((d.contact as { name?: unknown } | null)?.name ?? "").trim() || "the customer"}'s approval of change order ` +
+      `${coLabel} to quote ${quoteNo}, given on ${conversationDate}` +
+      (newTotal == null ? "" : `, for a revised order total of ${usd(newTotal)}`) +
+      (feeCents > 0 ? `, which includes a change order fee of ${usd((feeCents + feeTaxCents) / 100)}` : "") +
+      (refundCents > 0 ? `. The revised total is below what has already been paid, leaving ${usd(refundCents / 100)} to be refunded` : "") +
+      `. This is the builder's record of the customer's approval, not the customer's signature.`;
+
+    const acceptanceId = crypto.randomUUID();
+    const ackAtIso = new Date().toISOString();
+    const { error: insErr } = await admin.from("design_acceptances").insert({
+      id: acceptanceId,
+      client_id: clientId,
+      short_code: co.short_code,
+      // The WHOLE revised order, which is what they approved — and revision IS co_no, so the
+      // document a customer signed and the change it describes can never be numbered apart.
+      subject: "invoice",
+      revision: Number(co.co_no) || 0,
+      change_order_id: co.id,
+      quote_number: quoteNo,
+      total: newTotal,
+      // The tax as the AMENDED document carries it — that is what was approved.
+      ...taxFreeze(d.estimate_lines),
+      method: "rep",
+      signer_name: String((d.contact as { name?: unknown } | null)?.name ?? "").trim() || "(no name on file)",
+      consent_text: consentText,
+      // Not a claim about identity here (nothing matches on it — the customer never opened a
+      // session), just what the order has on file. Empty is honest and the column is NOT NULL.
+      phone_digits: phoneKey((d.contact as { phone?: unknown } | null)?.phone),
+      recorded_by_user_id: userId ?? null,
+      recorded_by_name: recordedByName,
+      ip: clientIp(req),
+      user_agent: (req.headers.get("user-agent") || "").slice(0, 300) || null,
+      accepted_at: ackAtIso,
+    });
+    if (insErr) {
+      // design_acceptances_co_once: somebody already recorded an answer for this change.
+      if (String(insErr.code) === "23505") return json({ ok: true, already: true });
+      return dbFail(req, clientId, "record that approval", insErr);
+    }
+
+    const { data: flipped, error: ackErr } = await admin.from("change_orders")
+      .update({
+        status: "acknowledged", ack_method: "verbal", acceptance_id: acceptanceId,
+        acknowledged_at: ackAtIso, verbal_rep_name: recordedByName,
+        verbal_conversation_date: conversationDate, verbal_recorded_by: userId ?? null,
+      })
+      .eq("client_id", clientId).eq("id", co.id).eq("status", "pending_ack")
+      .select("id, co_no").maybeSingle();
+    if (ackErr || !flipped) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: 500,
+        message: `CO attest flip failed: ${ackErr?.message ?? "no row"}`, context: { coId },
+      }).catch(() => {});
+      return json({ error: "The approval was recorded but the change didn't finalize. It's on the order — try again, or call it in." }, 500);
+    }
+
+    // ── THE ORDER'S MONEY ────────────────────────────────────────────────────────────────
+    // Re-read AFTER the flip, deliberately: change_orders_stamp_agreed (153) has by now moved
+    // accepted_snapshot forward onto the revision that was just agreed, and the acknowledged
+    // list now includes this change. Computing from stale copies is how the fee gets refunded
+    // by the next change order.
+    {
+      const [{ data: freshD }, { data: allAcked }] = await Promise.all([
+        admin.from("designs").select("estimate_lines, accepted_snapshot")
+          .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle(),
+        admin.from("change_orders")
+          .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+          .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged"),
+      ]);
+      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? [], co);
+      if (money != null) {
+        // total_source='manual' also shields it from sync-design-status' GHL repricer.
+        const { error: totErr } = await admin.from("orders")
+          .update({
+            total_cents: money.totalCents,
+            pretax_subtotal_cents: money.pretaxCents,
+            tax_cents: money.taxCents,
+            total_source: "manual",
+            updated_at: ackAtIso,
+          })
+          .eq("client_id", clientId).eq("short_code", co.short_code);
+        if (totErr) {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: 500,
+            message: `CO attest order-total update failed: ${totErr.message}`, context: { coId },
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // The quote PDF stops being a proposal and becomes the agreed document.
+    const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, co.short_code, {
+      quoteNumber: quoteNo, snap: d.estimate_lines, planUrl: d.image_url,
+    });
+
+    await auditStrict("change_order_attested", null,
+      `design=${co.short_code} co=${co.co_no} by=${recordedByName} on=${conversationDate}`);
+    return json({
+      ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no,
+      total: newTotal, refundCents, quotePdfUrl, consentText,
+    });
+  }
+
   if (action === "send_change_order") {
     const coId = String(payload?.changeOrderId ?? "").trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
@@ -6945,32 +7311,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           : co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided.",
       }, 400);
     }
-    const { data: d } = await admin.from("designs")
-      .select("contact, ss_quote_number")
-      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
-    const to = String((d?.contact as { email?: unknown } | null)?.email ?? "").trim();
-    if (!isEmail(to)) return json({ ok: true, sent: false, reason: "no email address on this design" });
-    const { data: cs } = await admin.from("client_settings")
-      .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
-      .eq("client_id", clientId).maybeSingle();
-    const content = changeOrderEmail({
-      businessName: String(cs?.business_name ?? "").trim() || clientId,
-      logoUrl: cs?.business_logo_url,
-      phone: cs?.business_phone,
-      website: cs?.business_website,
-      quoteNumber: String(d?.ss_quote_number || co.short_code),
-      coNo: Number(co.co_no) || 0,
-      description: String(co.description || ""),
-      totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
-      totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
-      reviewUrl: myQuotesUrl(clientId, req),
-      quoteTerms: cs?.quote_terms,
-    });
-    const outcome = await sendTenantEmail(admin, clientId, {
-      kind: "change_order", shortCode: co.short_code, to,
-      subject: content.subject, html: content.html, text: content.text,
-    });
-    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+    // One body, shared with finalize_amendment (which sends the first copy). This action is
+    // the RESEND: same email, same numbers, so a customer who lost the first one cannot be
+    // handed a second that says something different.
+    const outcome = await emailChangeOrder(co);
+    return json({ ok: true, sent: outcome.sent, reason: outcome.reason });
   }
 
   // ── order_paperwork: everything the invoice-style order document needs (migration 127) ──
@@ -7404,6 +7749,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // Regenerate the quote PDF from the patched snapshot, keeping the customer's
     // acceptance certificate page (regeneration must never silently drop the countersign).
+    //
+    // KEPT, DELIBERATELY (2026-09-07). The plan carried an open item to stop regenerating
+    // here, on the theory that the customer's document was moving under them mid-approval.
+    // Two things settle it the other way. The signed INVOICE pdf lives at its own path and is
+    // never touched by this — nothing the customer has put their name to is overwritten. And
+    // with the money pinned to the agreed baseline, what a regenerate now produces is exactly
+    // the document showing the customer the change they are being ASKED to approve, which is
+    // what a proposal should show. finalize_amendment and attest_change_order regenerate from
+    // the same helper at their own moments, so the file is never left stale on any path.
     const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, shortCode, {
       quoteNumber: String(d.ss_quote_number), snap: newSnap, planUrl: d.image_url,
     });
@@ -7587,13 +7941,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // the PDF below and the email-retry branch just under here read from this, so a
         // re-send can never name a different number than the document it links to.
         // A missing change_orders table is tolerated exactly as the pending check does.
+        // THE FEE COLUMNS ARE NOT OPTIONAL HERE (2026-09-07). The acknowledging writer adds the
+        // fee to orders.pretax_subtotal_cents, which is the figure handed to the reconciler
+        // below. Select the fee and it prints as the line the tenant named; omit it and the
+        // order looks unexplained by exactly the fee, so the reconciler invents an anonymous
+        // "Order adjustment" row for it on the customer's invoice. fee_label is not a column on
+        // change_orders — the tenant names their own fee once, in settings — so it is joined on
+        // here rather than denormalised onto every row.
         const loadAmendments = async (): Promise<{ acked: any[]; orderTotalCents: number | null }> => {
-          const [coRes, ordRes] = await Promise.all([
-            admin.from("change_orders").select("co_no, description, total_before_cents, total_after_cents")
+          const [coRes, ordRes, feeRes] = await Promise.all([
+            admin.from("change_orders")
+              .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
               .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
             admin.from("orders").select("total_cents, pretax_subtotal_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+            admin.from("client_settings").select("co_fee_label").eq("client_id", clientId).maybeSingle(),
           ]);
+          const feeLabel = String(feeRes.data?.co_fee_label ?? "").trim() || "Change order fee";
           // PRE-TAX, deliberately (migration 148). amendedInvoiceDocument reconciles its lines
           // against this in SUBTOTAL space — `sum(qty x amount) - discount`, the PDF's own
           // arithmetic — and since 148 the PDF adds a tax row ON TOP of that sum. orders
@@ -7605,7 +7969,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           const ord = ordRes.error ? null : ordRes.data;
           const pretax = ord?.pretax_subtotal_cents ?? ord?.total_cents ?? null;
           return {
-            acked: coRes.error ? [] : (coRes.data ?? []),
+            acked: coRes.error ? [] : (coRes.data ?? []).map((c) => ({ ...c, fee_label: feeLabel })),
             orderTotalCents: pretax == null ? null : Number(pretax),
           };
         };

@@ -93,7 +93,20 @@ export function paymentAmountDecision(input: AmountInput): AmountDecision {
     return { ok: false, reason: "no_total", balanceCents: null };
   }
   const balanceCents = owedCents - settledCents;
-  if (balanceCents <= 0) {
+  // EXACTLY ZERO IS PAID IN FULL. BELOW ZERO IS A REFUND OWED, AND THEY ARE NOT THE SAME
+  // ANSWER (Carolyn 2026-09-06: "Show it as a refund owed"). Until the amendment flow, a
+  // change could only ever raise a total, so `<= 0` was only ever reached at zero and the
+  // collapse cost nothing. A rep can now take $200 off a fully-paid order, and "Paid in full"
+  // is then a false statement about money the builder is holding — the customer's screen and
+  // the order screen would both go quiet about it. The signed balance rides along either way
+  // so the caller can print the amount rather than merely knowing the sign.
+  //
+  // Both branches still REFUSE a charge, which is the property the payment path depends on:
+  // this splits an explanation in two, it does not open a door.
+  if (balanceCents < 0) {
+    return { ok: false, reason: "refund_due", balanceCents };
+  }
+  if (balanceCents === 0) {
     return { ok: false, reason: "paid_in_full", balanceCents };
   }
   // A bank payment that has not funded is not money — but it is also not nothing. Any
@@ -126,6 +139,11 @@ export function amountRefusalText(reason: string): string {
       return "Your builder hasn't set the total on this order yet.";
     case "paid_in_full":
       return "This order is already paid in full.";
+    case "refund_due":
+      // The customer reads this on their own phone, so it says what happens next
+      // rather than merely that they cannot pay. Reversing a card charge is the
+      // builder's action (portal-payments refund_payment) and always was.
+      return "This order has been paid more than it now costs — your builder owes you the difference back.";
     case "pending_clearing":
       return "A bank payment on this order is still clearing. Nothing more to do until it lands.";
     case "below_minimum":

@@ -97,14 +97,40 @@ Deno.test("returned money does not count as settled — the balance reopens", ()
 Deno.test("paid in full, overpaid, and no-total are each a NAMED refusal", () => {
   const paid = ip.paymentAmountDecision({ ...base, settledCents: 365000 });
   check("paid", !paid.ok && paid.reason === "paid_in_full");
-  const over = ip.paymentAmountDecision({ ...base, settledCents: 400000 });
-  check("overpaid", !over.ok && over.reason === "paid_in_full");
   const none = ip.paymentAmountDecision({ ...base, owedCents: null });
   check("no total", !none.ok && none.reason === "no_total");
   // Every reason has a customer sentence, or a refusal ships with no words.
-  for (const r of ["no_total", "paid_in_full", "pending_clearing", "below_minimum", "above_maximum"]) {
+  for (const r of ["no_total", "paid_in_full", "refund_due", "pending_clearing", "below_minimum", "above_maximum"]) {
     check(`sentence for ${r}`, ip.amountRefusalText(r).length > 10, r);
   }
+});
+
+Deno.test("overpaid is a REFUND OWED, not 'paid in full' — and zero is the boundary", () => {
+  // A rep can now take money OFF a signed order (the amendment flow), so the balance can go
+  // below zero for the first time. Collapsing that into "paid in full" would leave the
+  // customer's screen silent about money the builder is holding.
+  const over = ip.paymentAmountDecision({ ...base, settledCents: 400000 });
+  check("named as a refund", !over.ok && over.reason === "refund_due");
+  check("and the amount is carried, not just the sign", !over.ok && over.balanceCents === -35000);
+
+  // EXACTLY zero stays paid in full. This is the line the split turns on.
+  const exact = ip.paymentAmountDecision({ ...base, settledCents: 365000 });
+  check("zero is paid in full", !exact.ok && exact.reason === "paid_in_full");
+  check("zero balance", !exact.ok && exact.balanceCents === 0);
+
+  // One cent either side, so the boundary is pinned rather than assumed. A cent SHORT is
+  // still owed — refused by the payment floor, which is a different answer entirely and the
+  // distinction this test exists to keep: money still owed must never read as money to return.
+  const oneUnder = ip.paymentAmountDecision({ ...base, settledCents: 364999 });
+  check("a cent short is owed, not refunded", !oneUnder.ok && oneUnder.reason === "below_minimum");
+  check("and the balance is positive", !oneUnder.ok && oneUnder.balanceCents === 1);
+  const oneOver = ip.paymentAmountDecision({ ...base, settledCents: 365001 });
+  check("a cent over is a refund", !oneOver.ok && oneOver.reason === "refund_due");
+  check("of a cent", !oneOver.ok && oneOver.balanceCents === -1);
+
+  // BOTH still refuse a charge. The split explains, it does not open a door.
+  check("paid in full refuses", !exact.ok);
+  check("refund due refuses too", !over.ok);
 });
 
 Deno.test("amounts outside the floor and ceiling are refused", () => {
