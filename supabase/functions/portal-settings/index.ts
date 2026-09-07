@@ -1046,7 +1046,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -1098,6 +1098,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // a tenant ends up quoting at 0.07%.
         ssTaxRate: data?.ss_tax_rate == null ? null : Math.round(Number(data.ss_tax_rate) * 1000000) / 10000,
         ssTaxLabel: data?.ss_tax_label ?? "Sales tax",
+        // Changing a signed order (migrations 209-216). The fee is surfaced in DOLLARS —
+        // the card asks for dollars, and a card that reads cents back into a dollar box is
+        // how a $150 fee becomes $15,000 on the first re-save.
+        coUnlockRequired: data?.co_unlock_required === true,
+        coFreeDays: Number(data?.co_free_days ?? 0),
+        coFee: data?.co_fee_cents == null ? 0 : Math.round(Number(data.co_fee_cents)) / 100,
+        coFeeTaxable: data?.co_fee_taxable !== false,
+        coFeeLabel: data?.co_fee_label ?? "Change order fee",
+        coUnlockHours: Number(data?.co_unlock_hours ?? 72),
         ssTaxDelivery: data?.ss_tax_delivery === true,
         // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
         // in SS mode there is no GHL fallback, so a tenant without live sending can't
@@ -1294,6 +1303,85 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updates.ss_tax_label = l || "Sales tax";
     }
     if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+
+    // ── CHANGING A SIGNED ORDER (migrations 209-216) ────────────────────────────────────
+    // Carolyn 2026-09-06: "add a feature in the settings that allow admin/builder to set how
+    // many days after an order is written that a sales rep can do a change order without
+    // their approval ... and the admin should be able to set a $ amount as a change order
+    // fee (if they want) and it automatically gets applied (after said amount of days)".
+    //
+    // Every bound below is the SAME one the database holds, restated so the builder is
+    // stopped at the control they just touched with a sentence rather than at a constraint.
+    if ("coUnlockRequired" in payload) updates.co_unlock_required = Boolean(payload.coUnlockRequired);
+
+    if ("coFreeDays" in payload) {
+      const raw = String(payload.coFreeDays ?? "").trim();
+      const n = raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || n > 365) {
+        return json({ error: "The free-change window has to be a whole number of days between 0 and 365. Enter 0 for no free window." }, 400);
+      }
+      updates.co_free_days = n;
+    }
+
+    if ("coFee" in payload) {
+      // Entered in DOLLARS, stored in CENTS. The ceiling is deliberate and low: this is a
+      // fee for paperwork, and a fat-fingered 15000 would otherwise land on a customer's
+      // invoice as $15,000 with a real signature request attached to it.
+      const raw = String(payload.coFee ?? "").trim();
+      const d = raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(d) || d < 0 || d > 5000) {
+        return json({ error: "The change order fee has to be an amount between $0 and $5,000. Enter 0 for no fee." }, 400);
+      }
+      updates.co_fee_cents = Math.round(d * 100);
+    }
+
+    if ("coFeeTaxable" in payload) updates.co_fee_taxable = Boolean(payload.coFeeTaxable);
+
+    if ("coFeeLabel" in payload) {
+      // Printed on the customer's invoice, so bounded exactly like the tax label beside it.
+      const l = String(payload.coFeeLabel ?? "").trim().slice(0, 40);
+      updates.co_fee_label = l || "Change order fee";
+    }
+
+    if ("coUnlockHours" in payload) {
+      const raw = String(payload.coUnlockHours ?? "").trim();
+      const n = raw === "" ? 72 : Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 720) {
+        return json({ error: "An unlock has to last between 1 and 720 hours (30 days)." }, 400);
+      }
+      updates.co_unlock_hours = n;
+    }
+
+    // ── THE MERGED-STATE REFUSALS: a number that is stored, invisible, and doing nothing ──
+    // Both of these are settings that LOOK set and have no effect, which is the worst kind
+    // of setting — a builder believes they are charging for late changes and are not.
+    // Checked against the merged state because the controls can arrive in separate saves.
+    if ("coFee" in payload || "coUnlockRequired" in payload || "invoiceInGhl" in payload) {
+      const { data: curCo } = await admin.from("client_settings")
+        .select("co_unlock_required, co_fee_cents, invoice_in_ghl").eq("client_id", clientId).maybeSingle();
+      const nextFee = "coFee" in payload ? Number(updates.co_fee_cents) : Number(curCo?.co_fee_cents ?? 0);
+      const nextRequired = "coUnlockRequired" in payload
+        ? Boolean(updates.co_unlock_required)
+        : curCo?.co_unlock_required === true;
+      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curCo?.invoice_in_ghl !== false;
+
+      // 1. In CRM mode GoHighLevel owns the documents. There is nothing of ours to print a
+      //    fee line on, so the money would simply never be charged.
+      if (nextFee > 0 && nextInGhl) {
+        return json({
+          error: "A change order fee can only be charged on paperwork StructureStudio issues. Your quotes and invoices are created in your CRM right now, so there is nothing here for the fee to appear on — switch that off above first, or leave the fee at 0.",
+        }, 400);
+      }
+      // 2. THE FEE RIDES THE UNLOCK. order_amendment_gate only quotes a fee on the 'unlock'
+      //    authority — inside the free window a change is free by definition, and with the
+      //    approval requirement off the whole regime is dormant and every change is free.
+      //    So a fee set without it is a number nobody will ever be charged.
+      if (nextFee > 0 && !nextRequired) {
+        return json({
+          error: "A change order fee is charged when an admin or crew leader unlocks a signed order — so it only applies once you require approval for changes. Switch that on, or leave the fee at 0.",
+        }, 400);
+      }
+    }
 
     if ("ssInvoicePrefix" in payload) {
       const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);

@@ -35,6 +35,11 @@ function SettingsView({ section }) {
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
     ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
+    // Changing a signed order (migrations 209-216). coUnlockRequired defaults FALSE and
+    // that is load-bearing: with it off the whole approval-and-fee regime is dormant and
+    // every tenant behaves exactly as they did before the feature existed.
+    coUnlockRequired: false, coFreeDays: "0", coFee: "0", coFeeTaxable: true,
+    coFeeLabel: "Change order fee", coUnlockHours: "72",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -137,6 +142,12 @@ function SettingsView({ section }) {
         ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
         ssTaxLabel: data.ssTaxLabel || "",
         ssTaxDelivery: Boolean(data.ssTaxDelivery),
+        coUnlockRequired: Boolean(data.coUnlockRequired),
+        coFreeDays: data.coFreeDays == null ? "0" : String(data.coFreeDays),
+        coFee: data.coFee == null ? "0" : String(data.coFee),
+        coFeeTaxable: data.coFeeTaxable !== false,
+        coFeeLabel: data.coFeeLabel || "Change order fee",
+        coUnlockHours: data.coUnlockHours == null ? "72" : String(data.coUnlockHours),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -222,6 +233,31 @@ function SettingsView({ section }) {
     setInvMsg({ ok: (mayGhlInvoice && form.invoiceInGhl)
       ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
       : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // Changing a signed order (migrations 209-216). Its own save, like the invoicing card
+  // above and for the same reason: the fields are presence-based on the server, so sending
+  // only these leaves every other setting untouched.
+  const [coBusy, setCoBusy] = useState(false);
+  const [coMsg, setCoMsg] = useState(null);   // { ok } | { err }
+  const saveChangeOrders = async () => {
+    setCoMsg(null); setCoBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
+      action: "save",
+      coUnlockRequired: form.coUnlockRequired,
+      coFreeDays: form.coFreeDays,
+      coFee: form.coFee,
+      coFeeTaxable: form.coFeeTaxable,
+      coFeeLabel: form.coFeeLabel,
+      coUnlockHours: form.coUnlockHours,
+    } });
+    setCoBusy(false);
+    if (err || (data && data.error)) { setCoMsg({ err: (data && data.error) || err.message }); return; }
+    setCoMsg({ ok: form.coUnlockRequired
+      ? `Saved — after ${Number(form.coFreeDays) || 0} day${Number(form.coFreeDays) === 1 ? "" : "s"}, a signed order has to be unlocked before it can be changed.`
+      : "Saved — your reps can change a signed order at any time without asking anyone." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -484,6 +520,91 @@ function SettingsView({ section }) {
           {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
         </button>
       </div>
+
+      {/* ── Changing a signed order (migrations 209-216) ─────────────────────────────────
+          SS-PAPERWORK MODE ONLY. In CRM mode GoHighLevel owns the documents, so there is
+          nothing of ours for a fee to print on and nothing for an unlock to protect — the
+          server refuses a fee in that state and the card would be describing a feature the
+          tenant cannot use.
+
+          The default (approval OFF) is what every tenant already has, and the copy says so
+          plainly rather than presenting the dormant state as an unconfigured one. */}
+      {!form.invoiceInGhl && (
+        <div style={S.card}>
+          <div style={S.h2}>Changing a signed order</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
+            A change order re-opens the whole order — the drawing, the options, the price — and the
+            customer signs it again. Payments already taken are never touched. This is who is allowed
+            to start one, and what it costs.
+          </p>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+            <input type="checkbox" checked={form.coUnlockRequired} onChange={set("coUnlockRequired")} style={{ marginTop: 2 }} />
+            An admin or crew leader has to unlock a signed order first
+          </label>
+          <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+            {form.coUnlockRequired
+              ? <>On — once the free window below has passed, a rep asks and someone with <b>Approve Changes</b> decides. A change can still happen at any point in the job, including after delivery and final payment.</>
+              : <><b>Off — this is how your account works today.</b> Any rep who holds Change Orders can change a signed order whenever they need to, with nobody's approval.</>}
+          </p>
+
+          {form.coUnlockRequired && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+                <div><span style={S.lbl}>Free-change window (days)</span>
+                  <input style={S.input} value={form.coFreeDays} onChange={set("coFreeDays")} placeholder="e.g. 3" inputMode="numeric" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    How long after the order is written a rep can change it with no approval and no fee — for the customer who rings back the same afternoon. Enter 0 for no free window.
+                  </div></div>
+                <div><span style={S.lbl}>How long an unlock lasts (hours)</span>
+                  <input style={S.input} value={form.coUnlockHours} onChange={set("coUnlockHours")} placeholder="72" inputMode="numeric" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    An unlock nobody used expires on its own, so an order is never left standing open. Up to 720 hours (30 days).
+                  </div></div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+                <div><span style={S.lbl}>Change order fee ($)</span>
+                  <input style={S.input} value={form.coFee} onChange={set("coFee")} placeholder="e.g. 150" inputMode="decimal" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    Added automatically to a change made after the free window, as its own line on the invoice. Enter 0 for no fee.
+                  </div></div>
+                <div><span style={S.lbl}>How the fee reads on the invoice</span>
+                  <input style={S.input} value={form.coFeeLabel} onChange={set("coFeeLabel")} placeholder="Change order fee" maxLength={40} />
+                  <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
+                    <input type="checkbox" checked={form.coFeeTaxable} onChange={set("coFeeTaxable")} />
+                    Charge sales tax on the fee
+                  </label>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    Taxed at the rate on the customer's own agreement, not today's — check with your accountant if you are unsure.
+                  </div></div>
+              </div>
+
+              {/* The one combination the server refuses, surfaced at the control rather
+                  than after a round trip. A fee with no approval requirement is charged
+                  by nothing — see order_amendment_gate: it only quotes a fee on an unlock. */}
+              {Number(form.coFee) > 0 && (
+                <div style={{ marginTop: 10, background: "#F0F9FF", border: "1px solid #BAE6FD", color: "#075985", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, lineHeight: 1.5 }}>
+                  A rep is shown the {"$"}{(Number(form.coFee) || 0).toFixed(2)} fee before they start the change, so nobody meets it for the first time on the customer's invoice.
+                  {Number(form.coFreeDays) > 0
+                    ? ` Changes made within ${Number(form.coFreeDays)} day${Number(form.coFreeDays) === 1 ? "" : "s"} of the order are free.`
+                    : " Every change to a signed order carries it — there is no free window."}
+                </div>
+              )}
+            </>
+          )}
+
+          <button type="button" onClick={saveChangeOrders} disabled={coBusy}
+            style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: coBusy ? 0.6 : 1 }}>
+            {coBusy ? "Saving…" : "Save change order rules"}
+          </button>
+          {coMsg && (
+            <div style={{ marginTop: 10, background: coMsg.err ? "#FEF2F2" : "#ECFDF5", border: `1px solid ${coMsg.err ? "#FECACA" : "#A7F3D0"}`, color: coMsg.err ? "#B91C1C" : "#065F46", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+              {coMsg.err || coMsg.ok}
+            </div>
+          )}
+        </div>
+      )}
 
       {status && status.configured && (
         <div style={S.card}>

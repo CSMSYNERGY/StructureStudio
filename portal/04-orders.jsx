@@ -1345,7 +1345,7 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 // but does not yet pass it, and defaulting to false would take Record-a-payment away from
 // owners and admins. The default is the no-op, `ordersOn={ordersCanEdit}` at the call site
 // is the fix — see the note returned with this change.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, ordersOn = true, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
+function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, coApproveOn = false, ordersOn = true, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -1450,10 +1450,27 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // this to the tenant, `status = pending_ack` is a handful of rows on any tenant, and
     // `pendingCo` below is only ever probed per rendered order, so codes that belong to no
     // shown order are inert. The read stays a fixed-size URL whatever the tenant's volume.
+    // 'draft' JOINS 'pending_ack' (2026-09-07): a change a rep opened and walked away from
+    // is exactly the thing this list has to surface, and it is invisible everywhere else.
+    // The two states mean different things on the row, so the STATUS comes back with the
+    // code rather than being flattened into one boolean.
     const coP = (codes.length
-      ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack")
+      ? sb.from("change_orders").select("short_code, co_no, status").eq("client_id", clientId).in("status", ["draft", "pending_ack"])
       : Promise.resolve({ data: [] })
     ).then((r) => r, (e) => ({ error: e }));
+
+    // Orders somebody has asked to unlock, and orders an approver has unlocked but nobody
+    // has used yet. Both are waiting on a PERSON, and neither shows anywhere else in the
+    // product — an approver would otherwise have to open every order to find the one request
+    // sitting on their desk. Same fixed-size URL discipline as the change-order read above:
+    // no `.in("short_code", ...)`, because the open set is tiny on any tenant.
+    // SOFT: a decoration read must never take the tab down (its own `.then` swallow, and no
+    // error branch below), unlike the two reads whose failure would understate money.
+    const unlockP = (codes.length
+      ? sb.from("order_unlocks").select("short_code, decision")
+          .eq("client_id", clientId).is("consumed_at", null).is("released_at", null)
+      : Promise.resolve({ data: [] })
+    ).then((r) => r, () => ({ data: [] }));
 
     // Through the server (portal-settings orders_designs), NOT direct RLS: the designs
     // policy answers "may you read DESIGNS", and since this tab shipped to tenants its
@@ -1476,7 +1493,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     const ssOrders = list.filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number));
     // PAINT NOW: the right rows, with the money still marked pending. `paid: 0` is never
     // read while moneyReady is false — every consumer of it is gated below.
-    setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false })));
+    setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false, coDraft: false, coNo: null, unlockState: null })));
 
     // Both were started before the designs read above; by now they are usually already in.
     const [paysRes, coRes] = await Promise.all([paysP, coP]);
@@ -1488,7 +1505,15 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // the server's invoice 409 still stands — the courtesy half of the rule goes dark.
     if (coRes.error) { setError(coRes.error.message); return; }
     const payByOrder = {}; (paysRes.data || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
-    const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
+    const coByCode = {};
+    for (const c of ((coRes && coRes.data) || [])) coByCode[c.short_code] = c;
+    const unlockRes = await unlockP;
+    const unlockByCode = {};
+    for (const u of ((unlockRes && unlockRes.data) || [])) {
+      // A DECLINED request is not an open one, and the row should stop shouting about it.
+      if (u.decision === "declined") continue;
+      unlockByCode[u.short_code] = u.decision === "granted" ? "granted" : "asked";
+    }
     const settled = ssOrders.map((o) => {
       const ps = payByOrder[o.id] || [];
       return {
@@ -1501,7 +1526,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
         // rather than each re-deciding.
         paid: ps.reduce((s, p) => s + (p.voided_at || p.funding_state === "pending" || p.funding_state === "returned" ? 0 : (p.amount_cents || 0)), 0),
         pending: ps.reduce((s, p) => s + (!p.voided_at && p.funding_state === "pending" ? (p.amount_cents || 0) : 0), 0),
-        coPending: pendingCo.has(o.short_code),
+        // `coPending` keeps its old meaning EXACTLY — awaiting the customer — because the
+        // invoice gate downstream is pending_ack-only and this chip explains that gate.
+        coPending: (coByCode[o.short_code] || {}).status === "pending_ack",
+        coDraft: (coByCode[o.short_code] || {}).status === "draft",
+        coNo: (coByCode[o.short_code] || {}).co_no || null,
+        unlockState: unlockByCode[o.short_code] || null,   // 'asked' | 'granted' | null
       };
     });
     setRows(settled);
@@ -1617,9 +1647,17 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     if (!moneyReady) return { key: "pending", label: "…", bg: "#F1F5F9", fg: "#94A3B8" };
     const bal = balOf(r);
     if (bal == null) return { key: "nototal", label: "Needs total", bg: "#F1F5F9", fg: "#475569" };
-    // Collected more than the total — say so plainly instead of "Paid in full",
-    // which would hide that a refund/credit is owed back to the customer.
-    if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
+    // Collected more than the total — say so plainly instead of "Paid in full", which
+    // would hide that money is owed BACK to the customer.
+    //
+    // "Refund owed", not "Overpaid" (Carolyn 2026-09-06). Until a rep could take money OFF a
+    // signed order this only ever happened by accident — someone paid twice — and "Overpaid"
+    // described the accident. An amendment makes it a normal, deliberate outcome: the
+    // customer dropped the loft on a job they had already paid for, and the builder owes them
+    // the difference. That is an obligation with an action attached, and the word has to say
+    // so. Reversing a real card charge is Refund on the payment itself; nothing here does it
+    // automatically, and nothing here ever touches a payment.
+    if (bal < 0) return { key: "over", label: "Refund owed", bg: "#FFEDD5", fg: "#9A3412" };
     // "Paid in full" uses SETTLED money only — a pending bank payment can never produce it.
     if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
     // Clearing OUTRANKS "Partially paid", and the order matters: "partially paid" is a
@@ -1676,6 +1714,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // Summary tiles — only orders with a known total can contribute to money figures.
   const withTotal = all.filter((r) => r.o.total_cents != null);
   const openBalance = withTotal.reduce((s, r) => s + Math.max(0, balOf(r)), 0);
+  // ⚠️ `openBalance` CLAMPS AT ZERO — deliberately, since a credit on one order does not pay
+  // for another. But that clamp also means money owed BACK to customers appears in no figure
+  // on this page at all, and an amendment can now create it on purpose. Counted separately,
+  // and shown only when there is some: a permanent "$0.00 refunds owed" tile is noise.
+  const refundsOwed = withTotal.reduce((s, r) => s + Math.max(0, -(balOf(r) || 0)), 0);
+  const refundCount = withTotal.filter((r) => (balOf(r) || 0) < 0).length;
   const collected = all.reduce((s, r) => s + r.paid, 0);
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
@@ -1718,7 +1762,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // collected", "Nothing recorded yet", and a Record-a-payment button prefilled with a
   // balance that is about to change. The list has always known better (its chip reads "…");
   // this is the same honesty one component further in.
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} ordersOn={ordersOn} moneyReady={moneyReady} />;
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} coApproveOn={coApproveOn} ordersOn={ordersOn} moneyReady={moneyReady} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -1744,6 +1788,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
         {moneyReady ? (
           <>
             {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
+            {refundsOwed > 0 && tile("Refunds owed", money(refundsOwed), `${refundCount} order${refundCount === 1 ? "" : "s"} paid above the total`, "#9A3412")}
             {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
             {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
             {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
@@ -1773,7 +1818,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
             {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
             {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
             {needsTotal > 0 && chip("nototal", "Needs total")}
-            {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
+            {all.some((r) => stateOf(r).key === "over") && chip("over", "Refund owed")}
           </>)}
           <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
             <SearchInput value={query} onChange={setQuery} placeholder="Search orders — name, building, order #…" />
@@ -1832,13 +1877,32 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
                           bars — the one cell shape that says "not yet" rather than "zero". */}
                       <td style={numCell}>{!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : r.paid ? money(r.paid) : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={{ ...numCell, fontWeight: bal ? 800 : 600, color: bal === 0 ? "#94A3B8" : bal < 0 ? "#9A3412" : "#1E293B" }}>
-                        {!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+                        {!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : bal == null ? "—" : bal < 0 ? `${money(-bal)} back` : money(bal)}
                       </td>
                       <td style={S.td}>
                         <span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
                         {r.coPending && (
                           <span title="A change order is awaiting the customer's acknowledgment — invoicing is blocked until they sign or a verbal confirmation is recorded"
                             style={{ background: "#FEF3C7", color: "#B45309", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>CO pending</span>
+                        )}
+                        {/* A change somebody OPENED and has not finished. Nobody has been
+                            asked for anything, so it does not block invoicing — but it is
+                            holding the order open and it is invisible everywhere else. */}
+                        {r.coDraft && (
+                          <span title="A change was opened on this order and hasn't been finished — open the order to pick it up or discard it"
+                            style={{ background: "#FFEDD5", color: "#9A3412", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>
+                            Change open{r.coNo ? ` · CO-${r.coNo}` : ""}
+                          </span>
+                        )}
+                        {/* Waiting on a PERSON. The "asked" half is the only place an
+                            approver can see there is a decision sitting on their desk. */}
+                        {r.unlockState === "asked" && (
+                          <span title="Someone has asked for this signed order to be unlocked so it can be changed"
+                            style={{ background: "#FEE2E2", color: "#991B1B", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>Unlock asked</span>
+                        )}
+                        {r.unlockState === "granted" && (
+                          <span title="This order has been unlocked and the change hasn't been started yet — the unlock expires on its own"
+                            style={{ background: "#DCFCE7", color: "#166534", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>Unlocked</span>
                         )}
                       </td>
                       {(schedOn || deliverOn) && (
@@ -2299,7 +2363,272 @@ const ssCladdingLabel = (id, offered) => {
   return SS_CLADDING_NAMES[cur] || cur;
 };
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false }) {
+
+/* ─── Changing a signed order (migrations 209-216) ──────────────────────────────────────
+   Carolyn 2026-09-06: "When we click the change order button, that should open the
+   invoice/design/entire order and allow the sales rep to edit/add/remove/change anything in
+   the order, without losing the payment that has already been applied."
+
+   So this is not a form. It is the ONE control that decides what a rep can do to a signed
+   order right now, and every branch of it is answered by the server: `amendment_status`
+   returns the gate (is it open, under what authority, what does it cost), the live change if
+   there is one, the outstanding unlock if there is one, and the tenant's policy. Nothing here
+   decides eligibility on its own — the same gate function refuses at the database, so what
+   this panel offers and what the server allows can never disagree.
+
+   ⚠️ THE FEE IS DISCLOSED BEFORE THE REP STARTS, never afterwards on the invoice. That is
+   what `preflight` is: a sheet they must dismiss, rendered from the server's own numbers. */
+function AmendmentPanel({ clientId, shortCode, orderId, amend, coOn, coApproveOn, onOpenDesign, onMsg, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [preflight, setPreflight] = useState(false);   // the fee sheet
+  const [askOpen, setAskOpen] = useState(false);       // the "why does this need changing?" box
+  const [reason, setReason] = useState("");
+
+  // A failed read leaves `amend` null. Offer nothing rather than guessing — the design's
+  // own "Open design" button below is unaffected, so nobody is stranded.
+  if (!amend || !amend.gate) return null;
+  const gate = amend.gate;
+  const live = amend.amendment || null;          // a draft or pending_ack change, if any
+  const unlock = amend.unlock || null;           // an outstanding request or grant, if any
+  const policy = amend.policy || null;
+
+  // Nothing to re-open: the customer has not committed to anything yet, so editing the
+  // design is just editing the design.
+  if (gate.signed !== true) return null;
+
+  const feeCents = Number(gate.fee_cents) || 0;
+  const feeLabel = (policy && policy.feeLabel) || "Change order fee";
+  const usd = (c) => ssUsd(c / 100);
+
+  const call = async (action, body) => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action, shortCode, ...(body || {}) } });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return null; }
+    return data;
+  };
+
+  // Open (or re-open) the change and hand the rep the designer. open_amendment is
+  // idempotent — a second call returns the row that already exists — so "Continue the
+  // change" and "Change this order" are the same call and a double click is harmless.
+  const startChange = async () => {
+    setPreflight(false);
+    const data = await call("open_amendment");
+    if (!data) return;
+    const co = data.changeOrder || {};
+    onChanged();
+    onOpenDesign(shortCode, null, {
+      amendment: {
+        changeOrderId: co.id, coNo: co.co_no, orderId,
+        feeCents: Number(co.fee_cents) || 0,
+        feeTaxCents: Number(co.fee_tax_cents) || 0,
+        feeLabel,
+        raisedUnder: co.raised_under || null,
+      },
+    });
+  };
+
+  const bar = (bg, border, fg, children) => (
+    <div style={{ background: bg, border: `1px solid ${border}`, color: fg, borderRadius: 9, padding: "10px 13px", marginTop: 12, fontSize: 12.5, lineHeight: 1.55 }}>
+      {children}
+    </div>
+  );
+  const btn = (label, onClick, primary) => (
+    <button type="button" onClick={onClick} disabled={busy}
+      style={{ ...S.btn(primary ? "#B45309" : "#FFF", primary ? "#FFF" : "#92400E"), border: `1px solid ${primary ? "#B45309" : "#FCD34D"}`, padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+      {label}
+    </button>
+  );
+
+  // ── A CHANGE IS ALREADY UNDERWAY ────────────────────────────────────────────────────
+  // Ahead of every other branch, because it is what the gate itself now answers first
+  // (migration 215): whatever authorised this change has already been checked and spent.
+  if (live) {
+    const isDraft = String(live.status) === "draft";
+    return bar("#FFFBEB", "#FDE68A", "#92400E", (
+      <>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>
+          {isDraft ? `Change CO-${live.co_no} is open and not finished` : `Change CO-${live.co_no} is with the customer`}
+        </div>
+        <div>
+          {isDraft
+            ? <>Nobody has been asked to approve anything yet. Pick it back up in the designer, or discard it and the order goes back exactly as it was signed.</>
+            : <>The customer has been sent this change to sign. Their answer decides it — you can still discard it if it was raised by mistake.</>}
+          {Number(live.fee_cents) > 0 && <> A {feeLabel.toLowerCase()} of {usd(Number(live.fee_cents) + (Number(live.fee_tax_cents) || 0))} goes on this change.</>}
+        </div>
+        {coOn && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 9 }}>
+            {isDraft && btn(`Continue the change (CO-${live.co_no})`, startChange, true)}
+            {btn("Discard this change", async () => {
+              if (!window.confirm(`Discard CO-${live.co_no}? The order goes back to exactly what the customer signed.`)) return;
+              const d = await call("void_change_order", { changeOrderId: live.id, reason: "Discarded from the order screen" });
+              if (d) { onMsg({ ok: `CO-${live.co_no} discarded — the order is back to what the customer signed.` }); onChanged(); }
+            })}
+          </div>
+        )}
+      </>
+    ));
+  }
+
+  // ── THE ORDER IS OPEN FOR CHANGE ────────────────────────────────────────────────────
+  if (gate.open === true) {
+    if (!coOn) {
+      return bar("#F8FAFC", "#E2E8F0", "#64748B", (
+        <>This order can be changed, but changing it raises a change order — and that is not part of your access. Ask an owner or admin to turn on <b>Change Orders</b> for you in Settings → Team.</>
+      ));
+    }
+    const authority = String(gate.authority || "");
+    return (
+      <>
+        {bar("#F0FDF4", "#BBF7D0", "#166534", (
+          <>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>This order can be changed</div>
+            <div>
+              {authority === "unlock"
+                ? <>Unlocked by {(unlock && unlock.decided_by_name) || "an approver"}{unlock && unlock.expires_at ? ` until ${fmtDate(unlock.expires_at)}` : ""}. Everything is editable — the drawing included — and the customer signs the revised order when you are done.</>
+                : authority === "free_window"
+                  ? <>Everything is editable — the drawing, the options, the price. The customer signs the revised order when you are done, and any payment already taken stays exactly where it is.</>
+                  : <>Everything is editable, and the customer signs the revised order when you are done.</>}
+              {feeCents > 0 && <> <b>A {feeLabel.toLowerCase()} of {usd(feeCents)} applies.</b></>}
+            </div>
+            <div style={{ marginTop: 9 }}>
+              {btn("Change this order", () => (feeCents > 0 ? setPreflight(true) : startChange()), true)}
+            </div>
+          </>
+        ))}
+        {preflight && (
+          <PreflightSheet feeCents={feeCents} feeTaxCents={0} feeLabel={feeLabel}
+            taxable={!!(policy && policy.feeTaxable)}
+            onCancel={() => setPreflight(false)} onGo={startChange} busy={busy} />
+        )}
+      </>
+    );
+  }
+
+  // ── LOCKED ───────────────────────────────────────────────────────────────────────────
+  // Someone has to unlock it. Two different people see two different things here, and the
+  // split is the whole point of the two permission switches: holding Approve does not
+  // imply holding Change Orders, and vice versa.
+  const waiting = unlock && !unlock.decision;
+  const declined = unlock && unlock.decision === "declined";
+  return bar("#FEF2F2", "#FECACA", "#991B1B", (
+    <>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>This order is signed and locked</div>
+      <div>{String(gate.reason || "An admin or crew leader has to unlock it before it can be changed.")}
+        {feeCents > 0 && <> Once unlocked, a {feeLabel.toLowerCase()} of {usd(feeCents)} goes on the change.</>}
+      </div>
+
+      {waiting && (
+        <div style={{ marginTop: 8, fontWeight: 600 }}>
+          {(unlock.requested_by_name || "Someone")} asked for this on {fmtDate(unlock.requested_at)} — “{unlock.reason}”
+        </div>
+      )}
+      {declined && (
+        <div style={{ marginTop: 8, fontWeight: 600 }}>
+          Declined by {unlock.decided_by_name || "an approver"}{unlock.decision_note ? ` — “${unlock.decision_note}”` : ""}.
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 9 }}>
+        {/* THE APPROVER'S HALF. `decide_order_unlock` is the only action on the
+            change_order_approve area — this button IS that switch. An approver may unlock an
+            order nobody has asked about: the builder often decides the change is happening
+            before the rep has typed anything. */}
+        {coApproveOn && (
+          <button type="button" disabled={busy}
+            onClick={async () => {
+              const note = window.prompt(waiting ? "Anything to tell them? (optional)" : "Why are you unlocking this order?", waiting ? "" : "");
+              if (note === null) return;
+              const d = await call("decide_order_unlock", { decision: "granted", note });
+              if (d) { onMsg({ ok: "Unlocked — this order can be changed now." }); onChanged(); }
+            }}
+            style={{ ...S.btn("#B45309", "#FFF"), padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {waiting ? "Unlock it" : "Unlock this order"}
+          </button>
+        )}
+        {coApproveOn && waiting && (
+          <button type="button" disabled={busy}
+            onClick={async () => {
+              const note = window.prompt("Why not? They will see this.");
+              if (note === null) return;
+              const d = await call("decide_order_unlock", { decision: "declined", note });
+              if (d) { onMsg({ ok: "Declined — they have been told." }); onChanged(); }
+            }}
+            style={{ ...S.btn("#FFF", "#991B1B"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            Decline
+          </button>
+        )}
+
+        {/* THE REP'S HALF. The reason is not paperwork — it is what the approver reads
+            before deciding, and it lands permanently on the order's amendment trail. */}
+        {coOn && !waiting && !askOpen && (
+          <button type="button" disabled={busy} onClick={() => setAskOpen(true)}
+            style={{ ...S.btn("#FFF", "#991B1B"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            Ask for it to be unlocked
+          </button>
+        )}
+      </div>
+
+      {coOn && askOpen && !waiting && (
+        <div style={{ marginTop: 10 }}>
+          <span style={S.lbl}>What needs changing?</span>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={500}
+            placeholder="Whoever unlocks it reads this — e.g. “Customer wants the door moved to the gable end.”"
+            style={{ ...S.input, resize: "vertical", fontFamily: "inherit" }} />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" disabled={busy || !reason.trim()}
+              onClick={async () => {
+                const d = await call("request_order_unlock", { reason });
+                if (!d) return;
+                setAskOpen(false); setReason("");
+                onMsg({ ok: d.already ? (d.message || "Someone has already asked.") : "Asked — whoever approves changes will see it." });
+                onChanged();
+              }}
+              style={{ ...S.btn("#B45309", "#FFF"), padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy || !reason.trim() ? 0.6 : 1 }}>
+              Send the request
+            </button>
+            <button type="button" onClick={() => { setAskOpen(false); setReason(""); }}
+              style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </>
+  ));
+}
+
+/* The pre-flight sheet. It exists for ONE reason: a rep must never meet the fee for the
+   first time on the customer's invoice, and neither must the customer. Rendered from the
+   server's own numbers (order_amendment_gate stamped them; the trigger will stamp the same
+   ones onto the row), so what this sheet promises is what gets charged. */
+function PreflightSheet({ feeCents, feeLabel, taxable, onCancel, onGo, busy }) {
+  return (
+    <div onClick={onCancel}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, maxWidth: 460, width: "100%", padding: 20, boxShadow: "0 18px 50px rgba(15,23,42,0.28)" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>This change carries a fee</div>
+        <p style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, marginTop: 10 }}>
+          Changing this order after it was signed adds <b>{ssUsd(feeCents / 100)}</b> to it, as its
+          own line reading “{feeLabel}” on the customer's invoice{taxable ? ", plus sales tax at the rate on their agreement" : ""}.
+        </p>
+        <p style={{ fontSize: 13, color: "#334155", lineHeight: 1.6 }}>
+          The customer signs the revised order before any of it counts, and <b>every payment they have
+          already made stays exactly where it is</b>. If you discard the change, the fee goes with it.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+          <button type="button" onClick={onCancel}
+            style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #E2E8F0", padding: "8px 14px", fontSize: 13, cursor: "pointer" }}>Not now</button>
+          <button type="button" onClick={onGo} disabled={busy}
+            style={{ ...S.btn("#B45309", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Opening…" : "Start the change"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -2340,17 +2669,36 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const sel = design.selections || {};
   const pc = design.paint_colors || {};
   const locked = ["invoiced", "delivered"].includes(String(design.status || ""));
+  const amend = (doc && doc.amend) || null;
+  const amendGate = amend && amend.gate ? amend.gate : null;
   // The roof/cladding/paint dropdowns specifically. Editing one on a signed order RAISES a
   // change order (stage_order_attribute_change), which moved onto its own permission area
   // on 2026-09-01 — so they freeze to text without the grant. Deliberately NOT folded into
   // `locked`: that flag also gates the invoicing panel below, and a rep holds orders:edit
   // precisely so they CAN invoice, take payment and collect the signature. Two flags,
   // because there are genuinely two questions.
-  const attrsLocked = locked || !coOn;
+  //
+  // ⚠️ `locked` NO LONGER FREEZES THESE (2026-09-07). It used to, and that single term is
+  // what made Carolyn's requirement false: "a change order can happen anytime throughout the
+  // process up until after delivery and final payment." An invoiced order is exactly when a
+  // change is most likely and most consequential. The question is no longer WHICH STATUS the
+  // order is in but whether the builder's own rules leave it open — the free window, or an
+  // unlock somebody granted — and that is `order_amendment_gate`, the same function the
+  // server asks before it writes, so the dropdowns and the database always agree.
+  //
+  // The fallback keeps the OLD behaviour when the gate read failed: a missing answer must
+  // not read as permission. `amendment_status` is soft on purpose (see its loader), so this
+  // is a real state, not a theoretical one.
+  const attrsLocked = !coOn || (amendGate ? amendGate.open !== true : locked);
   const acceptance = (acceptances || []).find((a) => a.subject === "quote") || null;
   const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
     .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
-  const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+  // 'draft' JOINS 'pending_ack' HERE (2026-09-07). open_amendment creates a DRAFT and that
+  // is now the ordinary way a change on a signed order begins, so a draft is every bit as
+  // "live" as a sent one for the three jobs this variable does: it feeds discardStaged, the
+  // amendment trail, and the `!pendingCo` drift exception below — and a draft has already
+  // revised the design, which is precisely what that exception is about.
+  const pendingCo = (cos || []).find((c) => (c.status === "pending_ack" || c.status === "draft") && c.source === "design_edit") || null;
   // Two questions, deliberately not one. The DOCUMENT's staging logic means the design_edit
   // CO specifically - it feeds discardStaged, the amendment trail and the `!pendingCo` drift
   // exception, and void_change_order restores from snapshot_before, which a manual CO never
@@ -2359,6 +2707,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   // manual CO raised from Change orders used to leave a live green 'Create & send invoice'
   // that only ever bought a 409 after the confirm dialog - and an info row in app_errors
   // every time. Source-blind HERE and nowhere else.
+  //
+  // ⚠️ AND THIS ONE STAYS 'pending_ack'-ONLY — the opposite decision to `pendingCo` above,
+  // deliberately. This flag gates INVOICING, and send_invoice's own 409 is pending_ack-only.
+  // Widening it to drafts would let a rep who opened a change and wandered off brick
+  // invoicing on that order forever, with nothing on screen explaining why.
   const anyPendingCo = (cos || []).find((c) => c.status === "pending_ack") || null;
   // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
   // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
@@ -2822,6 +3175,14 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             </div>
       )}
 
+      {/* Changing a signed order — the one control that decides what can happen to this
+          order right now. Above the action row because it outranks everything in it. */}
+      {onOpenDesign && (
+        <AmendmentPanel clientId={clientId} shortCode={o.short_code} orderId={o.id} amend={amend}
+          coOn={coOn} coApproveOn={coApproveOn} onOpenDesign={onOpenDesign}
+          onMsg={onMsg} onChanged={onChanged} />
+      )}
+
       {/* Action row. The documents open IN A POPUP (Carolyn 2026-08-25), not a tab —
           the viewer's own toolbar carries print/download. */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
@@ -2842,9 +3203,14 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         })()}
         {/* IN-PORTAL designer, never the public ?id= page — staff browsing there fires
             capture-lead/draft saves and corrupts the tenant's Contacts activity. */}
+        {/* "View design" once the order is signed and this person cannot raise a change —
+            the button still opens the real designer, but calling it "Open design" beside a
+            locked order invites an edit that the save will refuse. */}
         {o.short_code && onOpenDesign && (
           <button type="button" onClick={() => onOpenDesign(o.short_code)}
-            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>
+            {amendGate && amendGate.signed === true && attrsLocked ? "View design" : "Open design"}
+          </button>
         )}
         <button type="button"
           onClick={(e) => {
@@ -2869,9 +3235,9 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       </div>
       {attrsLocked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
-          {locked
-            ? "This order is invoiced — its options are frozen. Changes go through a manual change order below."
-            : "Changing these raises a change order, which needs the customer's sign-off. Ask an owner or admin to turn on Change Orders for you in Settings → Team."}
+          {!coOn
+            ? "Changing these raises a change order, which needs the customer's sign-off. Ask an owner or admin to turn on Change Orders for you in Settings → Team."
+            : "These are frozen while the order is locked — see above."}
         </div>
       )}
 
@@ -2996,7 +3362,7 @@ function QrSvg({ matrix, size = 200 }) {
 // default would take Record-a-payment away from owners. `moneyReady` = has the payments read
 // landed; while it is false `row.paid` is 0 and `balOf(row)` is the whole total, so every
 // figure derived from them is a number this screen does not know yet.
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false, ordersOn = true, moneyReady = true }) {
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false, coApproveOn = false, ordersOn = true, moneyReady = true }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -3168,16 +3534,23 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     if (!ssMode || !o.short_code) return;
     let alive = true;
     (async () => {
-      const [dRes, aRes, cRes, pRes] = await Promise.all([
+      const [dRes, aRes, cRes, pRes, amRes] = await Promise.all([
         sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [o.short_code], detail: true } })
           .then((r) => r.error ? { error: r.error, data: null } : { error: null, data: ((r.data && r.data.designs) || [])[0] || null }),
+        // `revision` since migration 213: an amended order is signed AGAIN, so there is now
+        // more than one subject='invoice' row and the highest revision is the one that
+        // governs. Without the column the reader below picks whichever row came back first.
         sb.from("design_acceptances")
-          .select("subject, signer_name, accepted_at, total, method, recorded_by_name")
+          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.from("change_orders")
-          .select("id, co_no, source, status, total_after_cents, acknowledged_at")
+          .select("id, co_no, source, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, raised_under, acknowledged_at")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.functions.invoke("portal-settings", { body: { action: "order_paperwork", shortCode: o.short_code } }),
+        // Is this order open for change, under what authority, and what will it cost --
+        // everything the Change Order button needs BEFORE it does anything. A read, gated at
+        // change_orders:'view', so a rep who may not raise one is still shown why.
+        sb.functions.invoke("portal-settings", { body: { action: "amendment_status", shortCode: o.short_code } }),
       ]);
       if (!alive) return;
       // A failed sub-read must NOT be coerced to "no data" — each coercion told its own
@@ -3201,6 +3574,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         acceptances: aRes.data || [],
         cos: cRes.data || [],
         paperwork: (pRes.data && !pRes.data.error) ? pRes.data : null,
+        // Deliberately NOT folded into loadError. This read decides which BUTTON renders;
+        // losing it should cost the amendment controls, not the whole order screen.
+        amend: (amRes.data && !amRes.data.error) ? amRes.data : null,
       });
     })();
     return () => { alive = false; };
@@ -3214,7 +3590,17 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
   // Migration 136: the invoice carries its own acceptance row, and it is the signature
   // that closes the sale. The quote row above may be a click with no signature at all.
-  const ssInvoiceAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "invoice");
+  //
+  // THE HIGHEST REVISION GOVERNS (migration 213). An amended order is signed again — same
+  // subject, revision = the change order's number — so `.find()` was returning whichever row
+  // PostgREST happened to hand back first, which on a re-signed order is a coin toss between
+  // the original signature and the current one. The table stays append-only; this is only
+  // about which row is "the agreement" for display.
+  const ssInvoiceAcceptance = ssDoc
+    ? (ssDoc.acceptances || []).filter((a) => a.subject === "invoice")
+        .sort((a, b) => (Number(b.revision) || 0) - (Number(a.revision) || 0)
+          || String(b.accepted_at || "").localeCompare(String(a.accepted_at || "")))[0] || null
+    : null;
   const ssInvoiceSigner = (ssInvoiceAcceptance && ssInvoiceAcceptance.signer_name) || "";
   const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
 
@@ -3320,7 +3706,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             /* The invoice-style order document (migration 127) — letterhead, the priced
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
-            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn}
+            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn} coApproveOn={coApproveOn}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
               onPreview={(url, title) => setPdfView({ url, title })}
               onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
@@ -3463,11 +3849,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                 settled order painted "Balance due $84,000" and "$0.00 of $84,000 collected"
                 for the length of that read and then corrected itself. The first number is the
                 one someone reads out loud — the pale block is the honest one. */}
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{moneyReady && bal != null && bal < 0 ? "Credit owed back" : "Balance due"}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{moneyReady && bal != null && bal < 0 ? "Refund owed" : "Balance due"}</div>
             <div style={{ fontSize: 29, fontWeight: 800, margin: "4px 0 2px", fontVariantNumeric: "tabular-nums", letterSpacing: -0.7 }}>
               {!moneyReady
                 ? <SkelBar w={148} h={25} style={{ background: "rgba(255,255,255,0.26)", margin: "4px 0" }} />
-                : bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+                : bal == null ? "—" : bal < 0 ? money(-bal) : money(bal)}
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
               {o.total_cents == null

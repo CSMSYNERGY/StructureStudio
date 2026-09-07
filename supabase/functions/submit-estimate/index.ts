@@ -2516,7 +2516,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     //   * treating the pending CO's own baseline as "signed" — after a void there IS no
     //     pending CO, and the next resubmit read the live revision. The baseline is now a
     //     property of the design's agreement, so a void changes nothing about it.
-    let changeOrder: { coNo: number | null; description: string; totalBefore: number | null } | null = null;
+    // `draft` and `id` are set only on the update arm: a change opened by open_amendment and
+    // still being worked on. They decide whether the customer hears about this save at all.
+    let changeOrder:
+      { coNo: number | null; description: string; totalBefore: number | null; draft?: boolean; id?: string }
+      | null = null;
     if (existingDesign.accepted_at) {
       // THE REVISION GOES ONTO THE DESIGN BEFORE THE CO EXISTS. 153's stamp trigger reads
       // designs.estimate_lines at ACKNOWLEDGMENT, so "what the customer just agreed to" is
@@ -2567,7 +2571,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // design, so the row this resubmit belongs to already exists. Without 'draft' here the
       // upsert below would try to insert a second live row and hit the one-live index.
       const { data: existingCo } = await supabase.from("change_orders")
-        .select("id, co_no, version_before, snapshot_before")
+        // `status` since 2026-09-07: the email decision below turns on whether the row this
+        // resubmit lands on is still a DRAFT, and without the column it reads undefined and
+        // every save in amendment mode mails the customer.
+        .select("id, co_no, status, version_before, snapshot_before")
         .eq("client_id", clientId).eq("short_code", designId)
         .in("status", ["draft", "pending_ack"]).eq("source", "design_edit")
         .limit(1).maybeSingle();
@@ -2618,7 +2625,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           const { error: coErr } = await supabase.from("change_orders")
             .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
             .eq("id", existingCo.id);
-          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal };
+          // `draft` rides along so the email decision below can see it. Deliberately NOT
+          // flipped to pending_ack here: a rep in amendment mode saves repeatedly while they
+          // work, and deciding the customer should be asked to approve it is a separate,
+          // explicit act (finalize_amendment).
+          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal, draft: String(existingCo.status) === "draft", id: existingCo.id };
           else {
             // DURABLE, not console-only. The revision is already on the design (the pre-CO
             // persist above), so a failed CO write leaves a signed order carrying lines the
@@ -2677,7 +2688,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const intendedTo = String(contact?.email || "").trim();
     let emailed = false;
     let emailReason: string | null = null;
-    if (intendedTo || redirectToTestInbox) {
+    // ⚠️ A DRAFT CHANGE ORDER EMAILS NOBODY (2026-09-07). open_amendment creates a draft and
+    // the rep then works in the designer, saving as they go — and every save lands here. Left
+    // alone, each one would send the customer "here is a change to approve" for a change that
+    // is half-made and may be discarded, with a Review & Approve link to a document they
+    // cannot act on (customer-quotes shows pending_ack only). The rep decides when to ask,
+    // and that decision has its own action. The ESTIMATE email is suppressed too: an
+    // amendment is not a new quote, and sending "your quote is ready" mid-edit is worse.
+    const draftAmendment = !!(changeOrder && changeOrder.draft);
+    if (draftAmendment) {
+      emailReason = "change still open — nothing sent to the customer yet";
+    } else if (intendedTo || redirectToTestInbox) {
       const content = changeOrder
         ? changeOrderEmail({
           businessName,
@@ -2790,7 +2811,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // A resubmit after the customer signed raised (or refreshed) a pending change order —
       // the designer surfaces "awaiting the customer's approval" instead of a routine
       // success line.
-      ...(changeOrder ? { changeOrder: { coNo: changeOrder.coNo, pending: true } } : {}),
+      // `pending` is FALSE for a draft, and the designer's success screen turns on it: a
+      // draft is not with the customer, so the banner that says "they need to approve this"
+      // would be a lie and Push to Invoice would be hidden for a reason that is not true yet.
+      ...(changeOrder
+        ? { changeOrder: { coNo: changeOrder.coNo, id: changeOrder.id ?? null, draft: !!changeOrder.draft, pending: !changeOrder.draft } }
+        : {}),
       betaMode: effectiveBetaMode,
       betaRedirected: redirectToTestInbox,
       betaRedirectedTo: redirectToTestInbox ? betaEmail : null,

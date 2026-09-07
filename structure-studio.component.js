@@ -9581,6 +9581,71 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [savedDesign, setSavedDesign] = useState(null);
   // Push to Invoice (Carolyn 2026-09-01). Kept beside savedDesign because that is the only
   // thing it acts on — the quote just submitted — and the same paths that clear one clear it.
+  const [amendBusy, setAmendBusy] = useState(false);
+  const [amendMsg, setAmendMsg] = useState(null);   // { ok } | { err }
+
+  /**
+   * What happens to a saved change: the customer signs it, or the rep records that they
+   * already said yes. Both go through the SERVER — nothing here writes change_orders.
+   *
+   * `finalize_amendment` is the step that turns a draft into something the customer is
+   * being asked about: it prices the diff, generates the description from the line diff
+   * (never typed by the person who made the change), stamps the fee onto the paperwork and
+   * emails it. Attesting runs it first, because a change nobody has finished is not a change
+   * anyone can have agreed to — the server refuses the attestation on a draft, and doing it
+   * in that order here means the rep never meets that refusal.
+   */
+  const finishAmendment = async (how) => {
+    const coId = (savedDesign && savedDesign.changeOrder && savedDesign.changeOrder.id)
+      || (amendment && amendment.changeOrderId) || null;
+    if (!coId || !supabase) { setAmendMsg({ err: "Couldn't tell which change this is — open the order and finish it from there." }); return; }
+    if (how === "attest") {
+      const ok = window.confirm(
+        "Record that the customer approved this change?\n\n" +
+        "This is the builder's record of their approval, in your name — not their signature. " +
+        "It is stored with the order exactly as a signature would be, and it says plainly that they did not sign.",
+      );
+      if (!ok) return;
+    }
+    setAmendBusy(true); setAmendMsg(null);
+    // The designer holds its own supabase client, so it unwraps its own errors — the portal's
+    // invoke wrapper is not in scope here, and without this every refusal reads "Edge Function
+    // returned a non-2xx status code" instead of the sentence the server wrote.
+    const call = async (action, body) => {
+      const { data, error } = await supabase.functions.invoke("portal-settings", {
+        body: { action, targetClientId: C.clientId, changeOrderId: coId, ...(body || {}) },
+      });
+      if (error) {
+        let detail = error.message || "That didn't go through";
+        try {
+          if (error.context && typeof error.context.json === "function") {
+            const b = await error.context.json();
+            if (b && b.error) detail = b.error;
+          }
+        } catch (_) { /* body unreadable — keep the generic message */ }
+        throw new Error(detail);
+      }
+      if (data && data.error) throw new Error(data.error);
+      return data;
+    };
+    try {
+      const fin = await call("finalize_amendment");
+      if (how === "attest") {
+        const att = await call("attest_change_order");
+        setAmendMsg({ ok: `Recorded — CO-${(att && att.coNo) || (fin && fin.changeOrder && fin.changeOrder.co_no) || ""} is approved and the order is updated.${att && att.refundCents > 0 ? ` The revised total is below what has been paid: $${(att.refundCents / 100).toFixed(2)} is owed back.` : ""}` });
+      } else {
+        setAmendMsg({ ok: fin && fin.sent
+          ? "Sent — the customer has it and can sign it from their quote page."
+          : `Ready to sign${fin && fin.sendReason ? ` — not emailed (${fin.sendReason})` : ""}. Copy the customer link above and send it yourself.` });
+      }
+      setAmendment(null);
+      if (onSaved) { try { onSaved(); } catch (_) { /* the host's refresh is not our failure */ } }
+    } catch (e) {
+      setAmendMsg({ err: (e && e.message) || "That didn't go through." });
+    }
+    setAmendBusy(false);
+  };
+
   const [pushBusy, setPushBusy] = useState(false);
   const [pushErr, setPushErr] = useState("");
   const [pushed, setPushed] = useState(null);
@@ -9686,6 +9751,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Staff chose "Design a new build instead" on a locked estimate: the plan unlocks and
   // the next submit saves a NEW version that is no longer tied to the unit.
   const [newBuildMode, setNewBuildMode] = useState(false);
+  // ── AMENDMENT MODE (migrations 209-216) ──────────────────────────────────────────────
+  // Carolyn 2026-09-06: "When we click the change order button, that should open the
+  // invoice/design/entire order and allow the sales rep to edit/add/remove/change anything
+  // in the order." So there is NO second designer and no shadow copy — this is the real
+  // tool on the real design, and amendment mode changes exactly four things: a bar saying
+  // what is being changed and what it costs, the submit button's words, what the success
+  // screen offers, and Push to Invoice going away. Everything else — the drawing, 3D,
+  // sizes, styles, doors, colours, options, discounts — is untouched, which is what makes
+  // "change anything" true without writing any of it twice.
+  //
+  // Set from openDesign.amendment, which the Orders screen fills in from the server's own
+  // open_amendment response. Nothing here decides whether the change is allowed; the gate
+  // did that before this component ever loaded, and refuses again at the save.
+  const [amendment, setAmendment] = useState(null);
   const [inventoryMaster, setInventoryMaster] = useState(null); // { code, unitId, priceCents, locationId } | null
   const [invDialog, setInvDialog] = useState(null); // { busy, err, price, done } | null — price/confirm only (location is inline now)
   // The inventory Save bar (inline location dropdown + button) appears ONLY for a NEW inventory
@@ -10306,6 +10385,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // a brand-new building never starts from the design that happened to be open. Without
     // this, clicking New while another unit's MASTER was loaded left the submit bar saying
     // "Update Inventory Building" — saving would have rewritten that other unit.
+    // A fresh open is never an amendment unless it says so — stale state here would put an
+    // amber "you are changing CO-7" bar over an unrelated design.
+    setAmendment(null);
     if (openDesign.blank) {
       if (items.length > 0 || sel.style || sel.size) {
         if (!window.confirm("Start a new building? This clears what's currently in the Designer tab.")) return;
@@ -10383,6 +10465,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           : null);
         setNewBuildMode(false);
         inventoryUnitRef.current = openDesign.inventoryUnitId || null;
+        // Amendment mode rides the ordinary open: same load, same design, same everything.
+        setAmendment(openDesign.amendment || null);
       } else if (openDesign.newBuild) {
         // "Quote a new build for this customer" from a sold building's estimate list. Exactly
         // what the in-designer "Design a new build instead" button does — the plan unlocks and
@@ -14247,6 +14331,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           )}
         </div>
       )}
+      {/* CHANGING A SIGNED ORDER. Persistent, at the top, and it names the money — a rep
+          must not be able to work for twenty minutes without seeing what this costs. */}
+      {embedded && amendment && (
+        <div style={{ background: "#FFFBEB", borderBottom: "2px solid #FDE68A", padding: "10px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#92400E", flex: "1 1 260px", lineHeight: 1.5 }}>
+            ✎ Changing a signed order{amendment.coNo != null ? ` — change order CO-${amendment.coNo}` : ""}.
+            {" "}Change anything you need to; the customer signs the revised order when you save it.
+            {Number(amendment.feeCents) > 0 && (
+              <span> A {String(amendment.feeLabel || "change order fee").toLowerCase()} of{" "}
+                {`$${(((Number(amendment.feeCents) || 0) + (Number(amendment.feeTaxCents) || 0)) / 100).toFixed(2)}`} goes on this change.
+              </span>
+            )}
+            <span> Money already paid is never touched.</span>
+          </div>
+          {/* The order this change belongs to. `orderId` is carried on the amendment
+              payload the Orders screen built — the designer has a design code, and
+              onOpenOrder wants an order id, which is not the same thing. */}
+          {onOpenOrder && amendment.orderId && (
+            <button type="button" onClick={() => onOpenOrder(amendment.orderId)}
+              style={{ background: "#FFF", color: "#92400E", border: "1px solid #FCD34D", borderRadius: 8, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+              Back to the order
+            </button>
+          )}
+        </div>
+      )}
       {/* Started on an inventory building, then staff chose to design fresh. */}
       {embedded && newBuildMode && designUnit && (
         <div style={{ background: "#F0FDF4", borderBottom: "1px solid #BBF7D0", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>
@@ -15874,7 +15983,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   transition: "all 0.2s", minWidth: 160,
                 }}
               >
-                {submitting ? "Submitting..." : (hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote")}
+                {submitting
+                  ? (amendment ? "Saving..." : "Submitting...")
+                  : amendment ? "Save the change"
+                    : hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote"}
               </button>
             )}
           </div>
@@ -15937,7 +16049,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
                 : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
           </p>
-          {savedDesign && savedDesign.changeOrder && (
+          {savedDesign && savedDesign.changeOrder && !savedDesign.changeOrder.draft && (
             /* This revision changed a SIGNED order (migration 126): the customer must
                acknowledge it before the order can be invoiced. */
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
@@ -15945,6 +16057,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} needs their
               approval (they sign from their quote page, or record their verbal OK on the order). Invoicing
               waits until it's acknowledged.
+            </div>
+          )}
+          {/* THE CHANGE IS SAVED AND NOBODY HAS BEEN ASKED ANYTHING YET. The customer has
+              deliberately NOT been emailed (submit-estimate suppresses it for a draft), so
+              this screen has to be where the rep decides what happens next — otherwise a
+              saved change sits on the order with the customer hearing nothing and the rep
+              believing it was sent. Three ways forward, and "keep editing" is one of them. */}
+          {savedDesign && savedDesign.changeOrder && savedDesign.changeOrder.draft && (
+            <div style={{ maxWidth: 560, margin: "14px auto 0", background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 10, padding: "12px 16px", fontSize: 13, textAlign: "left", lineHeight: 1.55 }}>
+              <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                Change{savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} saved — the customer hasn't been told yet
+              </div>
+              <div>Nothing has gone out. Send it for their signature, record that they have already said yes, or keep working on it.</div>
+              {amendMsg && (
+                <div style={{ marginTop: 8, fontWeight: 700, color: amendMsg.err ? "#B91C1C" : "#166534" }}>{amendMsg.err || amendMsg.ok}</div>
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+                <button type="button" disabled={amendBusy}
+                  onClick={() => finishAmendment("send")}
+                  style={{ ...S.btn(accent, "#FFF"), padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
+                  {amendBusy ? "Working…" : "Send it for signature"}
+                </button>
+                <button type="button" disabled={amendBusy}
+                  onClick={() => finishAmendment("attest")}
+                  style={{ ...S.btn("#FFF", "#92400E"), border: "2px solid #FCD34D", padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
+                  Record their OK verbally
+                </button>
+                <button type="button" disabled={amendBusy}
+                  onClick={() => { setSubmitted(false); setAmendMsg(null); }}
+                  style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", padding: "8px 14px", fontSize: 13 }}>
+                  Keep editing
+                </button>
+              </div>
             </div>
           )}
           {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false && (
@@ -15995,6 +16140,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       orders:edit answer — presentation only; portal-settings re-checks it.
                       A pending change order 409s server-side, so the amber banner above owns
                       that case rather than a button that is going to fail. */}
+                  {/* `!savedDesign.changeOrder` already covers a draft — a change of any
+                      kind, finished or not, means this order is not ready to be billed. */}
                   {embedded && canPushInvoice && !savedDesign.changeOrder && !pushed && (
                     <button type="button" disabled={pushBusy}
                       onClick={async () => {

@@ -1105,6 +1105,13 @@ function Dashboard({ session }) {
   const ordersCanEdit = canAdmin || !!(myAccess && myAccess.orders === "edit");
   // Amending a SIGNED order is granted separately from running one (access.ts, 2026-09-01).
   const coCanEdit = canAdmin || !!(myAccess && myAccess.change_orders === "edit");
+  // And APPROVING one is a SECOND, independent switch (migration 212). Carolyn 2026-09-06:
+  // "there should be both the option to give approval for a change order, but they can also
+  // make the change order if they are given person per their permissions." So this is
+  // deliberately not derived from coCanEdit in either direction — a person may hold either,
+  // both or neither, and an approver who cannot raise a change is a normal, intended state.
+  // `change_order_approve` has two levels only (none/edit), like `commissions`.
+  const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
@@ -1636,6 +1643,7 @@ function Dashboard({ session }) {
                 ? <OrdersView clientId={tenant.clientId}
                     schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
                     coOn={coCanEdit}
+                    coApproveOn={coApproveCanEdit}
                     /* The courtesy half of migration 188. The database refuses the write
                        either way; this is what stops a view-only rep being offered
                        Record-a-payment, Void and the order-total editor and then handed a
