@@ -1278,9 +1278,11 @@ function Dashboard({ session }) {
               )}
             </div>
           )}
-          <button type="button" className="ss-newlink" onClick={() => navigate("releases")} title="New features / Bug fixes">
+          {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
+              OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
+          <button type="button" className="ss-newlink" onClick={() => navigate("support")} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
-            <span>New features / Bug fixes</span>
+            <span>Support</span>
           </button>
           {/* Hovering (or focusing/tapping) the identity row reveals a small
               flyout menu above it with Sign Out — no standalone button. */}
@@ -1660,9 +1662,9 @@ function Dashboard({ session }) {
             {activeTab === "projects" && canProjects && !supportView && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
-            {!gateLocked && activeTab === "releases" && (
+            {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}
-                sub={activeTab === "releases" ? sub : null} onSub={(x) => navigate("releases", x)}
+                sub={activeTab === "support" ? sub : null} onSub={(x) => navigate("support", x)}
                 onNavigate={navigate} canAdmin={canAdmin} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'

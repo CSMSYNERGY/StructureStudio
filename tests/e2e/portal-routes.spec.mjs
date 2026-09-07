@@ -8,7 +8,12 @@ const ROUTES = [
   "/portal/designer", "/portal/contacts", "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline",
   "/portal/inventory", "/portal/orders", "/portal/build-schedule", "/portal/delivery-schedule", "/portal/repairs",
   "/portal/commissions", "/portal/quickbooks", "/portal/view-3d",
-  "/portal/releases", "/portal/releases/mine", "/portal/releases/features", "/portal/releases/fixes", "/portal/releases/roadmap",
+  "/portal/support", "/portal/support/mine", "/portal/support/features", "/portal/support/fixes", "/portal/support/roadmap",
+  // The pre-2026-08-30 name. Kept deliberately: these are the LEGACY paths, still live in
+  // bookmarks and in links the product hands out, and they must keep resolving through
+  // SS_TAB_ALIASES. If someone deletes the alias, these five turn red rather than a builder
+  // finding a dead link.
+  "/portal/releases", "/portal/releases/mine", "/portal/releases/setup",
   "/portal/settings/structures", "/portal/settings/options", "/portal/settings/colors", "/portal/settings/designer",
   "/portal/settings/branding", "/portal/settings/connection", "/portal/settings/quickbooks", "/portal/settings/email",
   "/portal/settings/sms", "/portal/settings/commissions", "/portal/settings/team", "/portal/settings/billing", "/portal/settings/myview",

@@ -910,7 +910,8 @@ function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin
 function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
-  // The sub-tab lives in the URL (/portal/releases/setup), so a "Take me there" link or a
+  // The sub-tab lives in the URL (/portal/support/setup — /portal/releases/setup still
+  // resolves via SS_TAB_ALIASES), so a "Take me there" link or a
   // bookmark lands on the right one. `null` = the visitor has not chosen; see the default
   // below, which only then decides for them.
   const subtab = sub || null;
@@ -1059,7 +1060,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
   // entries, so it carries its own count instead of a `list`. It LEADS the strip
   // (Carolyn 2026-08-28) — a builder's own open requests matter more to them than our
-  // changelog does. Its id stays "mine" so /portal/releases/mine keeps working.
+  // changelog does. Its id stays "mine" so /portal/support/mine — and the older
+  // /portal/releases/mine, via the alias — both keep working.
   const TABS = [
     { id: "mine",     label: "My Requests",  dot: "#7E22CE", count: mineCount },
     { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
@@ -1074,7 +1076,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
     TABS.splice(lead === "setup" ? 0 : 1, 0,
       { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
-  // An explicit choice — a click, or a /portal/releases/<sub> link — always wins; with
+  // An explicit choice — a click, or a /portal/support/<sub> link — always wins; with
   // none, the page lands on whichever tab leads.
   const effTab = subtab || lead || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];

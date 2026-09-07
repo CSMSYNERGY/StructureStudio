@@ -502,7 +502,7 @@ const TAB_META = {
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
   contacts: ["Contacts", "Everyone who has enquired, and their activity"],
   orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
-  releases: ["What's New", "Latest features and fixes"],
+  support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
   // Not "— coming soon" any more: RealTime Pricing shipped 2026-08-28 inside Settings →
@@ -535,13 +535,17 @@ const TAB_META = {
 // `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
 // static server ignores _redirects, so deep links only work on beta/production — locally
 // the app still runs, it just always boots at /portal.html.
-const SS_TAB_ALIASES = { leads: "contacts" };
+const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
   if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
   // Old tab ids that must keep resolving. `leads` was renamed to `contacts` on 2026-09-02 so
   // the URL matches the label and the server-side permission area, both already "contacts".
+  // `releases` became `support` on 2026-08-30 (Carolyn) — the page had already outgrown its
+  // name: it carries the setup checklist and two-way submission threads, not just a changelog.
+  // Its sub-paths ride the alias for free, which matters because /portal/releases/setup and
+  // /portal/releases/mine are both linked from elsewhere in the product.
   // Three live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid>
   // (record deep links and browser history), and /portal/designs/people (the merged-era alias).
   // Without it every caller does `TAB_META[p.page] ? p.page : "designs"`, so a stale link would
@@ -589,18 +593,20 @@ function ssPagePath(page, sub) {
   return base + (window.location.search || "");
 }
 
-// Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
-// (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
+// Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
+// setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
+// data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
 // this only decides what is worth showing, so that a driver sees a portal made of the four
 // things they do rather than a wall of tabs that 403.
 //
-// A page absent from this map is not access-controlled: "releases" is product news, and the
+// A page absent from this map is not access-controlled: "support" is product news plus a
+// person's own submissions, and the
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
@@ -750,11 +756,12 @@ function ssCanSeeTab(tab, access) {
 // the pre-migration-100 shape lands exactly where it always did; then the first page the
 // person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
 // ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
-// "releases": product news, no tenant data, never refused for any access map.
+// "support": product news and one's own submissions, no other tenant data, never refused
+// for any access map — which is why it is the last-resort landing page below.
 function ssFallbackTab(access) {
   if (ssCanSeeTab("designs", access)) return "designs";
   const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
-  return t || "releases";
+  return t || "support";
 }
 
 // "accounts", "admin" and "projects" are operator-gated (independent of tenant role) and sit
