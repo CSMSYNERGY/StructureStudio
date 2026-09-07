@@ -3155,6 +3155,12 @@ const D3 = {
   OVERHANG: 0.6,      // roof overhang past the walls
 };
 
+// The casing reveal every opening in the 3D model gets: how far the trim stands proud of the
+// opening on each side. At MODULE scope, not inside the renderer, because the dormer face has
+// to know it before it can say whether a chosen window fits on it (d3DormerWindowFit) — and the
+// function that draws the casing is a different function. One number, one place.
+const D3_CASE_F = 0.17;
+
 // Built-in 3D appearance per building style, keyed by lowercased style value
 // (plan §4.2). Each spec: roof { type: shed|gable|gambrel, pitch (rise/run),
 // ridgeOffset (gable ridge shifted toward one eave — saltbox looks), overhang,
@@ -3378,6 +3384,55 @@ function d3TransomDormerGeom(roofCfg, S, profYAt) {
     wantRise,
   };
 }
+// The dormer's FACE HEIGHT for a live design, so a caller outside the renderer can reason about
+// what will fit on it. The two dormer shapes answer differently and both answers are the height
+// of the plumb surface a window goes in: a gable dormer's face is simply its rise, while a
+// transom's is the gap between its own roof line and the main roof under it, which only
+// d3TransomDormerGeom can work out. Returns 0 when the style has no dormer at all.
+//
+// Sibling of d3DormerReadout, which takes a size LABEL because the calibration panel has no live
+// footprint to read; this one takes the real feet the customer is buying.
+function d3DormerFaceFt(spec, wFt, dFt) {
+  const roof = (spec && spec.roof) || {};
+  if (roof.type === "shed" || !((roof.dormerWidthFt || 0) > 0.5)) return 0;
+  if (roof.dormerType !== "transom") return Math.max(0.3, roof.dormerRiseFt != null ? roof.dormerRiseFt : 2.5);
+  const S = d3RoofAxes(roof, Number(wFt) || 12, Number(dFt) || 16).S;
+  const H = (spec && spec.wallHeightFt) || 8;
+  return d3TransomDormerGeom(roof, S, d3MakeProfYAt(d3RoofProfile(roof, S, H, true).dedup, H)).face;
+}
+
+// WHERE THE CUSTOMER'S CHOSEN WINDOW SITS ON A DORMER FACE, and whether it fits there at all.
+//
+// A SELECTION SIZED TO A SURFACE, never a placement. The face is not a wall and must not become
+// one: every opening in this renderer belongs to one of north|south|east|west, and a fifth value
+// would be silently wrong in the plan view most of all, where a dormer window looking down is on
+// top of the roof and has no honest position. So there is no `wall`, no item, no drag — the
+// fixture's own widthIn/heightIn, clamped by what the face can hold, slid along it by `offset`
+// (-1 hard left … 0 centred … 1 hard right).
+//
+// ⚠️ The clamp can draw the window NARROWER OR SHORTER THAN THE PRODUCT being bought — exactly as
+// the 55%-of-width stand-in it replaced always did, and for the same reason: casing running off
+// the end of a dormer cheek reads as a bug, a slightly small window does not. The estimate still
+// prices the real fixture; the drawing is the half that gives way. Returns null when even the
+// clamp cannot make it fit, and the caller then draws nothing rather than a sliver.
+//
+// The margins are the casing's own, not guesses: D3_CASE_F of reveal on every side, the sill
+// nose under it, and D3.WALL_T for the cheek the face butts into at each end.
+function d3DormerWindowFit(fx, dormW, face, offset) {
+  const W = Number(dormW) || 0, F = Number(face) || 0;
+  const maxW = W - 2 * (D3_CASE_F + D3.WALL_T);
+  const maxH = F - 2 * (D3_CASE_F + 0.08);
+  const wIn = Number(fx && fx.widthIn) || 0, hIn = Number(fx && fx.heightIn) || 0;
+  const w = Math.min(wIn > 0 ? wIn / 12 : 2, maxW);
+  const h = Math.min(hIn > 0 ? hIn / 12 : D3.WINDOW_H, maxH);
+  // The same refusal the stand-in made, and it was honest then and is honest now: a six-inch
+  // lift has no window in it either.
+  if (!(w > 0.7 && h > 0.55)) return null;
+  // How far it can slide before its casing meets a cheek.
+  const travel = Math.max(0, (W - w) / 2 - (D3_CASE_F + D3.WALL_T));
+  return { w, h, off: Math.max(-1, Math.min(1, Number(offset) || 0)) * travel, y0: (F - h) / 2 };
+}
+
 // The dormer geometry for a SPEC + a size label, so the calibration panel can say what the
 // rise number will really build. Parses the size and derives S and the profile exactly the
 // way D3ElevationSVG does, then hands off to the shared d3TransomDormerGeom — so the number
@@ -4752,6 +4807,143 @@ function buildShed3DModel(THREE, p) {
     return [d0, d0 + dh];
   };
 
+  // ── SHARED OPENING PIECES ───────────────────────────────────────────────────────────
+  // Casing reveal and casing depth, lifted out of buildOneWall's per-opening loop on
+  // 2026-09-07 because the DORMER FACE draws a window too and a second copy of these two
+  // numbers is precisely how the cladding inversion below comes back on one surface only.
+  //
+  // Casing sits ON TOP of the cladding, so its faces must clear the relief strips —
+  // the same inversion the corner boards had: lap courses at 0.23 stood 0.05 proud of
+  // a casing face at 0.18 and read as siding drawn through the trim. On panel this
+  // resolves to exactly the old T + 0.06.
+  const casingDepth = Math.max(T + 0.06, trimFace * 2);
+
+  // A catalog fixture's own photo is masked onto the opening when the builder
+  // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
+  // instead of it, for two reasons that both bit us:
+  //   · builders upload background-REMOVED cut-outs (every photo in production is an
+  //     RGBA PNG, 50-65% fully transparent), so the parametric fill is what shows
+  //     through the cut-away parts. Without it those pixels rendered pure BLACK, and
+  //     that black door went onto the customer's quote.
+  //   · while the photo loads (or if it 404s), there is something correct on screen.
+  // MeshBasicMaterial for the photo, not Lambert: a photo already carries the light it
+  // was shot in, and shading it again reads as a dirty smudge. The photo stretches to
+  // the opening on purpose — one photo serves a door's 4/5/6 ft variants, which is the
+  // whole point of not keeping a model library.
+  const d3PhotoLayer = (og, wf, entry, a0, a1, y0, y1, depth, tintHex) => {
+    // alphaTest discards the transparent surround (cheaper and better-sorted than
+    // blending it); transparent:true keeps the feathered edges of a soft cut-out.
+    const pm = new THREE.MeshBasicMaterial({ map: entry.tex, transparent: true, alphaTest: 0.06 });
+    // Chosen fixture color TINTS the photo (three.js multiplies material.color into the
+    // map): white product-photo pixels take the color fully, so the mostly-white
+    // cut-outs builders upload read as painted. A photo of an already-dark door
+    // over-darkens — acceptable; the color choice must show somewhere.
+    if (tintHex) { try { pm.color.set(tintHex); } catch (_e) { /* bad hex: leave untinted */ } }
+    const mesh = wallBox(pm, wf, a0, a1, y0, y1, 0.02, depth);   // 0.02 ft proud: no z-fight
+    mesh.visible = Boolean(entry.tex);        // hidden until the photo has decoded
+    d3BindFixturePhoto(entry, pm, mesh);
+    og.add(mesh);
+  };
+
+  // EVERYTHING A WINDOW IS, on any surface this renderer builds like a wall.
+  //
+  // Lifted out of buildOneWall's `o.it.type === "window"` branch on 2026-09-07 so the transom
+  // dormer's face can draw the SAME window the walls do — sill board, sill nose, sash ring,
+  // glass, the fixture photo, the muntin grid, shutters and flower box — instead of the four
+  // hard-coded boxes that used to stand in for one up there. A second window renderer is how
+  // the two drift apart, and they already had: shutters, the flower box and the fixture photo
+  // all arrived in this branch long after the dormer's stand-in was written, and not one of
+  // them ever reached it.
+  //
+  // The CASING is deliberately not in here. buildOneWall draws it for every opening class
+  // before it branches, so folding it in would double-draw it on every wall window; the dormer
+  // caller draws the same three boxes itself.
+  //
+  // `limL`/`limR` are how much room the shutters and the flower box actually have along the
+  // surface — the caller measures that, because only the caller knows what else is on its own
+  // surface. See the note at the call site in buildOneWall for why that measurement exists.
+  const d3WindowFill = (og, wf, o, limL, limR) => {
+    const f = D3_CASE_F;
+    og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, casingDepth));
+    // Sill nose: a slightly wider, deeper board under the casing — the one
+    // horizontal shadow line that makes the window read as installed.
+    og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, T / 2 + 0.04, 0.16));
+    // Sash: a slim dark inner ring set INTO the opening. The depth step
+    // between casing → sash → glass is what turns the old flat decal into
+    // an assembly (the SmartBuild teardown's biggest close-up win).
+    const s = 0.09;
+    // A catalog window's chosen color drives the sash (and muntins below) — the
+    // "frame" a shopper means when they say a black or white window.
+    const sashMat = mat(o.it.colorHex || "#3A3F45", { roughness: 0.6 });
+    og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, T * 0.5));
+    og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, T * 0.5));
+    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, T * 0.5));
+    og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y0, o.y0 + s, 0, T * 0.5));
+    // Glass you can genuinely see through — the interior showing through
+    // the panes is what sells it. Slight blue-green tint, a whisper of
+    // metalness for sky glint; depthWrite off so the ghosted look-inside
+    // mode never sorts against it.
+    og.add(wallBox(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), wf, o.a0 + s, o.a1 - s, o.y0 + s, o.y1 - s, 0, 0.05));
+    const winEntry = fixturePhotoTex(o.it);
+    if (winEntry) {
+      d3PhotoLayer(og, wf, winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08, o.it.colorHex || null);
+    } else {
+      // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
+      // by width, double-hung rail across the middle. Sash-colored so a black
+      // window reads black through the grid, not building-trim.
+      const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
+      const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
+      for (let ci = 1; ci < cols; ci++) {
+        const a = o.a0 + (ww * ci) / cols;
+        og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
+      }
+      const midY = o.y0 + wh / 2;
+      og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
+    }
+    // ── SHUTTERS AND FLOWER BOX (Carolyn 2026-09-03) ───────────────────────────────
+    // Independent of each other and of the sash colour, each painted from the builder's
+    // trim palette: "they can do shutters and flower boxes, or they can do just flower
+    // boxes, or they can do just shutters. And those colors will be separated as well."
+    //
+    // Both stand off `trimFace`, not off T/2. That is the number every trim face in this
+    // renderer takes, and it is what clears the proud cladding relief — a shutter parked
+    // at the bare wall face would have lap courses and battens cutting straight through
+    // it, which is the exact fault the corner boards and casings were fixed for.
+    // Colour falls back to the building trim when the stamp carries none, so a design
+    // saved before this field existed still renders something sane rather than black.
+    if (o.it.shutters) {
+      const gap = f + 0.05;                      // outside the casing, not on top of it
+      // A real pair covers the opening, so each leaf is about half the sash — capped so a
+      // wide window does not grow shutters that read as extra walls, and then cut down to
+      // whatever room the wall actually leaves. ONE width for both leaves: a pair with a
+      // fat side and a thin side reads as a bug, so the tighter side governs.
+      const shW = Math.min(0.95, (o.a1 - o.a0) * 0.42,
+                           Math.max(0, (o.a0 - gap) - limL), Math.max(0, limR - (o.a1 + gap)));
+      if (shW > 0.15) {                          // narrower than this is a sliver, not a shutter
+        const shMat = mat(o.it.shutterColorHex || trimColor, { roughness: 0.7 });
+        og.add(wallBox(shMat, wf, o.a0 - gap - shW, o.a0 - gap, o.y0, o.y1, trimFace + 0.04, 0.08));
+        og.add(wallBox(shMat, wf, o.a1 + gap, o.a1 + gap + shW, o.y0, o.y1, trimFace + 0.04, 0.08));
+      }
+    }
+    if (o.it.flowerBox) {
+      const fbMat = mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.7 });
+      // Hangs under the sill, a little wider than the window, and clamped off the ground:
+      // a low window would otherwise bury its box in the grass. Clamped sideways against
+      // the same limits as the shutters, for the same reason.
+      const top = Math.max(0.55, o.y0 - 0.08);
+      const bot = Math.max(0.12, top - 0.72);
+      const depth = 0.52;
+      const fbL = Math.max(limL, o.a0 - 0.18), fbR = Math.min(limR, o.a1 + 0.18);
+      if (fbR - fbL > 0.3) {
+        og.add(wallBox(fbMat, wf, fbL, fbR, bot, top, trimFace + depth / 2, depth));
+        // A darker lip along the top edge, so the box reads as a container rather than a
+        // slab — the same casing→sash→glass depth-step trick that sells the window itself.
+        og.add(wallBox(mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.55 }), wf,
+          Math.max(limL, fbL - 0.04), Math.min(limR, fbR + 0.04), top - 0.09, top, trimFace + depth / 2 + 0.02, depth + 0.04));
+      }
+    }
+  };
+
   // One wall's segments + opening groups, buildable in isolation: the live
   // drag rebuilds ONLY the wall(s) an item left and landed on (rebuildWalls on
   // the returned model) — same code as the full build, so a partial rebuild's
@@ -4878,46 +5070,18 @@ function buildShed3DModel(THREE, p) {
     // meshes live in their own tagged group so the 3D drag can raycast-pick
     // the item they belong to.
     ops.forEach((o) => {
-      const f = 0.17;
+      const f = D3_CASE_F;
       const og = new THREE.Group();
       og.userData = { itemId: o.it.id, wallItem: true, wall: wname };
       // A two-tone catalog door's chosen TRIM color drives its own casing; everything
       // else keeps the building trim (windows deliberately so — their color is the sash).
       const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
-      // Casing sits ON TOP of the cladding, so its faces must clear the relief strips —
-      // the same inversion the corner boards had: lap courses at 0.23 stood 0.05 proud of
-      // a casing face at 0.18 and read as siding drawn through the trim. On panel this
-      // resolves to exactly the old T + 0.06.
-      const casingDepth = Math.max(T + 0.06, trimFace * 2);
       og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
       og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
       og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
-      // A catalog fixture's own photo is masked onto the opening when the builder
-      // uploaded one — but it is LAYERED IN FRONT of the parametric door/glass, never
-      // instead of it, for two reasons that both bit us:
-      //   · builders upload background-REMOVED cut-outs (every photo in production is an
-      //     RGBA PNG, 50-65% fully transparent), so the parametric fill is what shows
-      //     through the cut-away parts. Without it those pixels rendered pure BLACK, and
-      //     that black door went onto the customer's quote.
-      //   · while the photo loads (or if it 404s), there is something correct on screen.
-      // MeshBasicMaterial for the photo, not Lambert: a photo already carries the light it
-      // was shot in, and shading it again reads as a dirty smudge. The photo stretches to
-      // the opening on purpose — one photo serves a door's 4/5/6 ft variants, which is the
-      // whole point of not keeping a model library.
-      const photoLayer = (entry, a0, a1, y0, y1, depth, tintHex) => {
-        // alphaTest discards the transparent surround (cheaper and better-sorted than
-        // blending it); transparent:true keeps the feathered edges of a soft cut-out.
-        const pm = new THREE.MeshBasicMaterial({ map: entry.tex, transparent: true, alphaTest: 0.06 });
-        // Chosen fixture color TINTS the photo (three.js multiplies material.color into the
-        // map): white product-photo pixels take the color fully, so the mostly-white
-        // cut-outs builders upload read as painted. A photo of an already-dark door
-        // over-darkens — acceptable; the color choice must show somewhere.
-        if (tintHex) { try { pm.color.set(tintHex); } catch (_e) { /* bad hex: leave untinted */ } }
-        const mesh = wallBox(pm, wf, a0, a1, y0, y1, 0.02, depth);   // 0.02 ft proud: no z-fight
-        mesh.visible = Boolean(entry.tex);        // hidden until the photo has decoded
-        d3BindFixturePhoto(entry, pm, mesh);
-        og.add(mesh);
-      };
+      // Bound to THIS opening's group and this wall — d3PhotoLayer above says what the layer is
+      // and why the photo goes IN FRONT of the parametric fill instead of replacing it.
+      const photoLayer = (entry, a0, a1, y0, y1, depth, tintHex) => d3PhotoLayer(og, wf, entry, a0, a1, y0, y1, depth, tintHex);
       if (isVentItem(o.it)) {
         // A vent, DRAWN rather than glazed. It is not a small window: no sash, no muntins, no
         // glass and no photo layer — a louvre is opaque, and the see-through pane that sells a
@@ -4954,53 +5118,6 @@ function buildShed3DModel(THREE, p) {
           }
         }
       } else if (o.it.type === "window") {
-        og.add(wallBox(trimMat, wf, o.a0 - f, o.a1 + f, o.y0 - f, o.y0, 0, casingDepth));
-        // Sill nose: a slightly wider, deeper board under the casing — the one
-        // horizontal shadow line that makes the window read as installed.
-        og.add(wallBox(trimMat, wf, o.a0 - f - 0.03, o.a1 + f + 0.03, o.y0 - 0.06, o.y0 + 0.02, T / 2 + 0.04, 0.16));
-        // Sash: a slim dark inner ring set INTO the opening. The depth step
-        // between casing → sash → glass is what turns the old flat decal into
-        // an assembly (the SmartBuild teardown's biggest close-up win).
-        const s = 0.09;
-        // A catalog window's chosen color drives the sash (and muntins below) — the
-        // "frame" a shopper means when they say a black or white window.
-        const sashMat = mat(o.it.colorHex || "#3A3F45", { roughness: 0.6 });
-        og.add(wallBox(sashMat, wf, o.a0, o.a0 + s, o.y0, o.y1, 0, T * 0.5));
-        og.add(wallBox(sashMat, wf, o.a1 - s, o.a1, o.y0, o.y1, 0, T * 0.5));
-        og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y1 - s, o.y1, 0, T * 0.5));
-        og.add(wallBox(sashMat, wf, o.a0, o.a1, o.y0, o.y0 + s, 0, T * 0.5));
-        // Glass you can genuinely see through — the interior showing through
-        // the panes is what sells it. Slight blue-green tint, a whisper of
-        // metalness for sky glint; depthWrite off so the ghosted look-inside
-        // mode never sorts against it.
-        og.add(wallBox(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), wf, o.a0 + s, o.a1 - s, o.y0 + s, o.y1 - s, 0, 0.05));
-        const winEntry = fixturePhotoTex(o.it);
-        if (winEntry) {
-          photoLayer(winEntry, o.a0 + 0.05, o.a1 - 0.05, o.y0 + 0.05, o.y1 - 0.05, 0.08, o.it.colorHex || null);
-        } else {
-          // Muntin GRID sized to the sash (a lone cross read flat): 2-3 columns
-          // by width, double-hung rail across the middle. Sash-colored so a black
-          // window reads black through the grid, not building-trim.
-          const ww = o.a1 - o.a0, wh = o.y1 - o.y0;
-          const cols = Math.max(2, Math.min(3, Math.round(ww / 1.1)));
-          for (let ci = 1; ci < cols; ci++) {
-            const a = o.a0 + (ww * ci) / cols;
-            og.add(wallBox(sashMat, wf, a - 0.03, a + 0.03, o.y0 + s, o.y1 - s, 0, 0.09));
-          }
-          const midY = o.y0 + wh / 2;
-          og.add(wallBox(sashMat, wf, o.a0 + s, o.a1 - s, midY - 0.035, midY + 0.035, 0, 0.09));
-        }
-        // ── SHUTTERS AND FLOWER BOX (Carolyn 2026-09-03) ───────────────────────────────
-        // Independent of each other and of the sash colour, each painted from the builder's
-        // trim palette: "they can do shutters and flower boxes, or they can do just flower
-        // boxes, or they can do just shutters. And those colors will be separated as well."
-        //
-        // Both stand off `trimFace`, not off T/2. That is the number every trim face in this
-        // renderer takes, and it is what clears the proud cladding relief — a shutter parked
-        // at the bare wall face would have lap courses and battens cutting straight through
-        // it, which is the exact fault the corner boards and casings were fixed for.
-        // Colour falls back to the building trim when the stamp carries none, so a design
-        // saved before this field existed still renders something sane rather than black.
         // ⚠️ HOW MUCH ROOM IS ACTUALLY THERE. Placement guarantees the OPENING fits the wall
         // and clears other openings — checkDoorCollision and checkWallSlabOverlap know nothing
         // about casing, let alone shutters. So a window snapped near a corner, or two windows
@@ -5013,37 +5130,7 @@ function buildShed3DModel(THREE, p) {
           if (ob.a1 <= o.a0) limL = Math.max(limL, ob.a1);
           if (ob.a0 >= o.a1) limR = Math.min(limR, ob.a0);
         });
-        if (o.it.shutters) {
-          const gap = f + 0.05;                      // outside the casing, not on top of it
-          // A real pair covers the opening, so each leaf is about half the sash — capped so a
-          // wide window does not grow shutters that read as extra walls, and then cut down to
-          // whatever room the wall actually leaves. ONE width for both leaves: a pair with a
-          // fat side and a thin side reads as a bug, so the tighter side governs.
-          const shW = Math.min(0.95, (o.a1 - o.a0) * 0.42,
-                               Math.max(0, (o.a0 - gap) - limL), Math.max(0, limR - (o.a1 + gap)));
-          if (shW > 0.15) {                          // narrower than this is a sliver, not a shutter
-            const shMat = mat(o.it.shutterColorHex || trimColor, { roughness: 0.7 });
-            og.add(wallBox(shMat, wf, o.a0 - gap - shW, o.a0 - gap, o.y0, o.y1, trimFace + 0.04, 0.08));
-            og.add(wallBox(shMat, wf, o.a1 + gap, o.a1 + gap + shW, o.y0, o.y1, trimFace + 0.04, 0.08));
-          }
-        }
-        if (o.it.flowerBox) {
-          const fbMat = mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.7 });
-          // Hangs under the sill, a little wider than the window, and clamped off the ground:
-          // a low window would otherwise bury its box in the grass. Clamped sideways against
-          // the same limits as the shutters, for the same reason.
-          const top = Math.max(0.55, o.y0 - 0.08);
-          const bot = Math.max(0.12, top - 0.72);
-          const depth = 0.52;
-          const fbL = Math.max(limL, o.a0 - 0.18), fbR = Math.min(limR, o.a1 + 0.18);
-          if (fbR - fbL > 0.3) {
-            og.add(wallBox(fbMat, wf, fbL, fbR, bot, top, trimFace + depth / 2, depth));
-            // A darker lip along the top edge, so the box reads as a container rather than a
-            // slab — the same casing→sash→glass depth-step trick that sells the window itself.
-            og.add(wallBox(mat(o.it.flowerBoxColorHex || trimColor, { roughness: 0.55 }), wf,
-              Math.max(limL, fbL - 0.04), Math.min(limR, fbR + 0.04), top - 0.09, top, trimFace + depth / 2 + 0.02, depth + 0.04));
-          }
-        }
+        d3WindowFill(og, wf, o, limL, limR);
       } else if (o.it.type === "singleDoor" || o.it.type === "doubleDoor" || o.it.type === "fixtureDoor") {
         const photoEntry = fixturePhotoTex(o.it);
         // A board-and-batten door is BUILT, and its photo is deliberately NOT layered over
@@ -5393,6 +5480,63 @@ function buildShed3DModel(THREE, p) {
   // Absent means gable, so every saved style renders exactly as it did.
   const dormW = roofCfg.dormerWidthFt || 0;
   const dormerIsTransom = roofCfg.dormerType === "transom";
+
+  // ── THE DORMER'S WINDOW — the customer's, not the renderer's (2026-09-07) ──────────────
+  // A per-DESIGN value threaded in like p.wallHeightFt, NOT a style field: the style says
+  // whether there is a dormer, and the shopper says which of the builder's windows goes in it.
+  // Resolved LIVE from the catalog by id for the same reason every other fixture photo is —
+  // re-speccing a window improves the designs already saved, and an archived row quietly draws
+  // nothing rather than leaving a hole.
+  //
+  // ABSENT MEANS NO WINDOW, and that is deliberate rather than a fallback that got lost. It
+  // used to mean "draw the generic one", which is what made the face un-editable; every design
+  // saved before today therefore renders a BLANK dormer face until somebody picks a window, and
+  // a blank face is the honest state for a window nobody has chosen.
+  const dormerFx = (p.dormerWindowId != null && p.dormerWindowId !== "")
+    ? (fxById.get(String(p.dormerWindowId)) || null) : null;
+  // One window, drawn on whichever dormer this style has. The two dormer shapes differ in WHERE
+  // the plumb face is; they do not differ in what a window on one looks like, so they share this.
+  // `wfFace` is a wall descriptor for that face (see the transom's dormerWf for how one is
+  // built), `faceBottom` its sill line in world feet and `faceH` how tall it stands.
+  const addDormerWindow = (wfFace, faceBottom, faceH) => {
+    if (!dormerFx) return;
+    const fit = d3DormerWindowFit(dormerFx, dormW, faceH, p.dormerWindowOffset);
+    if (!fit) return;                       // too small to hold this window: draw nothing
+    const a = L / 2 + fit.off;
+    const o = {
+      // ⚠️ A SYNTHETIC STAND-IN, NOT AN ITEM, and it never becomes one. `items` is the floor
+      // plan and every entry there belongs to a wall; a dormer face is not a wall, and a fifth
+      // wall value would be wrong in about eight places at once — loudest in the 2D plan, which
+      // is looking DOWN and cannot honestly place a window that sits on a roof slope. So this
+      // carries exactly the fields d3WindowFill reads off a placed window and nothing else.
+      // No colour picker for it yet, hence colorHex null: the sash falls back to its own dark
+      // default, and shutters/flower box are absent, so neither is drawn.
+      it: { type: "window", fixtureItemId: dormerFx.id, colorHex: null },
+      a0: a - fit.w / 2, a1: a + fit.w / 2,
+      y0: faceBottom + fit.y0, y1: faceBottom + fit.y0 + fit.h,
+    };
+    const og = new THREE.Group();
+    // ⚠️ NO userData.itemId, ON PURPOSE. The stand-in this replaced had none either, and that
+    // is exactly why Ahsan could not move it (2026-09-07: "i can not move the window any where
+    // on that") — but the fix is not to invent an id, it is that nothing up here is pickable at
+    // all: the pick raycasts test openingsGroup and wallsGroup only, and the dormer lives in the
+    // roof group, which "look inside" hides wholesale. An id here would be a promise the drag
+    // handlers would then act on and get wrong. Moving this window is the footer's offset
+    // slider, which is what a face that is not a wall can honestly offer.
+    og.userData = { dormerWindow: true };
+    const f = D3_CASE_F;
+    // The three casing boxes buildOneWall draws for every opening before it branches — jambs
+    // and head. d3WindowFill deliberately leaves them to the caller so it cannot double-draw
+    // them on a wall.
+    og.add(wallBox(trimMat, wfFace, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
+    og.add(wallBox(trimMat, wfFace, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
+    og.add(wallBox(trimMat, wfFace, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+    // The face is its own surface with nothing else on it, so the shutter/flower-box clamp is
+    // just the face's two edges. Neither is drawn today — the stand-in item carries no dressing
+    // stamps — but passing the wall's `0, wf.len` would be a lie the day one does.
+    d3WindowFill(og, wfFace, o, L / 2 - dormW / 2, L / 2 + dormW / 2);
+    rg.add(og);
+  };
   if (dormW > 0.5 && roofCfg.type !== "shed" && !dormerIsTransom) {
     const dRise = roofCfg.dormerRiseFt != null ? roofCfg.dormerRiseFt : 2.5;
     // offsetU is a fraction of the HALF-SPAN, so it reads the way kneeU does. Held off
@@ -5416,6 +5560,21 @@ function buildShed3DModel(THREE, p) {
       cap.position.set(dU, baseY + dRise + capRise / 2, L / 2 + sgn * half / 2);
       rg.add(cap);
     });
+    // AND ITS WINDOW, if the customer picked one (2026-09-07). The gable dormer has never had
+    // one — only the transom did, and only as the hard-coded stand-in that has just been
+    // removed. Once the drawing is shared this is a face descriptor and one call, and a builder
+    // who sells a gable dormer with a window in it is not an unusual builder.
+    //
+    // It is also the half that keeps the footer control honest: that control appears for ANY
+    // dormer, so without this a customer on a gable-dormer style could pick a window, be charged
+    // for it on the estimate, and see nothing at all on the building.
+    //
+    // The face is the gable TRIANGLE'S wall — the box's end at x = dU ± dDepth/2, which is where
+    // the cap's ridge (running along u, note rotation.x above) points. It faces the eave, the
+    // same side the transom dormer opens toward, so it takes the same dirU convention.
+    const gDirU = fr < 0 ? -1 : 1;
+    addDormerWindow({ len: L, O: [dU + gDirU * (dDepth / 2), 0], U: [0, 1], N: [gDirU, 0], a0Ft: 0 },
+                    baseY, dRise);
   }
 
   // ── TRANSOM DORMER (2026-08-28) ──────────────────────────────────────────────────
@@ -5459,17 +5618,16 @@ function buildShed3DModel(THREE, p) {
       // scale from the wall under it. cu is the dormer's centre measured in the SAME z the end
       // wall counts from, so the boards stay in phase with the wall below rather than starting
       // a new rhythm.
+      //
+      // ⚠️ IT NOW LITERALLY CALLS wallBox (2026-09-07) instead of reproducing it, and the mesh
+      // is identical either way: same box(dormW, face, T), same rotation.y = PI/2 (wallBox
+      // applies it for any wf whose run is along z), same UV anchor. What the descriptor buys is
+      // that the face finally IS a surface something can be drawn ON — which is what lets the
+      // shared d3WindowFill put a real catalog window here. `O` is measured at z = 0 rather than
+      // at the face's own left edge precisely so cu stays L / 2 and the boards keep their phase.
       const faceU = uOut - dirU * (T / 2);
-      const faceMesh = box(wallMat, dormW, face, T);
-      {
-        const uvA = faceMesh.geometry.attributes.uv, posA = faceMesh.geometry.attributes.position;
-        const cu = L / 2, cv = yBase + face / 2;
-        for (let i = 0; i < uvA.count; i++) uvA.setXY(i, posA.getX(i) + cu, posA.getY(i) + cv);
-        uvA.needsUpdate = true;
-      }
-      faceMesh.rotation.y = Math.PI / 2;
-      faceMesh.position.set(faceU, yBase + face / 2, L / 2);
-      rg.add(faceMesh);
+      const dormerWf = { len: L, O: [faceU, 0], U: [0, 1], N: [dirU, 0], a0Ft: 0 };
+      rg.add(wallBox(wallMat, dormerWf, L / 2 - dormW / 2, L / 2 + dormW / 2, yBase, yBase + face));
       // The cheeks: the triangle between the dormer's own roof line and the main roof under it.
       // Sampled along the profile rather than drawn as a straight hypotenuse, so a GAMBREL's
       // knee is followed instead of cut across — the same reason mainSlope is measured off the
@@ -5492,27 +5650,29 @@ function buildShed3DModel(THREE, p) {
       const cheekB = new THREE.Mesh(new THREE.ExtrudeGeometry(cheek, cheekOpts), wallMat);
       cheekB.position.z = L / 2 + dormW / 2 - T;
       rg.add(cheekB);
-      // A WINDOW, because a transom dormer has one. Carolyn: "typically, transom dormers come
-      // with windows like this, like almost always." So it is part of the shape rather than a
-      // separate switch — a dormer with a blank face is the unusual case, not the default.
-      // Skipped when the face is too small to hold one, which is honest: a 6-inch lift has no
-      // window in it either.
-      const winH = Math.min(face * 0.6, 2.0), winW = Math.min(dormW * 0.55, 2.4);
-      if (winH > 0.55 && winW > 0.7) {
-        const wy = yBase + face * 0.52;
-        const outAt = (d) => uOut + dirU * d;
-        const put = (m, w, h, d, off) => {
-          const b = box(m, w, h, d);
-          b.rotation.y = Math.PI / 2;          // same swap the face takes: w runs along z
-          b.position.set(outAt(off), wy, L / 2);
-          rg.add(b);
-        };
-        const sashMat = mat("#3A3F45", { roughness: 0.6 });
-        put(trimMat, winW + 0.26, winH + 0.26, 0.06, 0.02);        // casing
-        put(mat("#BFE0E8", { transparent: true, opacity: 0.22, roughness: 0.05, metalness: 0.4, side: THREE.DoubleSide, depthWrite: false }), winW, winH, 0.04, 0.05);
-        put(sashMat, 0.05, winH, 0.05, 0.07);                      // muntins, one each way
-        put(sashMat, winW, 0.05, 0.05, 0.07);
-      }
+      // THE WINDOW THE CUSTOMER CHOSE — see addDormerWindow above.
+      //
+      // ⚠️ THIS COMMENT IS A REVERSAL, and the thing it reverses is worth keeping because it is
+      // why the old code existed. It used to read: "A WINDOW, because a transom dormer has one.
+      // Carolyn: 'typically, transom dormers come with windows like this, like almost always.'
+      // So it is part of the shape rather than a separate switch — a dormer with a blank face is
+      // the unusual case, not the default." That was a fair reading of the call, and what it
+      // produced was four boxes — casing, tinted glass, two muntins — sized to 55% of the dormer
+      // width, with no fixture behind them, no catalog row, no price, no id and therefore no way
+      // to touch them. Ahsan, 2026-09-07, looking at one: "i can not move the window any where on
+      // that", then "remove that dummy and customers can add windows in there."
+      //
+      // Carolyn had already said what replaces it, on 2026-09-04 @8:40: "they have to build out
+      // what their window is that they're going to put in there, and then they build it out in
+      // the designer on what window goes in there." Two halves — the builder's catalog answers
+      // the first (a dormer window is an ordinary category='window' fixture row), and this is the
+      // second: the customer picks WHICH row, and the opening is sized to it.
+      //
+      // Her "almost always" survives as the SHAPE still assuming a window belongs here — the face
+      // is built and framed for one — but a window nobody has chosen is now drawn as no window
+      // rather than as a generic one, because a generic one cannot be priced, cannot be named on
+      // the estimate and, as Ahsan found, cannot be moved.
+      addDormerWindow(dormerWf, yBase, face);
       const tslab = box(roofMat, slen + OV, D3.ROOF_T, dormW + 0.5);
       d3RoofSlabUVs(tslab);
       tslab.rotation.z = ang;
@@ -6143,6 +6303,10 @@ async function renderDefault3DShot(p) {
       roofColor: roofCss, roofType: p.roofType, items: p.items, itemTypes: p.itemTypes,
       bodyColor: bodyCss, trimColor: trimCss, frontWall: p.frontWall,
       scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures,
+      // The dormer window travels with every render path or the quote's page 2 shows a blank
+      // dormer on a building the customer put a window in — and that page is the picture the
+      // estimate is built around.
+      dormerWindowId: p.dormerWindowId, dormerWindowOffset: p.dormerWindowOffset,
     });
     scene.add(model.root);
     scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
@@ -6194,7 +6358,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, perimeterFt, showPricing, onPaintChange, onWallHeight, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -6350,13 +6514,17 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // natural material colors, wall height) resolved by the parent from the
       // tenant's config + built-in defaults.
       const spec = style3d || { roof: D3_DEFAULT_ROOF, siding: null, colors: {}, wallHeightFt: 0 };
+      // The customer's dormer-window pick, held MUTABLE beside `spec` and for exactly the same
+      // reason spec.wallHeightFt is: the footer changes it while the scene is open, and every
+      // rebuild below has to read the new value rather than the one this effect closed over.
+      const dormPick = { id: dormerWindowId || null, off: Number(dormerWindowOffset) || 0 };
       // Live paint colors — swatch picks update these and recolor materials in
       // place; drag rebuilds read the same vars so colors survive rebuilds.
       // Unpainted falls back to the STYLE's natural material colors.
       let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
       let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
-      const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures }));
+      const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off }));
       scene.add(model.root);
       // Sky-tinted fill + warm sun: under ACES, white-on-white lighting reads
       // as overcast plastic; a blue-ish ambient with a warm key is what makes
@@ -6700,7 +6868,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           if (sc.full || nf !== e.model.builtFrontWall) {
             scene.remove(e.model.root);
             disposeShed3DModel(e.model);
-            e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: nf, scale, mgX, mgY, fixtures }));
+            e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: nf, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off }));
             scene.add(e.model.root);
           } else {
             d3TimedBuild(() => {
@@ -6716,6 +6884,15 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // and roof all recompute from the new plate height.
       const setWallHeight = (h) => {
         spec.wallHeightFt = h || 0;
+        queueRebuild();
+      };
+      // Dormer-window picks work the same way, and they are structural in the same sense: the
+      // opening is sized to the chosen fixture, so there is nothing to recolour in place.
+      // Clearing the id (id = null) is a real choice, not a reset — it is what "no window in the
+      // dormer" looks like.
+      const setDormerWindow = (id, off) => {
+        dormPick.id = id || null;
+        dormPick.off = Number(off) || 0;
         queueRebuild();
       };
       // Swatch picks recolor the live materials in place — no rebuild needed.
@@ -7400,7 +7577,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -7643,6 +7820,95 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             </div>
           );
         })()}
+        {/* DORMER WINDOW — Carolyn 2026-09-04 @8:40: "they have to build out what their window is
+            that they're going to put in there, and then they build it out in the designer on what
+            window goes in there." The builder's catalog answers the first half; this row is the
+            second one, and it replaces a hard-coded rectangle nobody could choose, price or move
+            (Ahsan 2026-09-07, looking at it: "i can not move the window any where on that", then
+            "remove that dummy and customers can add windows in there").
+
+            IT LIVES HERE, BESIDE WALL HEIGHT, and not on the 2D plan, for the same reason wall
+            height does: it is a per-design SELECTION, not a placed item. The plan is looking DOWN
+            at a roof and has no honest place to draw a window that sits on a slope, so 3D is the
+            only surface that can show what was picked — and the slider is what "move it" means on
+            a face that is not a wall.
+
+            Shown only when the style actually has a dormer, and BOTH shapes qualify: the gable
+            dormer gained a window in the same change, so there is no dormer this row can sell a
+            window for and then fail to draw. No catalog windows at all means no row — an empty
+            picker is worse than none. */}
+        {(() => {
+          const roofSpec = (style3d && style3d.roof) || {};
+          const dW = Number(roofSpec.dormerWidthFt) || 0;
+          if (!(dW > 0.5) || roofSpec.type === "shed") return null;
+          const wins = placeableWindows || [];
+          if (!wins.length) return null;
+          const curId = dormerWindowId ? String(dormerWindowId) : "";
+          const curOff = Number(dormerWindowOffset) || 0;
+          const cur = curId ? wins.find((w) => String(w.id) === curId) : null;
+          // ⚠️ WILL IT ACTUALLY FIT? The renderer draws nothing when the face cannot hold a
+          // window, and the estimate prices whatever was picked regardless — so silence here would
+          // mean a customer paying for a window that is nowhere on their building. Answered with the
+          // SAME two functions the renderer uses, never a second estimate of the same thing.
+          //
+          // A transom dormer's face is usually much shorter than its rise setting suggests: the run
+          // is clamped by the eave, so a 2.5 ft rise on a 12 ft span can build a face under a foot
+          // (see d3TransomDormerGeom, and the calibration panel's own maxFace readout, which exists
+          // to tell the BUILDER this). On such a style nothing in the catalog fits, and the honest
+          // answer is no row at all — the customer cannot change the dormer, so a row that can only
+          // ever say "no" is a dead control.
+          const faceFt = d3DormerFaceFt(style3d, bldgW, bldgH);
+          const offer = wins.filter((fx) => d3DormerWindowFit(fx, dW, faceFt, 0));
+          if (!offer.length && !cur) return null;
+          // A design can carry a window that USED to fit, before the shopper changed style or size.
+          // It keeps its place in the row so the choice is visible and revocable, and says so.
+          const fits = !cur || Boolean(d3DormerWindowFit(cur, dW, faceFt, curOff));
+          const shown = (cur && !offer.some((fx) => String(fx.id) === curId)) ? offer.concat([cur]) : offer;
+          const commit = (id, off) => {
+            const e = engineRef.current;
+            if (e && e.setDormerWindow) e.setDormerWindow(id, off);
+            if (onDormerWindow) onDormerWindow(id, off);
+            capturedRef.current = false;   // the building changed: any earlier shot is stale
+            setShotTaken(false);
+          };
+          const cell = (on) => ({
+            background: on ? accent : "#1E293B", color: on ? "#FFF" : "#CBD5E1",
+            border: "1px solid #334155", borderRadius: 7, padding: "6px 10px",
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            display: "flex", alignItems: "center", gap: 5,
+            opacity: phase === "ready" ? 1 : 0.5,
+          });
+          return (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+              <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Dormer window</span>
+              {/* "None" is a real choice and the DEFAULT, not a reset: a dormer nobody has put a
+                  window in is drawn with a blank face, which is what removing the stand-in means.
+                  It is also where an id that no longer RESOLVES lands — a fixture archived out of
+                  the catalog draws nothing and prices nothing, so the row must not show it as a
+                  live choice with a working slider. Every test below is on `cur`, not `curId`. */}
+              <button onClick={() => commit(null, 0)} disabled={phase !== "ready"} style={cell(!cur)}>None</button>
+              {shown.map((fx) => (
+                <button key={fx.id} onClick={() => commit(fx.id, curOff)} disabled={phase !== "ready"}
+                  title={fx.widthIn && fx.heightIn ? `${fx.name} — ${fx.widthIn}" x ${fx.heightIn}"` : fx.name}
+                  style={cell(curId === String(fx.id))}>
+                  {fx.imageUrl ? <img src={fx.imageUrl} alt="" style={{ width: 22, height: 16, objectFit: "contain" }} /> : <span>🪟</span>}
+                  {fx.name}
+                </button>
+              ))}
+              {cur && fits && (
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ color: "#64748B", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.05em" }}>Slide</span>
+                  <input type="range" min="-1" max="1" step="0.05" value={curOff} disabled={phase !== "ready"}
+                    onChange={(ev) => commit(cur.id, Number(ev.target.value))}
+                    style={{ width: 130, accentColor: accent, cursor: "pointer" }} />
+                </label>
+              )}
+              {cur && !fits && (
+                <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>Too big for this dormer — pick a smaller window</span>
+              )}
+            </div>
+          );
+        })()}
         {/* Paint colors: labels land in paintColors (and the estimate); swatch hex drives the 3D */}
         {paintEnabled && (
           <div style={{ display: "flex", gap: 14, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -7811,7 +8077,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -7826,7 +8092,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // undefined pool -- past the catalog lookup, past the built-in nine, down to
   // d3CssColor's CSS-name guess. "Mountain Red" is not a CSS colour name, so the panel drew
   // a fallback while the modal beside it drew the real hex off the same design.
-  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, fitHeightFt };
+  pRef.current = { bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt };
 
   // Every geometry input that is NOT `items`, flattened to a scalar string.
   // d3ResolveStyleSpec returns a fresh object (with fresh nested roof/colors)
@@ -7843,7 +8109,10 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   // changes what this model should draw without changing any label. Leaving them out meant
   // the corrected colour appeared everywhere except the panel, until some unrelated edit
   // forced a rebuild.
-  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors]);
+  // The dormer window is in the signature for the same reason the style spec is: it changes
+  // GEOMETRY (the opening is sized to the chosen fixture), so there is nothing to recolour in
+  // place and the scene has to be rebuilt.
+  const geomSig = JSON.stringify([style3d, roofType || "", roofColorHex || "", painted ? 1 : 0, paintBody || "", paintTrim || "", scale, mgX, mgY, fitHeightFt || 0, bodyColors, trimColors, dormerWindowId || "", Number(dormerWindowOffset) || 0]);
 
   useEffect(() => {
     let disposed = false;
@@ -7870,7 +8139,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       const roofOf = (p) => p.roofColorHex || specOf(p).colors.roof || D3_COLORS.roof;
       const buildArgs = (p, fw) => {
         const spec = specOf(p);
-        return { bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofOf(p), roofType: p.roofType, items: p.items, itemTypes: p.itemTypes, bodyColor: bodyOf(p), trimColor: trimOf(p), frontWall: fw, scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures };
+        return { bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofOf(p), roofType: p.roofType, items: p.items, itemTypes: p.itemTypes, bodyColor: bodyOf(p), trimColor: trimOf(p), frontWall: fw, scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures, dormerWindowId: p.dormerWindowId, dormerWindowOffset: p.dormerWindowOffset };
       };
 
       const p0 = pRef.current;
@@ -12125,6 +12394,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           roofType: sel.roofType,
           roofColorHex: (() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })(),
           fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+          dormerWindowId: sel.dormerWindowId || null, dormerWindowOffset: sel.dormerWindowOffset || 0,
         });
       }
       if (shot3d) pdfPages.push({ bytes: dataUrlToBytes(shot3d.url), w: shot3d.w, h: shot3d.h });
@@ -12388,7 +12658,57 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             flowerBoxColorId: w.flowerBoxColorId || null,
             flowerBoxColorLabel: w.flowerBoxColorLabel || null,
           };
-        }),
+        }).concat((() => {
+          // THE DORMER WINDOW, priced like any other catalog window (2026-09-07).
+          //
+          // This is the half that makes it a product rather than decoration: the stand-in it
+          // replaced was four boxes with no catalog row behind them, so a builder shipped a
+          // dormer window in every transom dormer and charged for none of them.
+          //
+          // ⚠️ `wall: null`, and there is no fifth wall value anywhere in this change. The
+          // schedule in submit-estimate re-prices by `fixtureItemId` with no category filter and
+          // no wall requirement — `wall` only ever reaches a description string, where null
+          // simply drops the clause. `dormer: true` is what puts "in the dormer" back in its
+          // place, and it also joins the server's grouping key so this line can never be folded
+          // into a wall window's and inherit that window's wall in its description.
+          //
+          // Resolved from the FULL window catalog, not `placeableWindows`: an internal-only
+          // fixture a rep chose must still price.
+          const id = sel.dormerWindowId;
+          if (!id) return [];
+          const fx = windowFixtures.find((f) => String(f.id) === String(id));
+          if (!fx) return [];   // archived out of the catalog: it is not drawn either
+          // ⚠️ PRICED ONLY IF IT IS DRAWN, checked with the SAME two functions the renderer uses.
+          // A dormer face is sized by the style AND the building size, both of which the shopper
+          // can change after picking a window — so a design can carry a choice its dormer can no
+          // longer hold. The 3D footer says so while they are looking at it, but nothing forces
+          // them back into the modal, and billing for a window that is nowhere on the drawing is
+          // the one outcome worth a few lines to prevent. The choice STAYS on the design; it comes
+          // back the moment the dormer can hold it again.
+          const dSpec = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW));
+          const dRoof = (dSpec && dSpec.roof) || {};
+          if (!d3DormerWindowFit(fx, Number(dRoof.dormerWidthFt) || 0, d3DormerFaceFt(dSpec, bldgW, bldgH), sel.dormerWindowOffset)) return [];
+          return [{
+            name: fx.name || "Window",
+            widthIn: fx.widthIn != null ? Number(fx.widthIn) : null,
+            heightIn: fx.heightIn != null ? Number(fx.heightIn) : null,
+            price: fx.price != null ? Number(fx.price) : null,
+            wall: null,
+            dormer: true,
+            fixtureItemId: fx.id,
+            // No colour and no dressing picker for a dormer window yet. Sent explicitly rather
+            // than omitted, for the reason the wall windows' block above gives: the server reads
+            // booleans, and absent is indistinguishable from an older client.
+            colorId: null,
+            colorLabel: null,
+            shutters: false,
+            shutterColorId: null,
+            shutterColorLabel: null,
+            flowerBox: false,
+            flowerBoxColorId: null,
+            flowerBoxColorLabel: null,
+          }];
+        })()),
         itemSummary: {
           singleDoors: items.filter((i) => i.type === "singleDoor").length,
           doubleDoors: items.filter((i) => i.type === "doubleDoor").length,
@@ -14726,6 +15046,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               roofType={sel.roofType}
               roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
+              dormerWindowId={sel.dormerWindowId || null}
+              dormerWindowOffset={sel.dormerWindowOffset || 0}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
               /* ⚠️ THE GATE APPLIES HERE TOO. This button is the one route from the view-only
@@ -15645,6 +15967,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           perimeterFt={2 * ((Number(bldgW) || 0) + (Number(bldgH) || 0))}
           showPricing={C.showPricing}
           onWallHeight={(d) => setSel((p) => ({ ...p, wallHeightDeltaIn: Number(d) || 0, wallHeight: 0 }))}
+          // The dormer window, modelled on wall height above: TWO per-design fields on `sel`, so
+          // they persist with the design (save_design stores `sel` verbatim) and travel to the
+          // estimate. Not on the style and not an item — see d3DormerWindowFit for why a dormer
+          // face cannot be a fifth wall.
+          dormerWindowId={sel.dormerWindowId || null}
+          dormerWindowOffset={sel.dormerWindowOffset || 0}
+          onDormerWindow={(id, off) => setSel((p) => ({ ...p, dormerWindowId: id || null, dormerWindowOffset: Number(off) || 0 }))}
           onItemAdd={(ni) => setItems((p) => [...p, ni])}
           onItemSelect={(id) => setSelectedId(id)}
           onItemMove={(id, sn) => setItems((p) => p.map((i) => (i.id === id ? { ...i, ...sn } : i)))}

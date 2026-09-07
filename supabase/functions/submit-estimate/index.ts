@@ -1630,12 +1630,22 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
       const dressText = dressDesc(w);
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
+      // WHERE IT IS. `wall` is one of front/back/left/right and a dormer window has none — its
+      // face is not a wall, so the designer sends `wall: null` and `dormer: true` rather than
+      // inventing a fifth value (2026-09-07). A client that predates the flag sends neither and
+      // reads exactly as it always did.
+      const place = w && w.dormer ? "in the dormer" : (w && w.wall ? `${w.wall} wall` : null);
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
       // The dressing joins the group key for the same reason the colour does: two otherwise
       // identical windows, one with shutters and one without, are two different products to
       // the shop, and collapsing them into one line would describe both by whichever arrived
       // first.
-      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}`;
+      //
+      // ⚠️ So does the dormer flag, and that one is not cosmetic: `wall` is deliberately NOT in
+      // this key (two identical windows on different walls are one line, which is right), so a
+      // dormer window would otherwise fold into an identical wall window's group and be
+      // described by that window's wall — telling the shop to build both on the front.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`;
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
       g.qty++; wg.set(key, g);
     }
