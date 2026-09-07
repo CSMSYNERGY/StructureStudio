@@ -3585,7 +3585,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
       <div style={S.card}>
-        <div style={S.h2}>Options</div>
+        {/* "Interior items", not "Options" (Carolyn 2026-09-07). A card called Options, inside
+            a tab called Options, inside the Interior group, said nothing about what it holds.
+            HEADING ONLY — the component, the save_layout_pricing action and every item_key are
+            untouched, so nothing joins on this string. */}
+        <div style={S.h2}>Interior items</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Set how each item customers can place on the floor plan is priced —
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;

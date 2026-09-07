@@ -2740,21 +2740,46 @@ function MyViewSettings({ prefs, onSaved }) {
 // but the Options tab was a flat stack of seven components with no grouping layer, so the
 // headers are code and only the CONTENT inside each card was ever hers to reorganise.
 //
-// THREE groups, not the two she named, and the third is not padding. Wall Heights is
-// structural and Layout Pricing is the designer's placeable RATES — which span both sides
-// (lofts and workbenches are interior; shutters and flower boxes are exterior). Forcing
-// either into Exterior or Interior would file half its rows under the wrong heading, which
-// is the exact confusion the split exists to remove. INTERIOR_SCOPE.md makes the same
-// distinction: grouping is configuration, but an item type's identity is not.
+// THREE groups, not the two she named, and the third is not padding: Wall Heights is
+// structural, which is neither an inside nor an outside thing.
+//
+// ⚠️ THIS PARAGRAPH USED TO ARGUE THE OPPOSITE of what the code now does, so read the reason
+// before moving anything back. It said Layout Pricing had to stay in BUILDING because its rows
+// spanned both sides — lofts and workbenches inside, shutters and flower boxes outside. That
+// was true when it was written and is not true now: doors, windows, vents, ramps and the three
+// electrical devices have each since left for their own card, and what remains is loft,
+// workbench, the two shelves and rough opening. So it moved to Interior and was renamed
+// "Interior items" (Carolyn 2026-09-07).
+//
+// Rough opening is the one row that does not fit — it is a hole in an exterior wall. It stays
+// anyway, by her explicit call: "I plan to change things on it later." Do not split it out on
+// tidiness grounds; she is going to change what that row IS.
 //
 // Presentation only. No data moves, no saved design changes, no price changes.
+
+// One tone per group, so a builder can see which section they are scrolling through. Every hex
+// here is ALREADY in the portal — INV_SALE_COLORS and two rows of INV_GROUP_COLORS in
+// 01-core.jsx — so the Options tab reads as the same system as the inventory chips rather than
+// introducing a fourth palette. ⛔ Not SYNERGY_TEAL: its own comment reserves it.
+const OPTIONS_GROUP_TONES = {
+  Building: { bg: "#EEF2FF", fg: "#3D3672", hint: "#6B6595" },  // brand purple — structural
+  Exterior: { bg: "#ECFEFF", fg: "#0E7490", hint: "#3F8A9E" },  // cyan  — the outside
+  Interior: { bg: "#F0FDF4", fg: "#15803D", hint: "#3F8A5C" },  // green — the inside
+};
+const OPTIONS_GROUP_FALLBACK = { bg: "#F1F5F9", fg: "#334155", hint: "#94A3B8" };
+
 function OptionsGroup({ title, hint, children }) {
+  const tone = OPTIONS_GROUP_TONES[title] || OPTIONS_GROUP_FALLBACK;
   return (
-    <div style={{ marginBottom: 6 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, margin: "18px 2px 10px" }}>
-        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: "#334155", whiteSpace: "nowrap" }}>{title}</div>
-        <div style={{ fontSize: 12, color: "#94A3B8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hint}</div>
-        <div style={{ flex: 1, height: 2, background: "#E2E8F0", borderRadius: 1, minWidth: 12 }} />
+    // The bar runs the FULL HEIGHT of the group, not just the header — that is what makes the
+    // boundary readable while scrolling past several cards. borderRadius stays 0 on the barred
+    // edge: a rounded corner on a single-sided border detaches the bar from the band above it.
+    <div style={{ marginTop: 18, marginBottom: 6, borderLeft: `4px solid ${tone.fg}`, borderRadius: 0, paddingLeft: 12 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, background: tone.bg, borderRadius: "0 8px 8px 0", padding: "7px 12px", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: tone.fg, whiteSpace: "nowrap" }}>{title}</div>
+        {/* Kept truncating rather than wrapping: the band is one line tall by design, and a
+            narrow window should shorten the hint, not push the cards down. */}
+        <div style={{ fontSize: 12, color: tone.hint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{hint}</div>
       </div>
       {children}
     </div>
@@ -2853,9 +2878,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
       {sub === "options" && (<>
-        <OptionsGroup title="Building" hint="Sizes and the rates behind everything a customer drops on a plan">
+        <OptionsGroup title="Building" hint="Structural upgrades to the building itself">
           <WallHeights viewingLabel={viewingLabel} clientId={clientId} />
-          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
         </OptionsGroup>
         <OptionsGroup title="Exterior" hint="Anything that goes on the outside of the building">
           <DoorsView viewingLabel={viewingLabel} clientId={clientId} />
@@ -2864,6 +2888,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           <RampsView viewingLabel={viewingLabel} clientId={clientId} />
         </OptionsGroup>
         <OptionsGroup title="Interior" hint="Anything that goes on the inside">
+          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
           <Electrical viewingLabel={viewingLabel} clientId={clientId} />
           <Insulation viewingLabel={viewingLabel} clientId={clientId} />
         </OptionsGroup>
