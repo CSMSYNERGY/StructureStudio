@@ -175,6 +175,24 @@ function SettingsView({ section }) {
     if (st && !st.error) setStatus(st);
   };
 
+  // ── MAY THIS TENANT INVOICE THROUGH THE CRM AT ALL? (migration 217) ──────────────────
+  // Carolyn 2026-09-07: "The feature for payments to go through GHL should only show in
+  // Junior Barns as he is an active user. All other builders will only have the option to
+  // invoice through SS. They can still have the customer info pass to GHL if they choose."
+  //
+  // So this hides ONE checkbox. The CRM Connection card above is untouched — location id,
+  // API key, pipeline and stages stay for everyone, and submit-estimate keeps mirroring
+  // contacts and opportunities into a connected CRM while we issue the paperwork.
+  //
+  // Read from `status`, never from `form`: a grandfathered tenant's `invoiceInGhl` is still
+  // true, and this must not follow it. The render below is unreachable until status has
+  // loaded (the `!status && !error` branch), so there is no flash of the wrong card.
+  const mayGhlInvoice = Boolean(status && status.ghlInvoicingAllowed === true);
+  // The SS-paperwork fields used to key on `!form.invoiceInGhl` alone. For a tenant that
+  // cannot choose, SS mode is the only mode — including while their row still says otherwise,
+  // which is exactly when they need the numbering fields in front of them.
+  const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
+
   // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
   // the three fields are presence-based on the server, so sending only these leaves every
   // other setting untouched — and this card lives in the CRM section while the page Save
@@ -185,7 +203,12 @@ function SettingsView({ section }) {
     setInvMsg(null); setInvBusy(true);
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
       action: "save",
-      invoiceInGhl: form.invoiceInGhl,
+      // `mayGhlInvoice` and not `form.invoiceInGhl` (migration 217): a tenant without the
+      // capability has no checkbox, and its state variable still holds whatever their row
+      // last said — which for a grandfathered tenant is `true`. Posting that would ask the
+      // server for the very thing the card no longer offers. The server forces false anyway;
+      // this keeps the request honest rather than relying on being overruled.
+      invoiceInGhl: mayGhlInvoice ? form.invoiceInGhl : false,
       ssQuoteNext: form.ssQuoteNext,
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
@@ -196,7 +219,7 @@ function SettingsView({ section }) {
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
-    setInvMsg({ ok: form.invoiceInGhl
+    setInvMsg({ ok: (mayGhlInvoice && form.invoiceInGhl)
       ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
       : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
@@ -381,19 +404,21 @@ function SettingsView({ section }) {
           collide with the paperwork a builder already has out. */}
       <div style={S.card}>
         <div style={S.h2}>Quotes &amp; Invoices</div>
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
-          <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
-          Quote and invoice through my CRM
-        </label>
-        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
-          {form.invoiceInGhl
+        {mayGhlInvoice && (
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+            <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
+            Quote and invoice through my CRM
+          </label>
+        )}
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: mayGhlInvoice ? 6 : 0, marginBottom: 0, lineHeight: 1.5 }}>
+          {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
-            : <><b>Off — StructureStudio issues your quotes and invoices.</b> Each quote is one document: the priced
+            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
                 estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
                 their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
                 opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
-        {!form.invoiceInGhl && (
+        {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Starting quote number</span>
               <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
@@ -414,7 +439,7 @@ function SettingsView({ section }) {
             from its delivery address (Avalara), and this is what gets charged when that
             lookup can't resolve, which is why the server refuses to flip SS mode on
             while it is blank: 0 is a real answer, "unanswered" is not. */}
-        {!form.invoiceInGhl && (
+        {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Sales tax rate (%)</span>
               <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
@@ -428,7 +453,7 @@ function SettingsView({ section }) {
               </label></div>
           </div>
         )}
-        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
+        {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
             Before saving, set{" "}
             {[
@@ -439,7 +464,7 @@ function SettingsView({ section }) {
             Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
           </div>
         )}
-        {!form.invoiceInGhl && status && status.emailReady === false && (
+        {ssMode && status && status.emailReady === false && (
           /* Was "nobody is emailed" (decision 5, 2026-08-23). Since 2026-09-02 a
              paperwork-mode tenant sends from the PLATFORM address until their own domain
              verifies — _shared/emailSend.ts opens its provider guard for exactly this case,

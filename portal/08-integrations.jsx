@@ -1395,6 +1395,7 @@ function CommissionStructure({ clientId }) {
       </button>
       <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12, lineHeight: 1.5 }}>
         This sets the rules that per-person rates (Settings → Team) and the Commissions report run on. Every period is still reviewed and approved by you before it's payable.
+        {" "}Commissions cover the sales you invoice from Structure Studio; an invoice raised in your CRM isn't included.
       </div>
     </div>
   );
@@ -2375,7 +2376,7 @@ function CommissionsReport({ clientId }) {
         )}
       </div>
 
-            {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
+            {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as you invoice sales from Structure Studio." : "You have no commissions yet."}</div>}
 
       {entries.length > 0 && (
         <div style={{ ...S.card, marginBottom: 14, padding: "12px 14px" }}>

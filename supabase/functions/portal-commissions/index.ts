@@ -188,6 +188,47 @@ function collectedDate(pays: any[], totalCents: number | null): string | null {
   return null;
 }
 
+// ── WHAT COUNTS AS A SALE THIS LEDGER CAN PAY ON ────────────────────────────────────────
+// Carolyn, 2026-09-07: "We are only calculating commissions for sales within the portal not
+// from GHL.... GHL is going away and commissions only should work from within the portal
+// sales."
+//
+// Orders reach this tenant by two routes and, until this rule, the ledger paid no attention
+// to which:
+//
+//   • PORTAL — the customer accepts and the builder raises the invoice here, so
+//     invoice_sends.issued_by = 'structurestudio' and a real person pressed the button.
+//   • GOHIGHLEVEL — the invoice is raised in GHL, or sync-design-status flips the design's
+//     status from GHL and the designs_ensure_order trigger opens an order behind it. NOBODY
+//     IN THIS PRODUCT DID ANYTHING, so there is no actor to pay. Measured 2026-09-07: those
+//     lines carried no earner, no rate and no amount, and read like an attribution failure
+//     rather than like a sale that was never ours.
+//
+// A missing invoice_sends row is the second case — the order the trigger opened for a sale
+// the portal never saw — so "no row" is NOT commissionable.
+//
+// ⚠️ `<> 'ghl'`, deliberately, not `= 'structurestudio'`. The column is `not null default
+//    'ghl'` with `check (issued_by in ('ghl','structurestudio'))` (migration 125:29), so its
+//    vocabulary can only grow by a deliberate constraint change — and when a future
+//    portal-native issuance route arrives it should count without anyone remembering this
+//    line. The 'ghl' default also fixes the failure direction: a row nobody stamped is read
+//    as NOT ours, so the mistake is a missed commission, never an invented one.
+const GHL_ISSUER = "ghl";
+
+function issuedByPortal(row: { issued_by?: unknown } | null | undefined): boolean {
+  return Boolean(row) && String(row!.issued_by ?? GHL_ISSUER) !== GHL_ISSUER;
+}
+
+// Single-order form of the same question, for the two actions that take an orderId straight
+// from the request body.
+async function orderIsPortalIssued(admin: any, clientId: string, shortCode: string): Promise<boolean> {
+  const { data } = await admin.from("invoice_sends")
+    .select("issued_by").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+  return issuedByPortal(data);
+}
+
+const NOT_A_PORTAL_SALE = "That sale wasn't invoiced from Structure Studio, so it isn't part of commissions. Commissions cover sales you invoice here.";
+
 // Human label for a period_key ("YYYY-MM" monthly, or "freq:startdate" for day-bucket cadences).
 function periodLabel(key: string, freq: string, customDays: number | null): string {
   if (/^\d{4}-\d{2}$/.test(key)) { const [y, m] = key.split("-").map(Number); return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }); }
@@ -796,7 +837,7 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // fields the no-op check below compares against.
         const [designsRes, invsRes, memsRes, teamRowsRes, paysRes, existingRes] = await Promise.all([
           admin.from("designs").select("short_code, ghl_estimate_id").eq("client_id", clientId).in("short_code", codes),
-          admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator").eq("client_id", clientId),
+          admin.from("invoice_sends").select("short_code, sender_user_id, sent_by_operator, issued_by").eq("client_id", clientId),
           admin.from("commission_members").select("user_id, commission_percent").eq("client_id", clientId),
           admin.from("client_users").select("user_id").eq("client_id", clientId),
           earnedOn === "collected"
@@ -808,7 +849,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         ]);
         const estIdByCode = new Map<string, string>((designsRes.data || []).map((d: any) => [d.short_code, d.ghl_estimate_id]));
         const senderByCode = new Map<string, string>();
-        for (const iv of invsRes.data || []) if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
+        const portalCodes = new Set<string>();
+        for (const iv of invsRes.data || []) {
+          if (iv.sender_user_id && !iv.sent_by_operator) senderByCode.set(iv.short_code, String(iv.sender_user_id));
+          if (issuedByPortal(iv)) portalCodes.add(String(iv.short_code));
+        }
         const rateByUser = new Map<string, number | null>((memsRes.data || []).map((m: any) => [m.user_id, m.commission_percent == null ? null : Number(m.commission_percent)]));
         const teamSet = new Set<string>((teamRowsRes.data || []).map((t: any) => t.user_id));
 
@@ -828,9 +873,16 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const existByOrder = new Map<string, any[]>();
         for (const e of existing) { const a = existByOrder.get(e.order_id) || []; a.push(e); existByOrder.set(e.order_id, a); }
 
+        // ── SCOPE: portal-issued sales only (see issuedByPortal above) ─────────────────
+        // Partitioned rather than filtered in the loop, because the orders that fall out are
+        // not simply skipped — any auto line already sitting on them has to go, or the report
+        // keeps showing sales this ledger has just decided it does not cover.
+        const inScope = ords.filter((o: any) => portalCodes.has(String(o.short_code)));
+        const outOfScope = ords.filter((o: any) => !portalCodes.has(String(o.short_code)));
+
         const diag: any[] = [];
-        let computed = 0, updated = 0;
-        for (const o of ords) {
+        let computed = 0, updated = 0, removed = 0;
+        for (const o of inScope) {
           // Pre-tax base: stored value, else derive from the GHL estimate subtotal (scale verified
           // against the order's known cents total, since GHL reports money in dollars).
           let baseCents: number | null = o.pretax_subtotal_cents ?? null;
@@ -916,11 +968,36 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
           }
         }
 
+        // ── Retire lines on orders this ledger no longer covers ────────────────────────
+        // compute has only ever created and updated. With the scope rule above that is not
+        // enough: every GHL sale already carries an auto line, and left alone it would sit on
+        // the report for ever — the exact "attribution failed" reading this change exists to
+        // remove. Measured on the internal tenant 2026-09-07: 12 such lines.
+        //
+        // ⛔ THE THREE CONDITIONS ARE THE WHOLE SAFETY OF THIS. They mirror the guard a few
+        //    lines above (`paid` / `payable` / `is_override` — never auto-touch): approving a
+        //    period is the owner committing to those exact amounts, and an override is a
+        //    human's decision about someone's pay. Neither may vanish because a scope rule
+        //    changed underneath it. A protected line on an out-of-scope order stays visible
+        //    and the owner removes it with delete_entry if they want it gone.
+        //
+        //    `kind = 'commission'` keeps clawbacks out of it for the same reason.
+        const staleIds = outOfScope.map((o: any) => o.id).filter((id: string) => (existByOrder.get(id) || []).some((e: any) => !e.is_override && e.status === "pending"));
+        if (staleIds.length) {
+          const { data: gone, error: delErr } = await admin.from("commission_entries")
+            .delete()
+            .eq("client_id", clientId).in("order_id", staleIds)
+            .eq("kind", "commission").eq("is_override", false).eq("status", "pending")
+            .select("id");
+          if (delErr) throw delErr;
+          removed = (gone || []).length;
+        }
+
         if (p.debug && diag.length) {
           try { await admin.from("app_errors").insert({ source: "edge:portal-commissions", severity: "info", code: "compute_diag", message: "pretax diag", client_id: clientId, context: { diag: diag.slice(0, 25) } }); } catch { /* best-effort */ }
         }
-        await audit(`compute (${computed} new, ${updated} updated)`);
-        return json({ ok: true, orders: ords.length, computed, updated, ...(p.debug ? { diag } : {}) });
+        await audit(`compute (${computed} new, ${updated} updated, ${removed} removed)`);
+        return json({ ok: true, orders: inScope.length, computed, updated, removed, ...(p.debug ? { diag } : {}) });
       }
 
       // ── the report: entries scoped to what the caller may see (rep = own; owner/sees_all = everyone) ──
@@ -1134,6 +1211,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const orderId = String(p.orderId || "");
         const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
+        // Scope (see issuedByPortal): the report is built from ENTRIES, so a GHL sale — which
+        // now has none — cannot be reached from the UI. This endpoint takes an orderId from
+        // the body, though, and reset_order below builds an entry from scratch. Refuse rather
+        // than let the one door the interface closed be opened by hand.
+        if (!(await orderIsPortalIssued(admin, clientId, String(ord.short_code)))) return json({ error: NOT_A_PORTAL_SALE }, 409);
         const clean: { userId: string; share: number }[] = [];
         let sum = 0;
         for (const s of (Array.isArray(p.splits) ? p.splits : [])) {
@@ -1188,6 +1270,10 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         const orderId = String(p.orderId || "");
         const { data: ord } = await admin.from("orders").select("id, short_code, total_cents, pretax_subtotal_cents, tax_cents, ordered_at").eq("client_id", clientId).eq("id", orderId).maybeSingle();
         if (!ord) return json({ error: "Order not found." }, 404);
+        // Same scope guard as split_order, and this is the one that needs it most: the insert
+        // below builds a commission line from nothing, so without it an orderId in the body is
+        // enough to put a GHL sale back on the ledger compute has just taken it off.
+        if (!(await orderIsPortalIssued(admin, clientId, String(ord.short_code)))) return json({ error: NOT_A_PORTAL_SALE }, 409);
         const { data: exRows } = await admin.from("commission_entries").select("id, status, kind").eq("client_id", clientId).eq("order_id", ord.id).eq("kind", "commission");
         if ((exRows || []).some((r: any) => r.status === "paid")) return json({ error: "This order has a paid line — it can't be reset." }, 409);
         const { data: settings } = await admin.from("commission_settings").select("*").eq("client_id", clientId).maybeSingle();

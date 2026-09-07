@@ -1046,7 +1046,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -1079,6 +1079,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // row that predates the column — or a tenant with no client_settings row at all —
         // reads as "invoice through the CRM", i.e. today's behaviour.
         invoiceInGhl: data?.invoice_in_ghl !== false,
+        // MAY they invoice through the CRM at all (migration 217)? Carolyn 2026-09-07:
+        // "The feature for payments to go through GHL should only show in Junior Barns as he
+        // is an active user. All other builders will only have the option to invoice through
+        // SS." Default false, so a row predating the column reads as NOT allowed — the safe
+        // direction, since the worst case is a builder asking why the checkbox went away
+        // rather than one quietly keeping a route we are retiring.
+        //
+        // This is only what the CARD RENDERS. The control is in `save` below; a hidden
+        // checkbox is a courtesy.
+        ghlInvoicingAllowed: data?.ghl_invoicing_allowed === true,
         ssQuoteNext: data?.ss_quote_next ?? null,
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
@@ -1222,6 +1232,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+    // Tentative — the capability check below can force this to false. See migration 217.
     if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
     // The quote-number START. Blank clears it back to "not set"; anything else must be a
     // whole positive number, because it is allocated with +1 and printed on a customer's
@@ -1299,8 +1310,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // separate saves), the same way the beta pair below is.
     if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
       const { data: curInv } = await admin
-        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next, ss_tax_rate, ss_quote_prefix, ss_invoice_prefix").eq("client_id", clientId).maybeSingle();
-      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
+        .from("client_settings").select("invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_invoice_next, ss_tax_rate, ss_quote_prefix, ss_invoice_prefix").eq("client_id", clientId).maybeSingle();
+      // ── CRM INVOICING IS A CAPABILITY NOW (migration 217, Carolyn 2026-09-07) ───────────
+      // "All other builders will only have the option to invoice through SS." A tenant
+      // without the flag can write only FALSE here, whatever the body says — the browser
+      // hides the checkbox, and this is what makes hiding it mean something.
+      //
+      // Forced only when the key is PRESENT. A non-allowed tenant still on the CRM path who
+      // saves a neighbouring field (a tax label, a prefix) must not be silently flipped into
+      // paperwork they have set no numbering for; the flip belongs to the save that comes
+      // from the Quotes & Invoices card, which always posts this key.
+      const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
+      if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
+      const nextInGhl = "invoiceInGhl" in payload
+        ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
+        : curInv?.invoice_in_ghl !== false;
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
