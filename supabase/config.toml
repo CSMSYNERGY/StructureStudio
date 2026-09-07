@@ -55,6 +55,20 @@ verify_jwt = false
 # for months in 2026-07.
 verify_jwt = false
 
+[functions.app-feedback]
+# Bug/feature intake from our OTHER products (FramedUp, BuildBridge, CSM Studio). Those
+# are SEPARATE Supabase projects and cannot mint a JWT this project would accept, so the
+# authentication is a per-app shared secret in the URL (?key= <-> one of
+# APP_FEEDBACK_SECRET_FRAMEDUP / _BUILDBRIDGE / _CSMSTUDIO), compared in constant time --
+# the email-inbound / sms-inbound pattern. THE SECRET ALSO DECIDES WHICH APP the report is
+# filed as; a body field naming the app is ignored, which is what makes "which product was
+# this filed from" trustworthy on the board.
+#
+# Flip this to true and the gateway 401s every call BEFORE the function runs: nothing
+# stored, nothing logged, invisible from inside the database -- the billing-webhook
+# outage's exact shape. An unset secret refuses everything, so it is inert until minted.
+verify_jwt = false
+
 [functions.postmark-events]
 # Postmark posts delivery/bounce/spam-complaint events here server-to-server. Authenticated
 # by a shared secret in the URL (?key= ⇄ POSTMARK_WEBHOOK_SECRET) compared in constant time —

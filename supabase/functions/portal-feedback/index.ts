@@ -49,6 +49,14 @@ function json(body: unknown, status = 200) {
 const MONDAY_API = "https://api.monday.com/v2";
 const MONDAY_FILE_API = "https://api.monday.com/v2/file";
 const APP_LABEL = "Structure Studio";
+// slug (feedback_submissions.source_app) -> the label on the boards' App dropdown.
+// Shared with app-feedback, which owns the other three; keep the two in step.
+const APP_LABELS: Record<string, string> = {
+  "structure-studio": "Structure Studio",
+  "framedup": "Framed UP",
+  "csm-studio": "CSM Studio",
+  "buildbridge": "BuildBridge",
+};
 
 const BOARDS = {
   bug: {
@@ -266,7 +274,18 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
         const intake = labels.find((l: any) => l.intake === true) || labels[0];
         if (intake) values[c.id] = intake.id;
       } else if (c.type === "text" && c.name === "Client") {
-        values[c.id] = row.client_id;
+        // Cross-app rows (migration 161) carry NO tenant — leave the cell empty rather
+        // than printing "null"; the App column below says what they are instead.
+        if (row.client_id) values[c.id] = row.client_id;
+      } else if (c.type === "dropdown" && c.name === "App") {
+        // Which PRODUCT this came from. Matched by label, the same way Priority is, so
+        // the option ids stay editable in the UI. APP_LABELS maps the stored slug to the
+        // board's label; an unknown slug simply leaves the cell blank rather than
+        // guessing — a wrong App is worse than a missing one when you triage by it.
+        const label = APP_LABELS[row.source_app || "structure-studio"];
+        // deno-lint-ignore no-explicit-any
+        const opt = (c.settings?.options || []).find((o: any) => o.label === label);
+        if (opt) values[c.id] = [opt.id];
       } else if (c.type === "date" && c.name === "Date") {
         values[c.id] = new Date().toISOString().slice(0, 10);
       } else if (c.type === "dropdown" && c.name === "Priority" && row.severity) {
