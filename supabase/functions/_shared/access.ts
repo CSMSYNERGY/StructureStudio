@@ -131,6 +131,29 @@ export const AREAS: Area[] = [
   // an owner or admin hands it out per person. Deliberately NOT ownerGranted: an admin runs
   // the business day to day and may legitimately grant this, unlike Billing.
   { key: "change_orders",     label: "Change Orders",      group: "workspace", hint: "Amend a signed order — the customer signs off again", levels: RVE },
+  // UNLOCKING a signed order so it can be amended. A SEPARATE AREA, not a third level on
+  // change_orders, and that is Carolyn's decision (2026-09-07): "there should be both the
+  // option to give approval for a change order, but they can also make the change order if
+  // they are given permission" — approving must not imply raising, and one person may hold
+  // either, both or neither.
+  //
+  // A level ABOVE `edit` on change_orders was the obvious alternative and is a trap. Two of
+  // them: effectiveAccess short-circuits an owner to the literal "edit" for every area, so an
+  // owner could not approve an unlock in their own business; and migration 188's restrictive
+  // policies test `current_area_level('change_orders') = 'edit'` literally, so an approver
+  // would be refused every change-order write at PostgREST — with no gate table, lint or
+  // preflight check standing behind either. Two areas keeps `edit` the top level of both and
+  // neither trap exists.
+  //
+  // Two levels, like commissions proves is supported. There is nothing to "view" here: the
+  // unlock request and its history render off the order screen under change_orders/orders.
+  //
+  // Omitted from sales_rep, crew_leader and driver, so it is DENIED by default and nobody —
+  // including every existing crew leader — gains it on the day it ships. Admins hold it by
+  // preset, which is the answer Carolyn picked ("everyone starts at None except owners and
+  // admins; you tick Approve for the specific crew leaders you trust").
+  { key: "change_order_approve", label: "Approve Changes",  group: "workspace",
+    hint: "Unlock a signed order so it can be changed", levels: ["none", "edit"] },
   { key: "build_schedule",    label: "Build Schedule",     group: "workspace", hint: "Crews, build dates, the board",       levels: RVE },
   { key: "delivery_schedule", label: "Delivery Schedule",  group: "workspace", hint: "Loads, routes, drivers",              levels: RVE },
   { key: "repairs",           label: "Repairs",            group: "workspace", hint: "Service jobs and history",            levels: RVE },
@@ -190,7 +213,7 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   owner: Object.fromEntries(AREA_KEYS.map((k) => [k, k === "commissions" ? "edit" : "edit"])),
   admin: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
-    change_orders: "edit",
+    change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
     settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",

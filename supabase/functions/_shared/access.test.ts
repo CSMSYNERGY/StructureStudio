@@ -409,3 +409,47 @@ Deno.test("an 'own' holder cannot grant 'view' on contacts", () => {
     "passing on exactly what you hold stays allowed");
   assert(mayGrant("owner", {}, "contacts", "view"), "an owner is unaffected");
 });
+
+// ── APPROVE CHANGES — a SEPARATE area, not a level above `edit` (2026-09-07) ────────────
+// Carolyn: "there should be both the option to give approval for a change order, but they can
+// also make the change order if they are given permission." These pin that the two grants are
+// genuinely independent in both directions, which is the whole reason it is a second area.
+
+Deno.test("Approve Changes is denied by default to every staff title", () => {
+  for (const t of ["sales_rep", "crew_leader", "driver"] as const) {
+    assertEquals(effectiveAccess("user", t, null).change_order_approve, "none", t);
+  }
+});
+
+Deno.test("owners and admins hold Approve Changes without anyone setting it", () => {
+  assertEquals(effectiveAccess("owner", "owner", null).change_order_approve, "edit");
+  assertEquals(effectiveAccess("user", "admin", null).change_order_approve, "edit");
+});
+
+Deno.test("granting Approve does not grant Raise, and granting Raise does not grant Approve", () => {
+  const approver = effectiveAccess("user", "crew_leader", { change_order_approve: "edit" });
+  assertEquals(approver.change_order_approve, "edit");
+  assertEquals(approver.change_orders, "none", "an approver cannot raise unless separately granted");
+
+  const raiser = effectiveAccess("user", "sales_rep", { change_orders: "edit" });
+  assertEquals(raiser.change_orders, "edit");
+  assertEquals(raiser.change_order_approve, "none", "a raiser cannot approve their own change");
+});
+
+Deno.test("one person can hold both", () => {
+  const both = effectiveAccess("user", "crew_leader", { change_orders: "edit", change_order_approve: "edit" });
+  assertEquals([both.change_orders, both.change_order_approve], ["edit", "edit"]);
+});
+
+Deno.test("Approve Changes has two levels — 'view' is not one of them", () => {
+  // An out-of-vocabulary override is discarded, not stored through. The SQL mirror asserts
+  // the same thing; this is the half that runs in CI.
+  assertEquals(effectiveAccess("user", "crew_leader", { change_order_approve: "view" }).change_order_approve, "none");
+});
+
+Deno.test("an approver can pass Approve on; a raiser cannot", () => {
+  const approver = effectiveAccess("user", "admin", null);
+  assertEquals(mayGrant("user", approver, "change_order_approve", "edit"), true);
+  const raiser = effectiveAccess("user", "sales_rep", { change_orders: "edit" });
+  assertEquals(mayGrant("user", raiser, "change_order_approve", "edit"), false);
+});

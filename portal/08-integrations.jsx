@@ -1446,6 +1446,9 @@ function ssLevelLabel(areaKey, lv) {
   // commissions it sits alongside a real 'view' rather than replacing it — dropping 'view'
   // would have silently demoted everyone already stored on it.
   if (areaKey === "contacts") return ({ none: "No access", own: "Own only", view: "View", edit: "Edit" })[lv] || lv;
+  // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
+  // edited. Two levels, so this row renders two buttons rather than three.
+  if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
