@@ -61,6 +61,48 @@ const CLIENT_STATUSES = new Set([
 ]);
 const LABEL_KINDS = new Set(["done", "working", "stuck"]);
 
+// ── Where an item came from ──────────────────────────────────────────────────
+// Carolyn 2026-09-07: "I need to see a log of the created date and the source of which
+// it was added." Every item already carried the answer, spread across four fields
+// (created_by_email, feedback_submission_id, release_note_id, monday_item_id) — nobody
+// could see it. Nothing new is stored: the label is DERIVED on read, so it is right for
+// every existing item without a backfill and can never drift from the row it describes.
+//
+// Order matters, most specific first. A linked submission is the strongest claim — it
+// names a real person and the product they were using. A Monday id only means "this was
+// imported", which is also true of many rows that have a better story to tell.
+const APP_LABELS_ORIGIN: Record<string, string> = {
+  "structure-studio": "Structure Studio",
+  "framedup": "Framed UP",
+  "csm-studio": "CSM Studio",
+  "buildbridge": "BuildBridge",
+};
+// deno-lint-ignore no-explicit-any
+function originOf(item: any, sub: any): { createdAt: string | null; label: string } {
+  const createdAt = item?.created_at ?? null;
+  const by = String(item?.created_by_email || "");
+  const who = (e: string) => (e.includes("@") ? e.split("@")[0] : e);
+
+  if (sub) {
+    const app = String(sub.source_app || "structure-studio");
+    const name = sub.submitter_name || who(String(sub.submitter_email || "")) || "someone";
+    if (app !== "structure-studio") {
+      return { createdAt, label: `Reported by ${name} in ${APP_LABELS_ORIGIN[app] || app}` };
+    }
+    // A builder's own portal — naming WHICH builder is the useful half.
+    return { createdAt, label: `Reported by ${name} from the ${sub.client_id || "builder"} portal` };
+  }
+  if (item?.release_note_id || by === "roadmap") {
+    return { createdAt, label: "Synced from the What's New roadmap" };
+  }
+  if (by === "expo-runway") {
+    return { createdAt, label: "Filed from the Expo Runway plan" };
+  }
+  if (by) return { createdAt, label: `Added by ${who(by)} on the board` };
+  if (item?.monday_item_id) return { createdAt, label: "Imported from monday.com" };
+  return { createdAt, label: "Added on the board" };
+}
+
 function str(v: unknown, max: number): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
 }
@@ -578,7 +620,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         let submission = null;
         if (item.feedback_submission_id) {
           const { data: sub } = await admin.from("feedback_submissions")
-            .select("id, client_id, submitter_name, submitter_email, kind, title, detail, severity, status, status_changed_at, attachment_path, created_at")
+            .select("id, client_id, source_app, source_ref, submitter_name, submitter_email, kind, title, detail, severity, status, status_changed_at, attachment_path, created_at")
             .eq("id", item.feedback_submission_id).maybeSingle();
           if (sub) {
             let attachmentUrl = null;
@@ -589,7 +631,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             submission = { ...sub, attachmentUrl };
           }
         }
-        return json({ item, updates, activity: actRes.data, submission, canWrite });
+        return json({ item, updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission) });
       }
 
       case "sign_attachment": {

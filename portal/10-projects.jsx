@@ -291,18 +291,36 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     <>
     <PMDrawer onClose={onClose} labelledBy="pm-item-title">
       {/* Header — pinned */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
-        {canWrite ? (
-          <input id="pm-item-title" style={{ ...S.input, fontSize: 15.5, fontWeight: 800, flex: 1 }} value={name}
-            onChange={(e) => setName(e.target.value)}
-            onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
-        ) : (
-          <div id="pm-item-title" style={{ fontSize: 15.5, fontWeight: 800, flex: 1 }}>{item.name}</div>
-        )}
-        {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
-        <button type="button" onClick={onClose} aria-label="Close"
-          style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>✕</button>
+      <div style={{ padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {canWrite ? (
+            <input id="pm-item-title" style={{ ...S.input, fontSize: 15.5, fontWeight: 800, flex: 1 }} value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
+              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
+          ) : (
+            <div id="pm-item-title" style={{ fontSize: 15.5, fontWeight: 800, flex: 1 }}>{item.name}</div>
+          )}
+          {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>✕</button>
+        </div>
+        {/* Where this came from and when (Carolyn 2026-09-07). Derived server-side from
+            fields the row already carried, so it is right for every item ever created —
+            nothing was backfilled and nothing can drift. `—` only while get_item loads. */}
+        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "baseline" }}>
+          {detail && detail.origin ? (
+            <>
+              <span style={{ fontWeight: 700, color: "#475569" }}>
+                Created {detail.origin.createdAt ? pmStamp(detail.origin.createdAt) : "—"}
+              </span>
+              <span style={{ color: "#CBD5E1" }}>·</span>
+              <span>{detail.origin.label}</span>
+            </>
+          ) : (
+            <span style={{ color: "#94A3B8" }}>Loading history…</span>
+          )}
+        </div>
       </div>
 
       {/* Thread — the only scrolling region */}
