@@ -15,6 +15,7 @@
     1. Serve the repo root (.claude/launch.json → ss-jenna, port 5687).
     2. http://localhost:5687/dev/setup-shot            — all three groups, every card
        ...?only=LayoutPricing,Electrical               — just those cards, in their own groups
+       ...?w=1800                                     — render wider, which renders SHORTER
     3. Capture crisply (the in-app browser pane downscales; Chrome headless does not):
        chrome --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2          --window-size=1400,<content height> --virtual-time-budget=10000          --screenshot=out.png "http://localhost:5687/dev/setup-shot?only=LayoutPricing"
        Read the content height off the page first: document.getElementById("shot").scrollHeight.
@@ -160,7 +161,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    setup-screens captures (card on white, nothing else). */
 body{background:#FFF}
 #root{display:none}
-#shot{background:#FFF;padding:14px 18px;width:1400px}
+#shot{background:#FFF;padding:14px 18px;width:1400px}  /* ?w= overrides */
 </style>
 </head><body>
 <div id="root"></div>
@@ -238,7 +239,11 @@ fetch("/portal.app.compiled.js").then(function(r){ return r.text(); }).then(func
   (0, eval)(patched);
   var X = window.__SSX, e = React.createElement;
   var p = { viewingLabel: null, clientId: "structure-studio" };
-  var only = new URLSearchParams(location.search).get("only");
+  var q = new URLSearchParams(location.search);
+  var only = q.get("only");
+  // ?w= widens the render. A card is fluid, so a wider shot is a SHORTER shot — which is what
+  // the checklist wants (see the header note about thumbnails).
+  if (q.get("w")) document.getElementById("shot").style.width = String(Number(q.get("w")) || 1400) + "px";
   var groups = [
     ["Building", "Structural upgrades to the building itself", [["WallHeights", X.WallHeights]]],
     ["Exterior", "Anything that goes on the outside of the building",

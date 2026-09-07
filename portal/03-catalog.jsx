@@ -2874,6 +2874,14 @@ function Electrical({ viewingLabel = null, clientId = null }) {
       switchHeightIn: String(e.switch_height_in == null ? 48 : e.switch_height_in),
       includePanel: e.include_panel !== false,
       panelHeightIn: String(e.panel_height_in == null ? 60 : e.panel_height_in),
+      // The three device pointers (206). These were missing until 2026-09-07: the card read
+      // its whole state from `catalog`, which returns the electrical_settings row RAW — so
+      // these are snake_case here, unlike get_config's camelCase for the designer. With them
+      // absent the pickers always rendered "— none —" no matter what was stored, and `save`
+      // (which posts ...f) had nothing to send, so the setting was unreachable from the UI.
+      outletItemId: e.outlet_item_id || "",
+      switchItemId: e.switch_item_id || "",
+      lightItemId: e.light_item_id || "",
     });
     setItems((data.electricalItems || []).map((r) => ({
       id: r.id, name: r.name, icon: r.icon || "\u26a1", mount: r.mount || "wall",
@@ -2954,8 +2962,11 @@ function Electrical({ viewingLabel = null, clientId = null }) {
             <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
             <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} style={{ ...S.input, width: 180 }}>
               <option value="">&mdash; none &mdash;</option>
-              {items.filter((it) => (it.name || "").trim()).map((it) => (
-                <option key={it.id || it.name} value={it.id || ""}>{it.name}</option>
+              {/* `it.id` guard: an item added in this session has no id yet, and an option
+                  with value="" reads back as "— none —" the moment it is picked. Save first,
+                  then point a standard at it. */}
+              {items.filter((it) => it.id && (it.name || "").trim()).map((it) => (
+                <option key={it.id} value={it.id}>{it.name}</option>
               ))}
             </select>
           </label>
@@ -2977,7 +2988,9 @@ function Electrical({ viewingLabel = null, clientId = null }) {
               style={{ ...S.input, width: 90, opacity: f.includePanel ? 1 : 0.5 }} />
             <span style={{ fontSize: 12, color: "#64748B" }}>in</span>
           </span>
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 5, cursor: "pointer", fontSize: 12, color: "#475569" }}>
+          {/* flex, not inline-flex: the height and its "in" above are an inline-flex span, so
+              an inline checkbox flowed onto the SAME line and sat on top of the unit. */}
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5, cursor: "pointer", fontSize: 12, color: "#475569" }}>
             <input type="checkbox" checked={f.includePanel} onChange={(e) => set("includePanel", e.target.checked)}
               style={{ width: 15, height: 15, cursor: "pointer", accentColor: DOOR_MINT }} />
             Include a panel

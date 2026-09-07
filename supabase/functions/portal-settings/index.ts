@@ -3308,6 +3308,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const n = Number(v);
       return Number.isFinite(n) && n >= min ? n : dflt;
     };
+    // "" and null both mean "the package lays out none of these" — the picker's own empty
+    // option. Anything that is not a uuid is treated the same way, so a malformed id can
+    // never reach the FK as a Postgres error the builder cannot read.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const elecItemRef = (v: unknown): string | null => {
+      const t = String(v ?? "").trim();
+      return UUID_RE.test(t) ? t : null;
+    };
     const rawPrice = String((payload as Record<string, unknown>).packagePrice ?? "").trim();
     const price = rawPrice === "" ? null : Number(rawPrice);
     if (price != null && (!Number.isFinite(price) || price < 0)) {
@@ -3330,8 +3338,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       switch_height_in: numOr((payload as Record<string, unknown>).switchHeightIn, 48, 0),
       panel_height_in: numOr((payload as Record<string, unknown>).panelHeightIn, 60, 0),
       include_panel: (payload as Record<string, unknown>).includePanel !== false,
+      // The three device pointers (206) — WHICH electrical_item the package lays out for each
+      // role. They were missing here until 2026-09-07, which made the pickers inert: the card
+      // could not read them back and this action never wrote them, so the only pointers in
+      // existence were the ones the migration set by hand. Ownership is checked below rather
+      // than left to the FK: the constraint proves the item EXISTS, not that it is this
+      // tenant's, and these ids arrive from the browser.
+      outlet_item_id: elecItemRef((payload as Record<string, unknown>).outletItemId),
+      switch_item_id: elecItemRef((payload as Record<string, unknown>).switchItemId),
+      light_item_id: elecItemRef((payload as Record<string, unknown>).lightItemId),
       updated_at: new Date().toISOString(),
     };
+    // Every non-null pointer must name one of THIS tenant's items. Refused loudly rather than
+    // nulled quietly: silently dropping a pointer looks like a save that worked and leaves the
+    // package laying out nothing.
+    const refs = [row.outlet_item_id, row.switch_item_id, row.light_item_id].filter((v): v is string => !!v);
+    if (refs.length) {
+      const own = await admin.from("electrical_items").select("id").eq("client_id", clientId).in("id", refs);
+      if (own.error) return dbFail(req, clientId, "save your electrical settings", own.error);
+      const ok = new Set((own.data ?? []).map((r: { id: string }) => r.id));
+      if (refs.some((id) => !ok.has(id))) {
+        return json({ error: "One of your standards points at an electrical item that isn't on your list. Save the item first, then pick it." }, 400);
+      }
+    }
     const up = await admin.from("electrical_settings").upsert(row, { onConflict: "client_id" });
     if (up.error) return dbFail(req, clientId, "save your electrical settings", up.error);
     return json({ ok: true });
