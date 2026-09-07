@@ -1783,7 +1783,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
         {all.length > 0 && (
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={shown.length} total={all.length} noun="order">
             <DateRange label="Ordered" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
-            <div style={FCTRL}><span style={S.lbl}>Amount ($)</span>
+            <div style={FCTRL}><span style={FLBL}>Amount ($)</span>
               <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                 <input type="number" min="0" step="any" value={fMin} onChange={(e) => setFMin(e.target.value)} placeholder="Min" style={{ ...S.input, padding: "6px 8px", width: 90 }} />
                 <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>

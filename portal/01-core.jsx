@@ -1549,9 +1549,20 @@ function CardHead({ title, count, desc, right, children }) {
 // LISTS must be derived from ALL loaded rows (never the filtered subset) so a filter can never
 // hide its own options; status-chip counts likewise stay full-list so they don't shuffle.
 const FCTRL = { display: "flex", flexDirection: "column", gap: 3 };
+// The filter-bar heading. S.lbl carries `marginBottom: 4` for the stacked forms it was
+// written for, but FCTRL is a flex column that already spaces its children with `gap: 3` —
+// so inside a filter bar the two stack and every heading floated 7px above its own box.
+// Carolyn, 2026-09-07, looking at the Pipeline bar: "line up the boxes ... by moving the
+// headings of the filter boxes up a tad bit." Dropping the redundant margin is that tad:
+// the headings sit against their controls, and every control rises 4px.
+const FLBL = { ...S.lbl, marginBottom: 0 };
+// A heading-shaped hole, for a control that has no heading but must line up with ones that
+// do (the Pipeline search box). Deliberately built from FLBL rather than a measured pixel
+// offset, so it stays exactly one heading tall if the type ever changes.
+const FLBL_SPACER = { ...FLBL, visibility: "hidden" };
 function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
   return (
-    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+    <div style={FCTRL}><span style={FLBL}>{label}</span>
       <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...S.input, padding: "6px 8px", minWidth: 120 }}>
         <option value="all">{allLabel}</option>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1561,7 +1572,7 @@ function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
 }
 function DateRange({ label, from, to, onFrom, onTo }) {
   return (
-    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+    <div style={FCTRL}><span style={FLBL}>{label}</span>
       <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
         <input type="date" value={from} onChange={(e) => onFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
         <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>

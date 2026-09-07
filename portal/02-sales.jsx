@@ -467,15 +467,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       />
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />
-          </div>
+          {/* Filters LEFT, search RIGHT (Carolyn, 2026-09-07). The search box used to lead and
+              sat 20px above the facet controls, because those carry a heading and it does not —
+              so the row read as two rows. It now trails the facets and wears a heading-shaped
+              spacer, which puts every box on one line by construction rather than by a pixel
+              offset that would drift the next time the label type changes. */}
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="design">
             {styleOpts.length > 1 && <FacetSelect label="Building style" value={fStyle} onChange={setFStyle} options={styleOpts.map((s) => ({ value: s, label: s }))} allLabel="All styles" />}
             {sizeOpts.length > 1 && <FacetSelect label="Size" value={fSize} onChange={setFSize} options={sizeOpts.map((s) => ({ value: s, label: s }))} allLabel="All sizes" />}
             <DateRange label="Created" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
             <FacetSelect label="Versions" value={fVersions} onChange={setFVersions} options={[{ value: "multi", label: "2+ versions" }]} allLabel="All" />
           </FilterBar>
+          <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
+            <span style={FLBL_SPACER} aria-hidden="true">Search</span>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />
+          </div>
         </div>
       )}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
@@ -1055,14 +1061,18 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       </CardHead>
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
-          </div>
+          {/* Same shape as Pipeline's bar above, and changed with it: Contacts sits one nav
+              item away, so leaving it search-first would have made two neighbouring tabs
+              disagree about where their search box lives. */}
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="contact">
             <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
             <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
               options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
           </FilterBar>
+          <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
+            <span style={FLBL_SPACER} aria-hidden="true">Search</span>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
+          </div>
         </div>
       )}
       {/* `browsing` is passed via `extra` because it is not a designs.status — it is the
