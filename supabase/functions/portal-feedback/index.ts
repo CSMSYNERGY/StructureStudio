@@ -286,7 +286,11 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
         // deno-lint-ignore no-explicit-any
         const opt = (c.settings?.options || []).find((o: any) => o.label === label);
         if (opt) values[c.id] = [opt.id];
-      } else if (c.type === "date" && c.name === "Date") {
+      } else if (c.type === "date" && (c.name === "Created" || c.name === "Date")) {
+        // ⚠️ The column is called "Created" on both boards and always has been — this
+        // read "Date" until 2026-09-07, so the branch NEVER fired and every mirrored
+        // submission arrived with an empty date cell (half the bug board, when found).
+        // "Date" stays accepted so a board that renames the column back still works.
         values[c.id] = new Date().toISOString().slice(0, 10);
       } else if (c.type === "dropdown" && c.name === "Priority" && row.severity) {
         // deno-lint-ignore no-explicit-any

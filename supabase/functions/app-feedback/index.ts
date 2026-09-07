@@ -211,7 +211,9 @@ async function mirrorToProjects(admin: any, row: any, appLabel: string): Promise
         // deno-lint-ignore no-explicit-any
         const opt = (c.settings?.options || []).find((o: any) => o.label === appLabel);
         if (opt) values[c.id] = [opt.id];
-      } else if (c.type === "date" && c.name === "Date") {
+      } else if (c.type === "date" && (c.name === "Created" || c.name === "Date")) {
+        // The boards' column is "Created"; this said "Date" until 2026-09-07 and so never
+        // fired. Kept tolerant of both — see the same note in portal-feedback.
         values[c.id] = new Date().toISOString().slice(0, 10);
       } else if (c.type === "dropdown" && c.name === "Priority" && row.severity) {
         // deno-lint-ignore no-explicit-any

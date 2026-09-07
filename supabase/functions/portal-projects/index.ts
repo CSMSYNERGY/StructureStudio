@@ -226,6 +226,48 @@ function sanitizeValues(columns: any[], raw: any, personIds: Set<string>): Recor
   return out;
 }
 
+// The three cells a NEW item should never arrive empty. Carolyn 2026-09-07, having added
+// one by hand: "it did not automatically select the app. This needs to happen."
+//
+// Every one of these was already being set by `mirrorToProjects` for a submission coming in
+// from a builder or another product — and by nothing at all for an item a person adds.
+// So a hand-added card landed with no App (invisible to an App filter), no Status (falling
+// into the __none bucket whenever the board is grouped by status) and no Created date.
+//
+// Columns are matched by TYPE + NAME and options by LABEL, never by uuid — the same rule
+// mirrorToProjects follows (portal-feedback/index.ts:279), because seed ids differ per
+// environment and option ids stay editable in the UI. A board without one of these columns
+// (roadmap has no App) simply gets fewer defaults; a missing option is left blank rather
+// than guessed, since a wrong App is worse than a missing one when you triage by it.
+//
+// ⚠️ These fill GAPS ONLY. Anything the caller sent survives untouched — that is what keeps
+// a FramedUp report labelled Framed UP instead of being overwritten to Structure Studio.
+const HOME_APP_LABEL = "Structure Studio";
+// deno-lint-ignore no-explicit-any
+function defaultValues(columns: any[], already: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const has = (id: string) => {
+    const v = already[id];
+    return v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && v.length === 0);
+  };
+  for (const c of columns || []) {
+    if (has(c.id)) continue;
+    if (c.type === "status") {
+      // deno-lint-ignore no-explicit-any
+      const labels = (c.settings?.labels || []) as any[];
+      const intake = labels.find((l) => l.intake === true) || labels[0];
+      if (intake) out[c.id] = intake.id;
+    } else if (c.type === "dropdown" && c.name === "App") {
+      // deno-lint-ignore no-explicit-any
+      const opt = (c.settings?.options || []).find((o: any) => o.label === HOME_APP_LABEL);
+      if (opt) out[c.id] = [opt.id];
+    } else if (c.type === "date" && c.name === "Created") {
+      out[c.id] = new Date().toISOString().slice(0, 10);
+    }
+  }
+  return out;
+}
+
 // Rebuild a saved view's snapshot. Shared by the whole operator team, so it is
 // whitelist-rebuilt exactly like column settings and item values: unknown keys dropped,
 // every string capped, and the column ids it names checked against this board. A view
@@ -562,7 +604,16 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .eq("board_id", b.id).is("archived_at", null);
           counts[b.id] = count || 0;
         }
-        return json({ boards, counts, canWrite });
+        // Columns and the roster ride along so the quick-add form can offer each board's
+        // real App / Priority / Status / Due / Assignee without a second round trip when
+        // you change the board dropdown. Keyed by board id; `people` is one global list
+        // (pm_people has no client_id — see _shared/pmRoster.ts).
+        const colsByBoard: Record<string, unknown[]> = {};
+        for (const b of boards || []) colsByBoard[b.id] = await boardColumns(b.id);
+        const { data: people, error: pErr } = await admin.from("pm_people")
+          .select("id, name, email, user_id, active").eq("active", true).order("position");
+        if (pErr) throw pErr;
+        return json({ boards, counts, canWrite, columns: colsByBoard, people });
       }
 
       case "get_board": {
@@ -881,7 +932,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           groupId = g.id;
         }
         const [columns, opIds] = await Promise.all([boardColumns(boardId), personIdSet()]);
-        const values = sanitizeValues(columns, payload.values, opIds);
+        // Whatever the form sent, then App / Status / Created filled in where it didn't.
+        // The order is the whole point: defaults never overwrite a chosen value.
+        const chosen = sanitizeValues(columns, payload.values, opIds);
+        const values = { ...chosen, ...defaultValues(columns, chosen) };
         const { data: maxRow } = await admin.from("pm_items").select("position")
           .eq("group_id", groupId).order("position", { ascending: false }).limit(1).maybeSingle();
         const { data: item, error } = await admin.from("pm_items").insert({

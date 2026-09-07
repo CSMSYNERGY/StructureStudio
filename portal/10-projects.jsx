@@ -1,9 +1,15 @@
 // ─── Projects tab — CSM Synergy's internal project management (Monday.com replacement) ───
-// OPERATOR-ONLY: gated exactly like Accounts/Admin (ssClampTab + the isOperator nav group +
-// the content render), and the portal-projects edge function re-checks app_operators on
-// every call regardless. Tenants have no read path to any pm_* table — everything a client
-// may see is COPIED into feedback_submissions/feedback_comments by the server, never read
-// from here.
+// INTERNAL-ONLY — and that is NOT the same as operator-only, which is what this comment
+// said until 2026-09-07. Migration 183 split Projects off from Accounts/Admin: the gate is
+// `canProjects` (the `can_open_projects` RPC → _shared/projectsAccess.ts), which admits a
+// platform operator OR a CSM Synergy team member on the internal tenant holding the
+// `projects` area. No builder can ever reach it — `client_settings.internal_account` is
+// checked BEFORE the area, because every builder's owner resolves projects:'edit' by
+// construction. The edge function re-checks all of that on every call, and keeps the roster
+// and `setup_*` actions hard operator-only. Tenants have no read path to any pm_* table —
+// everything a client may see is COPIED into feedback_submissions/feedback_comments by the
+// server, never read from here.
+// ⚠️ One thing genuinely IS still isOperator: the floating PMQuickAdd button in 12-shell.
 //
 // Boards, groups and columns are user-defined (Carolyn's "Monday but better"): the table
 // itself is the generic engine in 09-table-engine.jsx; this file owns data loading, the
@@ -1604,6 +1610,92 @@ function ProjectsTab({ sub, onSub }) {
 }
 
 
+// The five cells worth filling in at the moment you file something. Found on the chosen
+// board BY NAME + TYPE, so a board that doesn't carry one (roadmap has no App) simply shows
+// fewer fields and nothing is hard-coded. Everything else on the board — Client, Created —
+// is either derived or set server-side, and stays out of the form.
+const qaCol = (cols, name, type) => (cols || []).find((c) => c.name === name && c.type === type) || null;
+const qaStatusCol = (cols) => (cols || []).find((c) => c.type === "status") || null;
+
+// What a fresh form starts as. Carolyn 2026-09-07: "it did not automatically select the
+// app. This needs to happen." Mirrors the server's own defaults (portal-projects
+// `defaultValues`) so the form shows you exactly what you would get by saying nothing —
+// matched by LABEL, never by option id, because those stay editable in Board settings.
+function qaDefaults(cols) {
+  const out = {};
+  const app = qaCol(cols, "App", "dropdown");
+  if (app) {
+    const o = (app.settings?.options || []).find((x) => x.label === "Structure Studio");
+    if (o) out[app.id] = [o.id];
+  }
+  const st = qaStatusCol(cols);
+  if (st) {
+    const labels = st.settings?.labels || [];
+    const l = labels.find((x) => x.intake === true) || labels[0];
+    if (l) out[st.id] = l.id;
+  }
+  return out;   // Priority, Due and Assignee deliberately start empty.
+}
+
+// The quick-add form's middle band. Each control renders only if the chosen board actually
+// has that column, and writes the shape `sanitizeValues` expects: dropdown → [optionId],
+// status → labelId, date → "YYYY-MM-DD", people → [pm_people.id].
+function PMQuickAddFields({ cols, people, vals, setVal }) {
+  const app = qaCol(cols, "App", "dropdown");
+  const pri = qaCol(cols, "Priority", "dropdown");
+  const st = qaStatusCol(cols);
+  const due = qaCol(cols, "Due", "date");
+  const who = qaCol(cols, "Assignee", "people");
+  if (!app && !pri && !st && !due && !who) return null;
+
+  const sel = { ...S.input, marginBottom: 0, padding: "5px 7px", fontSize: 12.5 };
+  const cell = (label, control) => (
+    <div>
+      <span style={{ ...S.lbl, fontSize: 10.5 }}>{label}</span>
+      {control}
+    </div>
+  );
+  // A dropdown's stored value is an ARRAY even when the column is single-select.
+  const one = (v) => (Array.isArray(v) ? v[0] : v) || "";
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+      {app && cell("App", (
+        <select style={sel} value={one(vals[app.id])} onChange={(e) => setVal(app.id, e.target.value ? [e.target.value] : null)}>
+          {(app.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      ))}
+      {pri && cell("Priority", (
+        <select style={sel} value={one(vals[pri.id])} onChange={(e) => setVal(pri.id, e.target.value ? [e.target.value] : null)}>
+          <option value="">—</option>
+          {(pri.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      ))}
+      {st && cell("Status", (
+        <select style={sel} value={vals[st.id] || ""} onChange={(e) => setVal(st.id, e.target.value || null)}>
+          {(st.settings?.labels || []).map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        </select>
+      ))}
+      {due && cell("Due", (
+        <input type="date" style={sel} value={vals[due.id] || ""}
+          onChange={(e) => setVal(due.id, e.target.value || null)} />
+      ))}
+      {who && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          {cell("Assignee", (
+            // One person from the form; the cell on the board takes several. Starts blank
+            // by Carolyn's call — nothing lands on someone who isn't expecting it.
+            <select style={sel} value={one(vals[who.id])} onChange={(e) => setVal(who.id, e.target.value ? [e.target.value] : [])}>
+              <option value="">Unassigned</option>
+              {(people || []).map((p) => <option key={p.id} value={p.id}>{pmPersonName(p)}</option>)}
+            </select>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Quick-add: file a board item from ANYWHERE in the portal ─────────────────
 // Carolyn 2026-08-29: "I need a way to add items to the boards from inside SS."
 // The board's own ＋ Add item only exists on the Projects tab; the moment you actually
@@ -1616,6 +1708,9 @@ function ProjectsTab({ sub, onSub }) {
 function PMQuickAdd({ viewingClientId }) {
   const [open, setOpen] = useState(false);
   const [boards, setBoards] = useState(null);
+  const [cols, setCols] = useState({});     // boardId -> columns[], from list_boards
+  const [people, setPeople] = useState([]); // the pm_people roster, active only
+  const [vals, setVals] = useState({});     // colId -> value, in sanitizeValues' shapes
   const [boardId, setBoardId] = useState("");
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
@@ -1642,13 +1737,26 @@ function PMQuickAdd({ viewingClientId }) {
     setNote("Filed from " + where + (viewingClientId ? " while viewing " + viewingClientId : "") + " — ");
     if (!boards) {
       pmCall({ action: "list_boards" }).then((d) => {
-        setBoards(d.boards || []);
+        const list = d.boards || [];
+        setBoards(list);
+        setCols(d.columns || {});
+        setPeople(d.people || []);
         // Bugs is where a spotted problem goes 9 times in 10 — preselect it.
-        const bugs = (d.boards || []).find((b) => b.slug === "bugs");
-        setBoardId((cur) => cur || (bugs ? bugs.id : ((d.boards || [])[0] || {}).id || ""));
+        const bugs = list.find((b) => b.slug === "bugs");
+        const pick = boardId || (bugs ? bugs.id : (list[0] || {}).id || "");
+        setBoardId(pick);
+        setVals(qaDefaults((d.columns || {})[pick]));
       }).catch((e) => setErr(e.message));
+    } else {
+      // Boards are cached from the first open; the FORM still starts clean each time.
+      // (Within one visit "Add another" keeps your choices — filing three FramedUp bugs
+      // in a row shouldn't reset the App three times.)
+      setVals(qaDefaults(cols[boardId]));
     }
   };
+
+  const pickBoard = (id) => { setBoardId(id); setVals(qaDefaults(cols[id])); };
+  const setVal = (colId, v) => setVals((cur) => ({ ...cur, [colId]: v }));
 
   const file = async () => {
     const name = title.trim();
@@ -1660,6 +1768,10 @@ function PMQuickAdd({ viewingClientId }) {
       // UNLESS files are staged: attachments hang off an update, so one is created
       // anyway, and the where-you-were prefill is worth keeping alongside a screenshot.
       const body = { action: "create_item", boardId, name };
+      // App / Priority / Status / Due / Assignee, keyed by column id. The server
+      // re-validates every one against the board's real columns and fills in anything
+      // left blank that shouldn't be — so sending nothing here is still a valid item.
+      if (Object.keys(vals).length) body.values = vals;
       const n = note.trim();
       if ((n && !/—\s*$/.test(n)) || files.length) body.note = n || "Screenshot attached.";
       const d = await pmCall(body);
@@ -1717,7 +1829,7 @@ function PMQuickAdd({ viewingClientId }) {
         <div>
           {err && <div style={{ ...S.err, marginBottom: 8 }}>{err}</div>}
           <span style={S.lbl}>Board</span>
-          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => setBoardId(e.target.value)}>
+          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => pickBoard(e.target.value)}>
             {boards === null && <option value="">Loading boards…</option>}
             {(boards || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
@@ -1726,6 +1838,7 @@ function PMQuickAdd({ viewingClientId }) {
             placeholder="Short title — like a board item name"
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") file(); if (e.key === "Escape") setOpen(false); }} />
+          <PMQuickAddFields cols={cols[boardId]} people={people} vals={vals} setVal={setVal} />
           <span style={S.lbl}>Details (optional — becomes the first note)</span>
           <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 8 }}
             value={note} onChange={(e) => setNote(e.target.value)} />
