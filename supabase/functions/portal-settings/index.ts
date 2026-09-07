@@ -868,6 +868,37 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return kept.map((d) => d.short_code);
   };
 
+  /**
+   * Refuse a WRITE against a design this caller may not see. Returns a Response to return, or
+   * null to carry on.
+   *
+   * ⚠️ 193 scoped the READS and left the writes, which is a real gap and not a theoretical
+   * one: `designs:edit` and `orders:edit` are both Sales Rep presets, and every action below
+   * takes a short_code straight from the browser. A rep on contacts:'own' could not SEE a
+   * colleague's deal in any list, and could still delete-adjacent it — resend the customer's
+   * quote email, raise their invoice, text them a signing link, or attach their design to an
+   * inventory unit — by posting a code they guessed or kept from before they were narrowed.
+   *
+   * Not folded into the GATES table: that answers "may you do this kind of thing at all",
+   * which is still the floor here. This answers "to THIS row", which a per-action table
+   * cannot express.
+   *
+   * 404, not 403, matching crm_record's choice — a distinct refusal confirms the design
+   * exists, which is the leak in a different shape.
+   *
+   * A failed check REFUSES rather than allowing. It is the inverse of the read helpers'
+   * posture on purpose: a transient error that hides a row is an annoyance, and one that
+   * lets a write through is the thing this exists to stop.
+   */
+  const refuseUnlessDesignVisible = async (code: string): Promise<Response | null> => {
+    if (!ownContacts) return null;
+    if (!code) return null;                 // the action's own validation reports a blank
+    const ok = await visibleShortCodes([code]);
+    if (!ok) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    if (!ok.includes(code)) return json({ error: "That design is not one of yours." }, 404);
+    return null;
+  };
+
   // ── Record that a building has been sold ────────────────────────────────────────
   // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
   // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in
@@ -4482,6 +4513,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawUnit = payload.unitId;
     const unitId = rawUnit == null || rawUnit === "" ? null : String(rawUnit).trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     if (unitId) {
       const { data: unit } = await admin.from("inventory_units")
         .select("id, serial, sale_state, sold_design_short_code, sold_first_name")
@@ -5112,6 +5148,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "text_sign_link") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin.from("designs")
       .select("short_code, contact, status, ss_quote_number, ss_invoice_sent_at")
@@ -6541,6 +6582,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "resend_quote_email") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin
       .from("designs")
@@ -7142,6 +7188,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const pushToInvoice = action === "push_to_invoice";
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     // An operator is emailing a real invoice to SOMEONE ELSE'S customer. Two extra
     // conditions, neither of which applies to a tenant sending their own:
