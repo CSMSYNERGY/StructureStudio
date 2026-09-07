@@ -8324,7 +8324,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (claimIns.error) {
       // 23505 = the row exists → inspect it instead of converting again.
       const { data: prior } = await admin.from("invoice_sends")
-        .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id")
+        .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id, ghl_sender_user_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
       if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
       const st = String(prior.status || "");
@@ -8335,13 +8335,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // The invoice EXISTS in GHL but was never emailed → re-send it, do not convert.
         resendInvoiceId = prior.invoice_id ? String(prior.invoice_id) : null;
         resendInvoiceNumber = prior.invoice_number ? String(prior.invoice_number) : null;
-        // ⛔ DELIBERATELY NOT `prior.sender_user_id` any more (2026-09-07). That column is the
-        // PORTAL user who raised the invoice — the commission earner — and this variable is a
-        // GoHighLevel API parameter naming which GHL user the email appears to come from. They
-        // were the same field for as long as the GHL branch wrote a GHL id into it; the moment
-        // it holds a real auth uid, seeding this from it posts a Supabase uuid to GHL's users
-        // API and the resend fails. The GHL user is resolved fresh below instead.
-        resendSenderUserId = null;
+        // `ghl_sender_user_id`, NOT `sender_user_id` (migration 215). Those are two different
+        // ids and they were one column until today: this one is GoHighLevel's own user id, an
+        // API argument naming which GHL user the email appears to come from; the other is the
+        // portal user who pressed send, which is what commissions pay.
+        //
+        // Reading the right one is what keeps a RESEND going out as the same GHL user the
+        // invoice was raised as. Falling back to `users[0]` would re-send junior-barns'
+        // invoices as whoever happens to be first in his sub-account — and he is the only
+        // builder whose invoices are real money, and sells exclusively through GHL.
+        resendSenderUserId = prior.ghl_sender_user_id ? String(prior.ghl_sender_user_id) : null;
         if (!resendInvoiceId) return json({ error: "An invoice was created in your CRM for this design but its id wasn't recorded — send it from your CRM." }, 409);
       } else if (st === "claimed") {
         const age = Date.now() - new Date(String(prior.updated_at)).getTime();
@@ -8431,9 +8434,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       // Record it IMMEDIATELY: from here on the invoice exists in GHL, so even if the
       // email fails (or this function dies) the retry re-sends instead of converting.
-      // `userId` here is the OUTER one again — the portal user who pressed send, from r.ctx.
-      // That is who invoiced this, and who commissions pays.
-      await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId ?? null });
+      // BOTH ids, each in its own column (migration 215):
+      //   sender_user_id      — `userId` is the OUTER one again, the portal user who pressed
+      //                         send. The actor. What commissions pay.
+      //   ghl_sender_user_id  — the GHL user the invoice was raised as, so a later resend
+      //                         goes out as the same person rather than whoever GHL lists
+      //                         first.
+      await setClaim({
+        status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null,
+        sender_user_id: userId ?? null,
+        ghl_sender_user_id: ghlSenderId || null,
+      });
 
       // ── 5. Email it to the customer — own-domain branch first, GHL's email otherwise.
       //    tryOwnDomainEmail returning false (whatever the reason) lands on the stock GHL
