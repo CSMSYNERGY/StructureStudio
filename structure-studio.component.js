@@ -10385,9 +10385,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // a brand-new building never starts from the design that happened to be open. Without
     // this, clicking New while another unit's MASTER was loaded left the submit bar saying
     // "Update Inventory Building" — saving would have rewritten that other unit.
-    // A fresh open is never an amendment unless it says so — stale state here would put an
-    // amber "you are changing CO-7" bar over an unrelated design.
-    setAmendment(null);
+    // AMENDMENT MODE, armed here and nowhere else — unconditionally, at the top of the
+    // effect, before any of the branches below. It rides the ORDINARY open: same load, same
+    // design, same everything, so there is no branch it belongs inside. (It briefly lived in
+    // the `asNew` arm, which is the Inventory "Send estimate" path — a plain open from the
+    // order screen never takes it, so the bar never appeared.)
+    //
+    // A fresh open with no amendment field CLEARS it, which is the other half: stale state
+    // here would put an amber "you are changing CO-7" bar over an unrelated design.
+    setAmendment(openDesign.amendment || null);
     if (openDesign.blank) {
       if (items.length > 0 || sel.style || sel.size) {
         if (!window.confirm("Start a new building? This clears what's currently in the Designer tab.")) return;
@@ -10465,8 +10471,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           : null);
         setNewBuildMode(false);
         inventoryUnitRef.current = openDesign.inventoryUnitId || null;
-        // Amendment mode rides the ordinary open: same load, same design, same everything.
-        setAmendment(openDesign.amendment || null);
       } else if (openDesign.newBuild) {
         // "Quote a new build for this customer" from a sold building's estimate list. Exactly
         // what the in-designer "Design a new build instead" button does — the plan unlocks and
