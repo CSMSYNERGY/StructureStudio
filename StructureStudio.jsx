@@ -3420,8 +3420,21 @@ function d3DormerWindowFit(fx, dormW, face, offset) {
   const maxW = W - 2 * (D3_CASE_F + D3.WALL_T);
   const maxH = F - 2 * (D3_CASE_F + 0.08);
   const wIn = Number(fx && fx.widthIn) || 0, hIn = Number(fx && fx.heightIn) || 0;
-  const w = Math.min(wIn > 0 ? wIn / 12 : 2, maxW);
-  const h = Math.min(hIn > 0 ? hIn / 12 : D3.WINDOW_H, maxH);
+  // ⚠️ SCALE, DO NOT CROP. The first version clamped width and height INDEPENDENTLY
+  // (`min(wIn/12, maxW)` and `min(hIn/12, maxH)`), which is wrong whenever one axis binds and
+  // the other does not — and on a dormer the height always binds first, because
+  // d3TransomDormerGeom clamps the face at the eave. A 3'x3' double-hung on a 0.9 ft face came
+  // out 3 ft wide and 0.9 ft tall: a letterbox slot that reads as a vent, not a window.
+  // Ahsan, 2026-09-07, looking at exactly that: "the DORMER WINDOW does not have the shape of
+  // window."
+  //
+  // Fit the fixture's OWN proportions inside the face instead. A window that cannot have its
+  // real size should still be recognisably that window — the shape is what a customer reads,
+  // and a 3:1 rectangle is not a double-hung at any size.
+  const wantW = wIn > 0 ? wIn / 12 : 2;
+  const wantH = hIn > 0 ? hIn / 12 : D3.WINDOW_H;
+  const k = Math.min(1, maxW / wantW, maxH / wantH);
+  const w = wantW * k, h = wantH * k;
   // The same refusal the stand-in made, and it was honest then and is honest now: a six-inch
   // lift has no window in it either.
   if (!(w > 0.7 && h > 0.55)) return null;
