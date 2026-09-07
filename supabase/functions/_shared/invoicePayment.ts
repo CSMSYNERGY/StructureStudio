@@ -33,6 +33,7 @@ import {
   throttledRetryAfter,
 } from "./cardpointe.ts";
 import { amountOwed } from "./estimateLines.ts";
+import { agreedBaseline } from "./changeOrderDiff.ts";
 
 /** $1 floor — below it the card fee exceeds the payment. $50,000 ceiling: above that a
  *  figure is more likely a typo than a shed, and "call your builder" is the right answer.
@@ -172,7 +173,7 @@ export async function readOrderMoney(
 
   if (shortCode) {
     const [{ data: design }, { data: cos }, { data: inv }] = await Promise.all([
-      admin.from("designs").select("estimate_lines")
+      admin.from("designs").select("estimate_lines, accepted_snapshot")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       admin.from("change_orders")
         .select("co_no, description, total_before_cents, total_after_cents")
@@ -181,8 +182,16 @@ export async function readOrderMoney(
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
     ]);
     depositCents = inv?.deposit_cents == null ? null : Number(inv.deposit_cents);
+    // THE AGREED LINES, NOT THE LIVE ONES (2026-09-07). `estimate_lines` is rewritten the
+    // moment a rep stages a change — before anyone has approved it — so pricing from it let
+    // the amount due move under a customer who had signed for a different number. The agreed
+    // snapshot (migration 153) is what they committed to, and it is re-stamped by the trigger
+    // on every acknowledged change, so in the settled state the two are the SAME object:
+    // verified on live, all 6 designs with no open change order matched exactly, and the only
+    // two that differed each had one pending. This is a no-op except while a change is open,
+    // which is precisely when it matters.
     const owedDollars = amountOwed(
-      design?.estimate_lines,
+      agreedBaseline(design).lines,
       cos ?? [],
       order.total_cents == null ? null : Number(order.total_cents),
     );

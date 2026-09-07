@@ -206,17 +206,63 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
   }
 
   // ── pay_options ───────────────────────────────────────────────────────────────────
+  /**
+   * The two refusals `customer-pay` has always made and this function never did
+   * (customer-pay/index.ts:178-195). A rep's terminal must not be the way round a refusal the
+   * customer's own screen enforces — that is not a difference of altitude, it is the same
+   * bill.
+   *
+   *   change_pending  a change nobody has approved is not owed. `draft` counts as much as
+   *                   `pending_ack`: a half-edited order is not a bill either.
+   *   invoice_stale   the invoice was issued BEFORE an approved change, so the document names
+   *                   a number that is no longer the amount due.
+   *
+   * Soft on its own failure, deliberately. A missing change_orders table or a read error must
+   * not stop a builder taking money they are owed — the same tolerance `send_invoice`'s
+   * pending check carries. Returns the sentence to refuse with, or null to proceed.
+   */
+  const changeRefusal = async (shortCode: string | null): Promise<string | null> => {
+    if (!shortCode) return null;
+    try {
+      const [coRes, invRes] = await Promise.all([
+        admin.from("change_orders").select("status, acknowledged_at")
+          .eq("client_id", clientId).eq("short_code", shortCode),
+        admin.from("invoice_sends").select("updated_at")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      ]);
+      if (coRes.error) return null;
+      const cos = coRes.data ?? [];
+      if (cos.some((c) => c.status === "pending_ack" || c.status === "draft")) {
+        return "There's a change on this order the customer hasn't approved yet. Settle that first — the amount due may move.";
+      }
+      const invoiceAt = Date.parse(String(invRes.data?.updated_at || "")) || 0;
+      const stale = invoiceAt > 0 && cos.some((c) =>
+        c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt
+      );
+      if (stale) {
+        return "This invoice was issued before the latest approved change. Regenerate and resend it, then take the payment.";
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  };
+
   if (action === "pay_options") {
     const orderId = String(payload?.orderId ?? "").trim();
     if (!orderId) return json({ error: "orderId is required." }, 400);
     const money = await readOrderMoney(admin, clientId, orderId);
     if (!money) return json({ error: "Order not found." }, 404);
     const decision = paymentAmountDecision(money);
+    // An unapproved change outranks the amount arithmetic: the figure is not wrong, it is
+    // not yet owed. Surfaced through the same three fields the modal already renders, so the
+    // rep reads a sentence rather than finding a disabled button.
+    const blocked = await changeRefusal(money.shortCode);
     return json({
       ok: true,
-      canCharge: decision.ok,
-      reason: decision.ok ? null : decision.reason,
-      message: decision.ok ? null : amountRefusalText(decision.reason),
+      canCharge: decision.ok && !blocked,
+      reason: blocked ? "change_pending" : (decision.ok ? null : decision.reason),
+      message: blocked ?? (decision.ok ? null : amountRefusalText(decision.reason)),
       askCents: decision.ok ? decision.askCents : 0,
       askKind: decision.ok ? decision.kind : null,
       balanceCents: decision.balanceCents,
@@ -265,6 +311,11 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
 
     const money = await readOrderMoney(admin, clientId, orderId);
     if (!money) return json({ error: "Order not found." }, 404);
+    // BEFORE the card is touched, and before the amount is confirmed: an unapproved change
+    // means the amount due is still moving, and a charge taken against it is money that has
+    // to be given back.
+    const blocked = await changeRefusal(money.shortCode);
+    if (blocked) return json({ error: blocked, reason: "change_pending" }, 409);
     const decision = paymentAmountDecision(money);
     if (!decision.ok) return json({ error: amountRefusalText(decision.reason), reason: decision.reason }, 409);
 

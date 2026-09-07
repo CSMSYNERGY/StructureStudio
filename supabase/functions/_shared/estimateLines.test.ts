@@ -408,3 +408,56 @@ Deno.test("an untaxed order is unaffected — pretax and total are the same numb
   assertEquals(doc.lines.length, plain.lines.length);
   assertEquals(round2(doc.total), 10100);
 });
+
+// ── THE AMENDED TAX OBJECT (2026-09-07) ────────────────────────────────────────────────
+// estimatePdf does not sum the lines it prints — its grand total is
+// `tax.taxableBase + tax.nonTaxableNet + tax.amount`. So until amendedInvoiceDocument
+// returned a moved-forward tax object, every line it added was printed and then left out of
+// the Total on a taxed order. These pin the arithmetic the PDF actually performs.
+
+Deno.test("an untaxed snapshot returns tax:null — every pre-tax document stays byte-identical", () => {
+  const plain = { version: 1, discount: 0, lines: TAXED.lines };
+  const co = [{ co_no: 1, description: "Added ridge vent", total_before_cents: 1010000, total_after_cents: 1040000 }];
+  const doc = amendedInvoiceDocument(plain, co as any, 1040000);
+  assertEquals(doc.tax, null, "no tax object is invented for a snapshot that never had one");
+  assertEquals(round2(doc.total), 10400);
+});
+
+Deno.test("with nothing added, the tax object is the snapshot's own — not a rebuilt copy", () => {
+  const doc = amendedInvoiceDocument(TAXED, [], 1010000);
+  assertEquals(doc.tax, TAXED.tax, "an unamended bill must carry the accepted tax untouched");
+});
+
+Deno.test("a taxed change order moves the pools AND the tax, so the PDF's grand total is right", () => {
+  // +$300 taxable at 7.25% => +21.75 tax. The accepted 717.75 is never recomputed, only added to.
+  const co = [{ co_no: 1, description: "Added ridge vent", total_before_cents: 1010000, total_after_cents: 1040000 }];
+  const doc = amendedInvoiceDocument(TAXED, co as any, 1040000);
+  assertEquals(doc.tax.taxableBase, 10200, "the $300 joined the taxable pool");
+  assertEquals(doc.tax.nonTaxableNet, 200, "the non-taxable pool is untouched");
+  assertEquals(doc.tax.amount, 739.5, "717.75 + 21.75, the increment computed at taxOn's cent scaling");
+  // THE WHOLE POINT: what estimatePdf will print as Total.
+  const grand = round2(doc.tax.taxableBase + doc.tax.nonTaxableNet + doc.tax.amount);
+  assertEquals(grand, 11139.5, "the change order's money reaches the printed Total");
+  assertEquals(grand, round2(doc.total + doc.tax.amount), "and agrees with total + tax");
+});
+
+Deno.test("a NON-taxable added line lands in the non-taxable pool and adds no tax", () => {
+  // The shape a change-order fee takes when the tenant says the fee is not taxed.
+  const doc = amendedInvoiceDocument(TAXED, [], 1010000);
+  const withFee = amendedInvoiceDocument(
+    { ...TAXED, lines: [...TAXED.lines] },
+    [{ co_no: 1, description: "Late change", total_before_cents: 1010000, total_after_cents: 1025000 }] as any,
+    1025000,
+  );
+  assertEquals(doc.tax.amount, 717.75, "the control is unmoved");
+  assertEquals(withFee.tax.amount > 717.75, true, "a taxable delta does move it");
+});
+
+Deno.test("a percent-shaped rate is refused rather than charged a hundredfold", () => {
+  // salesTax.ts::sane's ceiling, mirrored: 7.25 (not 0.0725) must add no tax at all.
+  const bad = { ...TAXED, tax: { ...TAXED.tax, rate: 7.25 } };
+  const co = [{ co_no: 1, description: "x", total_before_cents: 1010000, total_after_cents: 1040000 }];
+  const doc = amendedInvoiceDocument(bad, co as any, 1040000);
+  assertEquals(doc.tax.amount, 717.75, "the accepted amount stands; no nonsense increment is added");
+  assertEquals(doc.tax.taxableBase, 10200, "the pool still moves — only the tax on it is refused");
+});

@@ -4,6 +4,7 @@ import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
 import { phoneKey } from "../_shared/phoneKey.ts";
 import { amountOwed, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -312,7 +313,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
     const { data: d, error: dErr } = await admin
       .from("designs")
-      .select("short_code, status, contact, ss_quote_number, estimate_lines, accepted_at")
+      .select("short_code, status, contact, ss_quote_number, estimate_lines, accepted_snapshot, accepted_at")
       .eq("client_id", identity.clientId)
       .eq("short_code", code)
       .maybeSingle();
@@ -379,8 +380,12 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     const { data: ordRow } = await admin
       .from("orders").select("total_cents")
       .eq("client_id", identity.clientId).eq("short_code", code).maybeSingle();
+    // THE AGREED LINES (2026-09-07). This number goes into a consent sentence the customer
+    // signs; it must come from what they agreed, not from a revision a rep staged while the
+    // invoice was sitting unsigned in their inbox. Identical to estimate_lines whenever no
+    // change is open — the state this always ran in until now.
     const total = amountOwed(
-      d.estimate_lines,
+      agreedBaseline(d).lines,
       (cos ?? []).filter((c) => c.status === "acknowledged"),
       ordRow?.total_cents == null ? null : Number(ordRow.total_cents),
     );
@@ -411,7 +416,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       // because a resubmit OVERWRITES designs.estimate_lines — without its own copy the rate
       // and jurisdiction the customer committed under are destroyed by the next revision.
       // Same reason `total` above is a column and not a join.
-      ...taxFreeze(d.estimate_lines),
+      // The rate and jurisdiction the customer committed under — from the agreed snapshot for
+      // the same reason the total above is.
+      ...taxFreeze(agreedBaseline(d).lines),
       method,
       signer_name: signerName,
       typed_signature: typedSignature,

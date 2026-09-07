@@ -19,7 +19,7 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 // push_to_invoice's phone precondition must use the SAME comparison sign_invoice will use to
 // decide whether the customer owns the invoice — see that module's duplication ledger.
 import { phoneKey } from "../_shared/phoneKey.ts";
@@ -7131,7 +7131,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // are untouched on the ordinary send_invoice path. That is a deliberate narrowing
           // of the 2026-08-07 rule "no dead PII reads on the invoice path": the read is not
           // dead here, it is the evidence. Nothing below logs any of the three.
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, selections, paint_colors, contact, inventory_unit_id")
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, accepted_snapshot, selections, paint_colors, contact, inventory_unit_id")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
@@ -7151,6 +7151,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             return { orderId: null, orderNo: null };
           }
         };
+
+        // THE AGREED LINES — what this branch bills from (2026-09-07).
+        //
+        // `estimate_lines` is the LIVE design and a rep rewrites it the moment they stage a
+        // change; `accepted_snapshot` (migration 153) is the design as the customer last
+        // agreed it, re-stamped by the trigger on every acknowledged change. Billing from the
+        // live copy meant a staged-but-unapproved revision could reach an invoice, a
+        // regenerated PDF and the sentence the customer signs.
+        //
+        // In the settled state the two are the same object — verified against live, where
+        // every design without an open change order matched exactly — so this changes nothing
+        // on the ordinary path. The push_to_invoice attestation below deliberately keeps
+        // reading `d.estimate_lines`: it is PERFORMING the acceptance, not billing one.
+        const agreedLines = agreedBaseline(d).lines;
 
         // AMENDMENTS (2026-08-27). A manual change order moves the TOTAL without touching
         // estimate_lines, so a document built from the snapshot alone bills the pre-change
@@ -7191,23 +7205,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // On a taxed order the customer therefore read one number in the mail, a bigger one on
         // the attachment, and signed for a third.
         //
-        // Built from the SAME two inputs the PDF uses, so there is one arithmetic and not two.
-        // taxFromSnapshot is the accepted figure, never a re-resolved rate, and clamps at >= 0;
-        // a snapshot with no tax returns null and this is the old number exactly. Null stays
-        // null — "nothing to go on" still renders as a blank rather than a fabricated $0.00.
+        // Built from the SAME call the PDF uses, so there is one arithmetic and not two. The
+        // tax is never a re-resolved rate — amendedTax carries the accepted amount forward and
+        // adds only the increment — and a snapshot with no tax returns null, leaving this the
+        // old number exactly. Null stays null: "nothing to go on" renders as a blank rather
+        // than a fabricated $0.00.
         //
         // ⛔ NOT a change to amountOwed or amendedInvoiceDocument. customer-quotes and
         // customer-accept pass those helpers the tax-INCLUSIVE orders.total_cents and land on
         // the right figure through the reconciler; moving either would move the number the
         // customer signs. This is the caller that had the wrong input, not the helper.
+        //
+        // 2026-09-07: the tax now comes from the SAME amendedInvoiceDocument call rather than
+        // from the snapshot beside it. `taxFromSnapshot` is the tax on the ACCEPTED lines, so
+        // on an amended order the email quoted the accepted tax against an amended subtotal
+        // and under-stated the bill by the tax on the change. One call, one arithmetic — which
+        // is the whole reason this helper exists.
         const emailAmountDue = (
           // deno-lint-ignore no-explicit-any
           acked: any[],
           orderTotalCents: number | null,
         ): number | null => {
-          const owed = amountOwed(d.estimate_lines, acked, orderTotalCents);
+          const doc = amendedInvoiceDocument(agreedLines, acked, orderTotalCents);
+          const owed = amountOwed(agreedLines, acked, orderTotalCents);
           if (owed == null) return null;
-          return Math.round((owed + (taxFromSnapshot(d.estimate_lines) ?? 0)) * 100) / 100;
+          return Math.round((owed + (Number(doc.tax?.amount) || 0)) * 100) / 100;
         };
 
         // `let`, not `const`: the push_to_invoice attestation below promotes the design and
@@ -7519,7 +7541,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // The bill is the ORDER's total, not the quote snapshot's: acknowledged change
         // orders become real lines so the document both foots and explains itself.
         const amend = await loadAmendments();
-        const amended = amendedInvoiceDocument(d.estimate_lines, amend.acked, amend.orderTotalCents);
+        const amended = amendedInvoiceDocument(agreedLines, amend.acked, amend.orderTotalCents);
         // ⚠️ TWO FIGURES, AND THEY ARE NOT INTERCHANGEABLE — read this before touching either.
         //   totalNum   the reconciled PRE-TAX total: what the PDF's line items foot to, which
         //              is what the ledger write below feeds (orderMoneyCols derives the
@@ -7527,7 +7549,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         //              falls back to this when there is no snapshot to derive from).
         //   emailTotal the same total WITH the accepted tax added — the figure the PDF
         //              actually prints, and therefore the only one the email may quote.
-        const totalNum = amountOwed(d.estimate_lines, amend.acked, amend.orderTotalCents);
+        const totalNum = amountOwed(agreedLines, amend.acked, amend.orderTotalCents);
         const emailTotal = emailAmountDue(amend.acked, amend.orderTotalCents);
         if (!invoicePdfUrl) {
           try {
@@ -7555,8 +7577,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               //
               // It rides ON TOP of amendedInvoiceDocument's reconciled lines, which is why
               // loadAmendments now hands that function the PRE-TAX order figure — see there.
-              tax: d.estimate_lines?.tax ?? null,
-              discountRows: d.estimate_lines?.discounts?.rows ?? null,
+              //
+              // 2026-09-07: `amended.tax`, NOT `d.estimate_lines.tax`. estimatePdf's grand
+              // total is the tax object's POOLS, not a sum of the lines it prints — so every
+              // line amendedInvoiceDocument adds was printed here and then silently left out
+              // of the Total. Its `amendedTax` moves the pools over those lines and adds only
+              // the increment, leaving the accepted amount exactly as the customer agreed it.
+              tax: amended.tax,
+              discountRows: agreedLines?.discounts?.rows ?? null,
               quoteTerms: cur0?.quote_terms ?? null,
               planPdfUrl: planUrl,
             });
@@ -7614,7 +7642,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // when the tax on it came from Avalara — a fallback rate cost us nothing to produce.
         // Inert until `tax_invoice` is armed, and it cannot fail the send: the invoice is
         // already recorded and the customer is waiting for it.
-        if ((d.estimate_lines as { tax?: { source?: unknown } } | null)?.tax?.source === "avalara") {
+        if ((agreedLines as { tax?: { source?: unknown } } | null)?.tax?.source === "avalara") {
           const meter = await chargeTaxCalculation(admin, {
             clientId,
             kind: "tax_invoice",
@@ -7693,7 +7721,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .update({
               // pretax + tax = total, written together (migration 148): total_cents alone is no
               // longer a safe pre-tax figure and portal-commissions reads it as one.
-              ...orderMoneyCols(d.estimate_lines, totalNum),
+              ...orderMoneyCols(agreedLines, totalNum),
               total_source: "manual", updated_at: nowIso(),
             })
             .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);

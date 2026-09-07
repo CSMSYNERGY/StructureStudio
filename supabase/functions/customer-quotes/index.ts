@@ -5,6 +5,7 @@ import { checkSession } from "../_shared/customerSession.ts";
 import { phoneKey } from "../_shared/phoneKey.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -159,7 +160,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // state the expression; this path pays one tenant scan instead.
   const { data: rows, error: designsErr } = await admin
     .from("designs")
-    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
+    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, accepted_snapshot, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
     .eq("client_id", identity.clientId)
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
@@ -304,11 +305,17 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // The invoice, once one is out (migration 136). Null until the builder sends it.
           // `amountDue` is what the invoice actually bills — the quote total plus every
           // acknowledged change — so the card, the PDF and the sentence they sign agree.
+          //
+          // From the AGREED snapshot, not the live lines (2026-09-07): a rep staging a change
+          // rewrites estimate_lines before the customer has approved anything, and this is the
+          // number on the screen where they are being asked to approve it. `total` above stays
+          // live on purpose — that is the quote headline, and while a change is pending the
+          // customer is meant to see the old and new figures side by side on the change card.
           invoice: invByCode.has(d.short_code)
             ? {
               ...invByCode.get(d.short_code),
               amountDue: amountOwed(
-                d.estimate_lines,
+                agreedBaseline(d).lines,
                 ackedByCode.get(d.short_code) ?? [],
                 orderTotalByCode.get(d.short_code) ?? null,
               ),

@@ -339,7 +339,7 @@ export function amendedInvoiceDocument(
   snap: any,
   acked: AcknowledgedChangeOrder[] | null | undefined,
   orderTotalCents: number | null | undefined,
-): { lines: any[]; discount: number; total: number } {
+): { lines: any[]; discount: number; total: number; tax: any | null } {
   const baseLines = snap && Array.isArray(snap.lines) ? snap.lines : [];
   const discountRaw = Number(snap?.discount);
   const discount = Number.isFinite(discountRaw) && discountRaw > 0 ? round2(discountRaw) : 0;
@@ -401,7 +401,65 @@ export function amendedInvoiceDocument(
     subtotal = round2(subtotal + adj);
   }
 
-  return { lines: [...baseLines, ...extra], discount, total: Math.max(0, round2(subtotal - discount)) };
+  return {
+    lines: [...baseLines, ...extra],
+    discount,
+    total: Math.max(0, round2(subtotal - discount)),
+    tax: amendedTax(snap?.tax, extra),
+  };
+}
+
+/**
+ * The snapshot's tax object, moved forward over the lines this function just added.
+ *
+ * WHY THIS EXISTS. estimatePdf's totals block does NOT sum the lines it prints — it computes
+ * the grand total from the tax object's POOLS (`taxableBase + nonTaxableNet + amount`, see
+ * estimatePdf.ts' `grand`). So every line added above — a change order, its fee, the
+ * reconciliation row — was printed on the document and then silently left out of the Total,
+ * on a taxed order. Proved on SSI-8005: the PDF said $3,400 while the ledger, the balance card
+ * and `emailAmountDue` all said $4,050, and a regenerate rebuilt the same wrong file. The
+ * amount owed was never wrong; the document was, and it is the document the customer signs.
+ *
+ * THE ACCEPTED AMOUNT IS NEVER RECOMPUTED. `taxFromSnapshot`'s rule holds: `tax.amount` is
+ * what the customer was quoted and signed for, and re-deriving it from the rate could shift
+ * it by a cent. Only the INCREMENT is computed, from the taxable extras alone, and added.
+ *
+ * The cent-scaling below is `salesTax.ts::taxOn` — THE SOURCE OF TRUTH, copied rather than
+ * imported because that module reads Deno.env at load and this one is pure (estimateLines.test.ts
+ * runs with no permissions). If the rounding there changes, change it here in the same commit.
+ * `dollars * rate` rounded at the end is a real half-cent bug, not a style preference — see its
+ * comment.
+ *
+ * Returns null when the snapshot carries no tax, which keeps every pre-tax document byte
+ * identical to what it prints today.
+ */
+function amendedTax(baseTax: any, extra: any[]): any | null {
+  if (!baseTax || baseTax.amount == null) return null;
+  const num = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+
+  let addTaxable = 0;
+  let addNonTaxable = 0;
+  for (const li of extra) {
+    const amt = round2((Number(li?.qty) || 0) * (Number(li?.amount) || 0));
+    if (li?.nonTaxable) addNonTaxable = round2(addNonTaxable + amt);
+    else addTaxable = round2(addTaxable + amt);
+  }
+  if (addTaxable === 0 && addNonTaxable === 0) return baseTax;
+
+  // Bounded exactly as salesTax.ts::sane bounds it: a percent-shaped 7.25 slipping through
+  // would multiply the increment by a hundred, and a missing rate is not a 0% rate.
+  const r = Number(baseTax.rate);
+  const rate = Number.isFinite(r) && r >= 0 && r <= 0.25 ? Math.round(r * 100000) / 100000 : 0;
+  const addTax = addTaxable > 0 && rate > 0
+    ? Math.round(Math.round(addTaxable * 100) * rate) / 100
+    : 0;
+
+  return {
+    ...baseTax,
+    taxableBase: round2(num(baseTax.taxableBase, num(baseTax.taxableSubtotal)) + addTaxable),
+    nonTaxableNet: round2(num(baseTax.nonTaxableNet, num(baseTax.nonTaxableSubtotal)) + addNonTaxable),
+    amount: Math.max(0, round2(num(baseTax.amount) + addTax)),
+  };
 }
 
 /**
