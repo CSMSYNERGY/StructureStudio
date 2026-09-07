@@ -235,7 +235,7 @@ fetch("/portal.app.compiled.js").then(function(r){ return r.text(); }).then(func
   // declaration, so they are all defined before the first statement executes.
   var head = "(function(){if(!window.__ssBootBlocked){";
   var i = src.indexOf(head) + head.length;
-  var patched = src.slice(0, i) + "window.__SSX={OptionsGroup:OptionsGroup,WallHeights:WallHeights,DoorsView:DoorsView,WindowsView:WindowsView,VentsView:VentsView,RampsView:RampsView,LayoutPricing:LayoutPricing,Electrical:Electrical,Insulation:Insulation};" + src.slice(i);
+  var patched = src.slice(0, i) + "window.__SSX={OptionsGroup:OptionsGroup,WallHeights:WallHeights,DoorsView:DoorsView,WindowsView:WindowsView,VentsView:VentsView,RampsView:RampsView,CladdingView:CladdingView,LayoutPricing:LayoutPricing,Electrical:Electrical,Insulation:Insulation};" + src.slice(i);
   (0, eval)(patched);
   var X = window.__SSX, e = React.createElement;
   var p = { viewingLabel: null, clientId: "structure-studio" };
@@ -247,7 +247,7 @@ fetch("/portal.app.compiled.js").then(function(r){ return r.text(); }).then(func
   var groups = [
     ["Building", "Structural upgrades to the building itself", [["WallHeights", X.WallHeights]]],
     ["Exterior", "Anything that goes on the outside of the building",
-      [["DoorsView", X.DoorsView], ["WindowsView", X.WindowsView], ["VentsView", X.VentsView], ["RampsView", X.RampsView]]],
+      [["DoorsView", X.DoorsView], ["WindowsView", X.WindowsView], ["VentsView", X.VentsView], ["RampsView", X.RampsView], ["CladdingView", X.CladdingView]]],
     ["Interior", "Anything that goes on the inside",
       [["LayoutPricing", X.LayoutPricing], ["Electrical", X.Electrical], ["Insulation", X.Insulation]]],
   ];

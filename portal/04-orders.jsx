@@ -2266,10 +2266,38 @@ const ssUsd = (n) => {
   const [int, frac] = Math.abs(v).toFixed(2).split(".");
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
-// The offered cladding set — mirrors the designer's D3_CLADDING_CHOICES (batten is a
-// legacy render-only value; it shows as its label if a row carries it, but isn't offered).
-const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
-const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
+// The built-in cladding names — the FALLBACK, not the authority. Since 207 the offered set and
+// the customer-facing name are per tenant, per style (style_cladding), and order_paperwork
+// carries this design's own list; this is what an account with no rows yet falls back to.
+//
+// ⚠️ `batten` was MISSING from this list, and it was not cosmetic. stage_order_attribute_change
+// validated against the matching server list and `next.cladding` defaults to the design's
+// CURRENT value — so a design saved as Board & Batten made every attribute change on its order
+// fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
+const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "Metal" };
+const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
+// `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
+// null. An empty/absent list means "this tenant has not configured cladding", which reads as
+// all four under our own names — the behaviour before 207.
+const ssCladdingOpts = (offered, current) => {
+  const rows = (Array.isArray(offered) && offered.length)
+    ? offered.map((o) => [String(o.id), (o.label && String(o.label).trim()) || SS_CLADDING_NAMES[String(o.id)] || String(o.id)])
+    : SS_CLADDING_ORDER.map((id) => [id, SS_CLADDING_NAMES[id]]);
+  const out = [["", "Builder's standard"], ...rows];
+  // A design carrying a cladding this style no longer offers keeps it listed, so opening the
+  // document does not silently restage it as something else — the same reason colorOpts
+  // unshifts the current value.
+  const cur = String(current || "");
+  if (cur && !out.some((c) => c[0] === cur)) out.push([cur, SS_CLADDING_NAMES[cur] || cur]);
+  return out;
+};
+const ssCladdingLabel = (id, offered) => {
+  const cur = String(id || "");
+  const hit = (Array.isArray(offered) ? offered : []).find((o) => String(o.id) === cur);
+  if (hit && hit.label && String(hit.label).trim()) return String(hit.label).trim();
+  if (!cur) return "Builder's standard";
+  return SS_CLADDING_NAMES[cur] || cur;
+};
 
 function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
@@ -2302,6 +2330,10 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const { design, acceptances, cos, paperwork } = doc;
   const biz = (paperwork && paperwork.business) || {};
   const colors = (paperwork && paperwork.colors) || [];
+  // What this design's STYLE offers, from order_paperwork (207). Empty means the tenant has
+  // configured none, which reads as all four under our built-in names — the behaviour this
+  // screen had before cladding was configurable.
+  const cladOffered = (paperwork && paperwork.cladding) || [];
   const invoice = (paperwork && paperwork.invoice) || null;
   const snap = design.estimate_lines || { lines: [], discount: 0 };
   const lines = Array.isArray(snap.lines) ? snap.lines : [];
@@ -2624,10 +2656,10 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 </tr>
                 {kind === "building" && optionRows("Cladding",
                   attrsLocked
-                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding)}</span>
+                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding, cladOffered)}</span>
                     : (
                       <select style={selStyle} value={eff.cladding} onChange={(e) => change("cladding", e.target.value)}>
-                        {SS_CLADDING.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                        {ssCladdingOpts(cladOffered, cur.cladding).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                       </select>
                     ))}
               </React.Fragment>

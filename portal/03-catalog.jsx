@@ -3422,6 +3422,191 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   );
 }
 
+// ── Cladding (207) ──────────────────────────────────────────────────────────
+// Carolyn, 2026-09-07: "Move the cladding into options allowing people to select the cladding
+// they use... but keep the cladding as dropdown options as we have it worked into the 3D so
+// make sure you don't lose that."
+//
+// FOUR FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
+// each of the four, and a builder cannot invent a fifth. What is theirs is which ones they sell,
+// what each costs, and what the customer sees it called. The id underneath never changes, which
+// is what keeps the 3D renderer and every saved design working.
+//
+// Per STYLE rather than per tenant because a Greenhouse and a Lofted Barn do not sell the same
+// siding, and because the wall area — and so the price — differs anyway.
+const SS_CLADDING_ROWS = [
+  { id: "panel", label: "Panel Siding" },
+  { id: "lap", label: "Lap Siding" },
+  { id: "batten", label: "Board & Batten" },
+  { id: "agpanel", label: "Metal" },
+];
+// wall_sqft is perimeter × wall height — the same geometry the Insulation card's Walls row
+// uses, so a taller-wall upgrade is picked up without a second rule. It is NOT the shared
+// pricing_method enum: that enum's `sqft_building` is the FOOTPRINT, and nobody clads a floor.
+const SS_CLADDING_BASES = [
+  ["wall_sqft", "per sq ft of wall"],
+  ["lineal_ft", "per lineal ft"],
+  ["each", "flat"],
+];
+
+function CladdingView({ viewingLabel = null, clientId = null }) {
+  // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [byStyle, setByStyle] = useState({});
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const saved = {};
+    (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
+    const m = {};
+    (data.styles || []).forEach((st) => {
+      const own = saved[st.id] || {};
+      // The four rows always render, whether or not the tenant has a row for each. A style with
+      // no rows at all is not broken — it is a style offering builder's standard only — and it
+      // must still be fillable, which a data-driven row list would not allow.
+      m[st.id] = SS_CLADDING_ROWS.map((c) => {
+        const r = own[c.id] || null;
+        return {
+          claddingId: c.id,
+          builtIn: c.label,
+          labelOverride: (r && r.label_override) || "",
+          rate: r && r.rate != null ? String(r.rate) : "",
+          basis: (r && r.basis) || "wall_sqft",
+          taxable: !r || r.taxable !== false,
+          active: !r || r.active !== false,
+          internalOnly: !!(r && r.internal_only),
+        };
+      });
+    });
+    setByStyle(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (styleId, idx, field, val) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
+
+  const save = async (styleId, styleLabel) => {
+    setBusyId(styleId); setMsg(null);
+    try {
+      const rows = byStyle[styleId] || [];
+      // Refuse, never coerce — nothing is sent until every rate reads as money, and the message
+      // names the rows at fault. The whole point is that a typo cannot become a silent $0.
+      const badRate = rows.filter((r) => {
+        const t = String(r.rate == null ? "" : r.rate).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badRate.length) {
+        throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: scoped({
+          action: "save_cladding",
+          styleId,
+          rows: rows.map((r) => ({
+            claddingId: r.claddingId,
+            labelOverride: String(r.labelOverride || "").trim(),
+            rate: String(r.rate == null ? "" : r.rate).trim(),
+            basis: r.basis,
+            taxable: r.taxable,
+            active: r.active,
+            internalOnly: r.internalOnly,
+          })),
+        }),
+      });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: styleLabel + ": saved." + (skipped.length ? " " + skipped.length + " skipped." : ""), skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusyId(null);
+  };
+
+  const renderSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
+        <div style={S.h2}>{st.label}</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 860 }}>
+            <thead><tr>
+              <th style={S.th}>Cladding</th>
+              <th style={S.th} title="What the customer sees this called. Leave blank to use our name.">Shown as</th>
+              <th style={S.th} title="Wall square footage is the perimeter times the wall height, so a taller-walls upgrade is charged for automatically.">How it&rsquo;s priced</th>
+              <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.claddingId}>
+                  <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{r.builtIn}</td>
+                  <td style={S.td}>
+                    <input type="text" value={r.labelOverride} placeholder={r.builtIn} maxLength={60}
+                      onChange={(e) => setRow(st.id, i, "labelOverride", e.target.value)}
+                      style={{ ...S.input, width: 170 }} />
+                  </td>
+                  <td style={S.td}>
+                    <select value={r.basis} onChange={(e) => setRow(st.id, i, "basis", e.target.value)}
+                      style={{ ...S.input, width: 160 }}>
+                      {SS_CLADDING_BASES.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
+                    </select>
+                  </td>
+                  <td style={S.td}>
+                    <input type="number" min="0" step="0.01" value={r.rate} placeholder="not offered"
+                      onChange={(e) => setRow(st.id, i, "rate", e.target.value)}
+                      style={{ ...S.input, width: 120 }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={r.internalOnly}
+                      onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={r.taxable}
+                      onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>
+            {busyId === st.id ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Cladding</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        The siding a customer can choose, per building style — not every style takes every
+        cladding, and metal in particular is far from universal. Leave a rate <b>blank</b> and you
+        do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
+        else is an upcharge. <b>Per sq ft of wall</b> is the perimeter &times; the wall height, so
+        a taller-walls upgrade is charged for automatically. Rename any of them under <b>Shown
+        as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
+        unaffected, because the siding itself is still the same one of our four.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (cat.styles || []).filter((st) => st.active !== false).map(renderSection)}
+    </div>
+  );
+}
+
 function LayoutPricing({ viewingLabel = null, clientId = null }) {
   // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);

@@ -1710,6 +1710,40 @@ function wallHeightOptionsFor(C, styleKey, widthFt, includeInternal) {
     (includeInternal || !o.internalOnly) &&
     (widthFt === undefined || wallHeightFitsWidth(o, widthFt)));
 }
+// ── Cladding (207) ──────────────────────────────────────────────────────────
+// Which claddings this tenant SELLS on this style, what they call each one, and what it costs.
+// This replaces the per-style `d3.claddingChoices` whitelist: the offered set is a builder's
+// Options rows now, not a checkbox grid buried in the 3D calibration spec.
+//
+// ⛔ THE IDS ARE UNCHANGED AND STILL CLOSED — get_config only ever emits the four D3_CLADDING
+// keys — so sel.cladding, every saved design, d3SidingOverride and the whole 3D chain are
+// untouched by this. Only WHICH of the four are offered, and what they are called, moved.
+function claddingOptionsFor(C, styleKey, includeInternal) {
+  const m = (C && C.claddingOptions) || {};
+  const list = styleKey ? m[styleKey] : null;
+  if (!Array.isArray(list)) return [];
+  // internalOnly follows the wall-height rule exactly: offered in the REP designer (embedded),
+  // hidden from the customer-facing page. Visibility only — resolveCladding below does NOT
+  // filter on it, so a cladding a rep picked still prices.
+  // D3_CLADDING[o.id] guards the render: an id we ship no texture for must never reach the
+  // dropdown, because picking it would take the 3D wall material down with it.
+  return list.filter((o) => o && D3_CLADDING[o.id] && (includeInternal || !o.internalOnly));
+}
+function resolveCladding(C, styleKey, claddingId) {
+  const id = String(claddingId || "");
+  if (!id) return null;
+  // includeInternal TRUE, for the same reason resolveWallHeight does it: this resolves a PRICE.
+  return claddingOptionsFor(C, styleKey, true).find((o) => o.id === id) || null;
+}
+// DISPLAY ONLY. The built-in name is the fallback, so one place owns those four strings and a
+// tenant who renamed nothing reads exactly as they always did.
+// ⛔ This must NEVER feed d3NormalizeCladding — that resolves geometry, and it resolves it from
+// the id. A renamed cladding is still the same cladding to the renderer.
+function claddingLabelOf(opt, id) {
+  const own = opt && opt.label != null ? String(opt.label).trim() : "";
+  if (own) return own;
+  return (D3_CLADDING[String(id || "")] || {}).label || String(id || "");
+}
 function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
   const d = Number(deltaIn) || 0;
   if (d <= 0) return null;
@@ -1746,6 +1780,10 @@ function ssOpeningRank(key) {
 }
 function ssRowSection(key) {
   if (key === "building") return "building";
+  // "cladding" is the priced siding line (207), "paint" is the colours that go on it. Both
+  // belong under the Cladding heading, and the push order in computeSelectionRows is what puts
+  // the material above its colours.
+  if (key === "cladding") return "cladding";
   if (key === "paint") return "cladding";
   if (key === "roof") return "roof";
   return ssOpeningRank(key) >= 0 ? "openings" : "options";
@@ -2007,6 +2045,39 @@ function computeSelectionRows(sel, paintColors, C, items) {
       });
     });
   }
+  // Cladding as a PRICED line (207) — a selection charge like taller walls and insulation, so
+  // it sits outside pushItem and the inclusion machinery entirely. Pushed ahead of the colour
+  // line below because both land in the "cladding" section and the material reads before its
+  // colours.
+  //
+  // ⚠️ `charged`, not `rate`, decides whether there is a line. The rate is NULLED for a tenant
+  // who hides prices, so it cannot also carry "included at no charge" — and every tenant was
+  // seeded at 0 = included, so getting this backwards would put a line on every quote in the
+  // product. get_config computes `charged` from the real number server-side.
+  const cladOpt = resolveCladding(C, styleKey, sel && sel.cladding);
+  if (cladOpt && cladOpt.charged) {
+    const cladBasis = String(cladOpt.basis || "wall_sqft");
+    const stEntryC = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
+    // The wall height the customer actually gets, so wall area tracks a taller-walls upgrade.
+    // Same expression insulation uses below; keep the two identical.
+    const cladWallH = d3CustomerWallHeightFt(C, stEntryC, styleKey, sel, bW) ||
+      Number(((stEntryC && stEntryC.d3) || {}).wallHeightFt) || Number(C && C.wallHeightFt) || 8;
+    const cladQty = cladBasis === "wall_sqft" ? Math.round(buildingPerimeter * cladWallH)
+                  : cladBasis === "lineal_ft" ? buildingPerimeter
+                  : 1;
+    const cladRate = cladOpt.rate != null ? Number(cladOpt.rate) : null;
+    const cladUnitWord = cladBasis === "wall_sqft" ? " / sq ft" : cladBasis === "lineal_ft" ? " / ft" : "";
+    if (cladQty > 0) {
+      rows.push({
+        key: "cladding",
+        label: claddingLabelOf(cladOpt, cladOpt.id),
+        qty: cladQty,
+        unit: cladRate != null ? fmtMoney2(cladRate) + cladUnitWord : (cladBasis === "wall_sqft" ? "sq ft" : ""),
+        total: showP && cladRate != null ? Math.round(cladRate * cladQty * 100) / 100 : null,
+        method: cladBasis,
+      });
+    }
+  }
   // CLADDING, not "Paint Colors" (Carolyn): the line is about the siding the customer chose,
   // and the colours belong under it. The key stays "paint" — it is what the tax lookup, the
   // estimate and every saved design already join on; only what the customer READS changes.
@@ -2020,9 +2091,13 @@ function computeSelectionRows(sel, paintColors, C, items) {
     [body, trim].forEach((c) => { if (c && c.id && !seen[c.id]) { seen[c.id] = 1; pTotal += charge(c); } });
     colourTxt = `Siding: ${(paintColors && paintColors.body) || "TBD"}, Trim: ${(paintColors && paintColors.trim) || "TBD"}`;
   }
-  // The cladding TYPE comes from the tenant's own option list, so it is only named when they
-  // offer one; otherwise the line is just the colours, exactly as it read before.
-  const claddingTxt = (sel && String(sel.cladding || "").trim()) || "";
+  // The cladding TYPE is named here only when the customer picked one; otherwise the line is
+  // just the colours, exactly as it read before.
+  //
+  // 🔴 THIS PRINTED THE RAW ID until 2026-09-07 — "lap — Siding: Barn Red, Trim: White". The
+  // comment it carried ("comes from the tenant's own option list") predated the D3_CLADDING
+  // dropdown, back when sel.cladding was expected to hold free text from a config option.
+  const claddingTxt = claddingLabelOf(cladOpt, sel && sel.cladding);
   const pDetail = claddingTxt ? `${claddingTxt} — ${colourTxt}` : colourTxt;
   rows.push({ key: "paint", label: claddingTxt ? "Cladding" : "Cladding & Colors", detail: pDetail, total: showP ? pTotal : null });
   const offersRoof = colors.some((c) => c.shingle || c.metal);
@@ -3218,30 +3293,17 @@ const D3_CLADDING = {
   // the whole visible effect and is intended.
   batten:  { id: "batten",  label: "Board & Batten", tex: "bnb",     relief: "batten", stepFt: 1.5,  tileFtU: 3.0, tileFtV: 8.0, bump: 0.40 },
 };
-// The customer-selectable set, in the order Carolyn named them on 2026-08-24: "panel
-// siding, lap siding, board and batten, and metal". `batten` joined the list that day --
-// it was rendered but never offered, which is why board & batten could only ever appear
-// on a style whose stored spec already said so.
+// D3_CLADDING_CHOICES and d3CladdingChoicesFor() LIVED HERE and were removed on 2026-09-07.
+// They were the whole offered-set model: a compiled-in list of four, narrowable per style by
+// `d3.claddingChoices`. Since 207 a builder owns that list — which claddings they sell on each
+// style, what each costs and what the customer sees it called — in Settings → Options →
+// Cladding, and the designer reads it from config.claddingOptions via claddingOptionsFor()
+// beside resolveWallHeight. Migration 207 seeded those rows from d3.claddingChoices, so no
+// builder lost a narrowing they had set.
 //
-// A style may NARROW this via `d3.claddingChoices` (see d3CladdingChoicesFor below) --
-// not every builder sells every cladding, and metal in particular is far from universal.
-const D3_CLADDING_CHOICES = ["panel", "lap", "batten", "agpanel"];
-
-// Which claddings a given style offers the customer. A style may narrow the list via
-// `d3.claddingChoices` -- plenty of builders sell no metal siding at all -- but a style
-// that says nothing offers all four, which is what every existing row says by omission.
-//
-// Rebuilt by filtering OUR list rather than trusting theirs, so the dropdown order is
-// always canonical and a stale id in the column cannot reach D3_CLADDING[id].label and
-// throw. An empty result means the builder unticked everything, which is a slip rather
-// than an instruction -- honouring it literally would leave the customer no cladding to
-// pick at all -- so it falls back to the full list.
-function d3CladdingChoicesFor(styleCfg) {
-  const narrowed = styleCfg && styleCfg.d3 && Array.isArray(styleCfg.d3.claddingChoices)
-    ? D3_CLADDING_CHOICES.filter((id) => styleCfg.d3.claddingChoices.indexOf(id) !== -1)
-    : [];
-  return narrowed.length ? narrowed : D3_CLADDING_CHOICES;
-}
+// The IDS above did not change and are still closed: get_config only ever emits keys of
+// D3_CLADDING, because we ship a texture and a relief profile per type and the renderer keys
+// on them. What moved is WHICH of them are offered, not what they are.
 
 // Every value `building_styles.d3.siding` can already hold, mapped onto the table above.
 // This is the whole backward-compatibility story and it needs NO migration: today `null`
@@ -3625,13 +3687,14 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // Named for the same reason gableVent is: the literal drops what it does not list,
     // and the calibration panel round-trips through this resolver.
     foundation: (o.foundation === "skids" || o.foundation === "slab") ? o.foundation : (base.foundation || null),
-    // Third field named for the same reason as the two above, and the one that was actually
-    // missing until 2026-08-25. It is worse than the others because the cladding checkboxes
-    // READ this spec too (`d3CladdingChoicesFor({ d3: adminCal.spec })`): a style that offers
-    // two claddings opened with all four ticked, and saving that screen -- without touching a
-    // checkbox -- wrote the widened list back. The narrowing was lost twice over, on display
-    // and on save. `undefined` rather than `null` matches what the checkbox handler stores,
-    // so an unnarrowed style keeps the key ABSENT from the column instead of growing a null.
+    // LEGACY DATA, still named here on purpose. Nothing reads d3.claddingChoices any more —
+    // 207 moved the offered set into style_cladding and seeded it from this key — but the
+    // literal drops what it does not list, and the calibration panel round-trips through this
+    // resolver. Removing the line would ERASE the column the first time a builder opened and
+    // saved the panel, destroying the only record of what each style used to offer.
+    //
+    // (That erasure is not hypothetical: this field was missing until 2026-08-25 and did
+    // exactly that, silently widening two-cladding styles back to four on save.)
     claddingChoices: Array.isArray(o.claddingChoices) ? o.claddingChoices : (base.claddingChoices || undefined),
     wallHeightFt: customerWallHeightFt || o.wallHeightFt || (styleCfg && styleCfg.wallHeightFt) || globalWallHeightFt || 0,
   };
@@ -9344,9 +9407,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return type === "Shingle" ? list.filter((c) => c.shingle) : type === "Metal" ? list.filter((c) => c.metal) : [];
   };
   const roofTypes = ["Shingle", "Metal"].filter((t) => roofColorsFor(t).length > 0);
-  // Cladding is a fixed FOUR (we ship a texture for each; a tenant cannot invent a fifth),
-  // narrowable per style. Empty string = "builder's standard", i.e. fall through to the
-  // style's own d3.siding, which is what every existing design does today.
+  // Cladding is still a fixed FOUR (we ship a texture and a relief profile for each; a tenant
+  // cannot invent a fifth) -- but WHICH of them a builder sells, what they call each one and
+  // what it costs is theirs now, per style, from Settings -> Options -> Cladding (207).
+  // Empty string = "builder's standard", i.e. fall through to the style's own d3.siding,
+  // which is what every existing design does today.
   //
   // Keyed off the CURRENTLY SELECTED style, so switching style re-reads the list. A
   // customer mid-design on a metal-capable style who switches to one that is not keeps
@@ -9355,15 +9420,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // simply no longer offers it. Clearing it instead would silently undo a deliberate pick
   // the moment someone browsed a neighbouring style.
   //
-  // Offered ONLY where 3D is on for this viewer. Cladding is visual-only in v1 -- the pick
-  // manifests nowhere but the 3D view (plus a line of text on the estimate) -- so on a
-  // tenant without the 3D grant it was a dropdown that visibly did nothing, shipped to
-  // every public designer without opt-in (audit 2026-08-19). Gating it on view3dOn keeps
-  // an ungranted tenant's page byte-identical to before cladding existed, and the control
-  // appears together with 3D as each builder is switched on.
-  const claddingChoices = view3dOn
-    ? d3CladdingChoicesFor(C.buildingStyles.find((s) => s.value === sel.style))
-    : [];
+  // ⚠️ NO LONGER GATED ON 3D, and the old reasoning INVERTED rather than lapsed. It read:
+  // "cladding is visual-only in v1 -- the pick manifests nowhere but the 3D view -- so on a
+  // tenant without the 3D grant it was a dropdown that visibly did nothing" (audit
+  // 2026-08-19). That was right while it was free. Since 207 the pick is a priced catalog
+  // option that lands on the quote, so gating it on 3D would hide a PAID option from every
+  // builder who has not bought 3D. What keeps an unconfigured tenant unchanged now is the
+  // list itself: no rows, no dropdown.
+  const claddingChoices = claddingOptionsFor(C, sel.style, embedded);
   // The paint option renders inline beside the Roof Options (same row), not in
   // the option list below — see the Size/Roof/Paint row and renderPaintFields.
   const paintOpt = visibleOptions.find((o) => o.type === "counter" && o.id === "paint") || null;
@@ -13623,39 +13687,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </select>
                 </label>
               </div>
-              {/* Which of the four this style OFFERS the customer. Carolyn, 2026-08-24:
-                  "they don't offer metal here, but there's some other clients that do."
+              {/* THE "Cladding this style offers the customer" CHECKBOX GRID WAS HERE, and it
+                  is gone on purpose (Carolyn 2026-09-07) — do not put it back. It wrote
+                  d3.claddingChoices, and since 207 the offered set is a builder's own priced
+                  rows in Settings → Options → Cladding, per style, alongside what each one
+                  costs and what the customer sees it called. Migration 207 read this list once
+                  to seed those rows, so nobody lost a narrowing they had set.
 
-                  All four ticked is the SAME as saying nothing, so that case stores
-                  nothing at all -- an untouched style keeps a spec byte-identical to the
-                  one it has today, and a builder who never opens this row is unaffected. */}
-              <div style={{ marginBottom: 8 }}>
-                <div style={{ fontSize: 11, color: "#92400E", fontWeight: 700, marginBottom: 4 }}>Cladding this style offers the customer</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-                  {D3_CLADDING_CHOICES.map((id) => {
-                    const offered = d3CladdingChoicesFor({ d3: adminCal.spec });
-                    const on = offered.indexOf(id) !== -1;
-                    return (
-                      <label key={id} style={{ fontSize: 11, color: "#92400E", display: "flex", alignItems: "center", gap: 4, cursor: "pointer" }}>
-                        <input
-                          type="checkbox"
-                          checked={on}
-                          onChange={() => {
-                            const next = D3_CLADDING_CHOICES.filter((c) => (c === id ? !on : offered.indexOf(c) !== -1));
-                            // Nothing ticked is a slip, not an instruction -- it would leave
-                            // the customer no cladding at all -- and everything ticked is the
-                            // default. Both store `undefined`, which JSON.stringify drops, so
-                            // the column stays absent rather than growing a list saying nothing.
-                            const store = (next.length === 0 || next.length === D3_CLADDING_CHOICES.length) ? undefined : next;
-                            calSet({ claddingChoices: store });
-                          }}
-                        />
-                        {D3_CLADDING[id].label}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
+                  Two per-style lists answering "which cladding does this style offer" is the
+                  same duplication 206 removed from Electrical, and it fails the same way: the
+                  one you are not looking at wins.
+
+                  ⚠️ THE SELECT ABOVE STAYS. That is this style's OWN standard appearance — what
+                  the walls look like when the customer picks "builder's standard" — which is a
+                  different question from what they may choose instead. */}
               {/* LEAN-TO and DORMER. Both are off at zero width, which is why they sit in
                   their own row rather than the main grid -- a builder who wants neither
                   should not have to read four controls to establish that. */}
@@ -14312,7 +14357,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
                     style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="">Builder's standard</option>
-                    {claddingChoices.map((id) => <option key={id} value={id}>{D3_CLADDING[id].label}</option>)}
+                    {claddingChoices.map((o) => <option key={o.id} value={o.id}>{claddingLabelOf(o, o.id)}</option>)}
                   </select>
                 </div>
               )}

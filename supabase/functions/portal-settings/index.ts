@@ -122,6 +122,7 @@ const GATES: GateTable = {
   save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
   save_wall_heights:              { area: "settings_options", level: "edit" },
+  save_cladding:                  { area: "settings_options", level: "edit" },
   save_insulation:                { area: "settings_options", level: "edit" },
   save_electrical:                { area: "settings_options", level: "edit" },
   save_electrical_items:          { area: "settings_options", level: "edit" },
@@ -1538,7 +1539,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
@@ -1561,6 +1562,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
       // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
       admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only, build_on_site, bos_fee_basis, bos_fee_rate").eq("client_id", clientId).order("delta_in"),
+      // Cladding offered per style (207). The card renders a FIXED four rows per style, so a
+      // style with no rows is not "broken" — it is a style offering builder's standard only.
+      admin.from("style_cladding").select("id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
       // Insulation rates (177) for the Options tab matrix.
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
@@ -1571,7 +1575,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, insulationRes, electricalRes, elecItemsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -1612,7 +1616,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       };
     } catch (_) { wallet = null; }
 
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], insulation: insulationRes.data ?? [],
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], cladding: claddingRes.data ?? [], insulation: insulationRes.data ?? [],
       // Null for a tenant who has never opened the card — the portal falls back to the same
       // defaults the table declares, so the form is never blank.
       electrical: electricalRes.data ?? null,
@@ -3286,6 +3290,76 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       deleted = sweep.length;
     }
     return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Cladding offered per style (207). A FIXED four rows per style, one per D3_CLADDING type,
+  // so this upserts what it is sent and sweeps nothing: the set is closed, and a cladding the
+  // payload does not mention means "not sent", never "remove it".
+  //
+  // ⛔ THE ROW IS KEPT WHEN THE RATE IS BLANK, deliberately — the wall-heights posture, not the
+  // insulation one. Insulation deletes a cleared cell because the cell holds nothing but a
+  // rate; a cladding row also holds the customer-facing name, the basis and the tax flag, and
+  // deleting it would throw away a label a builder typed while they were still deciding what
+  // to charge. get_config's `rate is not null` filter is what withholds it from the customer.
+  if (action === "save_cladding") {
+    const styleId = String((payload as Record<string, unknown>).styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId required" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+
+    // The style must be this tenant's. clientId comes from the JWT, never the body — this is
+    // what stops a crafted styleId writing cladding onto another builder's catalog.
+    const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
+    if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
+    if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
+
+    const CLADDING_IDS = new Set(["panel", "lap", "batten", "agpanel"]);
+    const BASES = new Set(["wall_sqft", "lineal_ft", "each"]);
+    let saved = 0; const skipped: string[] = [];
+    const seen = new Set<string>();
+    let i = 0;
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      const cid = String(row?.claddingId ?? "").trim();
+      // Refused, not defaulted. A fifth id would reach D3_CLADDING[id] in the browser as
+      // undefined and take the 3D wall material down with it, so it must never be stored.
+      if (!CLADDING_IDS.has(cid)) { skipped.push(`row ${i}: "${row?.claddingId}" is not a cladding we ship`); i++; continue; }
+      if (seen.has(cid)) { skipped.push(`${cid}: listed twice`); i++; continue; }
+      seen.add(cid);
+
+      // Refuse, never coerce — the rate posture everywhere in this file. Blank is a real
+      // state ("not offered on this style"), and it must reach the column as NULL rather than
+      // as 0: zero means INCLUDED AT NO CHARGE, which is what every tenant was seeded with.
+      const rateRaw = String(row?.rate ?? "").trim();
+      let rate: number | null = null;
+      if (rateRaw !== "") {
+        const n = Number(rateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`${cid}: "${rateRaw}" is not a usable dollar amount`); i++; continue; }
+        rate = n;
+      }
+      // An unrecognised basis is refused rather than defaulted: the three shapes differ by
+      // orders of magnitude on the same number, so defaulting would price by a rule the
+      // builder did not choose.
+      const basisRaw = String(row?.basis ?? "").trim();
+      if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
+
+      const patch = {
+        label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
+        rate,
+        basis: basisRaw || "wall_sqft",
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
+        sort_order: i,
+        updated_at: new Date().toISOString(),
+      };
+      const up = await admin.from("style_cladding")
+        .upsert({ client_id: clientId, style_id: styleId, cladding_id: cid, ...patch },
+                { onConflict: "client_id,style_id,cladding_id" });
+      if (up.error) { skipped.push(`${cid}: ${up.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    return json({ ok: true, saved, skipped });
   }
 
   // Insulation rates (177). A fixed 2x3 matrix rather than a free row list, so this is an
@@ -7389,6 +7463,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
     ]);
     if (colRes.error) return dbFail(req, clientId, "read your colors", colRes.error);
+    // The cladding THIS DESIGN'S STYLE offers (207), so the document's dropdown lists what the
+    // tenant actually sells and calls it what they call it. Before this the browser carried a
+    // compiled-in list of three that had drifted from the designer's four — it omitted
+    // `batten`, and because the staging action validated against the same list and defaults to
+    // the design's CURRENT value, a Board & Batten design could not have ANY attribute changed
+    // on its order, not even a roof colour.
+    //
+    // Fails SOFT to an empty list: the browser falls back to the built-in four, which is what
+    // an account with no rows yet should see. A colours read failing blanks the document
+    // because you cannot price paint without a palette; a cladding read failing must not.
+    let cladding: { id: string; label: string | null }[] = [];
+    {
+      const dRes = await admin.from("designs").select("selections")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      const styleKey = String(((dRes.data?.selections ?? {}) as Record<string, unknown>).style ?? "").trim();
+      if (!dRes.error && styleKey) {
+        const stRow = await admin.from("building_styles").select("id")
+          .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
+        if (!stRow.error && stRow.data?.id) {
+          const scRows = await admin.from("style_cladding").select("cladding_id, label_override, sort_order")
+            .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true)
+            .not("rate", "is", null).order("sort_order");
+          if (!scRows.error) {
+            cladding = (scRows.data ?? []).map((r: { cladding_id: string; label_override: string | null }) =>
+              ({ id: r.cladding_id, label: r.label_override }));
+          }
+        }
+      }
+    }
     return json({
       ok: true,
       business: {
@@ -7399,6 +7502,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: cs.quote_terms || null,
       },
       colors: colRes.data || [],
+      cladding,
       invoice: invRes.error ? null : (invRes.data || null),
     });
   }
@@ -7487,8 +7591,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
 
     // ── Validate against the catalog, loudly. ──
-    if (next.cladding && !CLADDING_OPTIONS.some((c) => c.id === next.cladding)) {
-      return json({ error: "That cladding isn't offered." }, 400);
+    // Cladding is per tenant, per STYLE since 207, so the offered set comes from this design's
+    // own style rather than from a list compiled into the function. A tenant or a style with no
+    // rows falls back to the closed four, which is how an account that predates 207 keeps
+    // behaving exactly as it did. (The old code validated against CLADDING_OPTIONS alone, and
+    // that list was missing `batten` — see attributeLines.ts for what that cost.)
+    const cladOverrides: Record<string, string> = {};
+    let cladOffered: string[] = [];
+    {
+      const styleKey = String(sel.style ?? "").trim();
+      if (styleKey) {
+        const stRow = await admin.from("building_styles").select("id")
+          .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
+        if (stRow.error) return dbFail(req, clientId, "read that design's style", stRow.error);
+        if (stRow.data?.id) {
+          const scRows = await admin.from("style_cladding").select("cladding_id, label_override")
+            .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true).not("rate", "is", null);
+          if (scRows.error) return dbFail(req, clientId, "read your cladding", scRows.error);
+          for (const r of (scRows.data ?? []) as { cladding_id: string; label_override: string | null }[]) {
+            cladOffered.push(r.cladding_id);
+            if (r.label_override) cladOverrides[r.cladding_id] = r.label_override;
+          }
+        }
+      }
+    }
+    const cladOk = (id: string) => cladOffered.length
+      ? cladOffered.includes(id)
+      : CLADDING_OPTIONS.some((c) => c.id === id);
+    if (next.cladding && !cladOk(next.cladding)) {
+      return json({ error: "That cladding isn't offered on this building style. Check Settings → Options → Cladding." }, 400);
     }
     const { data: colRows, error: colErr } = await admin.from("colors")
       .select("id, label, rate, pricing_method, allow_custom, siding, trim, shingle, metal")
@@ -7630,7 +7761,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const fromPaintStatus = (fromSel.paint && String(fromSel.paint).toLowerCase() === "painted") ? "Painted" : "Unpainted";
       say("Roof type", String(fromSel.roofType ?? ""), next.roofType);
       say("Roof color", String(fromSel.roofColor ?? ""), next.roofColor);
-      say("Cladding", claddingLabel(fromSel.cladding), claddingLabel(next.cladding));
+      // The tenant's own name for it, so the sentence the customer signs matches the word
+      // that was on their quote.
+      say("Cladding", claddingLabel(fromSel.cladding, cladOverrides), claddingLabel(next.cladding, cladOverrides));
       say("Paint", fromPaintStatus, nextPaintStatus);
       if (next.paintStatus === "Paint") {
         say("Paint body", String(fromPc.body ?? ""), next.paintBody);

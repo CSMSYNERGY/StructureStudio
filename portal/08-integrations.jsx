@@ -2889,6 +2889,10 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           <WindowsView viewingLabel={viewingLabel} clientId={clientId} />
           <VentsView viewingLabel={viewingLabel} clientId={clientId} />
           <RampsView viewingLabel={viewingLabel} clientId={clientId} />
+          {/* Cladding is the outside of the building by definition, so it belongs to this
+              group's own hint. It sits last because it is the one card here that is not a
+              catalog of things a customer places on the plan. */}
+          <CladdingView viewingLabel={viewingLabel} clientId={clientId} />
         </OptionsGroup>
         <OptionsGroup title="Interior" hint="Anything that goes on the inside">
           <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />

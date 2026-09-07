@@ -643,6 +643,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // style-specific layout_item_pricing overrides.
   const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
   let styleRowId: string | null = null;
+  // 8 ft is the fallback the whole product uses when a style declares nothing — same default
+  // as the browser's d3ResolveStyleSpec.
+  let styleBaseWallHeightFt = 8;
   let sizeRowId: string | null = null;       // reused below for the size's included-item quantities
   let styleLabel = style;            // display-name fallback if the style row isn't found
   let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
@@ -684,11 +687,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   }
 
   try {
-    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate, taxable").eq("client_id", clientId);
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate, taxable, d3").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
+      // The style's OWN wall height, which anything priced by wall AREA has to start from.
+      // Read here rather than in the wall-height block because it is true whether or not the
+      // customer bought an upgrade. See the resolvedWallHeightFt comment below for why this
+      // had to be fixed.
+      const baseWall = Number((styleRow.d3 || {}).wallHeightFt);
+      if (Number.isFinite(baseWall) && baseWall > 0) styleBaseWallHeightFt = baseWall;
       styleImageUrl = styleRow.image_url || null;
       styleShowImage = styleRow.show_image_on_estimate !== false;
       styleTaxable = styleRow.taxable !== false;
@@ -911,8 +920,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // same posture as an unpriced size above, and for the same reason: emailing a quote that
   // silently charged $0 for a real structural change is worse than refusing to send one.
   // Resolved wall height in feet — the style's standard plus whatever increase was chosen.
-  // Insulation's WALL area depends on it, which is why taller walls had to land first.
-  let resolvedWallHeightFt = 8;
+  // Insulation's WALL area depends on it, and so does cladding priced by wall_sqft, which is
+  // why taller walls had to land first.
+  //
+  // 🔴 THIS STARTED AT A HARDCODED 8 UNTIL 2026-09-07, and it was a real mispricing. The
+  // browser's preview resolves the style's own height (d3CustomerWallHeightFt → the style's
+  // d3.wallHeightFt); the server did not, so on any style whose standard is not 8 ft the
+  // customer was SHOWN one insulation figure and BILLED another — against a comment two
+  // blocks down insisting the two "must agree to the penny". Seven live styles are affected
+  // (six at 6.4–7 ft, one at 7 ft), all of them over-billed. Carolyn's call was to fix both
+  // at once rather than let cladding inherit the same bug.
+  let resolvedWallHeightFt = styleBaseWallHeightFt;
   const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
   if (wallHeightDeltaIn > 0) {
     if (!styleRowId) {
@@ -990,6 +1008,68 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // column. They are one decision on one row, and a builder who marks taller walls
           // non-taxable has already said what they think about this charge.
         }, { kind: "build_on_site", nonTaxable: wh.taxable === false }));
+      }
+    }
+  }
+
+  // ── Cladding (207) ──────────────────────────────────────────────────────────────────────
+  // The third SELECTION charge, and it copies the wall-height shape exactly: nothing is on the
+  // floor plan, so this sits outside pushItem and the inclusion machinery, and the rate is
+  // re-read from the table rather than trusted from the payload — get_config publishes it to
+  // an anonymous browser.
+  //
+  // ⚠️ KEY ON `claddingId`, NOT `cladding`. The submit payload deliberately carries both:
+  // `cladding` is the human LABEL the estimate template prints, `claddingId` is the stable id
+  // the design row stores. Matching on the label would break the moment a builder renamed it.
+  //
+  // A rate of 0 produces NO LINE, not a $0 one. Cladding was free for every tenant before this
+  // shipped and the migration seeded them all at 0 = included; emitting a zero line for it
+  // would add a row to every estimate in the product overnight.
+  const claddingId = String((selections as Record<string, unknown>).claddingId ?? "").trim();
+  if (claddingId) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price cladding: the style "${style}" is not in your catalog.` }, 400);
+    }
+    const scRes = await supabase.from("style_cladding")
+      .select("cladding_id, label_override, rate, basis, taxable, active")
+      .eq("client_id", clientId).eq("style_id", styleRowId).eq("cladding_id", claddingId).maybeSingle();
+    const sc = scRes.data as {
+      cladding_id: string; label_override: string | null; rate: number | null;
+      basis: string | null; taxable: boolean | null; active: boolean } | null;
+    // Not offered / not active / no rate is a hard 400, the posture the other two use: a quote
+    // that silently charged $0 for a siding upgrade the builder does sell is worse than one we
+    // refuse to send.
+    if (scRes.error || !sc || !sc.active || sc.rate == null) {
+      return json({ error: `That cladding isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Cladding, then resubmit.` }, 400);
+    }
+    const cladRate = Number(sc.rate) || 0;
+    if (cladRate > 0) {
+      const basis = String(sc.basis || "wall_sqft");
+      // wall_sqft is perimeter x wall height — the SAME geometry insulation's Walls row uses,
+      // deliberately, so a taller-wall upgrade lands on both without a second rule.
+      const cladQty = basis === "wall_sqft" ? Math.round(buildingPerimeter * resolvedWallHeightFt)
+                    : basis === "lineal_ft" ? buildingPerimeter
+                    : 1;
+      const cladUnit = basis === "wall_sqft" ? "sq ft of wall" : basis === "lineal_ft" ? "ft of wall" : "";
+      // The tenant's own name for it, falling back to the built-in — the customer must read the
+      // same words on the estimate that they read on the designer.
+      const cladName = (sc.label_override || "").trim()
+        || (String((selections as Record<string, unknown>).cladding ?? "").trim())
+        || claddingId;
+      if (cladQty > 0) {
+        targetItems.push(tagLine({
+          name: cladName,
+          qty: cladQty,
+          amount: cladRate,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: cladUnit
+            ? `${cladQty} ${cladUnit} at $${cladRate.toFixed(2)} each`
+            : `${cladName} for this building`,
+        }, { kind: "cladding", nonTaxable: sc.taxable === false }));
       }
     }
   }
