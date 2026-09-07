@@ -14027,7 +14027,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
-        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", justifyContent: "center" }}>
+        {/* ⚠️ flexDirection COLUMN, and alignItems rather than justifyContent. This was a bare
+            `display:flex` — i.e. a ROW — which was invisible for as long as the plan svg was its
+            only child. On 2026-09-04 a wall-elevation panel was added here with a comment saying
+            it "sits directly under the plan"; it did not, it sat BESIDE it, and because it only
+            rendered while something was selected, selecting a wall item made the plan jump 131px
+            sideways mid-gesture. getSvgPt reads getBoundingClientRect() live, so the trailing
+            click then hit-tested 131px away, missed, and deselected the item — which is why the
+            workbench/shelf stretch grips appeared on mousedown and vanished before anyone could
+            drag one. The panel is gone now, so this is belt and braces: a column cannot reproduce
+            it if anything is ever added here again. */}
+        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
@@ -14405,69 +14415,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
-          {/* ── ALONG-WALL DIMENSIONS FOR THE SELECTED ITEM (Carolyn 2026-09-03) ──────────
-              Two measurements, one to each end of the wall, the way ShedPro draws them:
-              "we're not showing the measurements of light, so they don't know if they're
-              centered or not ... how far it is from here to here at the end."
-
-              Three placement decisions, each load-bearing:
-              • Rendered HERE, as a sibling of the resize badge, NOT inside the item's own <g>.
-                That group carries `transform=rotate(...)` for east/west walls, so a chip drawn
-                inside it would hang sideways and the numbers would be unreadable on two of the
-                four walls.
-              • Drawn INSIDE the building. The band outside each wall already holds the
-                building's own "12 ft" dimensions and the FRONT/BACK/LEFT/RIGHT labels, and it
-                is also where the viewBox `frame` crops — inside, nothing can collide and
-                nothing can be clipped.
-              • No export twin, on purpose. renderExportCanvas draws no selection chrome at all,
-                and these follow the selection; they are a design-time aid, not part of the
-                customer's quote (Ahsan, 2026-09-04).
-
-              Live during a drag for free: onPtrMove commits to `items` on every pointer move,
-              and this reads `items`. A REFUSED move commits nothing, so the chips simply hold
-              their last legal reading instead of flickering — which is the honest behaviour. */}
-          {selectedId && (() => {
-            const si = items.find((i) => i.id === selectedId);
-            const sc = si && ITEMS[si.type];
-            if (!si || !sc) return null;
-            const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
-            if (!d) return null;                     // loft, note, line, prop, ceiling device
-            const isSlab = !!ssSlabModel(si.type, ITEMS);
-            // Clear the item itself: a wall slab is drawn inside the wall and would sit on top
-            // of a dimension line placed at a fixed inset.
-            const inset = (isSlab ? slabDepthFt(sc, si) : 0.5) * scale + 22;
-            const axis0 = d.isHoriz ? mgX : mgY;
-            const near = axis0 + (d.posFt - d.half) * scale;
-            const far = axis0 + (d.posFt + d.half) * scale;
-            const end = axis0 + d.wallLen * scale;
-            const cross = d.isHoriz
-              ? (si.wall === "north" ? mgY + inset : mgY + pH - inset)
-              : (si.wall === "west" ? mgX + inset : mgX + pW - inset);
-            const ink = d.centered ? "#059669" : "#1E293B";
-            const seg = (key, a, b, feet) => {
-              const mid = (a + b) / 2;
-              const label = fmtDimFtIn(feet);
-              const cw = Math.max(28, label.length * 6.5 + 12);
-              const x1 = d.isHoriz ? a : cross, y1 = d.isHoriz ? cross : a;
-              const x2 = d.isHoriz ? b : cross, y2 = d.isHoriz ? cross : b;
-              const cx = d.isHoriz ? mid : cross, cy = d.isHoriz ? cross : mid;
-              const tk = 4;                          // end-tick half length, perpendicular
-              return (
-                <g key={key} pointerEvents="none">
-                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={ink} strokeWidth={1} opacity={0.5} />
-                  <line x1={d.isHoriz ? x1 : x1 - tk} y1={d.isHoriz ? y1 - tk : y1}
-                        x2={d.isHoriz ? x1 : x1 + tk} y2={d.isHoriz ? y1 + tk : y1}
-                        stroke={ink} strokeWidth={1} opacity={0.5} />
-                  <line x1={d.isHoriz ? x2 : x2 - tk} y1={d.isHoriz ? y2 - tk : y2}
-                        x2={d.isHoriz ? x2 : x2 + tk} y2={d.isHoriz ? y2 + tk : y2}
-                        stroke={ink} strokeWidth={1} opacity={0.5} />
-                  <rect x={cx - cw / 2} y={cy - 9} width={cw} height={18} rx={4} fill={ink} />
-                  <text x={cx} y={cy + 4} textAnchor="middle" fill="#FFF" fontSize={10} fontWeight="700">{label}</text>
-                </g>
-              );
-            };
-            return <>{seg("dim-a", axis0, near, d.before)}{seg("dim-b", far, end, d.after)}</>;
-          })()}
           {resizing && (() => {
             const ri = items.find((i) => i.id === resizing.id);
             if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)
@@ -14498,25 +14445,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })}
         </svg>
-        {/* Wall elevation for the selected item — the "up and down" half of the 2026-09-03 ask.
-            Sits directly under the plan, inside the plan's own column, so it never disturbs the
-            flex row the docked 3D panel lives in. Appears only when the selected item is on a
-            wall AND something on it actually says where it sits vertically; a made-up height
-            off the floor is worse than none, because a builder would frame to it. */}
-        {selectedId && (() => {
-          const si = items.find((i) => i.id === selectedId);
-          const sc2 = si && ITEMS[si.type];
-          if (!si || !sc2) return null;
-          const d = ssWallDims(si, sc2, bldgW, bldgH, mgX, mgY, scale);
-          if (!d) return null;
-          const wh = d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW) || d3BaseWallHeightFt(C, selectedStyle);
-          return (
-            <div style={{ marginTop: 10 }}>
-              <SSWallElevation item={si} cfg={sc2} itemTypes={ITEMS} dims={d}
-                wallHeightFt={wh} wallLabel={getDisplayLabel(si.wall, frontWall)} />
-            </div>
-          );
-        })()}
         </div>
         {view3dOn && dock3D && (
           /* Width and height are pure CSS — never derived from `frame` or dispMaxW,
