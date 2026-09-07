@@ -2882,15 +2882,33 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         : `Accepted ${fmtDate(acceptance.accepted_at)}`,
       amountText: ssUsd(running), tone: "base",
     });
+    // ⚠️ EACH CHANGE'S OWN DELTA, NOT A CHAIN THROUGH `total_after_cents` (2026-09-07).
+    // That column is "the whole order after this change" as computed FROM THE DESIGN'S LINES
+    // — and a manual change order never touches those lines, nor does a fee. So chaining
+    // through it made a design edit look like it reversed every manual change above it: on
+    // the beta order this was found on, a no-cost roof change read "CO-5 · −$650.00 →
+    // $3,400.00" immediately above "Current total $4,200.00". Nothing was wrong with the
+    // money; the trail was describing it with the wrong arithmetic, and saying so directly
+    // above the right answer.
+    //
+    // The same reasoning the server settled on in orderCentsAfterAck: take what each change
+    // itself moved (its own before → after) plus the fee it carried, and accumulate that.
+    // The running total then lands on orders.total_cents by construction rather than by
+    // coincidence, which is the property that makes the last two rows agree.
     for (const c of ackedCos) {
-      if (c.total_after_cents == null) {
-        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
-      } else {
-        const after = c.total_after_cents / 100;
-        const delta = ssRound2(after - running);
-        running = after;
-        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: `${delta >= 0 ? "+" : "-"}${ssUsd(Math.abs(delta))} → ${ssUsd(after)}`, tone: "base" });
-      }
+      const delta = (c.total_after_cents == null || c.total_before_cents == null)
+        ? 0 : ssRound2((c.total_after_cents - c.total_before_cents) / 100);
+      const feeAll = ssRound2(((Number(c.fee_cents) || 0) + (Number(c.fee_tax_cents) || 0)) / 100);
+      const moved = ssRound2(delta + feeAll);
+      running = ssRound2(running + moved);
+      const feeNote = feeAll > 0 ? ` (incl. ${ssUsd(feeAll)} fee)` : "";
+      trail.push({
+        label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`,
+        amountText: moved === 0
+          ? "no price change"
+          : `${moved >= 0 ? "+" : "-"}${ssUsd(Math.abs(moved))}${feeNote} → ${ssUsd(running)}`,
+        tone: "base",
+      });
     }
     trail.push({ label: "Current total", amountText: o.total_cents == null ? "—" : money(o.total_cents), tone: "final" });
     if (pendingCo && pendingCo.total_after_cents != null) {
