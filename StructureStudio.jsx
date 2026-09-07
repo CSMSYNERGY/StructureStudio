@@ -3440,7 +3440,12 @@ function d3DormerWindowFit(fx, dormW, face, offset) {
   if (!(w > 0.7 && h > 0.55)) return null;
   // How far it can slide before its casing meets a cheek.
   const travel = Math.max(0, (W - w) / 2 - (D3_CASE_F + D3.WALL_T));
-  return { w, h, off: Math.max(-1, Math.min(1, Number(offset) || 0)) * travel, y0: (F - h) / 2 };
+  // `travel` is RETURNED as well as applied (2026-09-07, when the window became draggable). A
+  // drag has to turn pointer movement back into the -1…1 number, and the feet-per-unit-offset
+  // scale it divides by must be the one the renderer just used — two functions each deciding
+  // "how far can it slide" is exactly how a drag and the slider that shares its value start
+  // disagreeing about where the ends are. Additive: every existing caller reads w/h/off/y0.
+  return { w, h, travel, off: Math.max(-1, Math.min(1, Number(offset) || 0)) * travel, y0: (F - h) / 2 };
 }
 
 // The dormer geometry for a SPEC + a size label, so the calibration panel can say what the
@@ -5526,14 +5531,44 @@ function buildShed3DModel(THREE, p) {
       y0: faceBottom + fit.y0, y1: faceBottom + fit.y0 + fit.h,
     };
     const og = new THREE.Group();
-    // ⚠️ NO userData.itemId, ON PURPOSE. The stand-in this replaced had none either, and that
-    // is exactly why Ahsan could not move it (2026-09-07: "i can not move the window any where
-    // on that") — but the fix is not to invent an id, it is that nothing up here is pickable at
-    // all: the pick raycasts test openingsGroup and wallsGroup only, and the dormer lives in the
-    // roof group, which "look inside" hides wholesale. An id here would be a promise the drag
-    // handlers would then act on and get wrong. Moving this window is the footer's offset
-    // slider, which is what a face that is not a wall can honestly offer.
-    og.userData = { dormerWindow: true };
+    // ⚠️ STILL NO userData.itemId, ON PURPOSE — AND IT DRAGS ANYWAY (Ahsan, 2026-09-07).
+    //
+    // This used to read: "NO userData.itemId, ON PURPOSE. The stand-in this replaced had none
+    // either, and that is exactly why Ahsan could not move it (2026-09-07: 'i can not move the
+    // window any where on that') — but the fix is not to invent an id, it is that nothing up here
+    // is pickable at all: the pick raycasts test openingsGroup and wallsGroup only, and the
+    // dormer lives in the roof group, which 'look inside' hides wholesale. An id here would be a
+    // promise the drag handlers would then act on and get wrong. Moving this window is the
+    // footer's offset slider, which is what a face that is not a wall can honestly offer."
+    //
+    // Half of that was right and half of it was the wrong conclusion drawn from it. Ahsan came
+    // back the same day — "i can not drag it left or right" — having tried to drag the window
+    // itself, because every other thing in this scene is dragged. A slider he did not think to
+    // look for is not an affordance, whatever it can do once you find it. So the window IS
+    // draggable now; the half that was right is why it is still NOT an item to do it. The drag
+    // has its own path end to end: pickDormerWindow3 raycasts the roof group and walks up to this
+    // stamp, and the gesture drives ONE number — dormerWindowOffset, the same -1…1 the slider
+    // writes, committed through the same setDormerWindow + onDormerWindow pair. Nothing reaches
+    // `items`, nothing invents a fifth wall, and the 2D plan is untouched. The slider stays, and
+    // its thumb follows the drag, because they are two handles on one value.
+    //
+    // The three fields under it are what a drag cannot work out for itself:
+    //   travelFt    — d3DormerWindowFit's own travel, so the drag and the slider are clamped by
+    //                 one calculation instead of two that can drift apart.
+    //   builtOffset — the offset THESE meshes were placed at, so a live drag can translate the
+    //                 group by the difference instead of rebuilding the model on every move.
+    //   axisLocal   — the slide direction in this group's PARENT space (`rg`), not world space.
+    //                 rg is rotated a quarter turn on a landscape footprint (see the uAxisIsX
+    //                 branch at the bottom of the roof build), so a world axis frozen in here
+    //                 would be wrong for half of all buildings. The handler derives the world
+    //                 direction from matrixWorld at grab time, which is also the only way it can
+    //                 stay right while the customer orbits.
+    og.userData = {
+      dormerWindow: true,
+      travelFt: fit.travel,
+      builtOffset: Math.max(-1, Math.min(1, Number(p.dormerWindowOffset) || 0)),
+      axisLocal: [wfFace.U[0], wfFace.U[1]],
+    };
     const f = D3_CASE_F;
     // The three casing boxes buildOneWall draws for every opening before it branches — jambs
     // and head. d3WindowFill deliberately leaves them to the caller so it cannot double-draw
@@ -6615,6 +6650,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const pWpx = bldgW * scale, pHpx = bldgH * scale;
       let liveItems = items;
       let dragging3 = null;      // { id, moved }
+      let dormDrag = null;       // the dormer window's own drag - not an item, see dormerGrab3
       let lastHoverId = null;
       let rebuildScope = null;   // accumulated for the next frame: { full, walls:Set, interior }
       let canvasRect = null;     // getBoundingClientRect cache - a layout read per pointermove forces layout of the whole page (the 2D SVG included)
@@ -6773,6 +6809,79 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           if (n) return { wall: n.userData.wall, point: hits[h].point };
         }
         return null;
+      };
+      // Pick the DORMER'S WINDOW — the one draggable thing in this scene that is not an item.
+      // It carries no itemId (addDormerWindow explains why at length), so pickItem3 cannot see
+      // it and must not be taught to: it is picked out of the roof group by its own stamp.
+      //
+      // ⚠️ GUARDED ON VISIBILITY, because three's raycaster is not. Object3D.raycast does not
+      // test `visible`, and "look inside" hides the whole roofGroup — without this check a
+      // customer inspecting the interior could grab and move a window that is not on the screen.
+      //
+      // Nearest-hit-wins is deliberately NOT the rule here, for a geometric reason rather than a
+      // stylistic one: the dormer's own face is a full-depth wall box and the sash sits a quarter
+      // of that depth back INSIDE it, so the face is in front of the glass from every angle.
+      // Requiring the window to be the first thing the ray meets would leave it grabbable only by
+      // its casing. Scanning the hit list instead is exactly what pickItem3 already does, and it
+      // carries the same known cost — from the far side you can grab the thing through what is in
+      // front of it — bounded here by a window-sized silhouette on the roof.
+      const pickDormerWindow3 = (ev) => {
+        const e = engineRef.current;
+        if (!e || !e.model.roofGroup || !e.model.roofGroup.visible) return null;
+        setRay(ev);
+        const hits = raycaster.intersectObjects([e.model.roofGroup], true);
+        for (let h = 0; h < hits.length; h++) {
+          let n = hits[h].object;
+          while (n && !(n.userData && n.userData.dormerWindow)) n = n.parent;
+          if (n) return n;
+        }
+        return null;
+      };
+      // Everything a drag of that window needs, or null when one must not start. Shared by the
+      // hover cursor and by pointerdown, so a "grab" cursor can never promise a drag that then
+      // refuses — the cursor and the gesture answer the same question with the same code.
+      //
+      // THE MAPPING IS SCREEN-SPACE, and it has to be. The window slides along ONE world axis,
+      // and which way that reads under the hand depends entirely on where the camera is: half an
+      // orbit later, "drag right" is world-left, and a handler that assumed screen-right = the
+      // face's +U would send the window the wrong way for every customer who turned the building
+      // round. So the axis is PROJECTED: the window's centre and the far end of its travel become
+      // two pixel positions, and pointer movement is measured along the line between them and
+      // divided by its length. That is one unit of offset per full travel, in whatever direction
+      // the face currently runs on screen, and it needs no re-derivation as the camera moves
+      // because the basis is taken fresh at every grab.
+      const dormerGrab3 = (ev) => {
+        const g = pickDormerWindow3(ev);
+        if (!g) return null;
+        const travelFt = Number(g.userData.travelFt) || 0;
+        // A window that fills its face HAS NOWHERE TO GO, and that is a normal state, not an
+        // error — the fit clamps to the cheeks, so a big window on a narrow dormer lands with
+        // travel exactly 0. Refusing here is both the honest answer and what keeps the divide
+        // below off zero; the gesture falls through to an orbit, which is what a customer who
+        // cannot move something is going to do next anyway.
+        if (!(travelFt > 0.001)) return null;
+        const ax = g.userData.axisLocal || [0, 1];
+        g.updateWorldMatrix(true, false);   // Box3.setFromObject only refreshes the object itself
+        const c0 = new THREE.Box3().setFromObject(g).getCenter(new THREE.Vector3());
+        const axW = new THREE.Vector3(ax[0], 0, ax[1]).transformDirection(g.matrixWorld);
+        const p0 = c0.clone().project(camera);
+        const p1 = c0.clone().addScaledVector(axW, travelFt).project(camera);
+        const rc = canvasRect;
+        const dx = ((p1.x - p0.x) * rc.width) / 2, dy = (-(p1.y - p0.y) * rc.height) / 2;
+        const travelPx = Math.hypot(dx, dy);
+        // SIGHTING ALONG THE FACE — the same degeneracy the wall drag refuses rather than works
+        // around. End-on, the whole range of travel is a few pixels wide, so one pixel of hand
+        // shake throws the window from one cheek to the other. A drag that declines while you are
+        // looking down the face is honest; one that teleports the window is not.
+        if (!(travelPx > 12)) return null;
+        // Where it is NOW, not where it was built. Those differ for one frame after a release:
+        // setDormerWindow queues the rebuild for the next animation frame, so a second grab in
+        // between finds meshes built at the old offset and translated to the new one. Reading the
+        // live translation back off the group means the drag resumes from what is on the screen.
+        const built = Number(g.userData.builtOffset) || 0;
+        const off0 = Math.max(-1, Math.min(1, built + (g.position.x * ax[0] + g.position.z * ax[1]) / travelFt));
+        return { g, ax, travelFt, travelPx, built, off0, off: off0, moved: false,
+                 dirX: dx / travelPx, dirY: dy / travelPx, x0: ev.clientX, y0: ev.clientY };
       };
       // Vertical extent of an opening — item-stamped fields first (Phase 5), then a
       // catalog fixture's own heightIn, then D3 defaults for legacy items. Mirrors
@@ -7245,6 +7354,22 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           // An orbit is starting and hover raycasts pause while a button is
           // held - drop any hover outline so it can't ride along stale.
           if (lastHoverId != null) { lastHoverId = null; highlight.visible = false; dimGroup.visible = false; render(); }
+          // NOTHING IN `items` HERE — but the dormer's window is not in `items` and is draggable
+          // all the same (Ahsan 2026-09-07: "i can not drag it left or right"). Asked LAST, so an
+          // item always wins the gesture and item dragging is untouched; and every refusal —
+          // no window in the dormer, no travel, the face sighted end-on, or "look inside" hiding
+          // the roof — falls straight through to the orbit that used to happen here, without
+          // having stopped the event. Nothing above this line moved: the armed-palette-tool
+          // branch — the only caller of pickWall3 — still returns before we ever get here.
+          const dd = dormPick.id ? dormerGrab3(ev) : null;
+          if (!dd) return;
+          dormDrag = dd;
+          ev.stopImmediatePropagation();
+          ev.preventDefault();
+          controls.enabled = false;
+          setInteractDpr(true);
+          canvas.style.cursor = "grabbing";
+          try { canvas.setPointerCapture(ev.pointerId); } catch (_) { /* synthetic pointer */ }
           return;
         }
         ev.stopImmediatePropagation();
@@ -7273,6 +7398,36 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         queueRebuild(scope);
       };
       const onPtr3Move = (ev) => {
+        if (dormDrag) {
+          const d = dormDrag;
+          // Pointer travel projected onto the face's on-screen direction, in units of "one full
+          // sweep of the dormer" — see dormerGrab3 for why the basis is pixels, not world feet.
+          const t = ((ev.clientX - d.x0) * d.dirX + (ev.clientY - d.y0) * d.dirY) / d.travelPx;
+          const off = Math.max(-1, Math.min(1, d.off0 + t));
+          if (off !== d.off) {
+            d.off = off;
+            d.moved = true;
+            // ⚠️ NO REBUILD PER FRAME, and unlike the item drags below this is not a compromise.
+            // d3DormerWindowFit's w, h and y0 do not depend on the offset — only `off` does — so
+            // sliding the window is a pure TRANSLATION, and moving the group is not an
+            // approximation of the rebuilt geometry, it IS the rebuilt geometry: the same meshes
+            // ending up at the same coordinates. Item drags pay for a rebuild because their
+            // geometry genuinely changes (the wall is re-cut around the moved opening); this one
+            // costs a matrix update. queueRebuild here would tear down and rebuild the whole
+            // model on every move, which is the heaviest path in the file.
+            //
+            // The stale half is the shadow map (autoUpdate is off, and nothing here sets
+            // needsUpdate): the window's small cast shadow on the dormer face lags the drag and
+            // catches up on release, when the commit's rebuild flush marks it. That is the right
+            // trade — the alternative is a full 2048² PCFSoft pass per pointermove for a shadow
+            // the size of a window casing.
+            const m = (off - d.built) * d.travelFt;
+            d.g.position.set(d.ax[0] * m, 0, d.ax[1] * m);
+            render();
+          }
+          ev.preventDefault();
+          return;
+        }
         if (dragging3) {
           const it = liveItems.find((i) => i.id === dragging3.id);
           if (!it) return;
@@ -7473,7 +7628,12 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         if (tool3Ref.current) return;
         if (ev.buttons !== 0) return;
         const hov = pickItem3(ev);
-        canvas.style.cursor = hov ? "grab" : "";
+        // The dormer window is grabbable too, and the cursor is the ONLY thing that can say so:
+        // it is not an item, so placeHighlight has nothing to size and there is no outline to
+        // give it. Ahsan tried to drag it before anyone had told him he could, which is the whole
+        // argument for spending a second raycast here. Asked only when a window is actually in
+        // the dormer, so a style without one — or with no dormer at all — pays nothing.
+        canvas.style.cursor = hov ? "grab" : (dormPick.id && dormerGrab3(ev) ? "grab" : "");
         const hid = hov ? hov.id : null;
         if (hid !== lastHoverId) {
           lastHoverId = hid;
@@ -7484,6 +7644,33 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
       };
       const onPtr3Up = (ev) => {
+        if (dormDrag) {
+          const d = dormDrag;
+          dormDrag = null;
+          controls.enabled = true;
+          setInteractDpr(false);
+          canvas.style.cursor = "";
+          try { canvas.releasePointerCapture(ev.pointerId); } catch (_) { /* not captured */ }
+          if (d.moved) {
+            // THE SAME TWO CALLS THE SLIDER'S `commit` MAKES, in the same order, and both are
+            // load-bearing: setDormerWindow is the live scene (and the rebuild that re-cuts the
+            // geometry from the committed number, which is also what returns the group's local
+            // translation to zero), onDormerWindow is what writes it onto `sel` so the choice
+            // survives a save, a reload and a re-open — and it is what drags the slider's thumb
+            // to where the window now is. Committing only one of the two is precisely how a drag
+            // and a slider begin to disagree about one value.
+            //
+            // The id comes from the LIVE dormPick, never from the drag state: the drag moved a
+            // window, it did not choose one, and dormPick.id is the only thing that knows which.
+            const e = engineRef.current;
+            if (e && e.setDormerWindow) e.setDormerWindow(dormPick.id, d.off);
+            if (onDormerWindow) onDormerWindow(dormPick.id, d.off);
+            capturedRef.current = false;   // the building changed: any earlier shot is stale
+            setShotTaken(false);
+          }
+          render();
+          return;
+        }
         if (!dragging3) return;
         const d = dragging3;
         dragging3 = null;
