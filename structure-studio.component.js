@@ -1275,11 +1275,7 @@ function rampPlacementForDoor(door, rampDepthFt, pW, pH, mgX, mgY, scale) {
 // and C.sizePricing ({styleKey:{sizeLabel:{basePrice,widthFt,lengthFt}}}) — both are
 // present only when the tenant's show_pricing is on (else {} → returns no rows).
 const LAYOUT_PRICE_ORDER = ["singleDoor", "doubleDoor", "window", "workbench", "shelf", "doubleShelf", "loft", "ramp",
-  // Electrical devices price as ordinary "each" layout items. What makes the package work is
-  // that its standard counts join the SAME inclusion netting below — placed minus included,
-  // floored at zero — so "removing one doesn't discount, extras charged per device" needs no
-  // special case anywhere in this file.
-  "outlet", "lightFixture", "lightSwitch"];
+];
 function normSizeLabel(s) { return String(s || "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, ""); }
 function fmtMoney2(n) { const v = Number(n) || 0; const s = "$" + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v < 0 ? "−" + s : s; }
 // Building / Paint Colors / Roof summary for the "Details" section, in the SAME order they appear
@@ -1403,7 +1399,26 @@ function insulationSqft(area, widthFt, lengthFt, wallHeightFt) {
 // electricalAutoCounts is therefore a PRICING INPUT, and submit-estimate recomputes it from the
 // building's dimensions and the tenant's stored standards rather than trusting the browser —
 // the wall-height and insulation lesson. A forged auto=999 would make every extra device free.
+// The three ROLES the package lays out. Each one points at an ordinary electrical item, so a
+// builder prices an outlet the same way they price a ceiling fan (Carolyn 2026-09-03: the two
+// lists were duplicates, and the three devices were the ones NOT following her own two-price
+// rule). A role with no item designated simply lays nothing out.
 const ELECTRICAL_DEVICES = ["outlet", "lightFixture", "lightSwitch"];
+const ELEC_ROLE_POINTER = { outlet: "outletItemId", lightFixture: "lightItemId", lightSwitch: "switchItemId" };
+function elecRoleItemId(cfg, role) {
+  const k = ELEC_ROLE_POINTER[role];
+  return (cfg && k && cfg[k]) ? String(cfg[k]) : null;
+}
+// How many of THIS item the package already covers. Summed across roles rather than looked up,
+// because nothing stops a builder pointing two roles at the same item — and if they do, the
+// package covers both counts of it rather than silently one.
+function elecAutoForItem(cfg, itemId, widthFt, lengthFt) {
+  const counts = electricalAutoCounts(cfg, widthFt, lengthFt);
+  if (!counts || !itemId) return 0;
+  let n = 0;
+  ELECTRICAL_DEVICES.forEach((role) => { if (elecRoleItemId(cfg, role) === String(itemId)) n += counts[role] || 0; });
+  return n;
+}
 const ELECTRICAL_DEVICE_LABEL = { outlet: "Outlet", lightFixture: "Light", lightSwitch: "Light switch" };
 
 function electricalOffered(C) {
@@ -1477,6 +1492,10 @@ function electricalAutoItems(cfg, o) {
       c.width * sc, slabDepthFt(c) * sc, o.pW, o.pH, o.mgX, o.mgY);
     const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
       ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
+      // The item id is what pricing counts, so an auto-placed device must carry it exactly as a
+      // hand-placed one does. `type` IS the id here, but naming it explicitly keeps the pricing
+      // rollup reading one field rather than two shapes.
+      ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
       heightOffFloorIn: heightOffFloorIn != null ? heightOffFloorIn : c.heightOffFloorIn,
       elecAuto: true };
     const others = placed();
@@ -1488,23 +1507,26 @@ function electricalAutoItems(cfg, o) {
 
   // Outlets, evenly around the perimeter. The half-step offset keeps the first one off the
   // corner, where a plug cannot physically go.
-  const per = 2 * (W + L), n = counts.outlet;
+  const outletId = elecRoleItemId(cfg, "outlet");
+  const per = 2 * (W + L), n = outletId ? counts.outlet : 0;
   for (let i = 0; i < n; i++) {
     const p = elecPerimeterPoint((i + 0.5) * (per / n), W, L);
     // "with a workbench they go above the workbench" — the bench does not move the outlet
     // along the wall, it raises it. Height only, so it can never change a count or a price.
     const overBench = electricalBenchWall(placed(), T, p.wall, p.xFt, p.yFt, o);
-    tryWall("outlet", p.xFt, p.yFt, p.wall,
+    tryWall(outletId, p.xFt, p.yFt, p.wall,
       overBench && cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : (cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null));
   }
 
   // Lights down the centre of the length. Free-floating: both attachment guards key on
   // `type === "loft"`, so an unflagged item places anywhere inside the footprint.
-  const lc = T.lightFixture;
+  const lightId = elecRoleItemId(cfg, "lightFixture");
+  const lc = lightId ? T[lightId] : null;
   if (lc) {
     for (let i = 0; i < counts.lightFixture; i++) {
       const yFt = L * (i + 0.5) / counts.lightFixture;
-      out.push({ id: id++, type: "lightFixture", x: o.mgX + (W / 2) * sc, y: o.mgY + yFt * sc,
+      out.push({ id: id++, type: lightId, electricalItemId: lightId,
+        x: o.mgX + (W / 2) * sc, y: o.mgY + yFt * sc,
         widthFt: lc.width, heightFt: lc.height, rotation: 0,
         heightOffFloorIn: lc.heightOffFloorIn, elecAuto: true });
     }
@@ -1519,7 +1541,9 @@ function electricalAutoItems(cfg, o) {
     const d = along * frac;
     const pt = fw === "north" ? { xFt: d, yFt: 0 } : fw === "south" ? { xFt: d, yFt: L }
       : fw === "west" ? { xFt: 0, yFt: d } : { xFt: W, yFt: d };
-    if (tryWall("lightSwitch", pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? Number(cfg.switchHeightIn) : null)) break;
+    const switchId = elecRoleItemId(cfg, "lightSwitch");
+    if (!switchId) break;
+    if (tryWall(switchId, pt.xFt, pt.yFt, fw, cfg.switchHeightIn != null ? Number(cfg.switchHeightIn) : null)) break;
   }
   return out;
 }
@@ -1824,9 +1848,11 @@ function computeSelectionRows(sel, paintColors, C, items) {
       total: showP && elecCfg.price != null ? Number(elecCfg.price) : null,
     });
   }
-  // Builder-catalog electrical items, priced by WHICH MODE the customer is in. Always charged
-  // in full — these are extras by definition, so unlike the standard devices there is nothing
-  // to net them against.
+  // EVERY electrical item, one rule (Carolyn 2026-09-03 — the two lists became one):
+  //     price  = package ? priceWithPackage : priceStandalone
+  //     charge = max(0, placed - covered) * price,  covered = what the package lays out of it
+  // "Removing one doesn't discount it" still falls out of the max(0, …); an item the package
+  // does not lay out simply has covered = 0 and is charged in full, which is what an extra is.
   {
     const hasPkg = !!(sel && sel.electrical);
     const offered = elecItemsOffered(C, hasPkg, true);
@@ -1835,13 +1861,21 @@ function computeSelectionRows(sel, paintColors, C, items) {
     offered.forEach((ei) => {
       const n = counts[ei.id] || 0;
       if (!n) return;
+      const covered = hasPkg ? elecAutoForItem(elecCfg, ei.id, bW, bL) : 0;
+      const chargeable = Math.max(0, n - covered);
       const price = elecItemPrice(ei, hasPkg);
+      if (covered > 0 && chargeable <= 0) {
+        // Wholly covered by the package: shown at zero so the customer can see it IS included
+        // rather than wondering why the thing on their plan has no line.
+        rows.push({ key: "elecItem:" + ei.id, label: ei.name + " (in the package)", qty: n, unit: "included", total: 0, method: "each" });
+        return;
+      }
       rows.push({
         key: "elecItem:" + ei.id,
         label: ei.name,
-        qty: n,
-        unit: price != null ? fmtMoney2(price) + " each" : "",
-        total: showP && price != null ? Math.round(price * n * 100) / 100 : null,
+        qty: chargeable,
+        unit: (price != null ? fmtMoney2(price) + " each" : "") + (covered > 0 ? ` · ${covered} in the package` : ""),
+        total: showP && price != null ? Math.round(price * chargeable * 100) / 100 : null,
         method: "each",
       });
     });
@@ -1995,14 +2029,10 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
     if (q && typeof q === "object" && !Array.isArray(q)) { const o = {}; for (const k in q) o[k] = Math.max(1, Number(q[k]) || 1); return o; }
     const arr = pick(st.sizeInclusions); const o = {}; if (Array.isArray(arr)) for (const k of arr) o[k] = 1; return o;
   })();
-  // The electrical package covers its standard layout, so those counts join the very same
-  // netting a size inclusion uses: the loop below already charges only (placed - included) and
-  // already floors at zero. ADDED to any size inclusion rather than replacing it — a builder
-  // who includes outlets in the base price AND sells the package includes both.
-  if (sel && sel.electrical && electricalOffered(C)) {
-    const auto = electricalAutoCounts(electricalOffered(C), bW, bL);
-    if (auto) for (const k in auto) incForRows[k] = (Number(incForRows[k]) || 0) + auto[k];
-  }
+  // NOTE: electrical no longer joins this netting. The three devices used to be layout items
+  // priced through LAYOUT_PRICE_ORDER, so the package's counts were merged into incForRows;
+  // now every electrical thing is an electrical_item priced by the one rule in
+  // computeSelectionRows, and nothing electrical reaches this loop at all.
 
   const rows = [];
   // Tagged on the way out (see the end of this function) with the same ssRowSection the
@@ -8498,9 +8528,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // by fixture id — so placement, rendering, dragging and delete all work with no new branch.
   // Which items exist depends on whether the package is taken, because the two prices are two
   // independent offers: an item priced only with_package disappears without one.
-  const elecItemTools = (() => {
+  // Built for a GIVEN package state, not just the current one. The auto-layout runs at the
+  // instant the package is switched ON, when `sel.electrical` is still false — and the three
+  // devices are typically offered only WITH a package, so tools built from the old state would
+  // not contain them and the layout would place nothing at all. That was a real bug; the
+  // parameter is what fixes it.
+  const elecToolsFor = (hasPkg) => {
     const out = {};
-    elecItemsOffered(C, !!(sel && sel.electrical), embedded).forEach((it) => {
+    elecItemsOffered(C, hasPkg, embedded).forEach((it) => {
       out[it.id] = {
         label: it.name, icon: it.icon || "\u26a1", color: "#7C3AED",
         shortLabel: (it.name || "ITEM").toUpperCase().slice(0, 5),
@@ -8515,7 +8550,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       };
     });
     return out;
-  })();
+  };
+  const elecItemTools = elecToolsFor(!!(sel && sel.electrical));
   // One palette button per catalog vent, and deliberately NOT a picker. Every other fixture
   // family has one because the popup has a question to ask — which door, which swing, which
   // colour, which of five window sizes. A vent has none of those (no swing, no operation, no
@@ -12122,13 +12158,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const lbl = getDisplayLabel(i.wall, frontWall);
             return { wall: lbl ? lbl.toLowerCase() : i.wall, lengthFt: i.widthFt };
           }),
-          // Electrical devices: plain counts. The server nets these against the standard
-          // layout it recomputes itself, so what matters here is only how many are on the plan.
-          electricalDevices: {
-            outlet: items.filter((i) => i.type === "outlet").length,
-            lightFixture: items.filter((i) => i.type === "lightFixture").length,
-            lightSwitch: items.filter((i) => i.type === "lightSwitch").length,
-          },
           // Counts by catalog id. The SERVER re-reads the price from electrical_items and
           // picks the column from the package state, so nothing here is a price.
           electricalItems: (function () {
@@ -13739,7 +13768,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             setItems((its) => {
               const add = electricalAutoItems(elecCfg, {
                 widthFt: bldgW, lengthFt: bldgH, scale: scale, mgX: mgX, mgY: mgY, pW: pW, pH: pH,
-                itemTypes: ITEMS, existing: its, frontWall: getFrontWall(its), startId: idCounter,
+                // Tools for the state we are moving TO — see elecToolsFor. With the package on,
+                // the devices are offered; with it off they usually are not, so passing the
+                // current ITEMS here placed nothing.
+                itemTypes: { ...ITEMS, ...elecToolsFor(true) },
+                existing: its, frontWall: getFrontWall(its), startId: idCounter,
               });
               idCounter += add.length + 1;
               return its.concat(add);

@@ -827,11 +827,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // They are then merged into includedMap, so the netting and the "(included)" $0 line come
   // from pushItem exactly as they do for a size inclusion. That is the whole reason this rule
   // needed no new pricing code: max(0, placed - included) already IS "removing never discounts".
+  // COVERAGE IS PER ITEM now (206). The three devices became ordinary electrical_items, so
+  // nothing electrical merges into includedMap or prices through pushItem any more — the one
+  // rule below covers every electrical thing:
+  //     price  = package ? price_with_package : price_standalone
+  //     charge = max(0, placed - covered) * price
+  let elecCovered: Record<string, number> = {};
   let electricalPkg: { label: string; price: number; taxable: boolean; includePanel: boolean;
                        panelHeightIn: number; outletSpacingFt: number; lightSpacingFt: number } | null = null;
   if (selections?.electrical === true) {
     const esRes = await supabase.from("electrical_settings")
-      .select("enabled, package_price, package_label, taxable, include_panel, panel_height_in, outlet_spacing_ft, light_spacing_ft")
+      .select("enabled, package_price, package_label, taxable, include_panel, panel_height_in, outlet_spacing_ft, light_spacing_ft, outlet_item_id, switch_item_id, light_item_id")
       .eq("client_id", clientId).maybeSingle();
     // Refuse rather than silently price nothing — the same posture as an unpriced size.
     if (esRes.error) {
@@ -840,7 +846,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const es = esRes.data as {
       enabled: boolean; package_price: number | null; package_label: string | null;
       taxable: boolean | null; include_panel: boolean | null; panel_height_in: number | null;
-      outlet_spacing_ft: number | null; light_spacing_ft: number | null } | null;
+      outlet_spacing_ft: number | null; light_spacing_ft: number | null;
+      outlet_item_id: string | null; switch_item_id: string | null; light_item_id: string | null } | null;
     if (!es || es.enabled !== true) {
       return json({ error: "The electrical package isn't switched on for this account. Turn it on in the portal under Settings → Options → Electrical, then resubmit." }, 400);
     }
@@ -857,8 +864,16 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       lightFixture: Math.max(1, Math.round(buildingDepthFt / lightSp)),
       lightSwitch: 1,
     };
-    for (const k of Object.keys(autoCounts)) {
-      includedMap.set(k, (includedMap.get(k) || 0) + autoCounts[k]);
+    // Roll the role counts onto whichever ITEM each role points at. Summed rather than
+    // assigned: nothing stops a builder pointing two roles at the same item, and if they do the
+    // package should cover both counts of it rather than silently one.
+    const roleItem: Record<string, string | null> = {
+      outlet: es.outlet_item_id, lightFixture: es.light_item_id, lightSwitch: es.switch_item_id,
+    };
+    for (const role of Object.keys(autoCounts)) {
+      const itemId = roleItem[role];
+      if (!itemId) continue;   // no item designated -> the package lays none of these out
+      elecCovered[String(itemId)] = (elecCovered[String(itemId)] || 0) + autoCounts[role];
     }
     electricalPkg = {
       label: es.package_label || "Electrical Package",
@@ -1358,9 +1373,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     pushItem(names, key, shelfDesc, { count: rows.length, lengthFt: totalShelfFt });
   }
   // ── Electrical ─────────────────────────────────────────────────────────────
-  // The package first, then the devices. The devices net against the standard counts merged
-  // into includedMap above, so a plan holding exactly the standard layout produces three
-  // "(included)" $0 lines under the package — which is what the customer should see: the
+  // The package line first; every device and item is then priced by the ONE rule in the items
+  // block below, netting against elecCovered. A plan holding exactly the standard layout
+  // produces "(in the package)" $0 lines under it — which is what the customer should see: the
   // package covers them, and the quote says so item by item.
   if (electricalPkg) {
     const autoOut = Math.max(1, Math.floor(buildingPerimeter / electricalPkg.outletSpacingFt));
@@ -1377,20 +1392,6 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         electricalPkg.includePanel ? `electrical panel included, ${electricalPkg.panelHeightIn}" off the floor` : "no electrical panel",
       ].join(", "),
     }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false }));
-  }
-  {
-    // Counted whether or not the package was taken: without it every device is simply charged,
-    // because includedMap holds nothing for them. That is the a-la-carte case and it needs no
-    // rule of its own.
-    const dev = (summary as Record<string, unknown>).electricalDevices as Record<string, number> | undefined;
-    for (const [key, names] of [
-      ["outlet", ["Outlet", "Receptacle", "Plug"]],
-      ["lightFixture", ["Light", "Light Fixture", "Lighting"]],
-      ["lightSwitch", ["Light Switch", "Switch"]],
-    ] as [string, string[]][]) {
-      const n = Number(dev?.[key]) || 0;
-      if (n > 0) pushItem(names, key, "", { count: n });
-    }
   }
   // ── The builder's own electrical items ─────────────────────────────────────
   // Priced SERVER-SIDE from electrical_items by id — the body sends counts, never money (the
@@ -1425,6 +1426,21 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         if (!ei || !ei.active) {
           return json({ error: "One of the electrical items on this design is no longer in your catalog. Remove it from the layout, or re-add it in the portal under Settings → Options → Electrical." }, 400);
         }
+        // What the package already lays out of THIS item. max(0, …) is what keeps
+        // "removing one doesn't discount it" true, exactly as it was when the devices were
+        // layout items netting against includedMap.
+        const covered = hasPkg ? (elecCovered[id] || 0) : 0;
+        const chargeable = Math.max(0, qty - covered);
+        if (covered > 0 && chargeable <= 0) {
+          // Wholly covered: a $0 line so the customer can see it IS in the package rather than
+          // wondering why something on their plan has no line at all.
+          targetItems.push(tagLine({
+            name: `${ei.name} (in the package)`, qty, amount: 0,
+            priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+            description: "Included in the electrical package",
+          }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
+          continue;
+        }
         const price = hasPkg ? ei.price_with_package : ei.price_standalone;
         if (price == null) {
           return json({ error: hasPkg
@@ -1433,10 +1449,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         }
         targetItems.push(tagLine({
           name: ei.name,
-          qty,
+          qty: chargeable,
           amount: Number(price),
           priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
-          description: hasPkg ? "Added to the electrical package" : "Electrical item",
+          description: covered > 0
+            ? `${covered} in the electrical package, ${chargeable} extra`
+            : (hasPkg ? "Added to the electrical package" : "Electrical item"),
         }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
       }
     }

@@ -316,3 +316,65 @@ Deno.test("the server prices items itself and refuses an unoffered mode", () => 
     "the two prices must never fall back to one another",
   );
 });
+
+// ── ONE list, ONE rule (206) ─────────────────────────────────────────────────
+// The three package devices became ordinary electrical_items, so every electrical thing is now
+// priced by a single expression:
+//     price  = package ? priceWithPackage : priceStandalone
+//     charge = max(0, placed - covered) * price
+// `covered` is what the package lays out OF THAT ITEM — zero for anything it does not place.
+const { elecRoleItemId, elecAutoForItem } = new Function(
+  `${BLOCK}; return { elecRoleItemId, elecAutoForItem };`,
+)() as {
+  elecRoleItemId: (cfg: unknown, role: string) => string | null;
+  elecAutoForItem: (cfg: unknown, itemId: string, w: number, l: number) => number;
+};
+
+const POINTED = { ...CFG, outletItemId: "OUT", switchItemId: "SW", lightItemId: "LT" };
+
+Deno.test("the package covers the item each role points at, and nothing else", () => {
+  // 12x24 -> 12 outlets, 2 lights, 1 switch.
+  assertEquals(elecAutoForItem(POINTED, "OUT", 12, 24), 12);
+  assertEquals(elecAutoForItem(POINTED, "LT", 12, 24), 2);
+  assertEquals(elecAutoForItem(POINTED, "SW", 12, 24), 1);
+  // A ceiling fan is not laid out by the package, so it is covered zero and charged in full.
+  assertEquals(elecAutoForItem(POINTED, "FAN", 12, 24), 0);
+});
+
+Deno.test("a role with no item designated lays nothing out", () => {
+  // The builder has not said which item is an outlet, so the package places no outlets rather
+  // than inventing one — and covers none, so anything they DO place is charged.
+  const noOutlet = { ...POINTED, outletItemId: null };
+  assertEquals(elecRoleItemId(noOutlet, "outlet"), null);
+  assertEquals(elecAutoForItem(noOutlet, "OUT", 12, 24), 0);
+  assertEquals(elecAutoForItem(noOutlet, "LT", 12, 24), 2, "the other roles are unaffected");
+});
+
+Deno.test("two roles on one item cover BOTH counts of it", () => {
+  // Nothing stops a builder pointing outlets and the switch at the same item. If they do, the
+  // package must cover 12 + 1 of it, not silently one of the two.
+  const same = { ...POINTED, switchItemId: "OUT" };
+  assertEquals(elecAutoForItem(same, "OUT", 12, 24), 13);
+});
+
+Deno.test("the rule still means removing one never discounts", () => {
+  const charge206 = (placed: number, covered: number, price: number) => Math.max(0, placed - covered) * price;
+  const covered = elecAutoForItem(POINTED, "OUT", 12, 24);
+  assertEquals(charge206(8, covered, 45), 0, "deleting four of twelve credits nothing");
+  assertEquals(charge206(0, covered, 45), 0, "deleting all of them credits nothing");
+  assertEquals(charge206(15, covered, 45), 135, "three beyond the standard cost three");
+  // An item the package does not lay out is charged from the first one.
+  assertEquals(charge206(1, elecAutoForItem(POINTED, "FAN", 12, 24), 285), 285);
+});
+
+Deno.test("the two prices never fall back to each other", () => {
+  // A builder who priced something only as a package add-on has NOT agreed to sell it alone;
+  // quietly charging the other number would invent a price they never set.
+  const pkgOnly = { id: "BRK", priceWithPackage: 45, priceStandalone: null, withPackage: true, standalone: false };
+  assertEquals(elecItemPrice(pkgOnly, true), 45);
+  assertEquals(elecItemPrice(pkgOnly, false), null);
+  // And it is not even offered in that mode, so the customer cannot reach it.
+  const C206 = { electrical: POINTED, electricalItems: [pkgOnly] };
+  assertEquals(elecItemsOffered(C206, true, true).length, 1);
+  assertEquals(elecItemsOffered(C206, false, true).length, 0);
+});
