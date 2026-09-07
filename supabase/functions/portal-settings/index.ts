@@ -7590,9 +7590,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
 
         const nowIso = () => new Date().toISOString();
-        const setClaim = (patch: Record<string, unknown>) =>
-          admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+        const setClaim = async (patch: Record<string, unknown>) => {
+          const r = await admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
             .eq("client_id", clientId).eq("short_code", shortCode);
+          // Mirror the invoicer onto the design (migration 207) whenever this patch sets one.
+          // The board reads `designs` over PostgREST and cannot see invoice_sends at all, so
+          // this copy is the only way "invoiced by" reaches the Pipeline. Best-effort: the
+          // invoice is the real work and must never fail over an attribution write.
+          if (Object.prototype.hasOwnProperty.call(patch, "sender_user_id")) {
+            const who = operator ? null : (patch.sender_user_id ?? null);
+            await admin.from("designs").update({ invoiced_by_user_id: who })
+              .eq("client_id", clientId).eq("short_code", shortCode)
+              .then(() => undefined, () => undefined);
+          }
+          return r;
+        };
         const STALE_CLAIM_MS = 3 * 60 * 1000;
 
         // Claim — same PK-insert concurrency claim and recovery ladder as the CRM path.
@@ -7913,9 +7925,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
 
     const nowIso = () => new Date().toISOString();
-    const setClaim = (patch: Record<string, unknown>) =>
-      admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+    const setClaim = async (patch: Record<string, unknown>) => {
+      const r = await admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
         .eq("client_id", clientId).eq("short_code", shortCode);
+      // See the twin above: mirror the invoicer onto the design for the Pipeline board.
+      if (Object.prototype.hasOwnProperty.call(patch, "sender_user_id")) {
+        const who = operator ? null : (patch.sender_user_id ?? null);
+        await admin.from("designs").update({ invoiced_by_user_id: who })
+          .eq("client_id", clientId).eq("short_code", shortCode)
+          .then(() => undefined, () => undefined);
+      }
+      return r;
+    };
     // Every GHL call is wrapped: an unhandled fetch rejection would otherwise surface as
     // an opaque 500 with no CORS headers, losing the "invoice was created" warning.
     const ghl = async (url: string, init?: RequestInit) => {
@@ -8025,7 +8046,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // The invoice EXISTS in GHL but was never emailed → re-send it, do not convert.
         resendInvoiceId = prior.invoice_id ? String(prior.invoice_id) : null;
         resendInvoiceNumber = prior.invoice_number ? String(prior.invoice_number) : null;
-        resendSenderUserId = prior.sender_user_id ? String(prior.sender_user_id) : null;
+        // ⛔ DELIBERATELY NOT `prior.sender_user_id` any more (2026-09-07). That column is the
+        // PORTAL user who raised the invoice — the commission earner — and this variable is a
+        // GoHighLevel API parameter naming which GHL user the email appears to come from. They
+        // were the same field for as long as the GHL branch wrote a GHL id into it; the moment
+        // it holds a real auth uid, seeding this from it posts a Supabase uuid to GHL's users
+        // API and the resend fails. The GHL user is resolved fresh below instead.
+        resendSenderUserId = null;
         if (!resendInvoiceId) return json({ error: "An invoice was created in your CRM for this design but its id wasn't recorded — send it from your CRM." }, 409);
       } else if (st === "claimed") {
         const age = Date.now() - new Date(String(prior.updated_at)).getTime();
@@ -8068,14 +8095,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({ error: `The customer hasn't accepted this estimate yet (status: ${estStatus || "sent"}).` }, 400);
       }
 
-      // ── 3. Resolve the sender BEFORE converting (GHL: "either userId or sentFrom"). ──
-      let userId = String(est?.sentBy ?? "");
-      if (!userId) {
+      // ── 3. Resolve the GHL sender BEFORE converting (GHL: "either userId or sentFrom"). ──
+      //
+      // ⚠️ RENAMED FROM `userId` ON 2026-09-07, AND THE OLD NAME WAS THE BUG. A local `userId`
+      // here SHADOWED the caller's own `userId` from r.ctx (destructured at the top of this
+      // file), so `sender_user_id: userId` a few lines down stored a GOHIGHLEVEL user id in a
+      // column that portal-commissions reads as the commission earner. Two different kinds of
+      // id in one column, and the wrong one winning on every GHL-issued invoice.
+      //
+      // What it cost, measured 2026-09-07: 10 of 10 GHL invoices carried a GHL id, none of
+      // which matches a portal user, so portal-commissions:858 (`!teamSet.has(earner)`)
+      // discarded every one. Live state at the time: 21 commission_entries, 3 with an earner,
+      // ZERO with an amount. Nobody had been credited for a sale since invoicing began.
+      //
+      // This value is still a GHL id and MUST stay one — it is an argument to GHL's own API,
+      // naming which of their users the email appears to come from. It is not a person in this
+      // product. Never store it as an actor.
+      let ghlSenderId = String(est?.sentBy ?? "");
+      if (!ghlSenderId) {
         const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
         const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
-        userId = String(users[0]?.id ?? "");
+        ghlSenderId = String(users[0]?.id ?? "");
       }
-      if (!userId) {
+      if (!ghlSenderId) {
         // Fail fast: converting first would leave an un-sendable invoice behind.
         await setClaim({ status: "failed", error: "no GHL user to send as" });
         return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then try again. (Nothing was invoiced.)" }, 400);
@@ -8100,17 +8142,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       // Record it IMMEDIATELY: from here on the invoice exists in GHL, so even if the
       // email fails (or this function dies) the retry re-sends instead of converting.
-      await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId });
+      // `userId` here is the OUTER one again — the portal user who pressed send, from r.ctx.
+      // That is who invoiced this, and who commissions pays.
+      await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId ?? null });
 
       // ── 5. Email it to the customer — own-domain branch first, GHL's email otherwise.
       //    tryOwnDomainEmail returning false (whatever the reason) lands on the stock GHL
       //    send below unchanged; if send_manually already ran, that second send call is
       //    idempotent (verified live 2026-08-10). ──
-      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, ghlInvoiceTotal);
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, ghlSenderId, ghlInvoiceTotal);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
           method: "POST", headers: ghlHeaders,
-          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId: ghlSenderId }),
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
@@ -8123,23 +8167,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     } else {
       // ── Recovery path: the invoice already exists, only the email is outstanding.
       //    Reuse the sender recorded on the first attempt when we have it. ──
-      let userId = resendSenderUserId || "";
-      if (!userId) {
+      // Same rename, same reason as the block above: a GHL API parameter, not an actor.
+      let ghlSenderId = resendSenderUserId || "";
+      if (!ghlSenderId) {
         const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
         const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
-        userId = String(users[0]?.id ?? "");
+        ghlSenderId = String(users[0]?.id ?? "");
       }
-      if (!userId) {
+      if (!ghlSenderId) {
         return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
       }
       // Own-domain branch first here too — the recovery is only ever about the EMAIL
       //  (the invoice already exists), so the same rule applies: our branded send when the
       //  tenant is Resend-active, the stock GHL email as the unchanged fallback.
-      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, null);
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, ghlSenderId, null);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
           method: "POST", headers: ghlHeaders,
-          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId: ghlSenderId }),
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
