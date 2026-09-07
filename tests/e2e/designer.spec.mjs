@@ -93,3 +93,115 @@ test("designer on a phone viewport has no horizontal scroll", async ({ browser }
   expect(dims.sw, `scrollWidth ${dims.sw} vs clientWidth ${dims.cw}`).toBeLessThanOrEqual(dims.cw + 1);
   await ctx.close();
 });
+
+// ── SELECTION MUST SURVIVE THE CLICK THAT MAKES IT ───────────────────────────────────────
+// The regression this exists for (Carolyn, 2026-09-06: "the workbench and shelves can't be
+// resized at all"): the wall-elevation panel was a flex-ROW sibling of the plan, so selecting
+// a wall item made the plan jump 131px sideways mid-gesture. getSvgPt reads
+// getBoundingClientRect() LIVE, so the trailing click hit-tested 131px away, missed, and
+// deselected. The stretch grips rendered on mousedown and were gone before anyone could grab
+// one -- which also silently killed Rotate, Delete, Swap and Center for every wall item.
+//
+// It went unnoticed because NOTHING IN THIS SUITE EVER SELECTED AN ITEM. Placement alone
+// passes straight through the bug. Two assertions matter and neither is optional: the plan's
+// own x must not move across the selection, and the grips must still be on screen AFTER the
+// click, not merely during it.
+//
+// The threshold scaled with item width -- a 6ft double door survived, a 4ft workbench did not
+// -- so a wide item is not evidence the bug is gone. Keep this on the workbench.
+// designerItems() projects only type/wall/x/y, so a width assertion has to read the state
+// itself. Same fiber walk, one more field.
+async function workbenchWidthFt(page) {
+  return page.evaluate(() => {
+    const root = document.getElementById("root");
+    const k = Object.keys(root).find((x) => x.startsWith("__reactContainer"));
+    const q = [root[k]]; let n = 0;
+    while (q.length && n < 60000) {
+      const f = q.shift(); n++; if (!f) continue;
+      const nm = f.type && (f.type.name || f.type.displayName);
+      if (nm === "StructureStudioInner") {
+        let h = f.memoizedState;
+        while (h) {
+          const v = h.memoizedState;
+          if (Array.isArray(v) && v.length && v[0] && typeof v[0] === "object" && "type" in v[0] && ("x" in v[0] || "wall" in v[0])) {
+            const wb = v.filter((i) => i.type === "workbench")[0];
+            return wb ? wb.widthFt : null;
+          }
+          h = h.next;
+        }
+        return null;
+      }
+      if (f.child) q.push(f.child);
+      if (f.sibling) q.push(f.sibling);
+    }
+    return null;
+  });
+}
+
+test("selecting a wall item keeps it selected, and the workbench can be stretched", async ({ page }) => {
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
+
+  const chrome = () => page.evaluate(() => {
+    const svg = [...document.querySelectorAll("svg")].find((s) => /ft/.test(s.textContent || ""));
+    const texts = [...svg.querySelectorAll("text")].map((t) => t.textContent.trim());
+    return {
+      grips: texts.filter((t) => t === "◄" || t === "►").length,
+      selected: [...svg.querySelectorAll('rect[stroke-dasharray="4 2"]')].length,
+      planX: Math.round(svg.getBoundingClientRect().x * 10) / 10,
+    };
+  });
+
+  await arm(page, /Workbench/);
+  await clickPlan(page, 5, 0);
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "workbench" })]));
+  const planXBefore = (await chrome()).planX;
+
+  await clickPlan(page, 5, 0);                       // select it
+  const sel = await chrome();
+  expect(sel.selected, "the workbench is still selected after the click that selected it").toBe(1);
+  expect(sel.grips, "both stretch grips are on screen AFTER the click, not just during it").toBe(2);
+  expect(sel.planX, "the plan must not move when an item is selected").toBe(planXBefore);
+
+  // Stretch it by dragging the right-hand grip, and prove widthFt actually changed.
+  const beforeW = await workbenchWidthFt(page);
+  const grip = await page.evaluate(() => {
+    const svg = [...document.querySelectorAll("svg")].find((s) => /ft/.test(s.textContent || ""));
+    const a = [...svg.querySelectorAll("text")].filter((t) => t.textContent.trim() === "►")[0];
+    const b = a.getBoundingClientRect();
+    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+  });
+  await page.mouse.move(grip.x, grip.y);
+  await page.mouse.down();
+  await page.mouse.move(grip.x + 70, grip.y, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(() => workbenchWidthFt(page), { timeout: 10_000 }).not.toBe(beforeW);
+});
+
+// The plan is the SIMPLE layout: the grid carries the measuring, and per Carolyn 2026-09-06
+// the along-wall dimension chips do not belong on it (3b899bb put them there; the 3D has them
+// instead now).
+//
+// The assertion is "selecting must not ADD dimensions", NOT "the plan has no feet-inches text
+// anywhere". An item carries its own size label - a workbench reads 4' 0" - which long predates
+// this complaint and is not what she objected to. An absolute check trips on that label and
+// would push the next person into deleting the wrong thing.
+test("selecting a wall item draws no dimension chips on the plan", async ({ page }) => {
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
+  const ftIn = () => page.evaluate(() => {
+    const svg = [...document.querySelectorAll("svg")].find((s) => /ft/.test(s.textContent || ""));
+    return [...svg.querySelectorAll("text")].map((t) => t.textContent.trim())
+      .filter((t) => t.indexOf("'") > 0).sort();
+  });
+  await arm(page, /Workbench/);
+  await clickPlan(page, 5, 0);
+  const unselected = await ftIn();
+  await clickPlan(page, 5, 0);
+  const selected = await ftIn();
+  expect(selected, "selecting an item must not paint new dimensions on the plan").toEqual(unselected);
+});
