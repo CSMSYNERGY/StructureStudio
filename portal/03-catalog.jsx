@@ -3859,6 +3859,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
+    // Height off the floor rides for DOORS as well since 2026-09-04 — a loft door is an
+    // ordinary door row whose sill is not zero (Carolyn @27:16: "that loft door goes with the
+    // doors"). sillMode stays a WINDOW-only key on purpose: portal-settings pins every door to
+    // 'fixed', so sending one would be a value the save throws away, and a payload field the
+    // server ignores is a field the next reader believes.
+    ...(isDoorCat ? { sillIn: ftInToInches(r.sill_in) } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
     taxable: r.taxable !== false,
   });
@@ -3983,8 +3989,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // ── Excel round-trip. ASCII-only headers (a “×” becomes mojibake in Excel and the column
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
+  // "Height off floor" appears in BOTH lists since 2026-09-04 — the door sheet needs it so a
+  // builder can set loft-door heights in bulk (see the edit panel). Adding a column is safe
+  // for anyone holding an older sheet: import matches columns BY NAME and an absent one is
+  // left untouched, so an old export re-imports exactly as it always did.
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
     : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
@@ -3998,7 +4008,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
     : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
@@ -4118,8 +4128,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         }
         // Height off floor / Placement (139), same absent-column-leaves-it-alone contract.
         // A BLANK cell is meaningful here and is not the same as an absent column: blank
-        // means "the standard 3'6"", so it goes over as null rather than being skipped.
-        if (isWindowCat && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
+        // means "the standard 3'6"" for a window and "on the floor" for a door, and either
+        // way it goes over as null rather than being skipped.
+        //
+        // Doors read the same column since 2026-09-04 (Carolyn's loft door) — the Placement
+        // column below stays window-only, because portal-settings pins every door to 'fixed'
+        // and importing a 'variable' onto one would be a value the save silently discards.
+        if ((isWindowCat || isDoorCat) && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
         if (isWindowCat && iSillMode >= 0) {
           row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
         }
@@ -4202,6 +4217,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
       parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
+    // A raised DOOR says so on its row. It is the one field that separates a loft door from a
+    // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
+    // one they got wrong should not have to open each row to find it. Only when set, so an
+    // ordinary door's summary line is unchanged.
+    if (isDoorCat && String(r.sill_in || "").trim()) parts.push(`${String(r.sill_in).trim()} off the floor`);
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -4340,7 +4360,19 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           </div>
         </div>
       )}
-      {isWindowCat && (
+      {/* Height off the floor — ONE control for windows and doors since 2026-09-04, not two.
+          Carolyn's LOFT DOOR is a category='door' fixture that hangs high on a gable end
+          (@24:43 "it's called a loft door"; @27:16 "that loft door goes with the doors"), and
+          how far up IS the whole difference between it and a walk door. It is the same
+          question a window's sill answers, stored in the same column, so it is asked with the
+          same field rather than a parallel one that could drift in wording or units.
+
+          The PLACEMENT select stays window-only. 'variable' lets a shopper slide the opening
+          up and down the wall in 3D — Carolyn's transom — and a loft door's height is set by
+          where the builder's loft floor is, not by the customer. portal-settings pins every
+          door to 'fixed' on save, so offering the select here would be a control whose value
+          the server discards. */}
+      {(isWindowCat || isDoorCat) && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
             <div>
@@ -4353,22 +4385,29 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
                   catch it; width and height only survive the same typo because the server
                   rejects a null width. */}
               <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value.replace(/\s/g, "") })}
-                placeholder={`standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
+                placeholder={isDoorCat ? `on the floor` : `standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
             </div>
-            <div>
-              <div style={fldLbl}>Placement</div>
-              <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
-                onChange={(e) => setDraft({ sill_mode: e.target.value })}
-                style={{ ...S.input, minWidth: 0 }}>
-                <option value="fixed">Fixed at this height</option>
-                <option value="variable">Customer can slide it up and down</option>
-              </select>
-            </div>
+            {isWindowCat && (
+              <div>
+                <div style={fldLbl}>Placement</div>
+                <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
+                  onChange={(e) => setDraft({ sill_mode: e.target.value })}
+                  style={{ ...S.input, minWidth: 0 }}>
+                  <option value="fixed">Fixed at this height</option>
+                  <option value="variable">Customer can slide it up and down</option>
+                </select>
+              </div>
+            )}
           </div>
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {edit.draft.sill_mode === "variable"
-              ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
-              : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
+            {/* The door hint names the loft door outright. A builder reading "height off
+                floor" on a DOOR would reasonably assume it was a mistake, or a threshold
+                allowance, unless the field says what it is for. */}
+            {isDoorCat
+              ? `Leave blank for a normal door on the floor. Fill it in for a loft door — e.g. 7'6" puts it up on the gable end, above the walk door, with no ramp and no swing arc on the plan.`
+              : edit.draft.sill_mode === "variable"
+                ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
+                : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
           </div>
         </div>
       )}

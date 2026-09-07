@@ -184,21 +184,54 @@ function getNearestWall(x, y, pW, pH, mgX, mgY) {
   return walls[0].wall;
 }
 
+// ⚠️ REWRITTEN 2026-09-04 FOR THE LOFT DOOR, and the rule it replaced is written out here
+// rather than deleted, because it was RIGHT for as long as every door stood on the floor. It
+// was: "Only check doors on the same wall" — an overlap along the wall axis and nothing
+// else. With one plane to share, two bars that overlap in plan really are in each other's
+// way, so a purely 2D test was not an approximation; it was the whole truth.
+//
+// The loft door breaks that (Carolyn 2026-09-04 — see doorSillStamps). It sits high on a
+// gable end, and the arrangement builders actually put on a barn is a loft door DIRECTLY
+// ABOVE the walk door: same wall, same span, exactly the overlap the old rule refused. So it
+// would have made the feature unusable on the one wall it exists for, and it would have done
+// it with a toast that says nothing is wrong.
+//
+// The root cause was never the pad or the type list — it is that A PLAN VIEW HAS NO UP. The
+// fix is therefore to ask for the missing axis, not to weaken the horizontal one: two
+// openings clash when they overlap ALONG the wall AND their vertical bands overlap.
+// ssItemVBand is that band, and it is the same one the wall elevation prints, so a refusal
+// and the drawing beside it can never disagree about what is where.
+//
+// ⚠️ AN UNKNOWN BAND STILL REFUSES. ssItemVBand returns null when nothing on an item says
+// where it sits vertically, and null has to keep meaning "assume they clash" — the old
+// answer — never "let it through". Widening a placement rule on missing data is how a
+// legal-looking plan reaches a shop floor.
+//
+// The CANDIDATE's band is read with itemTypes[ni.type], not with `nc`: most callers pass a
+// bare { width: wFt } as nc, which carries no wallOnly flag, and reading the band off that
+// would return null for every door and quietly restore the old behaviour everywhere.
 function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   if (!ni.wall) return false;
   const niw = (ni.widthFt || nc.width) * sc;
+  // wallHeightFt is deliberately not threaded in. The only band that reads it is a vent's,
+  // measured DOWN from the plate, and the 8 ft default puts a vent LOWER than a taller wall
+  // would — so a tenant on 10 ft walls errs toward refusing, which is the safe direction.
+  const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes);
   for (const it of existing) {
     const c = itemTypes[it.type];
     if (!c || !c.wallOnly || it.type === "window") continue;
-    // Only check doors on the same wall
+    // Same wall, or they can never touch.
     if (it.wall !== ni.wall) continue;
     const iw = (it.widthFt || c.width) * sc;
-    // Check overlap along the wall axis
-    if (ni.wall === "north" || ni.wall === "south") {
-      if (Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4) return true;
-    } else {
-      if (Math.abs(ni.y - it.y) < (niw / 2) + (iw / 2) + 4) return true;
-    }
+    const along = (ni.wall === "north" || ni.wall === "south")
+      ? Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4
+      : Math.abs(ni.y - it.y) < (niw / 2) + (iw / 2) + 4;
+    if (!along) continue;
+    // Flush is allowed (<=, not <): a loft door whose sill sits exactly on the walk door's
+    // head is one framed opening over another sharing a header, which is how they are built.
+    const itBand = ssItemVBand(it, c, itemTypes);
+    if (niBand && itBand && (niBand.topFt <= itBand.bottomFt || itBand.topFt <= niBand.bottomFt)) continue;
+    return true;
   }
   return false;
 }
@@ -267,6 +300,19 @@ function slabDepthFt(cfg, it) {
 // the workbench silently succeeded and produced exactly the layout that toast exists to
 // prevent, rasterized into the PDF and sent to the shop. `cand` is the placing item when the
 // caller is itself a slab; a wallOnly caller passes nothing and blocks the full height.
+// ⚠️ KNOWN GAP, left open deliberately on 2026-09-04 rather than found again later. A
+// wallOnly caller passes no `cand`, so its candidate band defaults to full height and a
+// RAISED door (Carolyn's loft door — see doorSillStamps) is still refused above a workbench
+// or a low shelf, which is a legal arrangement. checkDoorCollision above now answers the
+// other direction correctly, so the invariant is currently enforced ASYMMETRICALLY — the
+// exact fault this function's own comment was written to fix, one level up.
+//
+// The fix is not in here: the band machinery already works. It is that the ~11 wallOnly call
+// sites must each pass the candidate they already hold, and this function must fall back to
+// ssItemVBand (feet) when ssSlabBand (INCHES) returns null for a non-slab. Not done in this
+// change because it touches every placement path in two hand-mirrored files with no way to
+// exercise them, and the failure it leaves behind is an honest, actionable toast ("A
+// workbench is on that wall") rather than a wrong drawing.
 function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
   if (!sn.wall) return false;
   const candBand = (cand && ssSlabBand(cand, itemTypes)) || [0, 1e4];
@@ -517,9 +563,20 @@ function noteEdgePoint(cx, cy, w, h, tx, ty) {
 function getFrontWall(items) {
   // Catalog fixture doors count as doors too; a double-leaf (built-in doubleDoor, or a
   // fixture whose operation is "double") wins over a single, same as before.
-  const doubles = items.filter((i) => i.wall && (i.type === "doubleDoor" || (i.type === "fixtureDoor" && i.operation === "double")));
+  //
+  // ⚠️ A RAISED DOOR DOES NOT VOTE (Carolyn's loft door, 2026-09-04 — see doorSillStamps).
+  // This function is how a building learns which side is its FRONT, and every user-facing
+  // wall label plus every front/back/left/right field in the submit payload keys off that.
+  // A loft door hangs high on a GABLE END — the one wall a shed's front is never on — so
+  // letting it vote would silently rotate the customer's building: the wall their walk door
+  // is on stops being called FRONT and the estimate follows it. Nothing would look broken.
+  //
+  // A building whose ONLY door is a loft door therefore has no front, which is exactly the
+  // answer a building with no doors at all already gets.
+  const grounded = items.filter((i) => !ssDoorSillFt(i));
+  const doubles = grounded.filter((i) => i.wall && (i.type === "doubleDoor" || (i.type === "fixtureDoor" && i.operation === "double")));
   if (doubles.length > 0) return doubles[0].wall;
-  const singles = items.filter((i) => i.wall && (i.type === "singleDoor" || i.type === "fixtureDoor"));
+  const singles = grounded.filter((i) => i.wall && (i.type === "singleDoor" || i.type === "fixtureDoor"));
   if (singles.length > 0) return singles[0].wall;
   return null;
 }
@@ -803,6 +860,44 @@ function windowSillStamps(fx) {
     sillMode: (fx && fx.sillMode === "variable") ? "variable" : "fixed",
   };
 }
+// The DOOR twin, and the whole of Carolyn's LOFT DOOR (2026-09-04 @24:43). Pointing at a
+// small opening high on a gable end: "that's a door ... it's a small, it's called a loft
+// door ... A lot of them have that. So consider it the same thing as a vent, or it might be
+// a door. Some of them just put trim on it." Asked where it belongs she was unambiguous
+// (@27:16): "that loft door goes with the doors."
+//
+// So a loft door is NOT a category and NOT a flag: it is an ordinary category='door' fixture
+// whose height off the floor is not zero. The height IS the distinction, and an is_loft_door
+// boolean beside it would be a second source of truth for one fact.
+//
+// Not windowSillStamps under another name, and the difference is the MODE. A door is always
+// 'fixed'. 'variable' exists so a shopper can slide a transom up and down the wall; a loft
+// door's height is set by where the builder's loft floor is, which is not a customer's
+// choice. Pinning it here keeps the 3D vertical drag's `type === "window"` test the whole
+// rule instead of one of three places that have to agree — portal-settings forces the column
+// the same way, and the catalog UI accordingly offers doors the height field and no
+// placement select.
+//
+// > 0 rather than windowSillStamps' >= 0, deliberately. For a WINDOW, 0 and null are
+// different answers (null = "use the 3'6\" standard", 0 = "at the floor"); for a door the
+// standard IS the floor, so both mean the same thing and both stamp undefined — which is
+// what keeps an ordinary walk door's saved JSON byte-identical to what it is today.
+function doorSillStamps(fx) {
+  const s = Number(fx && fx.sillIn);
+  return {
+    sillFt: (fx && fx.sillIn != null && Number.isFinite(s) && s > 0) ? s / 12 : undefined,
+    sillMode: "fixed",
+  };
+}
+// How far off the floor a placed DOOR sits, in feet, and 0 for every door standing on it.
+// ONE reader for the four rules a raised door changes — the front-wall pick, the ramp pool,
+// the plan glyph's swing arc, and the plan label — so "is this a loft door?" is answered in
+// one place rather than by four `sillFt > 0` tests that can drift apart. Callers filter to
+// door types first; this only answers how high.
+function ssDoorSillFt(it) {
+  const s = Number(it && it.sillFt);
+  return Number.isFinite(s) && s > 0 ? s : 0;
+}
 // Everything a placed VENT snapshots beyond the position/size fields every wall item carries.
 // ONE helper for both placement paths (the 2D included chip and the 3D viewer) on purpose: the
 // sill bug documented just above failed by missing exactly one of those two sites, and a vent
@@ -873,15 +968,27 @@ function fixtureDoorOut(item) {
   const outBase = item.wall === "north" || item.wall === "east";
   return item.swing === "in" ? !outBase : outBase;
 }
+// ⚠️ A RAISED DOOR DRAWS NO SWING ARC (Carolyn's loft door, 2026-09-04 — see doorSillStamps).
+// The arc is not decoration: it is the floor area the leaf sweeps, which is why the shop
+// keeps that area clear. A door 7'6" up a gable end sweeps no floor at all, so drawing one
+// claims a clearance that does not exist AND hides the one that does — the walk door
+// directly below it, whose arc is now the only one on that span.
+//
+// What is left is the bar and the label, and the label carries the height (see the plan text
+// in the item map), which is the fact a plan actually needs about a loft door. A double's
+// centre line stays: it is the two LEAVES meeting, not a floor sweep.
+// Canvas twin in fixtureDoorCanvas — CLAUDE.md's "two rendering paths" rule is these two.
 function fixtureDoorSVG(item, iw, color) {
   const stroke = color + "60", op = item.operation, out = fixtureDoorOut(item);
+  const raised = ssDoorSillFt(item) > 0;
   if (op === "slideup") {
     return <g>{[-iw / 4, 0, iw / 4].map((lx, k) => <line key={k} x1={lx} y1={-5} x2={lx} y2={5} stroke="#FFF" strokeWidth={1.5} />)}</g>;
   }
   if (op === "double") {
     const r = iw * 0.4, s = out ? -1 : 1;
-    return (<><path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><path d={`M ${iw / 2 - r} 0 A ${r} ${r} 0 0 ${out ? 1 : 0} ${iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><line x1={0} y1={-5} x2={0} y2={5} stroke="#FFF" strokeWidth={1.5} /></>);
+    return (<>{!raised && <><path d={`M ${-iw / 2 + r} 0 A ${r} ${r} 0 0 ${out ? 0 : 1} ${-iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /><path d={`M ${iw / 2 - r} 0 A ${r} ${r} 0 0 ${out ? 1 : 0} ${iw / 2} ${s * r}`} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray="4 3" /></>}<line x1={0} y1={-5} x2={0} y2={5} stroke="#FFF" strokeWidth={1.5} /></>);
   }
+  if (raised) return null;
   const r = iw * 0.8, rightHinge = op === "right", ey = out ? -r : r;
   const sx = rightHinge ? iw / 2 - r : -iw / 2 + r, ex = rightHinge ? iw / 2 : -iw / 2;
   const sweep = rightHinge ? (out ? 1 : 0) : (out ? 0 : 1);
@@ -889,6 +996,9 @@ function fixtureDoorSVG(item, iw, color) {
 }
 function fixtureDoorCanvas(ctx, item, iw, color) {
   const op = item.operation, out = fixtureDoorOut(item);
+  // No floor sweep to draw for a door that is up the wall — see fixtureDoorSVG, whose
+  // reasoning this branch exists to mirror exactly.
+  const raised = ssDoorSillFt(item) > 0;
   if (op === "slideup") {
     ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5;
     [-iw / 4, 0, iw / 4].forEach((lx) => { ctx.beginPath(); ctx.moveTo(lx, -5); ctx.lineTo(lx, 5); ctx.stroke(); });
@@ -897,11 +1007,16 @@ function fixtureDoorCanvas(ctx, item, iw, color) {
   ctx.strokeStyle = color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
   if (op === "double") {
     const r = iw * 0.4;
-    ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke();
-    ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
+    if (!raised) {
+      ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke();
+      ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke();
+    }
     ctx.setLineDash([]); ctx.strokeStyle = "#FFF"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(0, 5); ctx.stroke();
     return;
   }
+  // The dash pattern is set above and must be cleared on every exit, or the next item drawn
+  // on this context inherits it.
+  if (raised) { ctx.setLineDash([]); return; }
   const r = iw * 0.8, rightHinge = op === "right";
   if (rightHinge) { ctx.beginPath(); ctx.arc(iw / 2, 0, r, Math.PI, out ? 3 * Math.PI / 2 : Math.PI / 2, !out); ctx.stroke(); }
   else { ctx.beginPath(); ctx.arc(-iw / 2, 0, r, 0, out ? -Math.PI / 2 : Math.PI / 2, out); ctx.stroke(); }
@@ -983,6 +1098,18 @@ function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
     if (isVentItem(item)) { const s = ssVentSpan(item, wallHeightFt); return { bottomFt: s[0], topFt: s[1] }; }
     const def = d3OpeningDefaults(item.type) || {};
     let h = Number(item.openingHeightFt != null ? item.openingHeightFt : def.openingHeightFt);
+    // ⚠️ A CATALOG FIXTURE'S OWN heightIn, added 2026-09-04. It carries its real size there and
+    // no Phase 5 stamp, so the line below used to hand every one of them the GENERIC default:
+    // openingSpan cut a 7 ft roll-up's hole at 7 ft while this printed 6'6", and a 24" catalog
+    // window read 3 ft. The two have disagreed since catalog fixtures existed — quietly,
+    // because both numbers are plausible and neither view shows the other's.
+    //
+    // This is now the same fallback ORDER openingSpan uses (stamp, then heightIn, then the
+    // default), which is what this function's header means by the printed height and the cut
+    // hole agreeing. It also makes the band load-bearing rather than decorative:
+    // checkDoorCollision reads it, and a roll-up understated by half a foot would let a loft
+    // door be placed into the top of it.
+    if (!isFinite(h) || h <= 0) { const hi = Number(item.heightIn); if (hi > 0) h = hi / 12; }
     if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : D3.DOOR_H;
     let sill = Number(item.sillFt != null ? item.sillFt : def.sillFt);
     if (!isFinite(sill) || sill < 0) sill = 0;
@@ -3640,7 +3767,12 @@ function d3SwatchCssBuiltIn(label, fallback) {
 function d3OpeningDefaults(type) {
   if (type === "window") return { openingHeightFt: D3.WINDOW_H, sillFt: D3.WINDOW_SILL };
   if (type === "roughOpening") return { openingHeightFt: D3.RO_H };
-  if (type === "singleDoor" || type === "doubleDoor") return { openingHeightFt: D3.DOOR_H };
+  // sillFt: 0 is STATED rather than left absent, so the door branch has the same shape as
+  // the window branch above. Both readers already default an absent sill to the floor, so
+  // this moves no pixel today; what it changes is that "a door sits at 0" is now written
+  // down beside the door height instead of being an assumption spread across two renderers —
+  // which is how openingSpan came to hard-code the floor and keep it for as long as it did.
+  if (type === "singleDoor" || type === "doubleDoor") return { openingHeightFt: D3.DOOR_H, sillFt: 0 };
   return {};
 }
 
@@ -4596,7 +4728,25 @@ function buildShed3DModel(THREE, p) {
     }
     if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
     // singleDoor / doubleDoor / fixtureDoor (every catalog door placement)
-    return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
+    //
+    // ⚠️ THE FLOOR USED TO BE HARD-CODED HERE, and the old line is kept because it was right
+    // for every door this product could sell until 2026-09-04:
+    //     return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
+    // That leading 0 was the floor, and no door had anywhere else to be.
+    //
+    // Carolyn's LOFT DOOR is the exception (see doorSillStamps) — a category='door' fixture
+    // that hangs high on a gable end. It reads its sill exactly the way the window branch
+    // three lines up does, INCLUDING the same drop-down clamp for a tall opening on a short
+    // wall: the customer can pick a 6 ft wall in this very modal, and a door pinned at 7'6"
+    // would otherwise push its header through the roof and skip the header segment entirely.
+    //
+    // A door with no sill still returns [0, h], byte-identical to the old line — an absent
+    // sillFt is 0, and 0 + h can never exceed maxTop once h is clamped, so the clamp below
+    // cannot fire for any door that exists today.
+    const dh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop);
+    let d0 = it.sillFt > 0 ? it.sillFt : 0;
+    if (d0 + dh > maxTop) d0 = Math.max(0, maxTop - dh);
+    return [d0, d0 + dh];
   };
 
   // One wall's segments + opening groups, buildable in isolation: the live
@@ -4908,6 +5058,17 @@ function buildShed3DModel(THREE, p) {
         // lap-textured slab below, unchanged, which is what keeps every existing design identical.
         const dStyle = fixtureDoorStyle(o.it);
         const plank = dStyle === "rollup" || (dStyle !== "auto" && o.it.operation !== "slideup");
+        // ⚠️ EVERY VERTICAL NUMBER BELOW IS MEASURED FROM o.y0, NOT FROM THE FLOOR, and that
+        // is the 2026-09-04 loft-door change. These two read `0.05` and `o.y1 - 0.05` — "a
+        // hair off the floor", "a hair under the head" — which was true while openingSpan
+        // returned 0 for every door. It no longer does, and a door whose slab is drawn at the
+        // floor while its opening is cut at 7'6" is a hole in the customer's building with
+        // the door lying on the ground beneath it.
+        //
+        // Both branches share them deliberately: the plank path used to own y0d/y1d while the
+        // parametric path spelled the same two numbers out four more times, which is exactly
+        // how one of them gets missed.
+        const y0d = o.y0 + 0.05, y1d = o.y1 - 0.05;
         if (plank) {
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           // A two-tone catalog door frames itself in the SAME trim colour its casing already
@@ -4916,7 +5077,6 @@ function buildShed3DModel(THREE, p) {
           // as one piece of wood rather than a panel stuck inside a border.
           const frameMat = o.it.trimColorHex ? mat(o.it.trimColorHex) : doorMat;
           const ironMat = mat("#23272E", { metalness: 0.55, roughness: 0.42 });
-          const y0d = 0.05, y1d = o.y1 - 0.05;
           if (dStyle === "rollup") {
             // ONE curtain across the whole opening even at a "double" width: a 10 ft roll-up is
             // one door in one track, and splitting it at the centre would draw a pair of garage
@@ -4950,28 +5110,41 @@ function buildShed3DModel(THREE, p) {
           // doors with no palette row) keeps the hard-coded natural brown as before.
           const doorMat = mat(o.it.colorHex || D3_COLORS.door);
           if (o.it.type === "doubleDoor" || o.it.operation === "double") {
-            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, 0.05, o.y1 - 0.05, 0, 0.16));
-            og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a - 0.03, y0d, y1d, 0, 0.16));
+            og.add(wallBox(doorMat, wf, o.a + 0.03, o.a1 - 0.05, y0d, y1d, 0, 0.16));
           } else {
             if (o.it.operation === "slideup" && !photoEntry) {
               // Roll-up read: reuse the lap texture as ~1 ft horizontal panel
               // seams, matching the segmented glyph the 2D plan draws.
               const seamTex = d3MakeTexture(THREE, "lap");
-              if (seamTex) { seamTex.repeat.set(1, Math.max(2, Math.round(o.y1 - 0.1))); doorMat.map = seamTex; }
+              // Counted off the leaf's OWN height. It was `o.y1 - 0.1`, which is how far the
+              // door's HEAD is above the floor — the same floor assumption y0d/y1d were fixed
+              // for, and identical arithmetic for any door standing on it.
+              if (seamTex) { seamTex.repeat.set(1, Math.max(2, Math.round(y1d - y0d))); doorMat.map = seamTex; }
             }
-            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0, 0.16));
+            og.add(wallBox(doorMat, wf, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, 0, 0.16));
             if (!photoEntry && o.it.operation !== "slideup") {
               // Raised panels + a handle on a plain hinged slab — the relief
               // shadows are what stop it reading as a painted rectangle.
-              const pa0 = o.a0 + 0.22, pa1 = o.a1 - 0.22, ph = o.y1 - 0.05;
-              og.add(wallBox(doorMat, wf, pa0, pa1, ph * 0.55, ph - 0.18, 0.1, 0.05));
-              og.add(wallBox(doorMat, wf, pa0, pa1, 0.22, ph * 0.45, 0.1, 0.05));
-              og.add(wallBox(mat("#6B7280", { metalness: 0.6, roughness: 0.3 }), wf, o.a1 - 0.38, o.a1 - 0.24, 3.0, 3.14, 0.12, 0.08));
+              // ph is the LEAF's own height and every y below is o.y0 plus a fraction of it.
+              // It was `o.y1 - 0.05` — the head measured from the FLOOR — which is the same
+              // number for a door standing on the floor and the wrong one for a loft door,
+              // whose panels would have been laid out down the empty wall beneath it.
+              const pa0 = o.a0 + 0.22, pa1 = o.a1 - 0.22, ph = y1d - o.y0;
+              og.add(wallBox(doorMat, wf, pa0, pa1, o.y0 + ph * 0.55, o.y0 + ph - 0.18, 0.1, 0.05));
+              og.add(wallBox(doorMat, wf, pa0, pa1, o.y0 + 0.22, o.y0 + ph * 0.45, 0.1, 0.05));
+              // The handle was pinned at 3.0–3.14 ft, which is where a hand falls on a
+              // full-height door and nowhere sensible on a 4 ft loft door — three-quarters of
+              // the way up the leaf. Half the leaf height is still exactly 3.0 ft on every
+              // door tall enough for the old number to have been right (a 6'8" walk door, a
+              // 7 ft roll-up), so nothing already drawn moves.
+              const hy = o.y0 + Math.min(3.0, ph * 0.5);
+              og.add(wallBox(mat("#6B7280", { metalness: 0.6, roughness: 0.3 }), wf, o.a1 - 0.38, o.a1 - 0.24, hy, hy + 0.14, 0.12, 0.08));
             }
           }
         // One photo layer even for a double or a roll-up: the photo already shows both
         // leaves / the panel seams, so splitting it would draw them twice.
-        if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, 0.05, o.y1 - 0.05, 0.16, o.it.colorHex || null);
+        if (photoEntry) photoLayer(photoEntry, o.a0 + 0.05, o.a1 - 0.05, y0d, y1d, 0.16, o.it.colorHex || null);
         }
       }
       ogs.push(og);
@@ -6434,7 +6607,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return [s0, s0 + wh];
         }
         if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
-        return [0, Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop)];
+        // The door branch mirrors openingSpan's, sill and clamp together, for the reason
+        // stated at the top of this function: a highlight that does not track the hole is
+        // worse than none. A loft door's highlight has to be up the wall with the door.
+        const dh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.DOOR_H, maxTop);
+        let d0 = it.sillFt > 0 ? it.sillFt : 0;
+        if (d0 + dh > maxTop) d0 = Math.max(0, maxTop - dh);
+        return [d0, d0 + dh];
       };
       const placeHighlight = (it) => {
         const c = itemTypes[it.type] || {};
@@ -6685,7 +6864,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // The in-viewer picker has no color step (matching its no-swing/op contract):
             // stamp the door's defaults. Refining them no longer means going back to 2D —
             // select the door and the footer's Door / Door trim rows recolour it in place.
-            ...fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim) };
+            // Fourth of the four door placement paths that must stamp the sill — see the 2D
+            // included-chip branch in handleClick for the list.
+            ...fixtureDoorColorDefaults(fx, doorColors, paintBody, paintTrim), ...doorSillStamps(fx) };
         }
         if (checkDoorCollision(ni, { width: widthFt }, liveItems, itemTypes, scale)) {
           flash3("Something's already there — pick a different spot on the wall.");
@@ -6772,7 +6953,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         if (cfg.doorSnap) {
-          const doors = liveItems.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor");
+          // Raised doors excluded, same rule and same reason as the 2D doorSnap branch.
+          const doors = liveItems.filter((i) => (i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor") && !ssDoorSillFt(i));
           if (!doors.length) { flash3("Place a door first, then add a ramp to it."); return; }
           let closest = null, minDist = Infinity;
           doors.forEach((d) => { const dx = pageX - d.x, dy = pageY - d.y; const dist = Math.sqrt(dx * dx + dy * dy); if (dist < minDist) { minDist = dist; closest = d; } });
@@ -9955,7 +10137,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null, swing, operation,
           // No picker on the included-chip path — stamp the door's color defaults, same
           // contract as its swing/operation defaults above.
-          ...fixtureDoorColorDefaults(fx, doorPaintColors, paintColors.body, paintColors.trim) };
+          // doorSillStamps is one of FOUR door placement paths that must all write it. 139's
+          // own header records that catalog WINDOWS silently inherited a hard-coded sill for
+          // months because exactly two of its sites were missed; this is the first of the
+          // four (the others: placePickedDoor's placement and swap branches, placeFixture3).
+          ...fixtureDoorColorDefaults(fx, doorPaintColors, paintColors.body, paintColors.trim), ...doorSillStamps(fx) };
       }
       if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
         setToast("Something's already there — pick a different spot on the wall."); setTimeout(() => setToast(null), 4000); return;
@@ -10017,7 +10203,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // placed the tenant's own catalog door (a slide-up or garage door, the most natural ramp
       // companion) got "Place a door first, then add a ramp to it." with a door plainly on the plan.
       // Catalog doors are live: fixture_items has active category='door' rows today.
-      const doors = items.filter((i) => i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor");
+      // ⚠️ A RAISED DOOR IS NOT A RAMP ANCHOR (Carolyn's loft door, 2026-09-04 — see
+      // doorSillStamps). rampPlacementForDoor derives the ramp from the door's PLAN position
+      // and knows nothing about height, so a loft door 8 ft up a gable end would have grown a
+      // ramp on the ground below it — priced, drawn on the plan, and rasterized into the PDF
+      // the customer signs. Excluded from the POOL rather than refused after the pick, so
+      // "the nearest door" keeps meaning the nearest door a ramp can actually reach.
+      const doors = items.filter((i) => (i.type === "singleDoor" || i.type === "doubleDoor" || i.type === "fixtureDoor") && !ssDoorSillFt(i));
       if (doors.length === 0) {
         setToast("Place a door first, then add a ramp to it.");
         setTimeout(() => setToast(null), 5000);
@@ -10186,11 +10378,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // Drop the height a BUILT-IN placement stamped: openingHeightFt wins over heightIn
           // in openingSpan, so keeping it here would draw this fixture at the old 6'6" no
           // matter what the builder's door actually measures.
-          // sillMode goes too: a door has no height off the floor, and a leftover
-          // "variable" from the window this replaced is exactly the stale field the color
+          //
+          // ⚠️ THE SILL PAIR IS NOW THE NEW DOOR'S OWN, and the rule that stood here until
+          // 2026-09-04 is written out rather than deleted, because it was true the day it was
+          // written: "sillMode goes too: a door has no height off the floor, and a leftover
+          // 'variable' from the window this replaced is exactly the stale field the color
           // note below is about. Nothing reads it on a door today, which is what would make
-          // it survive unnoticed until something does.
-          openingHeightFt: undefined, sillFt: undefined, sillMode: undefined,
+          // it survive unnoticed until something does." Something does now — a door CAN have
+          // a height off the floor (Carolyn's loft door, see doorSillStamps) — so blanking
+          // the pair would swap a loft door in and drop it on the floor.
+          //
+          // What the old rule was protecting is untouched: doorSillStamps writes BOTH fields
+          // on every swap, so the replaced item's sill can never survive onto the new door.
+          // Third of the four door placement paths.
+          openingHeightFt: undefined, ...doorSillStamps(fx),
           // All six color fields set EXPLICITLY (nulls when absent) — same stale-field
           // discipline as openingHeightFt: the old door's colors must never survive a swap.
           ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
@@ -10228,6 +10429,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
       swing: swing || null, operation: operation || null,
       ...doorColorStamps(doorColor, fx.hasTrimColor ? trimColor : null),
+      // Second of the four door placement paths that must stamp the sill — see the
+      // included-chip branch in handleClick for the list and why it is a list.
+      ...doorSillStamps(fx),
     };
     if (checkDoorCollision(ni, { width: widthFt }, items, ITEMS, scale)) {
       setToast("A door is already there — pick a different spot on the wall.");
@@ -11087,6 +11291,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const w = fmtFtIn((item.widthFt || cfg.width) * 12);
           if (w) label = `${w} ${label}`;
         }
+        // The SVG twin of this suffix is in the item map — read it for why raised doors only.
+        const upFt = ssDoorSillFt(item);
+        if (upFt) label = `${label} @ ${fmtDimFtIn(upFt)}`;
         ctx.fillText(label, 0, lblY);
       }
       ctx.restore();
@@ -14365,7 +14572,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       // Doors + windows prefix their width, e.g. "6' DD", so the size reads off the plan.
                       const isDoorOrWin = item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window";
                       const w = isDoorOrWin ? fmtFtIn((item.widthFt || cfg.width) * 12) : "";
-                      return w ? `${w} ${base}` : base;
+                      // A RAISED door says how high, e.g. `3' LD @ 7'6"`. On a plan the height
+                      // is the ONLY thing separating a loft door from a walk door — same bar,
+                      // same colour, and the swing arc is gone precisely because it is up the
+                      // wall (see fixtureDoorSVG). RAISED DOORS ONLY: every window already
+                      // carries a sill, so suffixing those would put @ 3'6" on every window on
+                      // every plan ever drawn. Canvas twin in generatePNG.
+                      const upFt = ssDoorSillFt(item);
+                      const lbl = w ? `${w} ${base}` : base;
+                      return upFt ? `${lbl} @ ${fmtDimFtIn(upFt)}` : lbl;
                     })()}</text>
                     {/* RO resize handles — drag end to change width freely */}
                     {item.type === "roughOpening" && isSel && (() => {

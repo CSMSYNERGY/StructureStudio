@@ -3722,13 +3722,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
       }
     }
-    // Height off the FLOOR (139): windows only, presence-guarded, same shape as above.
-    // NULL sill_in means "use the designer's 3'6" default" and is deliberately NOT the same
-    // as 0 — 0 is a real answer, a window that starts at the floor. sill_mode 'variable'
-    // lets the customer slide it up and down the wall (Carolyn's transom); 'fixed' pins it.
-    // The 12 ft ceiling is a sanity bound, not a product rule: the designer clamps a window
-    // against the actual wall height at build time, which is the only place that knows it.
-    if (category !== "window") {
+    // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
+    // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
+    // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
+    // customer slide it up and down the wall (Carolyn's transom); 'fixed' pins it.
+    // The 12 ft ceiling is a sanity bound, not a product rule: the designer clamps against the
+    // actual wall height at build time, which is the only place that knows it.
+    //
+    // ⚠️ DOORS JOINED ON 2026-09-04, and the rule that stood here is written out rather than
+    // deleted because it was right for as long as 139 was the only feature reading these
+    // columns. It was: `if (category !== "window") { rec.sill_in = null; rec.sill_mode =
+    // "fixed"; }` — a sill was a window's business, and every other category had its pair
+    // blanked on save.
+    //
+    // Carolyn's LOFT DOOR is a category='door' fixture that hangs high on a gable end
+    // (2026-09-04 @24:43: "that's a door ... it's called a loft door ... A lot of them have
+    // that"; @27:16, on where it belongs: "that loft door goes with the doors"). Its height off
+    // the floor IS what makes it a loft door, so the old line would have stored every one of
+    // them at zero — a door every builder places at floor level, with nothing anywhere saying
+    // why. Reusing 139's own columns rather than adding a door_sill_in beside them: the fact is
+    // identical ("how far off the interior floor does this opening start") and so is the bound;
+    // a second column would be a second answer to one question.
+    //
+    // ⚠️ A DOOR IS ALWAYS 'fixed'. 'variable' lets the shopper slide the opening up and down
+    // the wall, and a loft door's height is set by where the builder's loft floor is — not
+    // something a customer picks. The designer enforces the same thing in exactly one place
+    // (its 3D vertical drag tests `type === "window"`), so pinning it here keeps the two
+    // agreeing without a third rule to remember, and the catalog UI accordingly offers a door
+    // the height field and NO placement select. Forced rather than presence-guarded, so a
+    // hand-built call or an older sheet cannot leave 'variable' on a door.
+    if (category !== "window" && !isDoor) {
       rec.sill_in = null; rec.sill_mode = "fixed";
     } else {
       if (has("sillIn")) {
@@ -3737,7 +3760,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (s !== null && ((s as number) < 0 || (s as number) > 144)) return { err: `${name}: height off floor must be between 0 and 12 ft` };
         rec.sill_in = s;
       }
-      if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
+      if (isDoor) rec.sill_mode = "fixed";
+      else if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
     }
     // How the door is DRAWN in 3D (186): doors only, presence-guarded, whitelisted.
     // 'auto' is today's behaviour (the fixture's photo if it has one, else the generic
