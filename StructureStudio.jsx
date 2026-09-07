@@ -6715,6 +6715,28 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       const place3 = (tool, cfg, pageX, pageY) => {
         // Same dispatch order as 2D handleClick: pickers → included chips →
         // doorSnap → wallSnap → loft → wallOnly built-ins.
+        // ⛔ A PICKER IS A STAND-IN, NEVER AN ITEM. The door/window/ramp pickers below all have
+        // a 3D dispatch; shelving and electrical did not, so they fell through to the generic
+        // wallSnap/wallOnly branches and COMMITTED THE PICKER ITSELF.
+        //
+        // What that produced for shelving: an item of type "shelfPicker", which buildInterior
+        // has no branch for (so no mesh is ever drawn — the shelf simply is not there), which
+        // ssSlabModel reads as "legacy" because the stand-in carries no modelKey (so its band is
+        // [0, 1e4], a full-height blocker that refuses every later shelf on that wall), and
+        // which computeLayoutPricingRows buckets on the literals "workbench"/"shelf"/
+        // "doubleShelf" and therefore CHARGES NOTHING FOR. The "Remove SHELF" label is the
+        // stand-in's own shortLabel and is the fingerprint of one of these.
+        //
+        // Electrical was worse: ELEC_ITEM_PICKER_CFG has no width/height at all, so the wallOnly
+        // branch computed the snap from NaN and committed an item at x: NaN, y: NaN.
+        //
+        // Refusing here closes the class. The tools themselves are re-admitted to the 3D palette
+        // (see paletteKeys), so shelving is placed from 3D by its real buttons.
+        if (cfg.isShelfPicker || cfg.isElecItemPicker) {
+          flash3("Pick which one from the palette beside the plan, then place it here.");
+          setTool3(null);
+          return;
+        }
         if (cfg.isDoorPicker || cfg.isWindowPicker) {
           const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
           setPick3({ kind: cfg.isDoorPicker ? "door" : "window", wall: w, ptx: pageX, pty: pageY });
@@ -6905,22 +6927,35 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               else if (it.wall === "west") dragPlane.set(new THREE.Vector3(1, 0, 0), bldgW / 2);
               else dragPlane.set(new THREE.Vector3(1, 0, 0), -bldgW / 2);
             };
-            let p;
-            if (vertical) {
-              wallPlane();
-              p = raycaster.ray.intersectPlane(dragPlane, dragHit);
-              if (!p) return;
-            } else {
-              dragPlane.set(new THREE.Vector3(0, 1, 0), -((sp[0] + sp[1]) / 2));
-              p = raycaster.ray.intersectPlane(dragPlane, dragHit);
-              const lim = Math.max(bldgW, bldgH) * 4;
-              if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) {
-                // Grazing angle — track against the item's current wall plane instead.
-                wallPlane();
-                p = raycaster.ray.intersectPlane(dragPlane, dragHit);
-                if (!p) return;
-              }
-            }
+            // ALWAYS THE WALL'S OWN PLANE. This used to raycast a HORIZONTAL plane at the
+            // opening's mid-height for everything except a variable-sill catalog window, and a
+            // palette-placed window never has sillMode (d3OpeningDefaults stamps only
+            // openingHeightFt/sillFt), so EVERY ordinary window took the horizontal path.
+            //
+            // On a horizontal plane, vertical mouse travel moves the hit point in DEPTH — off
+            // the wall the window lives on — and the wall is then re-asked on every move below.
+            // Crossing the building's mid-depth re-homes the window to the OPPOSITE wall, so it
+            // teleports across the building. At the untouched default camera the whole budget is
+            // 6 ft, about 42px of upward travel, and merely FOLLOWING the south wall from one
+            // end to the other costs 28px of it because the wall is a slanted line on screen.
+            // Grabbing the top rail rather than the middle spent another 3.24 ft before the
+            // mouse moved at all. That is Ahsan's "jumps to different places, not smooth", and
+            // it needed no orbiting to a grazing angle to reproduce.
+            //
+            // The wall plane fixes all three at once: depth is pinned to the wall, so the wall
+            // cannot flip except by genuinely dragging past a corner, and a grab anywhere on the
+            // opening projects to the same along-wall coordinate.
+            //
+            // ⚠️ REFUSE, DO NOT SWAP. A vertical plane degenerates in AZIMUTH instead: roughly
+            // 0.06 ft/px head-on, 4.5 ft/px at 5 degrees off, and no intersection at all once the
+            // camera passes behind that wall's infinite plane. There is no better second plane to
+            // fall back to — the horizontal one is what we just removed — so an out-of-range hit
+            // ends the move rather than committing a guess. A drag that does nothing while you
+            // are sighting along a wall is honest; one that teleports the window is not.
+            wallPlane();
+            const p = raycaster.ray.intersectPlane(dragPlane, dragHit);
+            const lim = Math.max(bldgW, bldgH) * 4;
+            if (!p || Math.abs(p.x) > lim || Math.abs(p.z) > lim) return;
             const pageX = mgX + (p.x + bldgW / 2) * scale;
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
@@ -13178,7 +13213,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           scale={scale} mgX={mgX} mgY={mgY} accent={accent}
           style3d={adminCal.spec}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
+          /* The 3D Add row. `noPalette` alone was the wrong test: when a tenant offers more than
+             one slab the three REAL slabs are re-stamped noPalette and replaced by a single
+             shelfPicker stand-in, so this row showed a button that could not place anything and
+             hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1) && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
@@ -15359,7 +15399,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           roofType={sel.roofType}
           roofColorHex={(() => { const rc = (Array.isArray(C.colors) ? C.colors : []).find((c) => c.label === sel.roofColor && (sel.roofType === "Metal" ? c.metal : c.shingle)); return (rc && rc.hex) ? rc.hex : ""; })()}
           fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].noPalette && (embedded || !ITEMS[k].internalOnly))}
+          /* The 3D Add row. `noPalette` alone was the wrong test: when a tenant offers more than
+             one slab the three REAL slabs are re-stamped noPalette and replaced by a single
+             shelfPicker stand-in, so this row showed a button that could not place anything and
+             hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
+             palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1) && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
