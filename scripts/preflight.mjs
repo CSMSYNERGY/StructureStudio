@@ -900,6 +900,43 @@ function checkMyQuotesPayFigures(html) {
   return errors;
 }
 
+
+// ── The customer-facing standalone pages must PARSE ────────────────────────────────────
+// 2026-09-08: a multiline regex whose newline escapes did not survive an edit landed in
+// my-quotes.html. One SyntaxError takes the whole inline script down, so the page rendered
+// ZERO characters — for every customer of every tenant — and it shipped because nothing here
+// looks at that file's syntax. preflight lints the three app pages and both component twins;
+// my-quotes.html is where customers ACCEPT QUOTES, SIGN INVOICES AND PAY, and it had no gate
+// at all. The two checks below it assert CONTENT, which a file that cannot parse still passes.
+//
+// Deliberately a parse check and not the full lint: these pages are hand-written ES5-ish
+// browser JS with globals the lint config knows nothing about, so `no-undef` would drown the
+// gate in false positives and get switched off — which is how a rule stops existing. Parsing
+// is the property that matters: a page that parses degrades, a page that does not is blank.
+function checkStandalonePagesParse(files) {
+  const errors = [];
+  for (const [name, html] of Object.entries(files)) {
+    // Inline blocks only — a src= tag is somebody else's file.
+    const blocks = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)];
+    if (!blocks.length) {
+      errors.push(`${name}: no inline <script> found — this check has lost its subject, so it `
+        + "is asserting nothing. Fix the pattern rather than deleting the rule.");
+      continue;
+    }
+    blocks.forEach((b, i) => {
+      const line = html.slice(0, b.index).split("\n").length;
+      try {
+        // eslint-disable-next-line no-new-func
+        new Function(b[1]);
+      } catch (e) {
+        errors.push(`${name}:${line}  <script #${i + 1}> does not parse — ${e.message}. `
+          + "A SyntaxError here renders the page completely blank for every customer.");
+      }
+    });
+  }
+  return errors;
+}
+
 function checkMyQuotesTaxBreakdown(html) {
   const errors = [];
   const lines = html.split("\n");
@@ -2151,6 +2188,31 @@ if (process.argv.includes("--self-test")) {
   // Prove three things — it passes on the real file, it FAILS on a broken breakdown, and it
   // fails when the block has been extracted away to nothing.
   const mqHtml = readFileSync(join(root, "my-quotes.html"), "utf8");
+
+  // ── The standalone-page PARSE step ───────────────────────────────────────
+  // Clean on the real file, and it must fire on the exact failure that shipped: a regex
+  // literal broken across lines. A check whose passing and whose absence look identical
+  // needs this, and this one shipped BECAUSE nobody had written it.
+  if (checkStandalonePagesParse({ "my-quotes.html": mqHtml }).length) {
+    console.error("self-test FAILED: my-quotes.html does not parse — fix the page, not the check");
+    process.exit(1);
+  }
+  const brokenSyntax = mqHtml.replace("var dlines = dtxt.split(String.fromCharCode(10));",
+    "var dlines = dtxt.replace(/\n?Total:[^\n]*$/, \"\");");
+  if (brokenSyntax === mqHtml) {
+    console.error("self-test FAILED: could not find the line to break — the parse check's subject moved");
+    process.exit(1);
+  }
+  if (!checkStandalonePagesParse({ "my-quotes.html": brokenSyntax }).length) {
+    console.error("self-test FAILED: a SyntaxError in my-quotes.html passed the parse check");
+    process.exit(1);
+  }
+  if (!checkStandalonePagesParse({ "my-quotes.html": "<html><body>no script</body></html>" }).length) {
+    console.error("self-test FAILED: a page with no inline script passed the parse check");
+    process.exit(1);
+  }
+  console.log("self-test passed: my-quotes.html parses, and a SyntaxError in it is caught");
+
   if (checkMyQuotesTaxBreakdown(mqHtml).length) {
     console.error("self-test FAILED: the my-quotes tax breakdown does not pass against the real file");
     process.exit(1);
@@ -2416,6 +2478,9 @@ if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
+errors.push(...checkStandalonePagesParse({
+  "my-quotes.html": readFileSync(join(root, "my-quotes.html"), "utf8"),
+}));
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
 errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 
