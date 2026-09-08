@@ -411,6 +411,47 @@ Deno.test("the ledger and the invoice document are the SAME number, not two agre
   eq("and its tax is the stored tax", Math.round(Number(doc.tax.amount) * 100), m.taxCents);
 });
 
+// ── A NULL total is NO CHANGE, not a credit for the whole order ─────────────────────────
+// Found 2026-09-08 on beta, acknowledging a change on a DELIVERED order: the order's total
+// came back as $150 on a $4,600 building. `total_after_cents` is nullable and legitimately
+// null on a change order that moved no money — the amendment trail has always rendered that
+// as "no price change" and alreadyInSnapshot already skips those rows — but changeOrderDelta
+// read `Number(null) || 0` as zero and returned MINUS THE WHOLE ORDER.
+//
+// It hid for as long as every caller supplied orderTotalCents, because the reconciliation
+// line absorbed it. orderCentsAfterAck passes null on purpose (it is computing the total, so
+// it has nothing to reconcile against) and WROTE the result: the building vanished from the
+// ledger and only the change-order fee survived.
+
+Deno.test("a change order with no priced effect moves nothing", () => {
+  eq("both sides null", changeOrderDelta({ co_no: 1 }), 0);
+  eq("after null — NOT minus the whole order", changeOrderDelta({ total_before_cents: 460000, total_after_cents: null }), 0);
+  eq("before null", changeOrderDelta({ total_before_cents: null, total_after_cents: 460000 }), 0);
+  eq("both present still computes", changeOrderDelta({ total_before_cents: 280000, total_after_cents: 460000 }), 1800);
+  eq("and a credit is still negative", changeOrderDelta({ total_before_cents: 460000, total_after_cents: 440000 }), -200);
+});
+
+Deno.test("THE BUG: a null-total change order wiped the order it belonged to", () => {
+  // The live shape, in its own amounts: a $4,600 building, one real manual change, and two
+  // legacy rows carrying nulls — then a new change with a $150 fee.
+  const bldg = snap([["Deluxe (10x12)", 1, 4600]]);
+  const cos = [
+    { co_no: 1, total_before_cents: 280000, total_after_cents: 460000 },
+    { co_no: 2, total_before_cents: null,   total_after_cents: null },
+    { co_no: 3, total_before_cents: 460000, total_after_cents: null },
+    { co_no: 5, total_before_cents: 460000, total_after_cents: 460000, fee_cents: 15000 },
+  ];
+  const m = orderCentsAfterAck(bldg, cos as any)!;
+  eq("the building is still on the order", m.pretaxCents, 475000);   // 4,600 + 1,800 change + 150 fee
+  eq("total", m.totalCents, 475000);
+  check("the order is not left as the fee alone", m.totalCents !== 15000);
+
+  // And the document does not print a phantom credit for it either.
+  const doc = amendedInvoiceDocument(bldg, cos as any, null);
+  eq("no negative phantom line", doc.lines.filter((l: any) => Number(l.amount) < 0).length, 0);
+  eq("the document foots to the same figure", Math.round(doc.total * 100), m.pretaxCents);
+});
+
 if (failures) throw new Error(`${failures} assertion(s) failed`);
 
 

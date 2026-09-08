@@ -301,9 +301,26 @@ export interface AcknowledgedChangeOrder {
 }
 
 /** One acknowledged change order's effect on the total, in dollars. Signed: a credit is
- *  negative and prints as one. */
-export const changeOrderDelta = (co: any): number =>
-  round2(((Number(co?.total_after_cents) || 0) - (Number(co?.total_before_cents) || 0)) / 100);
+ *  negative and prints as one.
+ *
+ *  ⚠️ EITHER SIDE MISSING MEANS NO COMPUTABLE EFFECT — ZERO, NOT MINUS THE OTHER SIDE.
+ *  `total_after_cents` is nullable and legitimately null on a change order that moved no
+ *  money; the amendment trail has always rendered exactly that as "no price change", and
+ *  alreadyInSnapshot already skips those rows. This function did not: `Number(null) || 0`
+ *  turned a null `after` into a delta of MINUS THE WHOLE ORDER.
+ *
+ *  It stayed invisible for as long as every caller supplied `orderTotalCents`, because the
+ *  reconciliation line silently absorbed the difference. orderCentsAfterAck deliberately
+ *  passes null — it is COMPUTING the order total, so it has nothing to reconcile against —
+ *  and on a live beta order carrying one such row it wrote $150 over $4,600: the building
+ *  vanished and only the change-order fee survived. Found 2026-09-08 by acknowledging a
+ *  change on a delivered order and reading the total back.
+ *
+ *  No row anywhere has `before` null with `after` set, so this loses no legacy behaviour. */
+export const changeOrderDelta = (co: any): number => {
+  if (co?.total_after_cents == null || co?.total_before_cents == null) return 0;
+  return round2((Number(co.total_after_cents) - Number(co.total_before_cents)) / 100);
+};
 
 /** The change-order FEE this row carries, in dollars. Never negative: a fee is a charge,
  *  and a negative one would be a refund wearing the wrong name. */
