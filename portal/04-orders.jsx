@@ -2525,7 +2525,10 @@ function AmendmentPanel({ clientId, shortCode, orderId, amend, coOn, coApproveOn
       )}
       {declined && (
         <div style={{ marginTop: 8, fontWeight: 600 }}>
-          Declined by {unlock.decided_by_name || "an approver"}{unlock.decision_note ? ` — “${unlock.decision_note}”` : ""}.
+          {/* The period lives BEFORE the quoted note, not after it — an approver's note
+              almost always ends with one of its own, and “…build on this one.”. is the
+              tell of a sentence assembled without reading it. */}
+          Declined by {unlock.decided_by_name || "an approver"}{unlock.decision_note ? <> — “{unlock.decision_note}”</> : "."}
         </div>
       )}
 
