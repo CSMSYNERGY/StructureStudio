@@ -1911,11 +1911,19 @@ function Dashboard({ session }) {
         />
       )}
 
-      {/* Operator quick-add: file an item onto a Projects board from anywhere in the
-          portal (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a
-          bug while inside a builder's account is exactly when you want it, and unlike
-          the Feedback bubble above there is no tenant attribution to get wrong. */}
-      {isOperator && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
+      {/* Quick-add: file an item onto a Projects board from anywhere in the portal
+          (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a bug while
+          inside a builder's account is exactly when you want it, and unlike the Feedback
+          bubble above there is no tenant attribution to get wrong.
+          Gated on `canProjects`, the SAME gate as the Projects tab and its own ＋ Add item
+          row (Carolyn 2026-09-07). It was `isOperator` until then, which is the pre-183
+          gate: a CSM team member granted the Projects area could add items ON the board but
+          not from anywhere else, for no reason anyone chose. This widens nothing — that add
+          row was already open to them, and portal-projects re-checks canWrite on every call.
+          `canProjects` is THREE-STATE (null while can_open_projects is in flight), so this
+          renders nothing for a moment on load rather than flashing a button at someone who
+          cannot use it — the same reason `featureOn` treats a null entitlement as loading. */}
+      {canProjects && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
 
       {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
           verified session's user id — the browser never says whose row to update. */}

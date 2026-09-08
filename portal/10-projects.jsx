@@ -9,7 +9,8 @@
 // and `setup_*` actions hard operator-only. Tenants have no read path to any pm_* table —
 // everything a client may see is COPIED into feedback_submissions/feedback_comments by the
 // server, never read from here.
-// ⚠️ One thing genuinely IS still isOperator: the floating PMQuickAdd button in 12-shell.
+// The floating PMQuickAdd button in 12-shell is gated the same way (it was the last thing
+// left on the old isOperator gate until 2026-09-07).
 //
 // Boards, groups and columns are user-defined (Carolyn's "Monday but better"): the table
 // itself is the generic engine in 09-table-engine.jsx; this file owns data loading, the
