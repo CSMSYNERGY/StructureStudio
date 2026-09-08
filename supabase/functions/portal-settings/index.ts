@@ -6948,7 +6948,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       kind: "change_order", shortCode: co.short_code, to,
       subject: content.subject, html: content.html, text: content.text,
     });
-    return { sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") };
+    // ⚠️ "failed" IS NOT A REASON, it is a status repeated back (found while testing the
+    // whole flow on beta, 2026-09-08). The rep's screen said "not emailed (failed)", which
+    // tells them nothing they can act on — while the server had the provider's actual answer
+    // sitting in `outcome.error`: `resend 422/validation_error`, i.e. the address was
+    // rejected. sendTenantEmail's contract carries both; only `reason` was being read.
+    //
+    // Every branch here names something the builder can DO. The raw provider string is
+    // deliberately not passed through — it is logged in email_sends.error for us, and
+    // "resend 422/validation_error" on a builder's screen is noise wearing authority.
+    if (outcome.sent) return { sent: true, reason: null };
+    const detail = String((outcome as { error?: unknown }).error ?? "");
+    const reason = outcome.reason === "not_active"
+      ? "your sending domain isn't live yet — check Settings → Branding → Email"
+      : /4(0[0-9]|2[0-9])|validation|invalid|recipient/i.test(detail)
+        ? `that email address was rejected (${to})`
+        : "the send didn't go through";
+    return { sent: false, reason };
   };
 
   // amendment_status: everything the Change Order button needs before it acts.

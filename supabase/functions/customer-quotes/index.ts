@@ -142,7 +142,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // one, company_name the config row's label). Both nullable; the frontend has its own
   // last-resort fallback.
   const [settingsRes, cfgRes] = await Promise.all([
-    admin.from("client_settings").select("business_name, invoice_in_ghl").eq("client_id", identity.clientId).maybeSingle(),
+    admin.from("client_settings").select("business_name, invoice_in_ghl, co_fee_label").eq("client_id", identity.clientId).maybeSingle(),
     admin.from("client_configs").select("company_name").eq("client_id", identity.clientId).maybeSingle(),
   ]);
   if (settingsRes.error) return dbFail(req, identity.clientId, "read business settings", settingsRes.error);
@@ -198,7 +198,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   const ackedByCode = new Map<string, any[]>();
   if (ssMode && mine.length > 0) {
     const { data: cos } = await admin.from("change_orders")
-      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at, status, acknowledged_at")
+      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, created_at, status, acknowledged_at")
       .eq("client_id", identity.clientId)
       .in("status", ["pending_ack", "acknowledged"])
       .in("short_code", mine.map((d) => d.short_code));
@@ -211,6 +211,19 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         ackedByCode.set(co.short_code, acked);
         continue;
       }
+      // ⚠️ THE FEE HAS TO BE ON THIS CARD (found 2026-09-08, testing the customer's own
+      // page). Without it the customer read "Total: $2,800.00 → $2,800.00" on a change that
+      // costs them $150 and approved it believing it was free. The consent sentence they
+      // sign DOES name the fee — so the binding text was never wrong — but meeting a charge
+      // for the first time inside the small print of a signature box is exactly the harm
+      // Carolyn's "a rep is shown the fee before they start" rule exists to prevent, and the
+      // customer deserves the same treatment as the rep.
+      //
+      // `newTotal` is what they will owe if they approve: the change's own after-figure plus
+      // the fee and its tax. Computed here rather than in the browser so the page cannot
+      // arrive at a different number than the invoice does.
+      const coFee = Number(co.fee_cents) || 0;
+      const coFeeTax = Number(co.fee_tax_cents) || 0;
       const list = cosByCode.get(co.short_code) ?? [];
       list.push({
         id: co.id,
@@ -218,6 +231,12 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         description: co.description,
         totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
         totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+        feeCents: coFee,
+        feeTaxCents: coFeeTax,
+        feeLabel: String(settingsRes.data?.co_fee_label ?? "").trim() || "Change order fee",
+        newTotal: co.total_after_cents == null
+          ? null
+          : Math.round(co.total_after_cents + coFee + coFeeTax) / 100,
         createdAt: co.created_at,
       });
       cosByCode.set(co.short_code, list);

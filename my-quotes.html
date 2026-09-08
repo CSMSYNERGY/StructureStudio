@@ -937,7 +937,18 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     if (co.description) {
       var desc = document.createElement("div");
       desc.style.cssText = "font-size:13px;color:#334155;white-space:pre-wrap;margin-top:6px";
-      desc.textContent = String(co.description);   // textContent — never innerHTML
+      // The GENERATED description ends with its own "Total: A -> B" line, and the card
+      // prints that same pair as its own row directly underneath — so the customer read the
+      // figures twice, which looks like a mistake in a document they are about to sign.
+      // Trimmed only when it is the LAST line and the card is going to say it anyway; a
+      // manual change order's typed words are never touched.
+      var dtxt = String(co.description);
+      if (co.totalBefore != null || co.totalAfter != null) {
+        dtxt = dtxt.replace(/
+?Total:[^
+]*$/, "");
+      }
+      desc.textContent = dtxt;   // textContent — never innerHTML
       box.appendChild(desc);
     }
     var beforeStr = fmtMoney(co.totalBefore);
@@ -947,6 +958,23 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       totals.style.cssText = "font-size:13px;font-weight:700;margin-top:6px";
       totals.textContent = (beforeStr || "—") + " → " + (afterStr || "—");
       box.appendChild(totals);
+    }
+    // THE FEE, NAMED, BEFORE THEY APPROVE ANYTHING (2026-09-08). Without this the card read
+    // "$2,800.00 → $2,800.00" on a change carrying a $150 fee, and the customer met that
+    // charge for the first time in the consent sentence — or worse, on the invoice.
+    var feeTotal = (Number(co.feeCents) || 0) + (Number(co.feeTaxCents) || 0);
+    if (feeTotal > 0) {
+      var fee = document.createElement("div");
+      fee.style.cssText = "font-size:13px;color:#B45309;margin-top:6px";
+      fee.textContent = "+ " + (co.feeLabel || "Change order fee") + ": " + fmtMoney(feeTotal / 100);
+      box.appendChild(fee);
+      var nt = fmtMoney(co.newTotal);
+      if (nt) {
+        var newTot = document.createElement("div");
+        newTot.style.cssText = "font-size:13px;font-weight:800;margin-top:4px;color:#92400E";
+        newTot.textContent = "New order total: " + nt;
+        box.appendChild(newTot);
+      }
     }
     var btn = document.createElement("button");
     btn.type = "button";
