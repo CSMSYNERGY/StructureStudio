@@ -94,6 +94,28 @@ function RowMenu({ items, label = "More actions" }) {
   );
 }
 
+// ── TWO KEYS OUT OF THE PLAN, NOT THE PLAN ──────────────────────────────────────────────
+// `designs.selections` is the WHOLE design: every placed item, its position, its options —
+// commonly tens of kilobytes a row. The Designs and Contacts lists read exactly two things
+// out of it, `style` and `size`, to draw one "Barn 12x24" cell; they used to pull the entire
+// blob for every design in the tenant to do it, so a few hundred designs moved megabytes to
+// paint two columns, and `design_versions` paid the same toll a second time.
+//
+// PostgREST projects json keys server-side (`alias:column->>key`), so the two values arrive
+// as two short strings. `withListSelections` then rebuilds the `{ selections: { style, size } }`
+// shape the rows already had, which is why nothing downstream — the facets, the search, the
+// sort, the pipeline cards, the version rows — had to learn about this.
+//
+// Anything that needs the FULL selections fetches the row it is opening and always did: the
+// version diff in the contact drawer comes from portal-settings `contact_activity`, the
+// record view and the designer load the design itself. Operator view-as (fetchDesigns) is a
+// service-role path with its own shape and is left exactly as it was.
+const SEL_LIST_COLS = "sel_style:selections->>style, sel_size:selections->>size";
+function withListSelections(r) {
+  const { sel_style, sel_size, ...rest } = r;
+  return { ...rest, selections: { style: sel_style || "", size: sel_size || "" } };
+}
+
 // NO SCHEDULING FROM THIS PAGE (Carolyn 2026-08-08). Designs briefly carried an
 // "Add to build schedule" action; it moved to ORDERS the same day — "Orders is all sales",
 // and it is from Orders that a sold building goes to the Build or Delivery schedule.
@@ -134,19 +156,52 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // toggle: `view` also survives in this component across a refresh of the entitlement, and
   // a builder who was mid-board when their subscription lapsed must not keep the board.
   const shownView = crmUnlocked ? view : "list";
+  // Cache-seeded so returning to Designs paints at once and refreshes behind it (see
+  // ssTabCache in 01-core, and LeadsTable/Orders which already do this). Operator view-as
+  // reads through a service-role path and is left uncached, same rule as Contacts.
+  const seeded = () => (fetchDesigns ? null : ssCacheGet("rest", "designs", clientId));
+  const [rows, setRows] = useState(() => (seeded() || {}).rows || null); // null = loading
+  const [error, setError] = useState(null);
+  const [vmap, setVmap] = useState(() => (seeded() || {}).vmap || {});   // short_code -> versions (newest first)
   // id -> serial for the Inventory chips (owner-select RLS; absent for operators in
   // view-as, where the chip simply reads "Inventory" without a number).
+  //
+  // Scoped to the units the loaded rows actually point at, rather than every unit the tenant
+  // has ever stocked: a lot with hundreds of buildings was read in full to label the handful
+  // of designs that came from one. Nothing here is a filter — an id with no serial yet just
+  // renders the chip without a number, exactly as it does before this resolves.
+  // EXPECTED CLOSE DATE, edited from the card (Carolyn, 2026-09-07: "editable straight from
+  // the card"). `closeEdit` is the short_code whose date input is open — one at a time, so a
+  // stray click elsewhere on the board closes it rather than leaving several open.
+  //
+  // Operator view-as is READ-ONLY here: the write goes through portal-settings under the
+  // tenant's own JWT, and an operator's save would be attributed to the wrong tenant.
+  const [closeEdit, setCloseEdit] = useState(null);
+  const canEditClose = !viewingLabel && !fetchDesigns;
   const [unitSerials, setUnitSerials] = useState({});
+  const unitIdKey = useMemo(() => {
+    const ids = new Set();
+    (rows || []).forEach((r) => { if (r.inventory_unit_id) ids.add(r.inventory_unit_id); });
+    Object.keys(vmap).forEach((code) => (vmap[code] || []).forEach((v) => { if (v.inventory_unit_id) ids.add(v.inventory_unit_id); }));
+    return [...ids].sort().join(",");
+  }, [rows, vmap]);
   useEffect(() => {
+    const ids = unitIdKey ? unitIdKey.split(",") : [];
+    if (ids.length === 0) { setUnitSerials((p) => (Object.keys(p).length ? {} : p)); return undefined; }
     let off = false;
-    sb.from("inventory_units").select("id, serial").eq("client_id", clientId)
-      .then(({ data }) => { if (!off && data) setUnitSerials(Object.fromEntries(data.map((u) => [u.id, u.serial]))); },
-            () => {});
+    // Chunked because the id list rides in the URL — one `in.(…)` over hundreds of uuids is
+    // a query string long enough to be rejected by the proxy rather than by PostgREST.
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 100) chunks.push(ids.slice(i, i + 100));
+    Promise.all(chunks.map((c) => sb.from("inventory_units").select("id, serial").eq("client_id", clientId).in("id", c).then((r) => r, () => ({ data: [] }))))
+      .then((res) => {
+        if (off) return;
+        const map = {};
+        res.forEach(({ data }) => (data || []).forEach((u) => { map[u.id] = u.serial; }));
+        setUnitSerials(map);
+      }, () => {});
     return () => { off = true; };
-  }, [clientId]);
-  const [rows, setRows] = useState(null); // null = loading
-  const [error, setError] = useState(null);
-  const [vmap, setVmap] = useState({});         // short_code -> versions (newest first)
+  }, [unitIdKey, clientId]);
   const [expanded, setExpanded] = useState({}); // short_code -> bool (show older versions)
   const [query, setQuery] = useState("");        // free-text search across all fields
   const [pdf, setPdf] = useState(null);          // { url, title } — the pop-up viewer
@@ -175,23 +230,39 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     // fetched at the very END of this function — behind the GHL sync below — so the history
     // a row expands to show did not exist until an eight-second call nothing about it needed
     // had finished.
+    // Only `selections.style` and `selections.size` are read here — see SEL_LIST_COLS above
+    // for why the blob itself never crosses the wire for a list.
     const [dRes, vRes] = await Promise.all([
       sb.from("designs")
-        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url")
+        // contact_id (130) is selected for ONE reason: the Pipeline's job is now to open the
+        // CUSTOMER, and the customer record is addressed by contact id, not short_code.
+        // Carolyn 2026-09-04 @1:07:19, watching it work: "this pipeline click is going to
+        // take you into the customer view where you can see everything about that customer."
+        // It stays nullable — crm_ensure_contact returns NULL for a design carrying neither
+        // a phone nor an email, and those rows fall back to the design record.
+        //
+        // ⚠️ It rides ALONGSIDE the SEL_LIST_COLS projection, which is a separate change that
+        // landed the same night: the list stopped pulling the whole `selections` blob across
+        // the wire and now names the two columns it reads. Taking either side of that merge
+        // alone was wrong in a way nothing would have reported — keeping only the narrow
+        // projection loses the Pipeline's ability to open a customer at all, and keeping only
+        // this line silently re-inflates every list payload back to the blob.
+        .select(`short_code, created_at, updated_at, status, contact, contact_id, ${SEL_LIST_COLS}, ghl_estimate_number, image_url, inventory_unit_id, ss_quote_number, ss_quote_pdf_url, total_cents, expected_close_date`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("design_versions")
-        .select("short_code, version, created_at, selections, image_url, inventory_unit_id")
+        .select(`short_code, version, created_at, ${SEL_LIST_COLS}, image_url, inventory_unit_id`)
         .eq("client_id", clientId)
         .order("version", { ascending: false })
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
-    const list = (dRes.data || []).filter(notInventory);
+    const list = (dRes.data || []).map(withListSelections).filter(notInventory);
     setRows(list); // show cached statuses immediately
     const map = {};
-    (vRes.data || []).forEach((v) => { (map[v.short_code] = map[v.short_code] || []).push(v); });
+    (vRes.data || []).forEach((v0) => { const v = withListSelections(v0); (map[v.short_code] = map[v.short_code] || []).push(v); });
     setVmap(map);
+    ssCachePut("rest", "designs", clientId, { rows: list, vmap: map });
     // Refresh fulfillment status from GHL (read-only projection). Non-fatal: if the sync
     // errors or GHL isn't configured, the cached designs.status values above stay shown.
     // LAST on purpose — everything above is already on screen before this starts.
@@ -199,7 +270,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       try {
         const { data: sync } = await sb.functions.invoke("sync-design-status", { body: { shortCodes: list.map((r) => r.short_code) } });
         const statuses = sync && sync.statuses;
-        if (statuses) setRows((rs) => (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r));
+        if (statuses) {
+          // ⚠️ MERGE INTO WHATEVER IS ON SCREEN NOW, never into the `list` this run captured.
+          // `load` has four triggers (mount/refreshKey, invoice send, delete confirm) and no
+          // cancellation, and the call above is the slow one — so a superseded run can land
+          // after a newer one. Writing the captured list back would RESURRECT rows the newer
+          // run already dropped: delete A, then delete B inside the window, and the older
+          // sync repaints B with a live Open/Invoice/Delete menu — and pins it in the tab
+          // cache for the 10-minute TTL. A functional update can only ever mis-set a status
+          // on a row that is still there, which is recoverable; putting a deleted design back
+          // in front of someone is not. The cache is written from the same merged value for
+          // the same reason.
+          setRows((rs) => {
+            const merged = (rs || []).map((r) => statuses[r.short_code] ? { ...r, status: statuses[r.short_code] } : r);
+            ssCachePut("rest", "designs", clientId, { rows: merged, vmap: map });
+            return merged;
+          });
+        }
       } catch (_e) { /* keep cached statuses */ }
     }
   }, [fetchDesigns]);
@@ -207,6 +294,34 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // refreshKey: bumped by Dashboard when the in-portal designer submits a design,
   // so the list refetches without a manual Refresh click.
   useEffect(() => { load(); }, [load, refreshKey]);
+
+  // Save an expected close date from the board (migration 206).
+  //
+  // Through portal-settings, NOT sb.from("designs").update(): the board READS designs over
+  // direct PostgREST, but the restrictive policies from 154/193 are select-only — there is no
+  // update policy on that table for a tenant, and there should not be one. Writes go through
+  // an action that resolves the tenant server-side.
+  //
+  // OPTIMISTIC, and deliberately so: this is one date on a card someone is scanning, and a
+  // full reload to show it would throw away their scroll position on a board they are reading.
+  // A failure repaints the old value and says so.
+  const saveCloseDate = useCallback(async (shortCode, value) => {
+    const iso = value || null;
+    setCloseEdit(null);
+    const prev = (rows || []).find((x) => x.short_code === shortCode)?.expected_close_date ?? null;
+    if (iso === prev) return;
+    setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)));
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
+        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
+      });
+      if (e) throw new Error(await fnError(e));
+      if (r && r.error) throw new Error(r.error);
+    } catch (err) {
+      setRows((rs) => (rs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: prev } : x)));
+      setError(err.message || "That close date did not save.");
+    }
+  }, [rows]);
 
   // Status chips. Counts are taken over ALL loaded rows (not the searched subset) so the
   // numbers don't shuffle while someone types — the chips describe the dataset, the search
@@ -388,15 +503,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       />
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />
-          </div>
+          {/* Filters LEFT, search RIGHT (Carolyn, 2026-09-07). The search box used to lead and
+              sat 20px above the facet controls, because those carry a heading and it does not —
+              so the row read as two rows. It now trails the facets and wears a heading-shaped
+              spacer, which puts every box on one line by construction rather than by a pixel
+              offset that would drift the next time the label type changes. */}
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="design">
             {styleOpts.length > 1 && <FacetSelect label="Building style" value={fStyle} onChange={setFStyle} options={styleOpts.map((s) => ({ value: s, label: s }))} allLabel="All styles" />}
             {sizeOpts.length > 1 && <FacetSelect label="Size" value={fSize} onChange={setFSize} options={sizeOpts.map((s) => ({ value: s, label: s }))} allLabel="All sizes" />}
             <DateRange label="Created" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
             <FacetSelect label="Versions" value={fVersions} onChange={setFVersions} options={[{ value: "multi", label: "2+ versions" }]} allLabel="All" />
           </FilterBar>
+          <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
+            <span style={FLBL_SPACER} aria-hidden="true">Search</span>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search designs — name, email, phone, building, estimate #…" />
+          </div>
         </div>
       )}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
@@ -439,8 +560,21 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", minWidth: "min-content" }}>
             {CRM_STAGES.map((st) => {
               const cards = sorted.filter((r) => (CRM_STAGE_FOR_STATUS[normStatus(r.status)] || "new") === st.kind);
+              // 240px, up from 190 (Carolyn, 2026-09-07). The card carries a value, a status, a
+              // close date and two dated lines now; at 190px the labelled date row wraps —
+              // "Created Sep 2, 26 · Updated Sep 4, 26" needs ~187px of text against 172px of
+              // content box, measured.
+              //
+              // ⚠️ THE BOARD NOW SCROLLS SIDEWAYS ON A LAPTOP, and the claim that it would not
+              // (made when this width was proposed) was wrong. Six columns at 240 plus five
+              // 10px gaps is 1490px; the sidebar is 240px (.ss-side), so a 1500px screen leaves
+              // about 1260px of main. Five stages are visible and Delivered needs a scroll.
+              // That is not fixable by picking a smaller number — anything above ~195px has the
+              // same problem, so the real choice was "all six visible and cramped" or "roomy
+              // and scrolled", and Carolyn chose roomy. The board has always had overflowX
+              // auto, and every kanban she compared this to (Pipedrive) scrolls the same way.
               return (
-                <div key={st.kind} style={{ flex: "1 0 190px", minWidth: 190, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
+                <div key={st.kind} style={{ flex: "1 0 240px", minWidth: 240, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
                     <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase", color: "#475569" }}>{st.name}</span>
                     <span style={{ fontSize: 11, fontWeight: 800, color: "#94A3B8" }}>{cards.length}</span>
@@ -448,21 +582,81 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                   {cards.length === 0 && <div style={{ fontSize: 11.5, color: "#CBD5E1", padding: "6px 2px" }}>—</div>}
                   {cards.map((r) => {
                     const c = r.contact || {}; const s = r.selections || {};
+                    const money = fmtMoneyWhole(r.total_cents);
+                    const closeIso = r.expected_close_date || null;
+                    // Local-midnight compare, not Date.parse of the bare yyyy-mm-dd (which is
+                    // parsed as UTC and reads as yesterday for anyone west of Greenwich — every
+                    // one of these builders). A date closing TODAY is not late.
+                    const overdue = !!closeIso && closeIso < new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+                    const editingClose = closeEdit === r.short_code;
                     return (
-                      <button key={r.short_code} type="button"
-                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code) : (onOpenDesign && onOpenDesign(r.short_code)))}
-                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 9px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit" }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {c.name || c.email || c.phone || "—"}
+                      <div key={r.short_code} style={{ position: "relative", marginBottom: 6 }}>
+                      <button type="button"
+                        onClick={() => (onOpenRecord ? onOpenRecord(r.short_code, r.contact_id) : (onOpenDesign && onOpenDesign(r.short_code)))}
+                        style={{ display: "block", width: "100%", textAlign: "left", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 9px", cursor: "pointer", fontFamily: "inherit" }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                          <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13, fontWeight: 700, color: "#1E293B", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {c.name || c.email || c.phone || "—"}
+                          </span>
+                          {/* NULL is "No quote yet", never $0 — 104 of the 153 designs on the
+                              platform have no estimate lines at all (drafts, browsing leads), and
+                              a $0 pipeline card is a lie about a real deal. */}
+                          <span style={{ fontSize: 13, fontWeight: money ? 800 : 600, color: money ? "#1E293B" : "#94A3B8", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                            {money || "No quote yet"}
+                          </span>
                         </div>
-                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1 }}>
+                        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {[titleCase(s.style), s.size].filter(Boolean).join(" ") || r.short_code}
                         </div>
-                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 3, display: "flex", justifyContent: "space-between", gap: 6 }}>
-                          <span>{fmtDate(r.created_at)}</span>
+                        {/* Status pill on every card (Carolyn, 2026-09-07). Note it repeats
+                            the column: CRM_STAGE_FOR_STATUS is 1:1, so every card in
+                            "Proposal Made" is Sent and every card in "Contract Signed" is
+                            Accepted. It earns its place as a TRANSLATION — the columns carry
+                            Carolyn's Pipedrive stage names, the pill carries the status the
+                            rest of the product shows — and it stops being redundant the day a
+                            second status maps into one stage. */}
+                        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 5, display: "flex", alignItems: "center", gap: 6 }}>
+                          <StatusPill status={r.status} small />
                           {r.ss_quote_number || r.ghl_estimate_number ? <span>#{r.ss_quote_number || r.ghl_estimate_number}</span> : null}
+                          {/* The close date is the reason this field exists: teal while there is
+                              still time, red the moment it passes. A date nobody is warned about
+                              is a date nobody acts on. Spacer only — the real control is the
+                              sibling button below, because a <button> inside a <button> is
+                              invalid HTML and swallows the card's own click. */}
+                          <span style={{ marginLeft: "auto", visibility: "hidden" }} aria-hidden="true">
+                            {closeIso ? fmtDateShort(closeIso) : "Set close"}
+                          </span>
+                        </div>
+                        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #F1F5F9", fontSize: 10, color: "#94A3B8", display: "flex", gap: 5, fontVariantNumeric: "tabular-nums" }}>
+                          <span>Created {fmtDateShort(r.created_at)}</span>
+                          <span style={{ opacity: 0.55 }}>·</span>
+                          <span>Updated {fmtDateShort(r.updated_at)}</span>
                         </div>
                       </button>
+                      {/* THE CLOSE-DATE CONTROL, a SIBLING of the card button and positioned over
+                          the spacer above it. Nesting it would be invalid HTML and every click on
+                          the date would also open the customer record. */}
+                      {editingClose ? (
+                        <input type="date" autoFocus defaultValue={closeIso || ""}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={(e) => saveCloseDate(r.short_code, e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setCloseEdit(null); }}
+                          style={{ position: "absolute", right: 7, top: 46, zIndex: 2, border: "1px solid " + ACCENT, borderRadius: 5, padding: "1px 4px", fontSize: 10.5, fontFamily: "inherit", fontWeight: 700, color: "#1E293B", background: "#FFF" }} />
+                      ) : (
+                        <button type="button" title={closeIso ? "Expected close — click to change" : "Set an expected close date"}
+                          onClick={(e) => { e.stopPropagation(); setCloseEdit(r.short_code); }}
+                          disabled={!canEditClose}
+                          style={{
+                            position: "absolute", right: 7, top: 47, zIndex: 2, border: "none", borderRadius: 4,
+                            padding: closeIso ? "0 4px" : "0 3px", fontSize: 10.5, fontWeight: 700, fontFamily: "inherit",
+                            cursor: canEditClose ? "pointer" : "default",
+                            background: overdue ? "#FEF2F2" : "transparent",
+                            color: closeIso ? (overdue ? "#DC2626" : "#1B7895") : "#CBD5E1",
+                          }}>
+                          {closeIso ? fmtDateShort(closeIso) : (canEditClose ? "+ close" : "—")}
+                        </button>
+                      )}
+                      </div>
                     );
                   })}
                 </div>
@@ -493,7 +687,23 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                   <React.Fragment key={r.short_code}>
                   <tr>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>{fmtDate(r.created_at)}</td>
-                    <td style={{ ...S.td, fontWeight: 700 }}>{c.name || "—"}</td>
+                    {/* THE NAME IS THE LINK, and it opens the CUSTOMER — Carolyn 2026-09-04
+                        @1:07:19: "when you're in pipeline and you click on test customer,
+                        you're going to open up this ... you're going to see everything in
+                        here." The list is the DEFAULT view, so before this the most common
+                        click in the product went to the designer instead, which is the
+                        opposite of what she asked for. "Open" in the Actions column still
+                        goes to the designer — that is a different intention and it keeps it.
+                        Same pattern LeadsTable already uses for a contact name. */}
+                    <td style={{ ...S.td, fontWeight: 700 }}>
+                      {onOpenRecord
+                        ? <button type="button" onClick={() => onOpenRecord(r.short_code, r.contact_id)}
+                            title={`Open ${c.name || "this customer"}`}
+                            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: "inherit", fontWeight: 700, color: ACCENT, textAlign: "left" }}>
+                            {c.name || "—"}
+                          </button>
+                        : (c.name || "—")}
+                    </td>
                     <td style={S.td}>
                       <div>{c.email || ""}</div>
                       <div style={{ color: "#64748B", fontSize: 12 }}>{c.phone || ""}</div>
@@ -510,11 +720,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                     </td>
                     {/* SS quote numbers render verbatim (prefix included); EST- is GHL's. */}
                     <td style={S.td}>{r.ghl_estimate_number ? `EST-${r.ghl_estimate_number}` : (r.ss_quote_number || "—")}</td>
-                    <td style={S.td}>{(() => { const st = normStatus(r.status); const c = STATUS_COLORS[st]; return (
-                      <span style={{ whiteSpace: "nowrap" }}>
-                        <span style={{ background: c.bg, color: c.fg, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}>{STATUS_LABELS[st]}</span>
-                      </span>
-                    ); })()}</td>
+                    <td style={S.td}><StatusPill status={r.status} /></td>
                     <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                       {/* Opens IN THE PORTAL designer — never the public page, which now
                           silently captures leads and saves drafts; staff browsing a
@@ -793,6 +999,11 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
         if (groups.has(normPhone(l.phone_digits)) || (em && groupEmails.has(em))) return;
         groups.set("lead-" + l.id, {
           key: "lead-" + l.id, browsing: true, source: l.source,
+          // A browsing lead is a PERSON too, so its name links to the record like every
+          // other row. captured_leads.contact_id is stamped by capture-lead (and by 130's
+          // backfill) — before that this was always null, which is why the newest row in
+          // the list, the one anybody clicks first, was the one row that did nothing.
+          contactId: l.contact_id || null,
           name: l.name || "", email: l.email || "", phone: l.phone || "",
           count: 0, firstSeen: l.created_at, lastActivity: l.updated_at,
           latestCode: null, topStatus: "browsing",
@@ -823,17 +1034,19 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
     // Additive — a failure there must never block the design list, which is why its result
     // is read defensively rather than destructured with the designs error.
     const [dRes, clRes] = await Promise.all([
+      // Style and size only (SEL_LIST_COLS) — this list groups people, and the two values it
+      // folds into a lead's searchable text are the only part of the plan it ever reads.
       sb.from("designs")
-        .select("short_code, created_at, updated_at, status, contact, selections, ghl_estimate_number, contact_id")
+        .select(`short_code, created_at, updated_at, status, contact, ${SEL_LIST_COLS}, ghl_estimate_number, contact_id`)
         .eq("client_id", clientId)
         .order("created_at", { ascending: false }),
       sb.from("captured_leads")
-        .select("id, name, phone, phone_digits, email, source, created_at, updated_at")
+        .select("id, name, phone, phone_digits, email, source, created_at, updated_at, contact_id")
         .eq("client_id", clientId).order("updated_at", { ascending: false })
         .then((r) => r, () => ({ data: [] })),
     ]);
     if (dRes.error) { setError(dRes.error.message); setRows([]); return; }
-    list = (dRes.data || []).filter(notInventoryLead);
+    list = (dRes.data || []).map(withListSelections).filter(notInventoryLead);
     browsing = clRes.data || [];
     // PAINT NOW, on the cached statuses. Everything below only ever improves them.
     paint(list, browsing);
@@ -953,14 +1166,18 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
       </CardHead>
       {rows && rows.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 320px", minWidth: 260 }}>
-            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
-          </div>
+          {/* Same shape as Pipeline's bar above, and changed with it: Contacts sits one nav
+              item away, so leaving it search-first would have made two neighbouring tabs
+              disagree about where their search box lives. */}
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={filtered.length} total={rows.length} noun="contact">
             <DateRange label="Last activity" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
             <FacetSelect label="Contact info" value={fContact} onChange={setFContact}
               options={[{ value: "has", label: "Has email or phone" }, { value: "missing", label: "No contact info" }]} allLabel="All" />
           </FilterBar>
+          <div style={{ ...FCTRL, flex: "1 1 320px", minWidth: 260 }}>
+            <span style={FLBL_SPACER} aria-hidden="true">Search</span>
+            <SearchInput value={query} onChange={setQuery} placeholder="Search contacts — name, email, phone, status…" />
+          </div>
         </div>
       )}
       {/* `browsing` is passed via `extra` because it is not a designs.status — it is the
@@ -1176,11 +1393,42 @@ const CRM_SECTIONS = [
 // actions that you can take." Disabled tabs render GREYED WITH A TOOLTIP, never hidden: a
 // missing tab reads as "not built", a greyed one reads as "next", and she is showing this
 // at a trade show.
+// Why a THIRD reason a tab can be off, beside "not built" and "not your permission": the
+// account has not bought the CRM. Blaming the reader's permissions for a billing state sends
+// an owner — who has every permission there is — off to Team looking for a switch that is not
+// there. Worded to match the 403 portal-settings returns for the same prefix, so the greyed
+// hint and any refusal that reaches the browser tell one story.
+const CRM_LOCKED_HINT = "The built-in CRM isn't part of your subscription — add it under Settings → Billing.";
+
+// The reason a tab is greyed on a CONTACT record with no deal picked yet. Carolyn,
+// 2026-09-02, looking at a contact holding four quotes: "Which one the heck is it when I'm
+// in a contact? ... you have to have one of these selected for anything to show up here ...
+// Right now, it's Greek, you have no idea."
+//
+// It says WHY rather than just "pick one": every one of these five writes carries a
+// short_code, and filed against the wrong deal a note about one customer's building lands
+// in another's history. Deliberately placed beside CRM_LOCKED_HINT so it falls inside the
+// block crmRecordGate_test already slices — no test anchor moves.
+const CRM_PICK_HINT = (what) =>
+  `Pick a deal or order on the left first, so the ${what} is filed against the right one.`;
+
 const CRM_TABS = [
   // "Not available yet" (the default hint) reads as NOT BUILT, which is the wrong story for
   // a tab that is merely out of this person's reach — it is built, they just cannot write.
-  { key: "activity", label: "Activity", enabled: (c) => c.canEdit, hint: "You don't have permission to log activities." },
-  { key: "note", label: "Notes", enabled: (c) => c.canEdit, hint: "You don't have permission to add notes." },
+  //
+  // ⚠️ HINT ORDER IS SUBSCRIPTION → PERMISSION → THE TAB'S OWN DATA NEED → needsPick, and
+  // needsPick goes LAST everywhere. If a contact has no email address, picking a deal still
+  // leaves Email disabled, so leading with "pick a deal" would be a lie by omission and send
+  // the reader off doing something that changes nothing. Ordered this way the hint always
+  // names a reason that is STILL TRUE once the reader has acted on every reason above it.
+  { key: "activity", label: "Activity", enabled: (c) => c.canEdit && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canEdit ? "You don't have permission to log activities."
+      : CRM_PICK_HINT("activity")) },
+  { key: "note", label: "Notes", enabled: (c) => c.canEdit && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked ? CRM_LOCKED_HINT
+      : !c.canEdit ? "You don't have permission to add notes."
+      : CRM_PICK_HINT("note")) },
   { key: "scheduler", label: "Meeting scheduler", enabled: () => false, hint: "Arrives with the calendar integration." },
   { key: "call", label: "Call", enabled: () => false, hint: "Arrives with the phone integration." },
   // SMS — A REAL CHANNEL NOW, REVERSING A DECISION THIS COMMENT USED TO RECORD.
@@ -1211,14 +1459,18 @@ const CRM_TABS = [
   // the phone number this very tab renders. Same rule, same words as the Person panel.
   {
     key: "sms", label: "SMS",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready),
-    hint: (c) => (!c.canEdit
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.phone && c.contact.id) && !!(c.sms && c.sms.ready) && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : !c.canEdit
       ? "You don't have permission to text contacts."
       : !(c.contact && c.contact.phone)
         ? "This contact has no phone number on file."
         : !(c.contact && c.contact.id)
           ? "This design predates contact records, so there is no contact to text yet. It gets its own contact the next time this customer submits."
-          : "Texting switches on once this account's number clears carrier registration."),
+          : !(c.sms && c.sms.ready)
+            ? "Texting switches on once this account's number clears carrier registration."
+            : CRM_PICK_HINT("text")),
   },
   // Conversations were email ONLY, until the tab above. Email remains the channel that
   // carries a document — a quote, an invoice, anything with a link — and needs an address to
@@ -1234,10 +1486,14 @@ const CRM_TABS = [
   // the data for a permissions problem sends someone off editing a contact that is fine.
   {
     key: "email", label: "Email",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email),
-    hint: (c) => (c.canEdit
-      ? "This contact has no email address on file."
-      : "You don't have permission to email contacts."),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.email) && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : !c.canEdit
+      ? "You don't have permission to email contacts."
+      : !(c.contact && c.contact.email)
+        ? "This contact has no email address on file."
+        : CRM_PICK_HINT("email")),
   },
   // TWO NAMES THAT SAY WHOSE FILES THEY ARE. Carolyn spent the longest stretch of the
   // 2026-08-26 call on this (20:08–26:45): "documents is what we create ... customer files
@@ -1253,10 +1509,14 @@ const CRM_TABS = [
   // design's uploads belong to the person, not to one of their quotes.
   {
     key: "files", label: "Customer Uploads",
-    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id),
-    hint: (c) => (c.canEdit
-      ? "This design has no contact record yet, so there is nowhere to file an upload."
-      : "You don't have permission to add files to contacts."),
+    enabled: (c) => c.canEdit && !!(c.contact && c.contact.id) && !c.needsPick,
+    hint: (c) => (!c.crmUnlocked
+      ? CRM_LOCKED_HINT
+      : !c.canEdit
+      ? "You don't have permission to add files to contacts."
+      : !(c.contact && c.contact.id)
+        ? "This design has no contact record yet, so there is nowhere to file an upload."
+        : CRM_PICK_HINT("upload")),
   },
   // NO "Design Documents" TAB. Carolyn, 2026-08-26 24:01, having found the same documents
   // listed both here and in History: "the top part is about things to do. The bottom part is
@@ -1293,9 +1553,103 @@ const CRM_CHIPS = [
   // Everything that happened, not three types two of which were never emitted — see the
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
+  // `owner_change` (2026-09-05) — assignment is a thing that HAPPENED to this record, and
+  // Carolyn's definition of the word is everything that happened to it (08-26 25:18: "if they
+  // changed ownership of a lead from one person to another person, that was logged").
+  //
+  // ⚠️ A chip asking for a type the server never emits fails SILENTLY — the filter returns
+  // nothing and an empty changelog reads as "nothing has happened here" rather than as a bug.
+  // That is how this very chip came to read 0 on Carolyn's screen. Mirrors
+  // CRM_FEED_TYPES.changelog in _shared/crmFeed.ts; keep the two identical.
+  //
+  // A contact MERGE deliberately has no chip of its own: migration 192 records it as a
+  // `crm_field_changes` row (`field = 'merged_from'`) and the feed emits it as the existing
+  // `field_change` type, so it already rides this list.
   { key: "changelog", label: "Changelog", types: ["design_created", "design_version", "accepted", "quote_opened",
-    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change"] },
+    "change_order", "invoice_created", "invoice_sent", "lead_captured", "field_change", "owner_change"] },
 ];
+
+// Street / City / State / ZIP for the contact editor, which renders in TWO places (the
+// contact record's Person card and a deal record's Person drop-down). It was copy-pasted
+// between them, and adding the billing pair (2026-09-04) would have made that four identical
+// blocks — so it is one component that takes the field names it writes.
+//
+// ⚠️ `keys` is explicit rather than derived from a prefix. The delivery columns are bare
+// (`street`) and the billing ones are prefixed (`billingStreet`), so any "" + capitalise rule
+// would be a lie for one of the two and would break the moment somebody adds a third address.
+function CrmAddressFields({ edit, setEdit, keys }) {
+  const set = (k) => (e) => setEdit((p) => ({ ...p, [k]: e.target.value }));
+  const cell = { ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" };
+  return (
+    <>
+      <span style={S.lbl}>Street</span>
+      <input style={{ ...S.input, marginBottom: 7 }} value={edit[keys.street]} placeholder="412 Ladder Lane"
+        onChange={set(keys.street)} />
+      <div style={{ display: "flex", gap: 7 }}>
+        <div style={{ flex: "2 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>City</span>
+          <input style={cell} value={edit[keys.city]} placeholder="Springfield" onChange={set(keys.city)} />
+        </div>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>State</span>
+          <input style={cell} value={edit[keys.state]} placeholder="MO" onChange={set(keys.state)} />
+        </div>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <span style={S.lbl}>ZIP</span>
+          <input style={cell} value={edit[keys.zip]} placeholder="65801" onChange={set(keys.zip)} />
+        </div>
+      </div>
+    </>
+  );
+}
+// WHO OWNS THIS CUSTOMER. Carolyn 2026-09-04 @1:09:30, settling a 40-minute argument with
+// herself: "we do not ever assign deals. We only assign contacts and followers … if they are
+// not assigned to or following that customer, they can't see anything of it."
+//
+// The roster comes from the SERVER (`crm_record`'s `team`), never from a browser query:
+// client_users' only policy is `client_users_select_own`, so a portal user cannot read their
+// own colleagues' rows and a locally-built list would be empty for everyone but an operator.
+//
+// `undefined` team = this record was not built with one (a DESIGN record, or an older server).
+// Render nothing rather than an empty picker — a drop-down with no names next to a filled-in
+// owner name reads as broken, and Carolyn has already been shown one screen that did that.
+function CrmOwnerPicker({ edit, setEdit, team }) {
+  if (!Array.isArray(team)) return null;
+  return (
+    <>
+      <span style={S.lbl}>Assigned to</span>
+      <select style={{ ...S.input, marginBottom: 7 }} value={edit.owner || ""}
+        onChange={(e) => setEdit((p) => ({ ...p, owner: e.target.value }))}>
+        {/* "" is a real answer, not a placeholder — the server reads it as "clear the owner". */}
+        <option value="">Unassigned</option>
+        {team.map((m) => (
+          <option key={m.userId} value={m.userId}>
+            {m.name || "(no name set)"}{m.title ? ` — ${ssTitleLabel(m.title)}` : ""}
+          </option>
+        ))}
+      </select>
+    </>
+  );
+}
+// Titles are stored as slugs (`sales_rep`); this is the only place the record page shows one.
+function ssTitleLabel(t) {
+  return String(t || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// The two address sets, named once so a caller cannot invent a third spelling.
+const CRM_ADDR_DELIVERY = { street: "street", city: "city", state: "state", zip: "zip" };
+const CRM_ADDR_BILLING = { street: "billingStreet", city: "billingCity", state: "billingState", zip: "billingZip" };
+
+// A section heading inside the contact editor. Only earns its place now that there are two
+// addresses: with one, an unlabelled Street/City/State/ZIP was unambiguous.
+function CrmEditHead({ children, hint }) {
+  return (
+    <div style={{ margin: "9px 0 5px", display: "flex", alignItems: "baseline", gap: 7 }}>
+      <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: "#475569", whiteSpace: "nowrap" }}>{children}</span>
+      {hint && <span style={{ fontSize: 11, color: "#94A3B8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>}
+    </div>
+  );
+}
 
 // The stage bar. Carolyn's own stage names, from her Pipedrive screen.
 //
@@ -1318,45 +1672,111 @@ const CRM_STAGE_FOR_STATUS = {
   draft: "new", sent: "quoted", accepted: "won", invoiced: "invoiced", delivered: "delivered",
 };
 
-// ── THE COMPACT MULTI-PIPELINE BAR ───────────────────────────────────────────────────
-// Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
-// three rows there" (2026-08-28 @24:48). Ahsan pushed back on the shape, not the idea:
-// "three rows, similar to these, it wouldn't look good", then proposed this at @29:25 --
-// "if we are on third stage, we can add a dot, a dot, and then the third stage is name, and
-// then a dot, a dot, a dot ... instead of using the names of which stages they are not in."
-// She took it: "I like that. Yes, I like that a lot."
+// ── HAS THIS DEAL BEEN INVOICED? ────────────────────────────────────────────────────
+// Carolyn, 2026-09-02, on a record with no invoice: "can we make this like hide this if it
+// doesn't have an invoice?" This is that test, and BOTH halves are load-bearing — I checked
+// the live data rather than reasoning about it.
 //
-// So one row per ladder: dots for what is behind, the NAME of where it is now, dots ahead.
-// Three chevron rails would be roughly 18 words of stage names; this is three.
+// ss_invoice_sent_at alone is WRONG. Its only writer in the repo is send_invoice, so it
+// marks a StructureStudio-issued invoice and nothing else; sync-design-status, which is what
+// flips a GHL-quoted design to 'invoiced', writes {status, updated_at} and never touches it,
+// and migration 136's backfill was narrowed to issued_by='structurestudio'. A design
+// invoiced in GoHighLevel therefore has it NULL forever — on live that is FOURTEEN of
+// junior-barns' buildings, every one physically on the build board. Since invoice_in_ghl
+// defaults true, this half alone would hide the rails on most real tenants' sold work.
+//
+// status alone is also wrong, in the other direction. Since 136, send_invoice deliberately
+// stopped flipping status, so an SS invoice that is OUT BUT UNSIGNED reads 'accepted' with
+// only the column set. One such row on structure-studio today. Carolyn said "if it doesn't
+// HAVE an invoice" — one sitting in the customer's inbox is one they have.
+//
+// Not invoice_sends: RLS with zero policies, so the browser cannot read it, and it covers
+// only SS-issued invoices anyway — the same blind spot plus a round trip.
+//
+// ⚠️ normStatus is `STATUS_LABELS[s] ? s : "sent"`, NOT a lowercaser. 'inventory',
+// undefined and 'INVOICED' all fall through to "sent" and read false. That is correct here.
+const crmHasInvoice = (d) => !!d && (
+  !!d.ss_invoice_sent_at ||
+  normStatus(d.status) === "invoiced" ||
+  normStatus(d.status) === "delivered"
+);
+
+// ⚠️ THE ROWS ARE CHEVRON RAILS NOW, NOT DOTS. Ahsan, 2026-09-02, looking at the shipped
+// screen: "instead of the dotted pipeline stages for build and delivery can you do similar
+// to the main pipeline stage with the same style and length but different color?" The dots
+// won the argument on the call because three rails of stage NAMES read as eighteen words;
+// what he saw was that a 7px dot beside a full-width chevron rail reads as a lesser thing,
+// not a compact one. So the ladders share one geometry and differ only in hue.
+//
+// The rail below is the single source of that geometry -- CrmStageBar renders it too, so
+// "the same style" cannot drift the next time one of them is touched.
+const CRM_RAIL_TONES = {
+  // Sales keeps ACCENT on purpose. The rail on a deal IS the sales ladder; giving the
+  // contact's sales row a second colour would say the two were different things.
+  sales:    { on: ACCENT,    past: "#DDD6FE" },
+  // Build and delivery are drawn from the palette the app already owns -- #1B7895 is the
+  // header gradient's other stop, not a new colour. An amber delivery row was tried first and
+  // it OUT-SHOUTED the sales stage it sits under: at this lightness orange carries far more
+  // chroma than the brand purple, so the least important rail read as the loudest.
+  build:    { on: "#1B7895", past: "#CFFAFE" },  // brand blue
+  delivery: { on: "#15803D", past: "#DCFCE7" },  // green -- the ladder ends in "Delivered"
+};
+const CRM_RAIL_IDLE = { bg: "#F1F5F9", fg: "#94A3B8" };
+
+// ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
+// rather than filling the first one, because filling it would claim the building is in it.
+// A building that has never been scheduled is not "in the first stage".
+function CrmChevronRail({ stages, idx = null, tone, title = null }) {
+  const t = tone || CRM_RAIL_TONES.sales;
+  return (
+    <div style={{ display: "flex", gap: 2, flexWrap: "wrap", flex: "1 1 auto", minWidth: 0 }}>
+      {stages.map((s, i) => (
+        // ⚠️ THE NAME LEADS THE TOOLTIP, and that is not decoration. Build stage names are
+        // tenant-authored and uncapped, so a long one can be narrowed by the flex basis until
+        // the chevron's clipPath eats its ends; hover is then the only way to read it whole.
+        // The dot version carried title={s.name} for exactly that reason and the first draft
+        // of this rail dropped it, keeping only the status word.
+        <div key={i}
+          title={`${s.name} — ${idx == null ? (title || "Not started") : i <= idx ? "Reached" : "Not yet"}`}
+          style={{
+            // ⚠️ NO minWidth HERE ON PURPOSE. `min-width: 0` would let a chevron shrink past
+            // its longest word, and since clipPath crops rather than scrolls, the word would
+            // lose its ends with nothing to reveal them. The default `min-width: auto` keeps a
+            // min-content floor: the rail wraps to another line instead of cropping. The
+            // original CrmStageBar never set it either, so this is parity, not a new rule.
+            flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
+            background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
+            color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
+            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
+          }}>
+          {s.name}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// -- THE MULTI-PIPELINE BAR ----------------------------------------------------------
+// Carolyn wanted the stage rail repeated for build and delivery -- "we essentially can have
+// three rows there" (2026-08-28 @24:48). That is now literally what this is: one rail per
+// ladder, same chevrons, same height, same right edge, coloured per ladder.
 //
 // ⚠️ The chevron rail on a DEAL stays exactly as it was. She said plainly "I like this
 // pipeline up here", and this bar carries the ladders it does not already show rather than
 // replacing something she praised. A contact has no chevron -- it may have several deals --
 // so there it carries all three.
+//
+// The name is kept from the dot era so every caller and every grep still finds it.
 function CrmStageDots({ rows }) {
   const live = (rows || []).filter((r) => r && r.stages && r.stages.length);
   if (!live.length) return null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 12 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
       {live.map((r) => (
-        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11 }}>
-          <span style={{ width: 58, flexShrink: 0, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
-          {r.idx == null ? (
-            // Not started is its own state, not stage zero: a building that has never been
-            // scheduled is not "in the first stage", and colouring a dot would say it was.
-            <span style={{ color: "#CBD5E1", fontWeight: 600 }}>{r.emptyLabel || "Not started"}</span>
-          ) : (
-            <span style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-              {r.stages.map((s, i) => (
-                i === r.idx
-                  ? <span key={i} title={s.name}
-                      style={{ fontWeight: 800, color: "#FFF", background: ACCENT, borderRadius: 20, padding: "2px 9px", whiteSpace: "nowrap" }}>{s.name}</span>
-                  : <span key={i} title={s.name}
-                      style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
-                               background: i < r.idx ? "#C4B5FD" : "#E2E8F0" }} />
-              ))}
-            </span>
-          )}
+        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 58, flexShrink: 0, fontSize: 11, color: "#94A3B8", fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3 }}>{r.label}</span>
+          <CrmChevronRail stages={r.stages} idx={r.idx} tone={CRM_RAIL_TONES[r.key]}
+            title={r.idx == null ? (r.emptyLabel || "Not started") : null} />
         </div>
       ))}
     </div>
@@ -1367,18 +1787,8 @@ function CrmStageBar({ status }) {
   const at = CRM_STAGE_FOR_STATUS[normStatus(status)] || "new";
   const idx = Math.max(0, CRM_STAGES.findIndex((s) => s.kind === at));
   return (
-    <div style={{ display: "flex", gap: 2, marginBottom: 12, flexWrap: "wrap" }}>
-      {CRM_STAGES.map((s, i) => (
-        <div key={s.kind} title={i <= idx ? "Reached" : "Not yet"}
-          style={{
-            flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
-            background: i < idx ? "#DDD6FE" : i === idx ? ACCENT : "#F1F5F9",
-            color: i === idx ? "#FFF" : i < idx ? ACCENT : "#94A3B8",
-            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
-          }}>
-          {s.name}
-        </div>
-      ))}
+    <div style={{ display: "flex", marginBottom: 12 }}>
+      <CrmChevronRail stages={CRM_STAGES} idx={idx} tone={CRM_RAIL_TONES.sales} />
     </div>
   );
 }
@@ -1390,7 +1800,25 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+  // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
+  // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
+  // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
+  // crm_record_consent, crm_file_* — and portal-settings refuses the whole prefix without the
+  // CRM (index.ts, the crmGated guard). The one exception is the READ, `crm_record` with
+  // kind "design", which is deliberately exempt so the free Pipeline list's own rows still
+  // open. The result before this line existed: on a tenant without the CRM the design record
+  // rendered in full, every control looked live, and the first click returned a 403 — Carolyn
+  // 2026-09-01, "I don't want them, if they are not paying for the CRM part in the billing,
+  // to be able to make these notes in any of this stuff here."
+  //
+  // Folding it into canEdit rather than adding a seventh predicate is what keeps the browser
+  // and the server agreeing by construction: `enabled: (c) => c.canEdit` already names the
+  // exact set of tabs the prefix refuses, and Invoice — which is send_invoice, NOT a crm_
+  // action, and belongs to Simple Layout — reads c.isAdmin and correctly stays live.
+  // `crmUnlocked` defaults TRUE so a caller that has not been taught about it (the contact
+  // record route, which is gated a level up) behaves exactly as it did.
+  const canEdit = canEditProp && crmUnlocked;
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [tab, setTab] = useState("note");
@@ -1430,6 +1858,22 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   // section they serve; only the hook has to live up here.
   const [edit, setEdit] = useState(null);              // { name, phone, email } | null — null = not editing
   const [personOpen, setPersonOpen] = useState(false); // the Person card's drop-down, on a DEAL
+  // WHICH of this contact's deals the page is about. NULL on purpose — Carolyn, 2026-09-02:
+  // "you have to have one of these selected for anything to show up here". The old behaviour
+  // picked designs[0] silently, which is exactly what she was reading when she said "Right
+  // now, it's Greek, you have no idea." ⚠️ This must be the LAST hook and stay ABOVE the
+  // early returns below, same as the two above it — and it is the ONLY new one: activeCode
+  // is derived, not stored, because a useMemo would be a second hook that would have to sit
+  // above the `!data` guard where `data` does not exist yet.
+  // SEEDED from initialDeal when the reader arrived by clicking that deal in the Pipeline
+  // (2026-09-04). Initial state only — a hand-pick later supersedes it, and `key={sub}` in
+  // the shell remounts on every route so a stale seed cannot outlive its own navigation.
+  //
+  // ⚠️ It is NOT trusted: activeCode below re-checks membership against knownCodes, so a
+  // deal that does not belong to this contact resolves to null and the reader gets the
+  // ordinary pick hint rather than somebody else's quote. That check already existed for
+  // load()'s re-runs; seeding just gave it a second thing to protect against.
+  const [selCode, setSelCode] = useState(initialDeal || null);
 
   const load = useCallback(async () => {
     setErr(null);
@@ -1451,7 +1895,32 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
   if (!data) return <div style={S.card}>Loading…</div>;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
-  const ctx = { kind, record, isAdmin, canEdit, contact: data.contact, designs: data.designs || [], sms: data.sms || null };
+
+  // THE SELECTED DEAL. Below the early returns on purpose — none of this is a hook.
+  //
+  // The membership re-check is not defensive padding: load() re-runs after every write, and
+  // a selCode left pointing at a design that has since moved contact would make every filter
+  // below return [] with no error anywhere — the "quietly always empty" failure the orders
+  // and delivery cards each have a comment about.
+  //
+  // activeCode can be set while activeDeal is null: orders join on short_code as a SOFT link
+  // with no FK, so an order can name a code whose design this read did not return. Every
+  // consumer has to tolerate that, and the rails do by construction.
+  const knownCodes = new Set([
+    ...(data.designs || []).map((d) => d.short_code),
+    ...(data.orders || []).map((o) => o.short_code),
+  ]);
+  const activeCode = kind === "design" ? recordId
+    : (selCode && knownCodes.has(selCode) ? selCode : null);
+  const activeDeal = activeCode
+    ? ((data.designs || []).find((d) => d.short_code === activeCode) || null)
+    : null;
+
+  // needsPick is derived and redundant, and that is the point: it puts the `kind ===
+  // "contact"` half in ONE place, so no tab can accidentally gate itself on a design record
+  // — which would break the free Pipeline list that opens design records without a CRM.
+  const ctx = { kind, record, isAdmin, canEdit, crmUnlocked, contact: data.contact, designs: data.designs || [], sms: data.sms || null,
+    selectedCode: activeCode, needsPick: kind === "contact" && !activeCode };
   const cname = (data.contact && (data.contact.name || data.contact.email || data.contact.phone)) || "Unnamed contact";
   const sel = (record && record.selections) || {};
   const title = kind === "design"
@@ -1470,7 +1939,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       body: {
         action: "crm_save_note", body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1497,6 +1966,12 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     name: (data.contact && data.contact.name) || "",
     phone: (data.contact && data.contact.phone) || "",
     email: (data.contact && data.contact.email) || "",
+    // WHO OWNS THIS CUSTOMER (188). Carolyn 2026-09-04 @1:09:30: "we do not ever assign
+    // deals. We only assign contacts and followers." The column has existed since 130 as
+    // deliberate "header furniture" with nothing able to write it; this is the writer.
+    // "" means unassigned — the server reads an empty string as a clear, the same contract
+    // every other field here uses.
+    owner: (data.contact && data.contact.owner_user_id) || "",
     // Address (166). Carolyn, 2026-08-28 @21:01: "We still need like address. You have it in
     // here, but everything that is contact related should be in here." These columns have
     // existed since 130 and were filled in from submitted designs -- the record SHOWED them
@@ -1506,6 +1981,27 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     city: (data.contact && data.contact.city) || "",
     state: (data.contact && data.contact.state) || "",
     zip: (data.contact && data.contact.zip) || "",
+    // SECOND ADDRESS (188). Carolyn, 2026-09-04 @1:14:06: "Address, we are going to need a
+    // second address as well. One is going to be a delivery address. There is going to be a
+    // mailing slash billing."
+    //
+    // ⚠️ THE FOUR FIELDS ABOVE ARE THE DELIVERY ADDRESS AND KEEP THAT MEANING. They are read
+    // as the delivery destination all the way downstream — `_shared/contactAddress.ts`'s
+    // `hasDestination()` and `territoryFor()` feed the delivery scheduler off exactly these
+    // columns. Repurposing them as "the main address" and adding delivery as the new pair
+    // would silently re-point every existing stop at a billing address, on live data, with
+    // nothing raising.
+    // ⚠️ THE COLUMNS ARE `billing_*`, NOT `bill_*`. This read said `bill_street` until the
+    // migration was applied and the live column list checked — a wrong key here does not
+    // throw, it resolves to undefined and falls through to "", so the field renders EMPTY
+    // while the row underneath holds a real address. The write path uses different names
+    // again (`billingStreet`, the wire shape crm_save_contact takes), so a builder would have
+    // typed an address, saved it successfully, and watched it vanish on reload — with no
+    // error anywhere and the data sitting safely in the table the whole time.
+    billingStreet: (data.contact && data.contact.billing_street) || "",
+    billingCity: (data.contact && data.contact.billing_city) || "",
+    billingState: (data.contact && data.contact.billing_state) || "",
+    billingZip: (data.contact && data.contact.billing_zip) || "",
   });
   const saveContact = async () => {
     if (!edit) return;
@@ -1516,8 +2012,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         id: (data.contact && data.contact.id) || null,
         // Sent as-typed, including "" — the server reads an empty string as "clear this
         // field", which is the one thing the anonymous-submission path cannot do.
-        name: edit.name, phone: edit.phone, email: edit.email,
+        name: edit.name, phone: edit.phone, email: edit.email, owner: edit.owner,
         street: edit.street, city: edit.city, state: edit.state, zip: edit.zip,
+        billingStreet: edit.billingStreet, billingCity: edit.billingCity,
+        billingState: edit.billingState, billingZip: edit.billingZip,
       },
     });
     setBusy(false);
@@ -1543,7 +2041,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         // screens use: UTC midnight renders as the PREVIOUS day for every US timezone.
         dueAt: act.dueAt ? new Date(act.dueAt + "T12:00:00").toISOString() : null,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1598,7 +2096,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
           body: {
             action: "crm_file_attach",
             contactId: (data.contact && data.contact.id) || null,
-            shortCode: kind === "design" ? recordId : null,
+            shortCode: activeCode,
             path: signed.path, name: file.name, size: file.size, mime: file.type || null,
           },
         });
@@ -1662,7 +2160,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       body: {
         action: "crm_send_sms", body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1684,7 +2182,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
         to: data.contact && data.contact.email,
         subject, body,
         contactId: (data.contact && data.contact.id) || null,
-        shortCode: kind === "design" ? recordId : null,
+        shortCode: activeCode,
       },
     });
     setBusy(false);
@@ -1716,26 +2214,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             <span style={S.lbl}>Phone</span>
             <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
               onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
-            <span style={S.lbl}>Street</span>
-            <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
-              onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
-            <div style={{ display: "flex", gap: 7 }}>
-              <div style={{ flex: "2 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>City</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
-                  onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
-              </div>
-              <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>State</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
-                  onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
-              </div>
-              <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                <span style={S.lbl}>ZIP</span>
-                <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
-                  onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
-              </div>
-            </div>
+            <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
+            {/* DELIVERY, then MAILING/BILLING (188). Carolyn 2026-09-04 @1:14:06. The first
+                four columns are the DELIVERY address and keep that meaning — the scheduler
+                builds its destination from these same submitted values, so relabelling them
+                would re-point live stops at a billing address with nothing raising. */}
+            <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
+            <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+            <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
+            <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
             {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
             <div style={{ display: "flex", gap: 7 }}>
               <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -1777,15 +2264,43 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       return (
         <div>
           <div style={{ fontSize: 11, color: "#94A3B8", fontWeight: 800, marginBottom: 6 }}>OPEN DEALS ({(data.designs || []).length})</div>
-          {(data.designs || []).map((d) => (
-            <button key={d.short_code} onClick={() => onNavigate("design", d.short_code)}
-              style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: "pointer" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+          {/* Shown only until something is picked, so it stops nagging the moment it has
+              been acted on. Without it the page is a contact whose stages, build, delivery
+              and every write tab are all silently off with nothing saying why. */}
+          {kind === "contact" && !activeCode && (data.designs || []).length > 0 && (
+            <div style={{ fontSize: 11, color: "#64748B", marginBottom: 6 }}>
+              Pick a deal to see its stages, build and delivery.
+            </div>
+          )}
+          {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
+              and the same warning: a button inside a button is invalid HTML and React will
+              not render it. THE ROW SELECTS; THE ARROW LEAVES. This does convert a list that
+              used to navigate on click into one that selects, which is a real change for
+              anyone who learned the old behaviour — the › keeps the destination one click
+              away. The glyph is there because colour alone is not a state indicator. */}
+          {(data.designs || []).map((d) => {
+            const sel = activeCode === d.short_code;
+            return (
+              <div key={d.short_code}
+                style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
+                <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                  title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                    padding: "7px 9px", cursor: "pointer" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                    {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                </button>
+                <button onClick={() => onNavigate("design", d.short_code)}
+                  title="Open this deal's own record"
+                  style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                    padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
               </div>
-              <div style={{ fontSize: 11, color: "#64748B" }}>{fmtDate(d.created_at)}</div>
-            </button>
-          ))}
+            );
+          })}
           {(data.designs || []).length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No designs yet.</div>}
         </div>
       );
@@ -1799,13 +2314,33 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     //   []         -> they can see it and there genuinely is nothing.
     // The orders card carries the same distinction for the same reason; this is that rule
     // applied three more times rather than a new idea.
+    // ⚠️ TWO MORE STATES, AND THEIR ORDER MATTERS. Both go BELOW the undefined guard and
+    // BELOW the non-empty case, so a real row always beats a story about why there is none:
+    //   "pick a deal"   -> the reader has not chosen which building this is about. Worded
+    //                      DIFFERENTLY from the [] sentence on purpose, so "you haven't
+    //                      picked" can never be misread as "there is nothing".
+    //   "invoice first" -> chosen, but nobody has billed it. Carolyn's own vocabulary from
+    //                      the Orders tab ("Needs invoice" / "Invoice first"), reused rather
+    //                      than reinvented, so one concept does not grow two names.
+    // The cards THEMSELVES stay — she settled that on 2026-08-28 ("the card just is going to
+    // be blank. It'll say build schedule. And it just is nothing"), and hiding the Build card
+    // would remove the place a builder goes to SCHEDULE the build. Only the rails hide.
+    const pickFirst = (what) => (
+      <div style={{ fontSize: 12, color: "#94A3B8" }}>Pick a deal or order above to see its {what}.</div>
+    );
+    const railSubject = kind === "contact" ? activeDeal : record;
     if (key === "build") {
       if (!data.build) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.build.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not on the build schedule yet.</div>;
+      const bJobs = activeCode ? data.build.filter((j) => j.design_short_code === activeCode) : data.build;
+      if (!bJobs.length && ctx.needsPick) return pickFirst("build schedule");
+      if (!bJobs.length && !crmHasInvoice(railSubject)) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
+      }
+      if (!bJobs.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not on the build schedule yet.</div>;
       const stageById = new Map((data.stages || []).map((s) => [s.id, s]));
       return (
         <div>
-          {data.build.map((j) => {
+          {bJobs.map((j) => {
             const st = stageById.get(j.stage_id);
             return (
               <div key={j.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
@@ -1823,10 +2358,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     }
     if (key === "delivery") {
       if (!data.delivery) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.delivery.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not scheduled for delivery yet.</div>;
+      const dStops = activeCode ? data.delivery.filter((s) => s.design_short_code === activeCode) : data.delivery;
+      if (!dStops.length && ctx.needsPick) return pickFirst("deliveries");
+      if (!dStops.length && !crmHasInvoice(railSubject)) {
+        return <div style={{ fontSize: 12, color: "#94A3B8" }}>Invoice first — scheduling unlocks once this is billed.</div>;
+      }
+      if (!dStops.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not scheduled for delivery yet.</div>;
       return (
         <div>
-          {data.delivery.map((s) => {
+          {dStops.map((s) => {
             const L = s.load || null;
             const label = s.delivered_at ? "Delivered" : L ? (CRM_LOAD_LABEL[L.status] || L.status) : "On a load";
             return (
@@ -1843,10 +2383,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
     }
     if (key === "repairs") {
       if (!data.repairs) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Not shown for your role.</div>;
-      if (!data.repairs.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
+      // Scoped to the pick like its siblings, but ⚠️ NO INVOICE GATE. A repair is not
+      // gated on billing — repairs key on design_short_code and have no invoice
+      // relationship at all, so "invoice first" would be a sentence that never becomes true.
+      const reps = activeCode ? data.repairs.filter((r) => r.design_short_code === activeCode) : data.repairs;
+      if (!reps.length && ctx.needsPick) return pickFirst("repairs");
+      if (!reps.length) return <div style={{ fontSize: 12, color: "#94A3B8" }}>No repairs.</div>;
       return (
         <div>
-          {data.repairs.map((r) => (
+          {reps.map((r) => (
             <div key={r.id} style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>#{r.repair_no} · {r.status}</div>
               <div style={{ fontSize: 11, color: "#64748B" }}>
@@ -1881,18 +2426,36 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
             // THE LINK OUT EXISTS NOW. This card used to carry a comment explaining why it
             // could not link anywhere -- "there is no /portal/orders/<id> route to deep-link
             // to" -- which was true until the order detail got its own URL in this change.
-            const Tag = onOpenOrder ? "button" : "div";
+            // SELECTING AN ORDER AND SELECTING ITS DEAL ARE THE SAME SELECTION, which is
+            // why selCode holds a SHORT CODE and not an order id. Carolyn asked for "a deal,
+            // or an order"; pick the order and its deal lights up in the card above, because
+            // they are the same building. Two independent selections could disagree, and
+            // "which one am I looking at" is the entire problem being fixed here.
+            const sel = !!o.short_code && activeCode === o.short_code;
             return (
-              <Tag key={o.id} onClick={onOpenOrder ? () => onOpenOrder(o.id) : undefined}
-                style={{ display: "block", width: "100%", textAlign: "left", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "7px 9px", marginBottom: 5, cursor: onOpenOrder ? "pointer" : "default" }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: onOpenOrder ? ACCENT : "#1E293B" }}>
-                  #{o.order_no}{what ? ` · ${what}` : ""}
-                </div>
-                <div style={{ fontSize: 11, color: "#64748B" }}>
-                  {fmtDate(o.ordered_at)}
-                  {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
-                </div>
-              </Tag>
+              <div key={o.id}
+                style={{ display: "flex", alignItems: "stretch", background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
+                <button onClick={() => { if (o.short_code) setSelCode(sel ? null : o.short_code); }}
+                  aria-pressed={sel} disabled={!o.short_code}
+                  title={o.short_code ? (sel ? "Showing this order — click to clear" : "Show this order's stages, build and delivery") : ""}
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                    padding: "7px 9px", cursor: o.short_code ? "pointer" : "default" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                    #{o.order_no}{what ? ` · ${what}` : ""}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>
+                    {fmtDate(o.ordered_at)}
+                    {o.total_cents != null ? ` · $${(o.total_cents / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""}
+                  </div>
+                </button>
+                {onOpenOrder && (
+                  <button onClick={() => onOpenOrder(o.id)} title="Open this order"
+                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                      padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
+                )}
+              </div>
             );
           })}
           {os.length === 0 && <div style={{ fontSize: 12, color: "#94A3B8" }}>No orders yet. One appears when a quote is signed.</div>}
@@ -1967,26 +2530,15 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   <span style={S.lbl}>Phone</span>
                   <input style={{ ...S.input, marginBottom: 7 }} value={edit.phone} placeholder="(816) 555-0100"
                     onChange={(e) => setEdit((p) => ({ ...p, phone: e.target.value }))} />
-                  <span style={S.lbl}>Street</span>
-                  <input style={{ ...S.input, marginBottom: 7 }} value={edit.street} placeholder="412 Ladder Lane"
-                    onChange={(e) => setEdit((p) => ({ ...p, street: e.target.value }))} />
-                  <div style={{ display: "flex", gap: 7 }}>
-                    <div style={{ flex: "2 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>City</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.city} placeholder="Springfield"
-                        onChange={(e) => setEdit((p) => ({ ...p, city: e.target.value }))} />
-                    </div>
-                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>State</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.state} placeholder="MO"
-                        onChange={(e) => setEdit((p) => ({ ...p, state: e.target.value }))} />
-                    </div>
-                    <div style={{ flex: "1 1 0", minWidth: 0 }}>
-                      <span style={S.lbl}>ZIP</span>
-                      <input style={{ ...S.input, marginBottom: 7, width: "100%", boxSizing: "border-box" }} value={edit.zip} placeholder="65801"
-                        onChange={(e) => setEdit((p) => ({ ...p, zip: e.target.value }))} />
-                    </div>
-                  </div>
+                  <CrmOwnerPicker edit={edit} setEdit={setEdit} team={data.team} />
+                  {/* DELIVERY, then MAILING/BILLING (188). Carolyn 2026-09-04 @1:14:06. The first
+                      four columns are the DELIVERY address and keep that meaning — the scheduler
+                      builds its destination from these same submitted values, so relabelling them
+                      would re-point live stops at a billing address with nothing raising. */}
+                  <CrmEditHead hint="where the building goes">Delivery address</CrmEditHead>
+                  <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_DELIVERY} />
+                  <CrmEditHead hint="leave blank if it is the same">Mailing / billing address</CrmEditHead>
+                  <CrmAddressFields edit={edit} setEdit={setEdit} keys={CRM_ADDR_BILLING} />
                   {opErr && opErr.where === "contact" && <div style={{ ...S.err, marginBottom: 7 }}>{opErr.msg}</div>}
                   <div style={{ display: "flex", gap: 7 }}>
                     <button style={{ ...S.btn(ACCENT, "#FFF"), padding: "6px 13px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}
@@ -2056,32 +2608,63 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
       </div>
       {kind === "design" && <CrmStageBar status={record.status} />}
       {(() => {
-        // SALES: on a contact only (the deal already has its chevron rail above). A contact
-        // can hold several deals, so the ladder shown is the one the NEWEST deal is on --
-        // designs come back newest-first from crm_record.
-        const newest = (data.designs || [])[0];
-        const salesIdx = newest
-          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(newest.status)] || "new")))
+        // The design these rails are about: the record itself on a deal, the PICKED deal on
+        // a contact. Null on a contact with nothing picked, which reads as "no invoice" and
+        // hides Build/Delivery — correct, and the sales row is gone for the same reason.
+        const railDesign = kind === "contact" ? activeDeal : record;
+
+        // SALES: on a contact only (the deal already has its chevron rail above), and only
+        // once a deal is PICKED.
+        //
+        // ⚠️ THIS USED TO AUTO-PICK designs[0], "the newest deal", and that auto-pick IS the
+        // bug. Carolyn, 2026-09-02, on a contact holding four quotes: "there's three, four
+        // quotes in here. Which one the heck is it when I'm in a contact? ... what is it
+        // displaying up here? ... this should not show up here, unless one of these is
+        // selected, so you know which one you're seeing." A ladder drawn for a deal the
+        // reader did not choose and cannot identify is worse than no ladder: it looks like
+        // an answer. Defaulting to the newest would be the same bug with a nicer comment.
+        const salesIdx = activeDeal
+          ? Math.max(0, CRM_STAGES.findIndex((s) => s.kind === (CRM_STAGE_FOR_STATUS[normStatus(activeDeal.status)] || "new")))
           : null;
+
+        // Scope build/delivery to the picked deal. crm_record computes both over EVERY code
+        // this contact owns, so without this the rails would mix four buildings into one
+        // ladder — the same "what am I looking at" problem one level down. Every row carries
+        // its own design_short_code, so this is pure client-side filtering, no server change.
+        const forDeal = (rows) => (activeCode ? (rows || []).filter((r) => r.design_short_code === activeCode) : (rows || []));
+
         // BUILD: the tenant's OWN stages, in their own order. Names are editable, so the
         // ladder is whatever this builder configured, never a hard-coded list.
         const bStages = (data.stages || []).map((s) => ({ name: s.name }));
-        const firstJob = (data.build || [])[0];
+        const firstJob = forDeal(data.build)[0];
         const bIdx = firstJob
           ? (() => { const i = (data.stages || []).findIndex((s) => s.id === firstJob.stage_id); return i < 0 ? null : i; })()
           : null;
         // DELIVERY: the fixed three-value ladder on delivery_loads. A stop with a
         // delivered_at is delivered even if its load has not been closed out.
-        const stop = (data.delivery || [])[0];
+        const stop = forDeal(data.delivery)[0];
         const dIdx = !stop ? null
           : stop.delivered_at ? 2
           : stop.load ? Math.max(0, ["planned", "out", "delivered"].indexOf(stop.load.status))
           : 0;
+
+        // ⚠️ THE ROW MUST BE CONDITIONAL, NOT THE INDEX. Setting bIdx = null does NOT drop
+        // the row — CrmChevronRail renders an all-idle rail for idx == null deliberately
+        // ("not started is not stage zero"), and CrmStageDots only filters rows with no
+        // stages. Nulling the whole row object is the only thing that removes it.
+        //
+        // Carolyn: "can we make this like hide this if it doesn't have an invoice?" Build and
+        // Delivery only — the Sales rail is what a pipeline IS for, and hiding it on an
+        // un-invoiced quote would remove the ladder from every deal still being sold. Six
+        // idle chevrons on an un-invoiced deal claim there is a ladder to be on; that is what
+        // reads as broken. The permission check stays FIRST, so a reader without
+        // build_schedule:view keeps their own reason and the invoice rule never speaks for it.
+        const invoiced = crmHasInvoice(railDesign);
         return (
           <CrmStageDots rows={[
-            kind === "contact" ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
-            data.build ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
-            data.delivery ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
+            kind === "contact" && activeDeal ? { key: "sales", label: "Sales", stages: CRM_STAGES, idx: salesIdx, emptyLabel: "No deals yet" } : null,
+            data.build && invoiced ? { key: "build", label: "Build", stages: bStages, idx: bIdx, emptyLabel: "Not scheduled" } : null,
+            data.delivery && invoiced ? { key: "delivery", label: "Delivery", stages: [{ name: "Planned" }, { name: "Out" }, { name: "Delivered" }], idx: dIdx, emptyLabel: "Not scheduled" } : null,
           ].filter(Boolean)} />
         );
       })()}
@@ -2114,6 +2697,28 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 );
               })}
             </div>
+
+            {/* NOT ONLY A TOOLTIP. A greyed tab explains itself on hover, which is no
+                explanation on a touch screen and none at all to someone who never hovers —
+                and with every writable tab off, the panel below is an empty card. Say what is
+                missing, and say what still works: the design, its quotes and its schedule are
+                Simple Layout and are NOT affected, which is the half a reader assumes is gone
+                the moment a page tells them something is locked. */}
+            {!crmUnlocked && (
+              <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+                Notes, activities, email, texts and customer files are part of the <strong>built-in CRM</strong>,
+                which isn&rsquo;t on this subscription yet. This design, its quotes, its documents and its
+                build and delivery schedule are unaffected.
+                {onSeeBilling ? (
+                  <>{" "}
+                    <button onClick={onSeeBilling}
+                      style={{ background: "none", border: "none", padding: 0, color: ACCENT, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>
+                      See Billing
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            )}
 
             {tab === "sms" && canEdit && data.contact && data.contact.phone && (
               <div style={{ marginBottom: 12 }}>
@@ -2223,10 +2828,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                   To <strong>{data.contact.email}</strong> — replies come back to you, not to a no-reply address.
                 </div>
                 <input value={mail.subject} onChange={(e) => setMail((p) => ({ ...p, subject: e.target.value }))}
-                  placeholder="Subject" style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                  placeholder="Subject" style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
                 <textarea value={mail.body} onChange={(e) => setMail((p) => ({ ...p, body: e.target.value }))} rows={5}
                   placeholder="Write to this customer…"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 5 }}>
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !mail.subject.trim() || !mail.body.trim()} onClick={sendEmail}>
                     {busy ? "Sending…" : "Send email"}
@@ -2264,10 +2869,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                 </div>
                 <input value={act.subject} onChange={(e) => setAct((p) => ({ ...p, subject: e.target.value }))}
                   placeholder="What needs doing? e.g. Call back about the loft"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", marginBottom: 5 }} />
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                   <input type="date" value={act.dueAt} onChange={(e) => setAct((p) => ({ ...p, dueAt: e.target.value }))}
-                    style={{ ...S.sel, width: "auto" }} />
+                    style={{ ...S.input, width: "auto" }} />
                   <span style={{ fontSize: 11.5, color: "#94A3B8" }}>Leave the date blank for an undated task.</span>
                   <button style={S.btn(ACCENT, "#FFF")} disabled={busy || !act.subject.trim()} onClick={saveActivity}>
                     {busy ? "Saving…" : "Save activity"}
@@ -2327,11 +2932,19 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
               </div>
             )}
 
+            {/* S.input, not a bare control. These five composers (email subject + body,
+                activity subject + date, and the note box below) spread `S.sel` — a token
+                that has never existed in S. The spread of `undefined` is silent, so they
+                rendered with the BROWSER's default field: a near-black 2px border in a
+                platform whose every other input is a 1px #CBD5E1 hairline. Carolyn,
+                2026-09-02: "this black outline ... is sooo annoying." The SMS composer a
+                few lines up was written later against the real token, which is why that
+                one alone looked right. */}
             {tab === "note" && canEdit && (
               <div style={{ marginBottom: 12 }}>
                 <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2}
                   placeholder="Click here to add a note…"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
+                  style={{ ...S.input, width: "100%", boxSizing: "border-box", resize: "vertical" }} />
                 <button style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 5 }} disabled={busy || !draft.trim()} onClick={saveNote}>
                   {busy ? "Saving…" : "Save note"}
                 </button>
@@ -2362,6 +2975,11 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                     }} />
                     <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{f.subject}</span>
                     <span style={{ fontSize: 11, color: "#94A3B8" }}>{f.due_at ? fmtDate(f.due_at) : "no due date"}</span>
+                    {/* WHICH building this is about. crm_record has always selected
+                        short_code here and thrown it away; on a contact with four deals
+                        "Call about the door" tells you nothing without it. The History feed
+                        already prints the code the same way — this is that, one list up. */}
+                    {f.short_code && <span style={{ fontSize: 11, color: "#CBD5E1" }}>· {f.short_code}</span>}
                   </div>
                 ))}
               </div>
@@ -2398,9 +3016,37 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit = false, onBack, o
                        machine output — the same reason a note is a yellow card. Getting this
                        wrong would bury the one thing in the conversation somebody wrote. */
                     <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, padding: "7px 9px" }}>
-                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2 }}>
-                        ↩ {e.actor || "Customer"} replied
+                      <div style={{ fontSize: 11, fontWeight: 800, color: "#1D4ED8", marginBottom: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span>↩ {e.actor || "Customer"} replied</span>
+                        {/* NOTHING IN THE PIPELINE PROVES A REPLY IS REALLY FROM THE CUSTOMER.
+                            A forged From renders here as their own words, in a card designed
+                            to look exactly like them speaking. The receiving side's SPF/DKIM/
+                            DMARC verdict was stored on every row and read by nobody; this is
+                            it reaching a human.
+
+                            Shown ONLY when the news is bad or absent. A verified sender gets
+                            no chip at all — badging the normal case trains people to ignore
+                            the badge, and the whole value here is that the chip is rare.
+
+                            null is NOT false: "the provider told us nothing" is its own state
+                            and says so, because a message we know nothing about is not a
+                            message we vouched for. */}
+                        {e.meta && e.meta.senderVerified === false && (
+                          <span title={e.meta.senderVerdict || ""} style={{ fontSize: 10, fontWeight: 800, color: "#991B1B", background: "#FEE2E2", border: "1px solid #FCA5A5", borderRadius: 4, padding: "1px 5px" }}>
+                            SENDER NOT VERIFIED
+                          </span>
+                        )}
+                        {e.meta && e.meta.senderVerified === null && (
+                          <span style={{ fontSize: 10, fontWeight: 700, color: "#92400E", background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "1px 5px" }}>
+                            SENDER UNCHECKED
+                          </span>
+                        )}
                       </div>
+                      {/* The bare address next to the display name: "Bob Smith" is chosen by
+                          the sender, the address is what actually arrived. */}
+                      {e.meta && e.meta.from && e.meta.senderVerified !== true && (
+                        <div style={{ fontSize: 10.5, color: "#64748B", marginBottom: 2 }}>{e.meta.from}</div>
+                      )}
                       {e.title && <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1E293B" }}>{e.title}</div>}
                       {e.body && <div style={{ fontSize: 13, color: "#1E293B", whiteSpace: "pre-wrap", marginTop: 2 }}>{e.body}</div>}
                     </div>

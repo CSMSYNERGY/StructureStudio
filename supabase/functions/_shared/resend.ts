@@ -472,7 +472,21 @@ export type RsSendInput = {
   subject: string;
   html: string;
   text?: string;
-  replyTo?: string;
+  /**
+   * One reply address, or several.
+   *
+   * Resend's send API documents `reply_to` as accepting either shape — "Reply-to email
+   * address. For multiple addresses, send as an array of strings" (read off
+   * resend.com/docs/api-reference/emails/send-email, 2026-09-06) — and states a maximum only
+   * for `to` (50). No cap is documented for `reply_to`, so none is enforced here; the array
+   * this transport receives is built by one caller out of at most a handful of addresses.
+   *
+   * The array shape exists for emailSend.ts's combined Reply-To (the CRM's routing address
+   * PLUS the sending staff member's own). A caller that passes a plain string is untouched:
+   * see replyToWire below, which puts a single address on the wire as a bare string exactly
+   * as it did before this field was widened.
+   */
+  replyTo?: string | string[];
   tags?: { name: string; value: string }[];
   /** Custom RFC 5322 headers. Used for `Message-ID`, so a reply's In-Reply-To is matchable —
    *  the provider's own send id never is (see _shared/emailInbound.ts buildThreadMessageId).
@@ -487,6 +501,29 @@ export type RsSendInput = {
  *  survives, and the sanitized value stays recognizable in the dashboard. */
 function sanitizeTag(s: string): string {
   return s.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+/**
+ * `reply_to` exactly as Resend should see it, or undefined to leave the key off the wire.
+ *
+ * ⚠️ A ONE-ADDRESS ARRAY IS COLLAPSED TO A BARE STRING, and that is the point of this
+ * function rather than an aesthetic. Widening `replyTo` to accept arrays must not change a
+ * single byte of what today's sends put on the wire, and every send in the product today
+ * carries exactly one reply address — so the common case has to serialize identically to
+ * how it did when the field was typed `string`. Resend treats both spellings the same; the
+ * collapse is for US, so that a wire diff during the rollout means something really changed.
+ *
+ * An EMPTY array becomes undefined rather than `[]`. JSON.stringify keeps an empty array
+ * (it only drops undefined), so without this a caller who filtered every address out would
+ * post `"reply_to": []` — a shape nothing documents and the 422 path punishes.
+ */
+function replyToWire(v: string | string[] | undefined): string | string[] | undefined {
+  if (typeof v === "string") return v.trim() || undefined;
+  if (!Array.isArray(v)) return undefined;
+  const list = v.filter((a): a is string => typeof a === "string")
+    .map((a) => a.trim()).filter(Boolean);
+  if (list.length === 0) return undefined;
+  return list.length === 1 ? list[0] : list;
 }
 
 /**
@@ -506,7 +543,7 @@ export async function rsSendEmail(input: RsSendInput): Promise<{ id: string }> {
       subject: input.subject,
       html: input.html,
       text: input.text,
-      reply_to: input.replyTo,
+      reply_to: replyToWire(input.replyTo),
       // Undefined when the caller passed none, and JSON.stringify then drops the key.
       headers: input.headers && Object.keys(input.headers).length ? input.headers : undefined,
       tags: input.tags?.map((t) => ({ name: sanitizeTag(t.name), value: sanitizeTag(t.value) })),

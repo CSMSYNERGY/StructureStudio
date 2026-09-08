@@ -2,6 +2,11 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { ownContactsOnly } from "../_shared/access.ts";
+import { optInDisclosureUrl, designerUrl } from "../_shared/smsConsentText.ts";
+import { fetchPage } from "../_shared/safeFetchText.ts";
+import { policyPageChecks, optInPageChecks, consistencyChecks } from "../_shared/smsComplianceCheck.ts";
+import type { Check } from "../_shared/smsComplianceCheck.ts";
 import type { GateTable } from "../_shared/access.ts";
 import {
   trustHubConfigured,
@@ -15,12 +20,15 @@ import {
   createMessagingService,
   fetchEligibleUseCases,
   createCampaign,
+  updateCampaign,
   fetchCampaign,
+  deleteCampaign,
   searchAvailableNumbers,
   purchaseNumber,
   findPurchasedNumbers,
   normalizeBrandStatus,
   normalizeCampaignStatus,
+  validateCampaignCopy,
   TrustHubError,
   BUSINESS_TYPES,
   JOB_POSITIONS,
@@ -91,6 +99,22 @@ const GATES: GateTable = {
   // the business's legal identity, so it is held to the same bar as submitting it.
   save_intake:     { area: "settings_billing", level: "edit" },
   accept_aup:      { area: "settings_billing", level: "edit" },
+  // The text the CARRIERS read, published under the business's name. Spends nothing and is
+  // not a submission, but it is the same material save_intake collects, so it is held to the
+  // same bar. ⚠️ preflight does NOT cross-check this file's GATES against its `case` labels
+  // (it discovers `action === "x"`, not `switch`), so omitting a line here is a runtime 403
+  // that reads like a broken feature, with no push-time warning at all.
+  save_copy:       { area: "settings_billing", level: "edit" },
+  // The privacy-policy and terms URLs, ON THEIR OWN. Separate from save_intake because they
+  // must stay editable long after the intake is frozen — see the branch below.
+  save_policy_urls: { area: "settings_billing", level: "edit" },
+  // Reads the builder's own policy pages and grades the registration. Spends nothing and
+  // touches no Twilio endpoint, but it makes us fetch URLs a tenant typed, so it is held to
+  // the same bar as the rest of this screen and rate-limited in the database.
+  compliance_check: { area: "settings_billing", level: "edit" },
+  // Clears a REJECTED campaign so the copy can be fixed and tried again. The delete itself
+  // costs nothing; the spend is the `advance` one press later, which carries its own gate.
+  retry_campaign:  { area: "settings_billing", level: "edit" },
   // ⚠️ SPENDS MONEY.
   advance:         { area: "settings_billing", level: "edit" },
   search_numbers:  { area: "settings_billing", level: "edit" },
@@ -105,6 +129,45 @@ const GATES: GateTable = {
   // Testing rig. Same bar as submitting, because it changes what submitting DOES.
   set_mock:        { area: "settings_billing", level: "edit" },
 };
+
+/** Everything the browser might send, clipped to what a column and Twilio will hold. */
+function normalizeCopy(raw: unknown): { description: string; messageFlow: string; messageSamples: string[] } {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  return {
+    description: String(c.description ?? "").trim().slice(0, 4096),
+    messageFlow: String(c.messageFlow ?? "").trim().slice(0, 4096),
+    messageSamples: (Array.isArray(c.messageSamples) ? c.messageSamples : [])
+      .map((s) => String(s ?? "").trim().slice(0, 1024)).slice(0, 5),
+  };
+}
+
+/** The copy that will ACTUALLY be submitted: what the caller sent, falling back FIELD BY FIELD
+ *  to what we stored.
+ *
+ *  ⚠️ FIELD BY FIELD, NOT OBJECT BY OBJECT, and that distinction is the whole bug fix. The
+ *  portal ALWAYS posts a `copy` object — the brand_approved card posts
+ *  {description:"", messageFlow:"", messageSamples:["",""]} from a freshly-mounted React state,
+ *  because the carriers take days and a page reload by then is certain. So "did they send one?"
+ *  is the wrong question, and answering it was the deterministic 400 that left a builder staring
+ *  at a refusal with no form on screen to fix it.
+ *
+ *  ⚠️ THIS IS ALSO THE FORWARD-COMPAT SEAM. Edge functions go live for beta AND production the
+ *  moment they deploy, while the portal artifact only reaches production on the Monday
+ *  promotion. With this merge in place the CURRENTLY DEPLOYED portal — the one whose
+ *  brand_approved card has no form at all — stops 400ing as soon as a row has stored copy. */
+function mergeCopy(reg: any, posted: unknown) {
+  const p = normalizeCopy(posted);
+  const stored = normalizeCopy({
+    description: reg?.campaign_description,
+    messageFlow: reg?.campaign_message_flow,
+    messageSamples: Array.isArray(reg?.campaign_message_samples) ? reg.campaign_message_samples : [],
+  });
+  return {
+    description: p.description || stored.description,
+    messageFlow: p.messageFlow || stored.messageFlow,
+    messageSamples: p.messageSamples.filter(Boolean).length >= 2 ? p.messageSamples : stored.messageSamples,
+  };
+}
 
 const AUP_TEXT =
   "I confirm that this business will only text people who have given us permission to text " +
@@ -193,6 +256,27 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
 
   const p = (payload ?? {}) as Record<string, any>;
 
+  /** The two values the cross-checks need that do NOT live on the registration row.
+   *
+   *  ⚠️ BOTH ARE SECOND COPIES OF SOMETHING, WHICH IS EXACTLY WHY THEY ARE CHECKED.
+   *  `client_settings.business_website` and `sms_registrations.website_url` are the same fact
+   *  stored twice with nothing keeping them in step — on the first real tenant they already
+   *  disagreed (a pre-rebrand domain in one, the current one in the other), and a reviewer
+   *  comparing the registration against the quote a customer received would see both.
+   *  `client_configs.company_name` is the name the live consent box renders; when it is empty
+   *  the box reads "this builder may send you text messages", which reads as an automatic
+   *  refusal.
+   *
+   *  Two indexed single-row reads on every call. Deliberately unconditional: the cross-checks
+   *  are pure and free, so they are recomputed on every read rather than snapshotted, and a
+   *  field the builder has just corrected stops being reported as broken immediately. */
+  const [{ data: csRow }, { data: ccRow }] = await Promise.all([
+    admin.from("client_settings").select("business_website").eq("client_id", clientId).maybeSingle(),
+    admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
+  ]);
+  const settingsWebsite = String(csRow?.business_website ?? "");
+  const consentCompanyName = String(ccRow?.company_name ?? "");
+
   /** Load the row, creating the empty one on first sight so every later write can assume it. */
   const load = async () => {
     const { data } = await admin.from("sms_registrations").select("*").eq("client_id", clientId).maybeSingle();
@@ -214,6 +298,7 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     campaignStatus: reg?.campaign_status ?? null,
     errors: Array.isArray(reg?.last_errors) ? reg.last_errors : [],
     brandUpdatesLeft: Math.max(0, 3 - Number(reg?.brand_update_count ?? 0)),
+    campaignRetriesLeft: Math.max(0, 3 - Number(reg?.campaign_attempt_count ?? 0)),
     // ⚠️ ALWAYS PROJECTED, never hidden behind a debug flag. A mock registration looks
     // identical to a real one right up until a text does not arrive, so the screen has to
     // say which one it is.
@@ -225,6 +310,17 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       privacyPolicyUrl: reg?.privacy_policy_url ?? "",
       termsUrl: reg?.terms_url ?? "",
     },
+    // The campaign copy, so the form can PRE-FILL. Until 2026-09-01 this was never stored and
+    // never returned, so the brand_approved card — reached days later, after a certain reload —
+    // rendered no form and posted two empty strings into a guaranteed refusal.
+    // Always two slots, so the form always has two boxes to draw.
+    copy: {
+      description: reg?.campaign_description ?? "",
+      messageFlow: reg?.campaign_message_flow ?? "",
+      messageSamples: (Array.isArray(reg?.campaign_message_samples) && reg.campaign_message_samples.length >= 2)
+        ? reg.campaign_message_samples.map((s: unknown) => String(s ?? ""))
+        : ["", ""],
+    },
     aupAcceptedAt: reg?.aup_accepted_at ?? null,
     aupText: AUP_TEXT,
     numbers: (numbers ?? []).map((n) => ({
@@ -235,6 +331,32 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
     businessTypes: BUSINESS_TYPES,
     jobPositions: JOB_POSITIONS,
     configured: trustHubConfigured(),
+    // The public page a carrier reviewer can open to see how this builder asks permission.
+    // Derived from the client id rather than stored — there is nothing to keep in step, and a
+    // column would only be a second copy to go stale.
+    optInDisclosureUrl: optInDisclosureUrl(clientId),
+    // ⚠️ TWO SOURCES, ON PURPOSE. The page rows are SNAPSHOTTED (fetching someone's website
+    // takes seconds and cannot ride an action the portal polls every minute), while the
+    // cross-checks are RECOMPUTED every read because they are pure and instant. A stale
+    // "your two website fields disagree" left on screen after the builder has fixed one is
+    // how a checklist teaches people to stop reading it.
+    compliance: {
+      checkedAt: reg?.compliance_checked_at ?? null,
+      checks: [
+        ...(Array.isArray(reg?.compliance_result) ? reg.compliance_result : []),
+        ...consistencyChecks({
+          websiteUrl: String(reg?.website_url ?? ""),
+          privacyPolicyUrl: String(reg?.privacy_policy_url ?? ""),
+          termsUrl: String(reg?.terms_url ?? ""),
+          settingsWebsite,
+          legalBusinessName: String(reg?.legal_business_name ?? ""),
+          consentCompanyName,
+          messageSamples: Array.isArray(reg?.campaign_message_samples)
+            ? reg.campaign_message_samples.map((s: unknown) => String(s ?? "")) : [],
+          hasEmbeddedLinks: false,
+        }),
+      ],
+    },
   });
 
   const numbersOf = async () => {
@@ -295,6 +417,45 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           }
         }
 
+        // ── RECONCILE A REJECTION AGAINST TWILIO ─────────────────────────────────────
+        // ⚠️ THE REASONS MUST NOT DEPEND ON A WEBHOOK ARRIVING. Twilio names the failing
+        // fields — 30886 USE_CASE_DESCRIPTION, 30896 MESSAGE_FLOW, 30908 PRIVACY_POLICY_URL —
+        // and for the whole life of this feature the only path for them was an Event Streams
+        // delivery that nothing stored. One missed delivery and the rejection card says
+        // "They told us why" over an empty list, which is what it did through three separate
+        // refusals. Twilio holds the verdict permanently, so read it from the source.
+        //
+        // Also pulls back the copy the carriers ACTUALLY hold. Our row and the campaign drift
+        // the moment anyone edits through the API, and a form showing text that was never
+        // submitted is worse than no form at all.
+        //
+        // A pure read, no spend, at most once a minute, and a failure is invisible to the page.
+        const stale = reg && reg.status === "campaign_failed"
+          && (!Array.isArray(reg.last_errors) || reg.last_errors.length === 0)
+          && (!reg.next_poll_at || new Date(reg.next_poll_at).getTime() <= Date.now());
+        if (stale && reg.messaging_service_sid && trustHubConfigured()) {
+          try {
+            const live = await fetchCampaign(reg.messaging_service_sid);
+            const patch: Record<string, unknown> = {
+              last_errors: live.errors,
+              next_poll_at: new Date(Date.now() + 60_000).toISOString(),
+              updated_at: new Date().toISOString(),
+            };
+            if (live.description) patch.campaign_description = live.description;
+            if (live.messageFlow) patch.campaign_message_flow = live.messageFlow;
+            if (live.messageSamples.length) patch.campaign_message_samples = live.messageSamples;
+            await admin.from("sms_registrations").update(patch).eq("client_id", clientId);
+            await note("campaign_reasons_read", { count: live.errors.length });
+            reg = await load();
+          } catch (e) {
+            await logEdgeError({
+              fn: "portal-sms", clientId, code: "sms_reason_read_failed",
+              message: `could not read the rejection reasons: ${(e as Error).message}`,
+              severity: "info",
+            }).catch(() => {});
+          }
+        }
+
         return json({ ok: true, ...view(reg, await numbersOf()) });
       }
 
@@ -308,6 +469,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         // ⚠️ Refuse to edit an intake that has already been SUBMITTED. Past 'ready' the
         // authoritative copy lives in Twilio's EndUser objects; letting the form overwrite
         // our echo would make the portal disagree with what the carriers actually reviewed.
+        //
+        // ⚠️ THAT REASONING IS TRUE OF THE BUNDLE AND FALSE OF THE TWO POLICY URLS, which is
+        // why they moved out to `save_policy_urls` below. They live on the Usa2p campaign,
+        // not on any EndUser, and every resubmit re-sends them from this row — so freezing
+        // them here meant a campaign rejected FOR those URLs could be resubmitted forever
+        // with the same failing values and no control anywhere on the screen to change them.
         if (!["none", "intake", "aup_pending", "ready", "brand_failed"].includes(reg.status)) {
           return json({ error: "This registration has already been submitted, so its details cannot be edited here. Ask support to change them." }, 409);
         }
@@ -335,6 +502,115 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         return json({ ok: true, ...view(fresh, await numbersOf()) });
       }
 
+      // ── The two URLs the carriers judge, editable for as long as they can still be sent ──
+      //
+      // ⚠️ THIS EXISTS BECAUSE THE THIRD DEAD END OF THE SAME SHAPE WAS SITTING HERE.
+      // `save_intake` freezes at `ready`, and the campaign-rejection card — the one screen
+      // whose entire job is "fix what the carriers named" — offered no way to touch the
+      // privacy or terms URL. A campaign refused for its privacy policy could be resubmitted
+      // free and unlimited, re-sending the same URL off this row every single time.
+      //
+      // ⚠️ AND IT MUST NOT BE `save_intake` WITH A LONGER ALLOWLIST. That branch ends with
+      // `status: reg.aup_accepted_at ? "ready" : "aup_pending"`, so calling it from
+      // `campaign_failed` would throw the registration back to the start of the chain and
+      // strand a paid brand. This writes two columns and nothing else — no status, no poll.
+      // ── The pre-submission check ────────────────────────────────────────────────────────
+      //
+      // Opens the builder's own privacy policy and terms pages and grades the registration
+      // against what the carriers look at. It spends nothing and touches no Twilio endpoint.
+      //
+      // ⚠️ AN EXPLICIT PRESS, NEVER PART OF `status`. `status` is gated contacts:'view' and the
+      // portal polls it every sixty seconds while anything is pending — folding outbound page
+      // fetches into it would turn every open SMS tab into a crawler pointed at a builder's own
+      // website, fired by anyone who can open the Contacts tab. Same shape as the reason the
+      // lazy sweep refuses to advance `profile_pending`, and it deserves the same refusal.
+      //
+      // ⚠️ AND IT MUST NOT TAKE `advance_lock_until`. That lock is five minutes long and
+      // `advance` proceeds only if its conditional UPDATE returns a row, so a check that grabbed
+      // it would make "Register with the carriers" answer "already being worked on" for five
+      // minutes after every press.
+      case "compliance_check": {
+        const reg = await load();
+
+        // A cooldown, in the DATABASE rather than in memory. `throttle()` in twilioTrustHub is
+        // the cautionary tale: it writes its timestamp AFTER its own await, so concurrent
+        // callers all read the same stale value and fire together — an in-process limiter that
+        // does not limit. Two portal tabs are concurrent callers.
+        //
+        // Inside the window we return the stored result rather than a 409. A cooldown that
+        // looks like an error teaches people to press it again.
+        const last = reg.compliance_checked_at ? new Date(reg.compliance_checked_at).getTime() : 0;
+        if (last && Date.now() - last < 60_000) {
+          return json({ ok: true, fresh: false, ...view(reg, await numbersOf()) });
+        }
+
+        const privacy = String(reg.privacy_policy_url ?? "");
+        const terms = String(reg.terms_url ?? "");
+        const optIn = designerUrl(clientId);
+
+        // ⚠️ GROUPED BY ORIGIN, SEQUENTIAL WITHIN ONE. A builder's privacy policy and terms are
+        // almost always the same small shared host; three simultaneous requests to it is rude,
+        // gets us rate-limited, and makes their site look slow to whoever is browsing it. The
+        // waves idiom from portal-schedule: independent work in parallel, dependent work in order.
+        const originOf = (u: string) => { try { return new URL(u).origin; } catch { return u; } };
+        const wanted = [privacy, terms, optIn].filter(Boolean);
+        const byOrigin = new Map<string, string[]>();
+        for (const u of wanted) {
+          const k = originOf(u);
+          byOrigin.set(k, [...(byOrigin.get(k) ?? []), u]);
+        }
+        const fetched = new Map<string, Awaited<ReturnType<typeof fetchPage>>>();
+        await Promise.all([...byOrigin.values()].map(async (urls) => {
+          for (const u of urls) {
+            // fetchPage never rejects; it reports a refusal instead. Belt and braces anyway,
+            // because a check that 500s is a check nobody runs twice.
+            try { fetched.set(u, await fetchPage(u)); } catch { /* leaves it absent → a warn */ }
+          }
+        }));
+
+        const pageChecks: Check[] = [
+          ...policyPageChecks("privacy", privacy, fetched.get(privacy) ?? null),
+          ...policyPageChecks("terms", terms, fetched.get(terms) ?? null),
+          ...optInPageChecks(fetched.get(optIn) ?? null, consentCompanyName),
+        ];
+
+        // ⚠️ ONLY THE PAGE ROWS ARE STORED. The cross-checks are recomputed in `view()` on every
+        // read — see the comment there. Storing them would freeze a complaint about a field the
+        // builder is about to correct.
+        await admin.from("sms_registrations").update({
+          compliance_result: pageChecks,
+          compliance_checked_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("compliance_checked", {
+          fails: pageChecks.filter((c) => c.verdict === "fail").length,
+          warns: pageChecks.filter((c) => c.verdict === "warn").length,
+        });
+        return json({ ok: true, fresh: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "save_policy_urls": {
+        const reg = await load();
+        const privacy = String(p.privacyPolicyUrl ?? "").trim();
+        const terms = String(p.termsUrl ?? "").trim();
+        const bad = [
+          !/^https:\/\/\S+\.\S+/i.test(privacy) ? "The privacy policy needs a full https:// address the carriers can open." : "",
+          !/^https:\/\/\S+\.\S+/i.test(terms) ? "The terms page needs a full https:// address the carriers can open." : "",
+        ].filter(Boolean);
+        if (bad.length) return json({ error: bad[0], problems: bad }, 400);
+        // Closed only once nothing we send can carry them any more.
+        if (["number_pending", "active", "paused", "releasing", "off"].includes(reg.status)) {
+          return json({ error: "Texting is already live on this account, so these are changed by support." }, 409);
+        }
+        await admin.from("sms_registrations").update({
+          privacy_policy_url: privacy,
+          terms_url: terms,
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("policy_urls_saved", { status: reg.status });
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
       case "accept_aup": {
         const reg = await load();
         if (reg.aup_accepted_at) return json({ ok: true, ...view(reg, await numbersOf()) });
@@ -350,6 +626,107 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           updated_at: new Date().toISOString(),
         }).eq("client_id", clientId);
         await note("aup_accepted", {});
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "retry_campaign": {
+        // ── THE WAY OUT OF campaign_failed ────────────────────────────────────────────────
+        // Until 2026-09-01 there was none: no branch here, no button, and deleteCampaign() had
+        // no callers anywhere. A builder whose campaign the carriers rejected was told "we have
+        // been notified and will be in touch" and could do nothing — which is the same shape as
+        // the profile_pending dead end, one stage later.
+        //
+        // ⛔ THIS DELETES, AND IT IS NO LONGER THE WAY OUT OF A REJECTION — the `campaign_failed`
+        // branch of `advanceOne` edits the campaign in place instead, which Twilio does not
+        // charge for. This paragraph used to claim the Usa2p resource has no update operation;
+        // it does (`UpdateUsAppToPerson`), that claim was false, and believing it is what threw
+        // away a paid campaign on 2026-09-02. Nothing in the portal calls this any more. Keep it
+        // only as the deliberate start-over — a campaign registered against the wrong USE CASE
+        // or keywords, which really are create-only — and expect it to cost a second vetting.
+        //
+        // ⚠️ IT DOES NOT CREATE THE REPLACEMENT EITHER. It drops the row back to
+        // `brand_approved`, which is the state whose card now renders the copy form pre-filled
+        // from the database. That is deliberate: a campaign is rejected because of what it SAID,
+        // so handing the builder the same text and resubmitting it unchanged would just buy the
+        // same refusal again. They edit, then press Continue, and that press is the existing
+        // `advance` with its existing gate and its existing validation.
+        const reg = await load();
+        if (reg.status !== "campaign_failed") {
+          return json({ error: "There is no rejected campaign to clear." }, 409);
+        }
+        // Mirrors the brand path's three free resubmissions. The retry is free; the Continue it
+        // unlocks is a real billed campaign submission, so the cap is a SPEND limit.
+        if (Number(reg.campaign_attempt_count ?? 0) >= 3) {
+          return json({ error: "This registration has used its three retries. Contact support so we can look at it with you." }, 409);
+        }
+        if (!trustHubConfigured()) {
+          return json({ error: "Texting is not switched on for this platform yet." }, 503);
+        }
+
+        // Best effort, and deliberately so. If the campaign is already gone at Twilio — deleted
+        // by hand in the console, or reaped — a 404 here must not trap the builder in the exact
+        // state this action exists to clear. Anything else is reported, because silently losing
+        // a delete would leave an orphan attached to the brand.
+        if (reg.campaign_sid && reg.messaging_service_sid) {
+          try {
+            await deleteCampaign(reg.messaging_service_sid, reg.campaign_sid);
+          } catch (e) {
+            const err = e as TrustHubError;
+            if (err?.status !== 404) {
+              await logEdgeError({
+                fn: "portal-sms", clientId, code: "campaign_delete_failed",
+                message: `retry_campaign could not delete ${reg.campaign_sid}: ${err?.message}`,
+                context: { status: err?.status ?? 0, code: err?.code ?? 0 },
+              }).catch(() => {});
+              return json({ error: "The carriers would not release the old submission just now. Try again shortly." }, 502);
+            }
+          }
+        }
+
+        await note("campaign_retry", {
+          deletedCampaignSid: reg.campaign_sid ?? null,
+          attempt: Number(reg.campaign_attempt_count ?? 0) + 1,
+        });
+        await admin.from("sms_registrations").update({
+          campaign_sid: null,
+          campaign_cm_sid: null,
+          campaign_status: null,
+          campaign_attempt_count: Number(reg.campaign_attempt_count ?? 0) + 1,
+          last_errors: [],
+          needs_attention: false,
+          attention_note: null,
+          // Back to the state that renders the copy form. The messaging service is KEPT: it is
+          // reusable, and minting a second one is the orphan bug a2d3e33 already fixed once.
+          status: "brand_approved",
+          next_poll_at: new Date(Date.now() + 60_000).toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        return json({ ok: true, ...view(await load(), await numbersOf()) });
+      }
+
+      case "save_copy": {
+        const reg = await load();
+        // Editable while the wording can still reach Twilio, which now includes `campaign_failed`
+        // — that state's whole purpose is rewriting what the carriers refused, and locking the
+        // form there meant the only route to the text ran through a DESTRUCTIVE clear. It stays
+        // closed once a campaign is pending or live: our stored text would then silently
+        // disagree with what the carriers hold. Same reasoning as save_intake's 409.
+        if (!["none", "intake", "aup_pending", "ready", "profile_pending", "brand_pending",
+              "brand_failed", "brand_approved", "campaign_failed"].includes(reg.status)) {
+          return json({ error: "The carriers already have this description and it cannot be changed here. Contact support." }, 409);
+        }
+        // ⚠️ CAPS ONLY, NOT THE FULL RULES. A hard validation here would make a half-typed draft
+        // unsaveable, which is the exact thing this action exists to allow. The full rules run at
+        // submit, where the form is on screen to answer them.
+        const c = normalizeCopy(p.copy);
+        await admin.from("sms_registrations").update({
+          campaign_description: c.description || null,
+          campaign_message_flow: c.messageFlow || null,
+          campaign_message_samples: c.messageSamples,
+          campaign_copy_updated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq("client_id", clientId);
+        await note("copy_saved", { descChars: c.description.length, samples: c.messageSamples.length });
         return json({ ok: true, ...view(await load(), await numbersOf()) });
       }
 
@@ -377,6 +754,19 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "advance": {
+        // ⚠️ can_bill, NOT just can_write. A brand registration is billed per POST, and
+        // this branch is reachable in VIEW-AS: resolveTenant hands a PLATFORM operator
+        // canEdit = () => can_write and never consults requireBilling here — portal-sms cannot
+        // pass requireBilling, because it is evaluated for the whole invocation and would 403
+        // an operator's `status` polling and blank the panel. Without this line a
+        // can_write / can_bill=false operator spends the VIEWED tenant's wallet. Migration 056:
+        // "Adding an operator should never silently grant the ability to charge a client's
+        // card." Same per-action shape admin-catalog uses. Tenant owners and owner-granted
+        // admins have ctx.operator === null and are unaffected; support operators are already
+        // refused upstream by settings_billing:'none'.
+        if (r.ctx.operator && !r.ctx.operator.canBill) {
+          return json({ error: "This operator account cannot change billing." }, 403);
+        }
         if (!trustHubConfigured()) {
           return json({ error: "Text messaging is not switched on for this deployment yet." }, 503);
         }
@@ -422,6 +812,12 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "buy_number": {
+        // ⚠️ can_bill, NOT just can_write — a number bills monthly at Twilio from the
+        // moment it is bought, and this takes a wallet hold. See the same guard on `advance`
+        // above for why resolveTenant cannot do this for us.
+        if (r.ctx.operator && !r.ctx.operator.canBill) {
+          return json({ error: "This operator account cannot change billing." }, 403);
+        }
         if (!trustHubConfigured()) return json({ error: "Text messaging is not switched on yet." }, 503);
         const reg = await load();
         if (!reg.messaging_service_sid || reg.status === "none") {
@@ -430,8 +826,20 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
         const wanted = String(p.phoneNumber ?? "").trim();
         if (!/^\+1\d{10}$/.test(wanted)) return json({ error: "Choose a number from the search results." }, 400);
 
-        // ⚠️ ONE LIVE NUMBER PER TENANT, enforced here AND by a partial unique index. The
-        // inbound webhook resolves the tenant from the To number and nothing else.
+        // ⚠️ ONE LIVE NUMBER PER TENANT, AND THIS COUNT IS THE ONLY THING ENFORCING IT.
+        // This comment used to claim a partial unique index backed it up. It does not.
+        // 165_sms_registration.sql has sms_numbers_live_unique on (phone_number) — one TENANT
+        // per number, which is what stops two builders sharing an inbound number — and
+        // sms_numbers_client_idx on (client_id), which is NOT unique. So this is a read-then-act
+        // check with no lock, unlike `advance`, which single-flights on advance_lock_until:
+        // two concurrent buys of DIFFERENT numbers both see 0 and both rent, and the tenant
+        // keeps whichever landed last in client_settings.sms_number while the platform pays
+        // monthly for the other. Do NOT delete this check believing the database repeats it.
+        // To make the invariant real: add a partial unique index on (client_id) where
+        // released_at is null, and handle the 23505 on the insert below by releasing the wallet
+        // hold AND the just-purchased number at Twilio — otherwise a duplicate rental becomes
+        // an orphaned one.
+        // The inbound webhook resolves the tenant from the To number and nothing else.
         const { count } = await admin.from("sms_numbers")
           .select("id", { count: "exact", head: true })
           .eq("client_id", clientId).is("released_at", null);
@@ -499,6 +907,26 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "set_opt_out": {
+        // NEWLY REACHABLE ON 2026-09-07, and refused here rather than left to fall through.
+        // contacts:'own' became a WRITE scope that day (access.ts's ownWrites), so this
+        // action's `contacts: edit` gate now admits somebody who may only touch their own
+        // customers — where before canEdit() refused them at the door.
+        //
+        // It cannot be narrowed to their rows, because it is not keyed on a contact at all:
+        // sms_opt_outs is a PHONE-NUMBER register, the tenant's FCC revocation record, and
+        // one number can match several customers or none. Un-suppressing a number would let
+        // a dealer re-open texting to somebody who revoked consent through a colleague, and
+        // there is no row here to check that against. So the honest answer is a refusal that
+        // says why, not a silent narrowing that cannot work.
+        //
+        // ⚠️ Its READ twin, `opt_outs`, is NOT covered: it gates on contacts:'view', which
+        // 'own' has always satisfied, so a narrowed caller could already list the tenant's
+        // opted-out numbers before this change and still can. That is pre-existing rather
+        // than introduced here, and narrowing it is a separate decision — but it is real,
+        // and this comment is where the next reader will find it.
+        if (ownContactsOnly(r.ctx.access)) {
+          return json({ error: "The opt-out list covers the whole business, and you only have access to your own customers." }, 403);
+        }
         const digits = String(p.phoneDigits ?? "").replace(/\D/g, "");
         if (digits.length !== 10) return json({ error: "That is not a US phone number." }, 400);
         if (p.optedOut === false) {
@@ -570,9 +998,13 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
           return json({
             ok: true, verdict: "valid",
             tokenLength: tok.length,
-            // Proves it authenticated against the account we think we are, not some other one.
-            accountSid: String(body?.sid ?? ""),
-            friendlyName: String(body?.friendly_name ?? ""),
+            // Proves it authenticated against the account we think we are, not some other one —
+            // ⚠️ COMPARED SERVER-SIDE AND RETURNED AS A BOOLEAN. The SID and the account name
+            // themselves must not travel: this action is reachable by any tenant holding
+            // settings_billing:'edit', and the caller only ever needs the verdict. The header
+            // note above ("only a verdict, a length and a Twilio error code travel") was always
+            // the intended contract; returning the account identity had quietly broken it.
+            sameAccount: String(body?.sid ?? "") === acct,
             detail: "Twilio accepted this token for this account, so inbound webhook signature validation will work.",
           });
         }
@@ -673,6 +1105,24 @@ async function advanceOne(
       const intake = (p.intake ?? {}) as BuilderIntake;
       const problems = validateIntake(intake, reg.brand_tier !== "sole_proprietor");
       if (problems.length) throw new TrustHubError({ message: problems[0], status: 400, code: 0, permanent: true });
+
+      // ⚠️ WRITE THE COPY DOWN BEFORE THE FIRST TWILIO CALL. Until 2026-09-01 `p.copy` was read
+      // NOWHERE in this branch and never stored, so the paragraphs the builder typed on this very
+      // screen were gone the moment the page reloaded — and the carriers take days, so it always
+      // did. Persisting first also means a throw anywhere in the twelve calls below loses no
+      // typing, and validating first means an empty MessageFlow is refused here rather than by
+      // the carriers a week later.
+      const readyCopy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(readyCopy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
+      }
+      await set({
+        campaign_description: readyCopy.description,
+        campaign_message_flow: readyCopy.messageFlow,
+        campaign_message_samples: readyCopy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
 
       // Stages 1 and 2. Twilio's ISV guide is explicit that the trust product does NOT have
       // to reach `approved` before the brand, so both are created in one pass and the first
@@ -834,28 +1284,58 @@ async function advanceOne(
         });
       }
 
-      const copy = (p.copy ?? {}) as any;
-      const samples: string[] = Array.isArray(copy.messageSamples) ? copy.messageSamples.filter(Boolean) : [];
-      if (samples.length < 2) {
-        throw new TrustHubError({
-          message: "At least two example messages are needed before the campaign can be submitted.",
-          status: 400, code: 0, permanent: true,
-        });
+      // ⚠️ THE COPY COMES FROM THE ROW, NOT ONLY FROM THE REQUEST. This card is reached after a
+      // page reload BY DEFINITION — the carriers take days — so the browser's form state is empty
+      // by the time anyone gets here. Reading only p.copy is why this used to answer 400 with no
+      // form on screen to fix it.
+      const copy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(copy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
       }
+      const samples: string[] = copy.messageSamples.filter(Boolean);
+      // Keep whatever the caller improved: a campaign rejection can only be re-authored from our
+      // own record, because the Usa2p resource has no update operation.
+      await set({
+        campaign_description: copy.description,
+        campaign_message_flow: copy.messageFlow,
+        campaign_message_samples: copy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
+      // The four fields below are NOT part of the persisted copy and deliberately still come
+      // from the request: they are per-submission flags and boilerplate, not the paragraphs a
+      // builder authored and would need back to re-author a rejection. `mergeCopy` carries only
+      // the three that are worth surviving a reload.
+      const extra = (p.copy ?? {}) as Record<string, unknown>;
       const c = await createCampaign({
         serviceSid: svc.serviceSid, brandSid: reg.brand_sid, useCase: pick.code,
         copy: {
-          description: String(copy.description ?? ""),
-          messageFlow: String(copy.messageFlow ?? ""),
+          description: copy.description,
+          messageFlow: copy.messageFlow,
           messageSamples: samples,
           optOutKeywords: "STOP", helpKeywords: "HELP", optInKeywords: "START",
-          helpMessage: String(copy.helpMessage ?? ""),
-          optOutMessage: String(copy.optOutMessage ?? ""),
+          helpMessage: String(extra.helpMessage ?? ""),
+          optOutMessage: String(extra.optOutMessage ?? ""),
         },
-        hasEmbeddedLinks: !!copy.hasEmbeddedLinks,
-        hasEmbeddedPhone: !!copy.hasEmbeddedPhone,
+        // ⚠️ THE TWO FIELDS THAT USED TO BE COLLECTED AND THEN DROPPED. They come off the row,
+        // not the request: the builder typed them on the details screen, days before this.
+        privacyPolicyUrl: String(reg.privacy_policy_url ?? ""),
+        termsUrl: String(reg.terms_url ?? ""),
+        hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
+        hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
       });
-      await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid });
+      await note("campaign_submitted", { useCase: pick.code, campaignSid: c.campaignSid, policyUrlsEchoed: c.policyUrlsEchoed });
+      // ⚠️ THE 09-02 REGRESSION DETECTOR. Twilio echoing the campaign back WITHOUT the two
+      // policy URLs means they did not land, which is the exact failure that cost a paid
+      // registration while every local check said the data was fine. Recorded, never thrown:
+      // the campaign exists by now and abandoning it before its SID is written is the worse bug.
+      if (!c.policyUrlsEchoed) {
+        await logEdgeError({
+          fn: "portal-sms", clientId, code: "campaign_policy_urls_not_echoed",
+          message: `campaign ${c.campaignSid} came back without both policy URLs`,
+          severity: "error",
+        }).catch(() => {});
+      }
       return await set({
         messaging_service_sid: svc.serviceSid,
         campaign_sid: c.campaignSid,
@@ -875,16 +1355,76 @@ async function advanceOne(
         });
       }
       if (status === "FAILED") {
-        // ⚠️ THERE IS NO CAMPAIGN UPDATE API. Deleting and re-creating is vetted as a new
-        // submission and charges the fee again; the free path is a human editing it in the
-        // Twilio Console. So this is an OPERATOR state, not an automatic retry.
+        // A rejection is a LOOP now, not an operator escalation: `campaign_failed` below edits
+        // this same campaign in place, for free, as many times as it takes.
         return await set({
           campaign_status: status, status: "campaign_failed", next_poll_at: null,
           needs_attention: true,
-          attention_note: "The carriers rejected the campaign. It has to be corrected in the Twilio Console — re-creating it through the API would be charged again.",
+          attention_note: "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.",
         });
       }
       return await set({ campaign_status: status, next_poll_at: soon(120) });
+    }
+
+    // ── THE FREE WAY BACK FROM A REJECTION ────────────────────────────────────────────────
+    // ⚠️ THIS EDITS THE EXISTING CAMPAIGN — it does not delete and re-create. Twilio assesses
+    // the vetting fee ONCE PER CAMPAIGN, so resubmitting the same resource is free and has no
+    // limit, while destroying it and building another buys a second vetting. This file
+    // asserted the opposite as fact for weeks and it cost a live campaign on 2026-09-02.
+    //
+    // Only ever reached by the builder pressing send: `campaign_failed` is deliberately NOT in
+    // the lazy sweep's list, because an automatic resubmit of unchanged wording would just buy
+    // the same refusal on a timer.
+    case "campaign_failed": {
+      if (!reg.campaign_sid || !reg.messaging_service_sid) {
+        // Nothing left at Twilio to edit — someone cleared it, or an older row never held a
+        // SID. Drop back to the state whose card offers the copy form and the create path.
+        return await set({
+          status: "brand_approved", needs_attention: false, attention_note: null,
+          next_poll_at: soon(30),
+        });
+      }
+      const copy = mergeCopy(reg, p.copy);
+      const copyProblems = validateCampaignCopy(copy);
+      if (copyProblems.length) {
+        throw new TrustHubError({ message: copyProblems[0], status: 400, code: 0, permanent: true });
+      }
+      await set({
+        campaign_description: copy.description,
+        campaign_message_flow: copy.messageFlow,
+        campaign_message_samples: copy.messageSamples,
+        campaign_copy_updated_at: new Date().toISOString(),
+      });
+      const extra = (p.copy ?? {}) as Record<string, unknown>;
+      const c = await updateCampaign({
+        serviceSid: reg.messaging_service_sid,
+        campaignSid: reg.campaign_sid,
+        copy: {
+          description: copy.description,
+          messageFlow: copy.messageFlow,
+          messageSamples: copy.messageSamples.filter(Boolean),
+        },
+        privacyPolicyUrl: String(reg.privacy_policy_url ?? ""),
+        termsUrl: String(reg.terms_url ?? ""),
+        hasEmbeddedLinks: !!extra.hasEmbeddedLinks,
+        hasEmbeddedPhone: !!extra.hasEmbeddedPhone,
+      });
+      await note("campaign_resubmitted", { campaignSid: c.campaignSid, status: c.status, policyUrlsEchoed: c.policyUrlsEchoed });
+      if (!c.policyUrlsEchoed) {
+        await logEdgeError({
+          fn: "portal-sms", clientId, code: "campaign_policy_urls_not_echoed",
+          message: `resubmitted campaign ${c.campaignSid} came back without both policy URLs`,
+          severity: "error",
+        }).catch(() => {});
+      }
+      return await set({
+        campaign_status: normalizeCampaignStatus(c.status),
+        status: "campaign_pending",
+        last_errors: [],
+        needs_attention: false,
+        attention_note: null,
+        next_poll_at: soon(60),
+      });
     }
 
     case "campaign_approved":

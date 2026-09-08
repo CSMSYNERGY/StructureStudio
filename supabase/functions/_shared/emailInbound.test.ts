@@ -245,6 +245,78 @@ Deno.test("envelopeRecipients NEVER reads the To: header", () => {
   assertEquals(envelopeRecipients({}, { recipient: "not-an-address" }), []);
 });
 
+Deno.test("received_for may never be the field that names a SECOND tenant", () => {
+  // THE OTHER SECURITY TEST, and the one that matters on the provider we ship on. Resend's
+  // received_for is parsed out of Received HEADERS: only the topmost of those is written by
+  // the MTA that accepted the mail, so whether a sender can plant one is unproved (see the
+  // docstring). Unproved evidence is allowed to say WHICH ADDRESS at a tenant we already
+  // reached; it is never allowed to be the thing that decides WHICH TENANT.
+
+  // The ordinary reply — one recipient, header-parsed or not — is untouched.
+  assertEquals(envelopeRecipients({}, { received_for: ["d.ss-1@reply.jrbarns.com"] }),
+    ["d.ss-1@reply.jrbarns.com"]);
+
+  // Two addresses at ONE domain is one tenant, so there is nothing to guess: both survive.
+  // (A builder legitimately reachable at two locals on their own inbound domain must keep
+  // working — the refusal below is about tenants, not about addresses.)
+  assertEquals(
+    envelopeRecipients({}, { received_for: ["d.ss-1@reply.jrbarns.com", "c.abc@reply.jrbarns.com"] }),
+    ["d.ss-1@reply.jrbarns.com", "c.abc@reply.jrbarns.com"],
+  );
+
+  // ⛔ TWO DOMAINS, NOTHING ELSE TO GO ON: refuse. Each of inbound_domain / email_domain is
+  // unique per tenant, so a second candidate domain is a second BUILDER, and the caller
+  // resolves it with `.limit(1)` and no ordering — i.e. by whichever row comes back first.
+  // Handing it two is handing it a coin flip between two accounts, so hand it neither and
+  // let the message be stored unattributed instead.
+  assertEquals(
+    envelopeRecipients({}, { received_for: ["d.ss-1@reply.jrbarns.com", "d.ss-2@reply.yoderbarns.com"] }),
+    [],
+  );
+  // Same refusal however the value is spelled (a bare string list, display-name wrapped).
+  assertEquals(
+    envelopeRecipients({}, {
+      received_for: ["Mine <d.ss-1@Reply.JrBarns.com>", "d.ss-2@reply.yoderbarns.com"],
+    }),
+    [],
+  );
+
+  // ⛔ REAL ENVELOPE + A HEADER NAMING SOMEWHERE ELSE: only the envelope comes back. The
+  // accepting MTA's own record of where it routed the mail outranks anything that travelled
+  // inside the message, exactly as it does for `To:` above.
+  assertEquals(
+    envelopeRecipients({}, {
+      recipient: "d.ss-mine@reply.jrbarns.com",
+      received_for: ["d.ss-victim@reply.yoderbarns.com"],
+    }),
+    ["d.ss-mine@reply.jrbarns.com"],
+  );
+  assertEquals(
+    envelopeRecipients({ receipt: { recipients: ["d.ss-mine@reply.jrbarns.com"] } },
+      { received_for: ["d.ss-victim@reply.yoderbarns.com"] }),
+    ["d.ss-mine@reply.jrbarns.com"],
+  );
+
+  // …but it may still CONFIRM the domain the envelope already names, which is the whole
+  // reason it is not simply dropped: on a forwarded message it can carry the reply token the
+  // envelope copy lost, and that token is what stage B routes on.
+  assertEquals(
+    envelopeRecipients({}, {
+      recipient: "inbox@reply.jrbarns.com",
+      received_for: ["d.ss-1@reply.jrbarns.com"],
+    }),
+    ["inbox@reply.jrbarns.com", "d.ss-1@reply.jrbarns.com"],
+  );
+  // And the same address from both grades is listed once.
+  assertEquals(
+    envelopeRecipients({}, {
+      recipient: "d.ss-1@reply.jrbarns.com",
+      received_for: ["D.SS-1@Reply.JrBarns.com"],
+    }),
+    ["d.ss-1@reply.jrbarns.com"],
+  );
+});
+
 Deno.test("thread Message-ID round-trips, and encodes what a reply belongs to", () => {
   const id = buildThreadMessageId("junior-barns", "jrbarns.com",
     { shortCode: "SS-9R8UHJGTDJ" }, "k3f9x2");

@@ -21,6 +21,16 @@ _archive/
 supabase/.temp/
 .wrangler/
 
+# ⚠️ ROOT-LEVEL SCRATCH. THIS REPOSITORY IS PUBLIC.
+# `supabase/.temp/` above has been ignored for a long time and reads as though it covers
+# scratch generally. It does not — it is anchored to that one subdirectory, so a `.temp/`
+# at the repo root was fully trackable, and a single `git add -A` from any session would
+# have published whatever was in it. It has in practice accumulated fetched page blobs,
+# wrangler logs, one-off patch scripts and working notes that quote account state and
+# tenant configuration — none of which belongs in a public repo.
+# Working notes that are worth keeping belong in the Obsidian vault, not here.
+.temp/
+
 # Dev tooling (preflight gate)
 node_modules/
 package-lock.json

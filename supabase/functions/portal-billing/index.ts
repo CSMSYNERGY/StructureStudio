@@ -82,6 +82,19 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -157,9 +170,24 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   // keeps working (with a warning) instead of being locked out mid-week. A
   // CANCELLATION is deliberate and locks immediately.
   const GRACE_DAYS = 7;
-  const { data: csRow } = await admin
+  const { data: csRow, error: csErr } = await admin
     .from("client_settings").select("billing_exempt, billing_exempt_until, discount_percent, discount_features, internal_account")
     .eq("client_id", clientId).maybeSingle();
+  // A FAILED read of this row is fatal, deliberately — unlike the feature-grant read further
+  // down, which is fail-soft because a grant is a bonus. This row decides BOTH the gate and
+  // the price: swallowing the error would read as "not exempt, no discount, not internal",
+  // which locks an exempt tenant out of the product and registers every recurring at full
+  // list price with the account discount silently dropped. Failing the call is the safe
+  // outcome because the portal shell's entitlement fetch fails open (a null entitlement locks
+  // nothing), and withErrorLog files the 500 in app_errors on its way out.
+  //
+  // NOTE the shape: maybeSingle() reports a MISSING row as data null with error null, so the
+  // ordinary state of a paying tenant with no client_settings row still falls through to the
+  // defaults below. Only a real read failure gets here.
+  if (csErr) {
+    console.error("client_settings read failed; refusing rather than guessing entitlement/price:", csErr.message);
+    return json({ error: "We couldn't read your account settings. Try again in a moment." }, 500);
+  }
   const exempt = Boolean(csRow?.billing_exempt);
   // INTERNAL ACCOUNT (migration 169): this tenant is CSM Synergy, not a customer. It gets
   // every feature including the pay-only ones, because there is no revenue to protect from

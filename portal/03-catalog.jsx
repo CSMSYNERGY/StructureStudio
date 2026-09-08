@@ -35,6 +35,11 @@ function SettingsView({ section }) {
     // Invoices number separately from quotes (migration 125, Carolyn's decision).
     invoiceInGhl: true, ssQuoteNext: "", ssQuotePrefix: "", ssInvoiceNext: "", ssInvoicePrefix: "",
     ssTaxRate: "", ssTaxLabel: "", ssTaxDelivery: false,
+    // Changing a signed order (migrations 209-216). coUnlockRequired defaults FALSE and
+    // that is load-bearing: with it off the whole approval-and-fee regime is dormant and
+    // every tenant behaves exactly as they did before the feature existed.
+    coUnlockRequired: false, coFreeDays: "0", coFee: "0", coFeeTaxable: true,
+    coFeeLabel: "Change order fee", coUnlockHours: "72",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
   });
@@ -75,6 +80,15 @@ function SettingsView({ section }) {
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
     setLogoDataUrl(""); setLogoCt(""); setClearLogo(false);
+  };
+  // Branding lives inside the page-wide <form> but saves through its OWN action. Enter in
+  // one of its text fields would otherwise fire the form's implicit submit: the page-wide
+  // save runs, "Settings saved." appears, and the branding edit just typed is never sent —
+  // a success message for work that didn't happen. Route Enter to this card's own save.
+  const brandKeyDown = (e) => {
+    if (e.key !== "Enter" || brandBusy) return;
+    e.preventDefault();
+    saveBranding();
   };
   // Business-logo (estimates) upload → uploads to the branding bucket and fills
   // the Logo URL field with the public URL; persisted by the normal Save action.
@@ -128,6 +142,12 @@ function SettingsView({ section }) {
         ssTaxRate: data.ssTaxRate == null ? "" : String(data.ssTaxRate),
         ssTaxLabel: data.ssTaxLabel || "",
         ssTaxDelivery: Boolean(data.ssTaxDelivery),
+        coUnlockRequired: Boolean(data.coUnlockRequired),
+        coFreeDays: data.coFreeDays == null ? "0" : String(data.coFreeDays),
+        coFee: data.coFee == null ? "0" : String(data.coFee),
+        coFeeTaxable: data.coFeeTaxable !== false,
+        coFeeLabel: data.coFeeLabel || "Change order fee",
+        coUnlockHours: data.coUnlockHours == null ? "72" : String(data.coUnlockHours),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
       });
@@ -166,6 +186,24 @@ function SettingsView({ section }) {
     if (st && !st.error) setStatus(st);
   };
 
+  // ── MAY THIS TENANT INVOICE THROUGH THE CRM AT ALL? (migration 217) ──────────────────
+  // Carolyn 2026-09-07: "The feature for payments to go through GHL should only show in
+  // Junior Barns as he is an active user. All other builders will only have the option to
+  // invoice through SS. They can still have the customer info pass to GHL if they choose."
+  //
+  // So this hides ONE checkbox. The CRM Connection card above is untouched — location id,
+  // API key, pipeline and stages stay for everyone, and submit-estimate keeps mirroring
+  // contacts and opportunities into a connected CRM while we issue the paperwork.
+  //
+  // Read from `status`, never from `form`: a grandfathered tenant's `invoiceInGhl` is still
+  // true, and this must not follow it. The render below is unreachable until status has
+  // loaded (the `!status && !error` branch), so there is no flash of the wrong card.
+  const mayGhlInvoice = Boolean(status && status.ghlInvoicingAllowed === true);
+  // The SS-paperwork fields used to key on `!form.invoiceInGhl` alone. For a tenant that
+  // cannot choose, SS mode is the only mode — including while their row still says otherwise,
+  // which is exactly when they need the numbering fields in front of them.
+  const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
+
   // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
   // the three fields are presence-based on the server, so sending only these leaves every
   // other setting untouched — and this card lives in the CRM section while the page Save
@@ -176,7 +214,12 @@ function SettingsView({ section }) {
     setInvMsg(null); setInvBusy(true);
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
       action: "save",
-      invoiceInGhl: form.invoiceInGhl,
+      // `mayGhlInvoice` and not `form.invoiceInGhl` (migration 217): a tenant without the
+      // capability has no checkbox, and its state variable still holds whatever their row
+      // last said — which for a grandfathered tenant is `true`. Posting that would ask the
+      // server for the very thing the card no longer offers. The server forces false anyway;
+      // this keeps the request honest rather than relying on being overruled.
+      invoiceInGhl: mayGhlInvoice ? form.invoiceInGhl : false,
       ssQuoteNext: form.ssQuoteNext,
       ssQuotePrefix: form.ssQuotePrefix,
       ssInvoiceNext: form.ssInvoiceNext,
@@ -187,9 +230,34 @@ function SettingsView({ section }) {
     } });
     setInvBusy(false);
     if (err || (data && data.error)) { setInvMsg({ err: (data && data.error) || err.message }); return; }
-    setInvMsg({ ok: form.invoiceInGhl
+    setInvMsg({ ok: (mayGhlInvoice && form.invoiceInGhl)
       ? "Saved — your quotes and invoices are created in your CRM, exactly as before."
-      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM." });
+      : "Saved — StructureStudio now issues your quotes and invoices. Contacts and opportunities still go to your CRM if one is connected." });
+    const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+    if (st && !st.error) setStatus(st);
+  };
+
+  // Changing a signed order (migrations 209-216). Its own save, like the invoicing card
+  // above and for the same reason: the fields are presence-based on the server, so sending
+  // only these leaves every other setting untouched.
+  const [coBusy, setCoBusy] = useState(false);
+  const [coMsg, setCoMsg] = useState(null);   // { ok } | { err }
+  const saveChangeOrders = async () => {
+    setCoMsg(null); setCoBusy(true);
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: {
+      action: "save",
+      coUnlockRequired: form.coUnlockRequired,
+      coFreeDays: form.coFreeDays,
+      coFee: form.coFee,
+      coFeeTaxable: form.coFeeTaxable,
+      coFeeLabel: form.coFeeLabel,
+      coUnlockHours: form.coUnlockHours,
+    } });
+    setCoBusy(false);
+    if (err || (data && data.error)) { setCoMsg({ err: (data && data.error) || err.message }); return; }
+    setCoMsg({ ok: form.coUnlockRequired
+      ? `Saved — after ${Number(form.coFreeDays) || 0} day${Number(form.coFreeDays) === 1 ? "" : "s"}, a signed order has to be unlocked before it can be changed.`
+      : "Saved — your reps can change a signed order at any time without asking anyone." });
     const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
     if (st && !st.error) setStatus(st);
   };
@@ -349,7 +417,7 @@ function SettingsView({ section }) {
         <p style={{ fontSize: 12, color: "#64748B", marginBottom: 12 }}>
           {status && status.configured
             ? <>Connected — location <b>{status.ghlLocationIdMasked}</b>. Leave the fields blank to keep current credentials.</>
-            : <>Not connected yet. Estimates can't be sent until your CRM Location ID and API key are saved.</>}
+            : <>Not connected. Optional — connect one to mirror contacts and quotes into it. With no CRM, contacts stay in Structure Studio and quotes go out through Structure Studio paperwork (switch it on below).</>}
         </p>
         {ghlMsg && ghlMsg.err && <div style={S.err}>{ghlMsg.err}</div>}
         {ghlMsg && ghlMsg.ok && <div style={ghlMsg.warn ? { ...S.okMsg, background: "#DBEAFF", color: "#1B7895", border: "1px solid #75E6DA" } : S.okMsg}>{ghlMsg.ok}</div>}
@@ -372,19 +440,21 @@ function SettingsView({ section }) {
           collide with the paperwork a builder already has out. */}
       <div style={S.card}>
         <div style={S.h2}>Quotes &amp; Invoices</div>
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
-          <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
-          Quote and invoice through my CRM
-        </label>
-        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
-          {form.invoiceInGhl
+        {mayGhlInvoice && (
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+            <input type="checkbox" checked={form.invoiceInGhl} onChange={set("invoiceInGhl")} style={{ marginTop: 2 }} />
+            Quote and invoice through my CRM
+          </label>
+        )}
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: mayGhlInvoice ? 6 : 0, marginBottom: 0, lineHeight: 1.5 }}>
+          {!ssMode
             ? <>On — your estimates and invoices are created in your CRM and emailed from there, exactly as they are today.</>
-            : <><b>Off — StructureStudio issues your quotes and invoices.</b> Each quote is one document: the priced
+            : <><b>{mayGhlInvoice ? "Off — StructureStudio issues your quotes and invoices." : "StructureStudio issues your quotes and invoices."}</b> Each quote is one document: the priced
                 estimate, the floor plan, and a sheet showing all four sides in 3D. Your customer accepts it from
-                their quote page, and you invoice from the Orders tab. Contacts and opportunities still go to your
-                CRM exactly as before, so your pipeline keeps working.</>}
+                their quote page, and you invoice from the Orders tab. If a CRM is connected, contacts and
+                opportunities still go there so your pipeline keeps working; if not, everything stays in Structure Studio.</>}
         </p>
-        {!form.invoiceInGhl && (
+        {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Starting quote number</span>
               <input style={S.input} value={form.ssQuoteNext} onChange={set("ssQuoteNext")} placeholder="e.g. 1041" inputMode="numeric" />
@@ -405,7 +475,7 @@ function SettingsView({ section }) {
             from its delivery address (Avalara), and this is what gets charged when that
             lookup can't resolve, which is why the server refuses to flip SS mode on
             while it is blank: 0 is a real answer, "unanswered" is not. */}
-        {!form.invoiceInGhl && (
+        {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Sales tax rate (%)</span>
               <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
@@ -419,7 +489,7 @@ function SettingsView({ section }) {
               </label></div>
           </div>
         )}
-        {!form.invoiceInGhl && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
+        {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
             Before saving, set{" "}
             {[
@@ -430,14 +500,17 @@ function SettingsView({ section }) {
             Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
           </div>
         )}
-        {!form.invoiceInGhl && status && status.emailReady === false && (
-          /* Warn-but-allow (decision 5, 2026-08-23): in StructureStudio mode there is no
-             CRM fallback for sending, so until the sending domain is live, quotes and
-             invoices generate but nobody is emailed. Print / Copy-link still work. */
+        {ssMode && status && status.emailReady === false && (
+          /* Was "nobody is emailed" (decision 5, 2026-08-23). Since 2026-09-02 a
+             paperwork-mode tenant sends from the PLATFORM address until their own domain
+             verifies — _shared/emailSend.ts opens its provider guard for exactly this case,
+             because nothing else can send their documents. So the notice states what now
+             happens (a working send under our name) rather than a failure that no longer
+             occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your email sending isn't verified yet (Settings → Email), so customers
-            won't receive quote or invoice emails — you can still print them or copy the
-            customer link. Emails start flowing once your sending domain is verified.
+            Heads up: your own sending domain isn't verified yet (Settings → Email), so quotes
+            and invoices go out from our address on your behalf, with your business name as the
+            sender. Verify your domain to send from your own address instead.
           </div>
         )}
         {invMsg && invMsg.err && <div style={{ ...S.err, marginTop: 10 }}>{invMsg.err}</div>}
@@ -447,6 +520,91 @@ function SettingsView({ section }) {
           {invBusy ? "Saving…" : "Save Quote & Invoice Settings"}
         </button>
       </div>
+
+      {/* ── Changing a signed order (migrations 209-216) ─────────────────────────────────
+          SS-PAPERWORK MODE ONLY. In CRM mode GoHighLevel owns the documents, so there is
+          nothing of ours for a fee to print on and nothing for an unlock to protect — the
+          server refuses a fee in that state and the card would be describing a feature the
+          tenant cannot use.
+
+          The default (approval OFF) is what every tenant already has, and the copy says so
+          plainly rather than presenting the dormant state as an unconfigured one. */}
+      {!form.invoiceInGhl && (
+        <div style={S.card}>
+          <div style={S.h2}>Changing a signed order</div>
+          <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
+            A change order re-opens the whole order — the drawing, the options, the price — and the
+            customer signs it again. Payments already taken are never touched. This is who is allowed
+            to start one, and what it costs.
+          </p>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
+            <input type="checkbox" checked={form.coUnlockRequired} onChange={set("coUnlockRequired")} style={{ marginTop: 2 }} />
+            An admin or crew leader has to unlock a signed order first
+          </label>
+          <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 0, lineHeight: 1.5 }}>
+            {form.coUnlockRequired
+              ? <>On — once the free window below has passed, a rep asks and someone with <b>Approve Changes</b> decides. A change can still happen at any point in the job, including after delivery and final payment.</>
+              : <><b>Off — this is how your account works today.</b> Any rep who holds Change Orders can change a signed order whenever they need to, with nobody's approval.</>}
+          </p>
+
+          {form.coUnlockRequired && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+                <div><span style={S.lbl}>Free-change window (days)</span>
+                  <input style={S.input} value={form.coFreeDays} onChange={set("coFreeDays")} placeholder="e.g. 3" inputMode="numeric" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    How long after the order is written a rep can change it with no approval and no fee — for the customer who rings back the same afternoon. Enter 0 for no free window.
+                  </div></div>
+                <div><span style={S.lbl}>How long an unlock lasts (hours)</span>
+                  <input style={S.input} value={form.coUnlockHours} onChange={set("coUnlockHours")} placeholder="72" inputMode="numeric" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    An unlock nobody used expires on its own, so an order is never left standing open. Up to 720 hours (30 days).
+                  </div></div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
+                <div><span style={S.lbl}>Change order fee ($)</span>
+                  <input style={S.input} value={form.coFee} onChange={set("coFee")} placeholder="e.g. 150" inputMode="decimal" />
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    Added automatically to a change made after the free window, as its own line on the invoice. Enter 0 for no fee.
+                  </div></div>
+                <div><span style={S.lbl}>How the fee reads on the invoice</span>
+                  <input style={S.input} value={form.coFeeLabel} onChange={set("coFeeLabel")} placeholder="Change order fee" maxLength={40} />
+                  <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>
+                    <input type="checkbox" checked={form.coFeeTaxable} onChange={set("coFeeTaxable")} />
+                    Charge sales tax on the fee
+                  </label>
+                  <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>
+                    Taxed at the rate on the customer's own agreement, not today's — check with your accountant if you are unsure.
+                  </div></div>
+              </div>
+
+              {/* The one combination the server refuses, surfaced at the control rather
+                  than after a round trip. A fee with no approval requirement is charged
+                  by nothing — see order_amendment_gate: it only quotes a fee on an unlock. */}
+              {Number(form.coFee) > 0 && (
+                <div style={{ marginTop: 10, background: "#F0F9FF", border: "1px solid #BAE6FD", color: "#075985", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, lineHeight: 1.5 }}>
+                  A rep is shown the {"$"}{(Number(form.coFee) || 0).toFixed(2)} fee before they start the change, so nobody meets it for the first time on the customer's invoice.
+                  {Number(form.coFreeDays) > 0
+                    ? ` Changes made within ${Number(form.coFreeDays)} day${Number(form.coFreeDays) === 1 ? "" : "s"} of the order are free.`
+                    : " Every change to a signed order carries it — there is no free window."}
+                </div>
+              )}
+            </>
+          )}
+
+          <button type="button" onClick={saveChangeOrders} disabled={coBusy}
+            style={{ ...S.btn(ACCENT, "#FFF"), marginTop: 12, opacity: coBusy ? 0.6 : 1 }}>
+            {coBusy ? "Saving…" : "Save change order rules"}
+          </button>
+          {coMsg && (
+            <div style={{ marginTop: 10, background: coMsg.err ? "#FEF2F2" : "#ECFDF5", border: `1px solid ${coMsg.err ? "#FECACA" : "#A7F3D0"}`, color: coMsg.err ? "#B91C1C" : "#065F46", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+              {coMsg.err || coMsg.ok}
+            </div>
+          )}
+        </div>
+      )}
 
       {status && status.configured && (
         <div style={S.card}>
@@ -510,16 +668,16 @@ function SettingsView({ section }) {
         {brandMsg && brandMsg.err && <div style={S.err}>{brandMsg.err}</div>}
         {brandMsg && brandMsg.ok && <div style={S.okMsg}>{brandMsg.ok}</div>}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
-          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} /></div>
-          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} placeholder="Design & Quote" /></div>
+          <div><span style={S.lbl}>Company name</span><input style={S.input} value={form.brandName} onChange={set("brandName")} onKeyDown={brandKeyDown} /></div>
+          <div><span style={S.lbl}>Tagline</span><input style={S.input} value={form.brandTagline} onChange={set("brandTagline")} onKeyDown={brandKeyDown} placeholder="Design & Quote" /></div>
           <div><span style={S.lbl}>Accent color</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandAccent} onChange={set("brandAccent")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} /></div></div>
+              <input style={{ ...S.input, flex: 1 }} value={form.brandAccent} onChange={set("brandAccent")} onKeyDown={brandKeyDown} /></div></div>
           <div><span style={S.lbl}>Header background</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
-              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} /></div></div>
+              <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
         </div>
         <div style={{ marginBottom: 12 }}>
           <span style={S.lbl}>Logo</span>
@@ -559,7 +717,31 @@ function SettingsView({ section }) {
       </div>
       )}
 
-      {show("branding") && (<>
+      {/* ─── COMPANY (Carolyn 2026-09-04 @28:55) ───
+          Split out of Branding, not newly built. She hit this mid-onboarding of a real
+          client: "I'm getting ready to send this email to this client ... what I'm trying to
+          work through on the setup part of it ... I feel like we need to go into branding and
+          we need to have everything about the company ... the EIN, all that stuff needs to be
+          in here. Their terms and conditions, company, branding, company information."
+
+          Her structure, in her words, is three things: Branding, Company, Team. This is the
+          Company third. Nothing moved in the DATABASE — these are the same
+          `client_settings.business_*` columns saved by the same global save; only the tab
+          they live under changed, which is what she was actually missing.
+
+          ⚠️ WHAT IS DELIBERATELY NOT HERE YET: legal business name, business type, and the
+          privacy/terms URLs. Those exist today only inside the SMS carrier registration
+          (`sms_registrations`), and promoting them is a schema change, not a re-tab. The
+          EIN is a harder case and must NOT simply be moved: 165_sms_registration.sql holds
+          that the full EIN, the rep's mobile and the registered address live at TWILIO and
+          are referenced by SID, with only `ein_last4` kept locally, so that "a support ticket
+          must never be answerable by reading our database". Reversing that is a privacy
+          decision for Ahsan and Carolyn, not a refactor. See the plan's Lane E.
+
+          Safe by construction: SettingsView's form state always covers every field no matter
+          which section renders, and the save is global — the comment at the top of this
+          component says so, and it is why this split needs no new save path. */}
+      {show("company") && (<>
       <div style={S.card}>
         <div style={S.h2}>Business Details (shown on estimates)</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 12 }}>
@@ -587,7 +769,9 @@ function SettingsView({ section }) {
         <div><span style={S.lbl}>Quote terms (printed on every estimate)</span>
           <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }} value={form.quoteTerms} onChange={set("quoteTerms")} /></div>
       </div>
+      </>)}
 
+      {show("branding") && (<>
       <div style={S.card}>
         <div style={S.h2}>Pricing</div>
         <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, color: "#1E293B" }}>
@@ -632,8 +816,21 @@ function SettingsView({ section }) {
         )}
       </div>
 
-      <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
       </>)}
+
+      {/* ⚠️ THE GLOBAL SAVE MUST OUTLIVE THE BRANDING FRAGMENT. It used to sit INSIDE it,
+          which was invisible while Branding owned every editable card on this form — and the
+          moment Business Details moved to the Company tab (2026-09-04) that tab would have
+          rendered a full form of inputs and NO way to save them. A form that silently cannot
+          save looks identical to one that saved and lost the data.
+
+          Gated on branding-or-company rather than hoisted unconditionally: `show()` returns
+          true for EVERY key when `section` is null, so an unconditional button is correct for
+          the legacy all-sections render but would also add a second, whole-form Save to the
+          CRM Connection tab, which deliberately has its own three narrow saves. */}
+      {(show("branding") || show("company")) && (
+        <button type="submit" disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1, marginBottom: 24 }}>{busy ? "Saving…" : "Save Settings"}</button>
+      )}
     </form>
   );
 }
@@ -1626,12 +1823,18 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     const col = (f) => ({ key: String(f.id), label: `${f.name || "Item"}${f.width_in && f.height_in ? ` (${fmtFtIn(f.width_in)}x${fmtFtIn(f.height_in)})` : ""}` });
     const inCat = (f, c) => (f.category || "door") === c; // a missing category reads as "door" (matches DoorsView)
     const byCat = (c) => fx.filter((f) => inCat(f, c)).map(col);
-    const other = fx.filter((f) => !["door", "ramp", "window"].includes(f.category || "door")).map(col);
+    const KNOWN_CATS = ["door", "ramp", "window", "vent"];
+    const other = fx.filter((f) => !KNOWN_CATS.includes(f.category || "door")).map(col);
+    // Section order follows the Options tab's own Exterior grouping (Doors · Windows ·
+    // Vents · Ramps) so the sheet reads the way the screen does. "Other" still catches any
+    // category added later without a section here — a new fixture kind must never fall out
+    // of the export silently, which is what a bare `byCat` list per known name would do.
     return [
       { name: "Built-in options", argb: "FFDBEAFF", cols: layout },
       { name: "Doors",            argb: "FFFEE9C7", cols: byCat("door") },
-      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
       { name: "Windows",          argb: "FFDCF1FB", cols: byCat("window") },
+      { name: "Vents",            argb: "FFEAF3E6", cols: byCat("vent") },
+      { name: "Ramps",            argb: "FFE7E5E4", cols: byCat("ramp") },
       { name: "Other",            argb: "FFF1F5F9", cols: other },
     ].filter((s) => s.cols.length);
   };
@@ -2274,6 +2477,22 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
 
   const saveBom = async () => {
     if (!bomSizeId) return;
+    // A quantity that doesn't parse ("12 ea", "two") or is negative used to be dropped by the
+    // filter below and the save sent anyway — and since save_rtp_bom FULL-REPLACES the size's
+    // bill of materials, the line being edited was deleted rather than saved. Refuse the whole
+    // save and name the rows, the way saveOverhead does. A qty of 0 is untouched: that stays
+    // the documented way to delete a line, and so does dropping the blank starter row.
+    const badQty = bomRows
+      .map((l, i) => ({ row: i + 1, materialId: l.materialId, raw: l.qty, n: rtpNum(l.qty) }))
+      .filter((x) => x.materialId && (!Number.isFinite(x.n) || x.n < 0));
+    if (badQty.length) {
+      const names = badQty.map((x) => {
+        const m = matRows.find((mr) => mr.id === x.materialId);
+        return `${m ? m.name : `line ${x.row}`} ("${x.raw}")`;
+      });
+      setMsg({ err: `Nothing was saved — fix these quantities first: ${names.join("; ")}.` });
+      return;
+    }
     const lines = bomRows
       .map((l) => ({ materialId: l.materialId, section: l.section, qty: rtpNum(l.qty) }))
       .filter((l) => l.materialId && Number.isFinite(l.qty) && l.qty > 0);
@@ -2294,7 +2513,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
   const doToggle = async (on) => {
     setConfirmToggle(null);
     const r = await invoke("set_rtp_enabled", { on });
-    if (r) { setMsg({ ok: on ? "Real-time pricing is LIVE — your building prices now come from your material costs." : "Real-time pricing is off — your manual prices are restored." }); await load(); }
+    if (r) { setMsg({ ok: on ? "Real-Time Pricing is LIVE — your building prices now come from your material costs." : "Real-Time Pricing is off — your manual prices are restored." }); await load(); }
   };
 
   // ── The workbook (download) ── Materials + one sheet per selected style + Overhead +
@@ -2371,9 +2590,9 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
       wsO.addRow([]);
       wsO.addRow(["Types: multiplier (multiplies the running price), flat (adds dollars), percent_of_price (a reporting allocation OF the final price — does not change it)."]);
 
-      const wsP = wb.addWorksheet("Current Prices");
+      const wsP = wb.addWorksheet("Basic Pricing");
       wsP.addRow(["Reference only — this sheet is not imported."]).getCell(1).font = { italic: true, color: { argb: "FF64748B" } };
-      wsP.addRow(["Style", "Size", "Current price", "Computed price"]);
+      wsP.addRow(["Style", "Size", "Basic Pricing", "Real-Time Pricing"]);
       paintHdr(wsP, 2, 4);
       wsP.columns = [{ width: 22 }, { width: 10 }, { width: 14 }, { width: 15 }];
       styles().forEach((s) => sizesFor(s.id).forEach((z) => {
@@ -2403,7 +2622,12 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
       const lcName = (n) => String(n).trim().toLowerCase();
       const matSheet = sheets.find((s) => lcName(s.name) === "materials");
       const ovhSheet = sheets.find((s) => lcName(s.name) === "overhead");
-      const styleSheets = sheets.filter((s) => !["materials", "overhead", "current prices"].includes(lcName(s.name)));
+      // ⚠️ BOTH NAMES, FOREVER. The read-only price reference tab was renamed "Current Prices"
+      // -> "Basic Pricing" on 2026-09-01. Dropping the old name would silently reclassify a
+      // workbook downloaded before that date as a STYLE sheet and feed its rows to the BOM
+      // importer; keeping only the old one breaks every workbook downloaded after. Neither is
+      // a sheet we read, so listing both costs nothing and is the only safe shape.
+      const styleSheets = sheets.filter((s) => !["materials", "overhead", "current prices", "basic pricing"].includes(lcName(s.name)));
       if (!matSheet && !styleSheets.length) throw new Error("This doesn't look like the Real-Time Pricing workbook — no Materials sheet and no style sheets.");
 
       const materials = [];
@@ -2506,7 +2730,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
         <div style={{ marginLeft: "auto" }}>
           <button onClick={() => setConfirmToggle({ to: !enabled })} disabled={busy}
             style={S.btn(enabled ? "#FEF2F2" : "#166534", enabled ? "#DC2626" : "#FFF")}>
-            {enabled ? "Turn off — restore manual prices" : "Go live with real-time pricing"}
+            {enabled ? "Turn off — restore manual prices" : "Go live with Real-Time Pricing"}
           </button>
         </div>
       </div>
@@ -2676,7 +2900,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
           </p>
           <div style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", width: "100%" }}>
-              <thead><tr><th style={S.th}>Style</th><th style={S.th}>Size</th><th style={S.th}>Materials</th><th style={S.th}>Computed</th><th style={S.th}>Current</th><th style={S.th}>Where it goes</th></tr></thead>
+              <thead><tr><th style={S.th}>Style</th><th style={S.th}>Size</th><th style={S.th}>Materials</th><th style={S.th}>Real-Time Pricing</th><th style={S.th}>Basic Pricing</th><th style={S.th}>Where it goes</th></tr></thead>
               <tbody>
                 {previewRows.map((p) => (
                   <tr key={p.size_id}>
@@ -2702,7 +2926,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
           <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 560, width: "100%", maxHeight: "84vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
             <div style={{ background: confirmToggle.to ? "#166534" : "#92400E", color: "#FFF", padding: "15px 18px", fontSize: 15.5, fontWeight: 800 }}>
-              {confirmToggle.to ? "Go live with real-time pricing?" : "Turn real-time pricing off?"}
+              {confirmToggle.to ? "Go live with Real-Time Pricing?" : "Turn Real-Time Pricing off?"}
             </div>
             <div style={{ padding: "16px 18px" }}>
               {confirmToggle.to ? (<>
@@ -2726,7 +2950,7 @@ function RealTimePricing({ viewingLabel = null, clientId = null, unlocked = fals
                 </table>
               </>) : (
                 <p style={{ fontSize: 13, color: "#475569", margin: "0 0 12px", lineHeight: 1.6 }}>
-                  Every building goes back to the manual price it had before real-time pricing went live.
+                  Every building goes back to the manual price it had before Real-Time Pricing went live.
                   Your materials, bills and overhead stay saved — going live again re-applies them.
                 </p>
               )}
@@ -2756,6 +2980,809 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// -- Wall Height Upgrades (172) ----------------------------------------------------------
+// One card, one section per building style -- the ColorsView pattern, and for the reason
+// Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
+// The heights on offer differ per style because HAULING limits do, which is why this is not
+// one list for the whole tenant.
+//
+// renderSection is a plain function and NOT a component, deliberately: as a component React
+// remounts it on every keystroke and the input loses focus. Same note as ColorsView.
+// -- Insulation (177) -------------------------------------------------------------------
+// A fixed 2x3 matrix: batt / spray foam across floor / walls / roof. Blank a cell and that
+// combination stops being offered -- the row is deleted, get_config stops emitting it, and the
+// customer's toggle disappears. "Entire building" is a shortcut in the DESIGNER, never a
+// fourth row here: a stored fourth rate would be a second place for the price to live.
+function Electrical({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [f, setF] = useState(null);
+  const [items, setItems] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    const e = data.electrical || {};
+    setF({
+      enabled: e.enabled === true,
+      packagePrice: e.package_price != null ? String(e.package_price) : "",
+      packageLabel: e.package_label || "Electrical Package",
+      taxable: e.taxable !== false,
+      internalOnly: e.internal_only === true,
+      outletSpacingFt: String(e.outlet_spacing_ft == null ? 6 : e.outlet_spacing_ft),
+      outletHeightIn: String(e.outlet_height_in == null ? 24 : e.outlet_height_in),
+      outletAboveBenchIn: String(e.outlet_above_bench_in == null ? 42 : e.outlet_above_bench_in),
+      lightSpacingFt: String(e.light_spacing_ft == null ? 10 : e.light_spacing_ft),
+      switchHeightIn: String(e.switch_height_in == null ? 48 : e.switch_height_in),
+      includePanel: e.include_panel !== false,
+      panelHeightIn: String(e.panel_height_in == null ? 60 : e.panel_height_in),
+      // The three device pointers (206). These were missing until 2026-09-07: the card read
+      // its whole state from `catalog`, which returns the electrical_settings row RAW — so
+      // these are snake_case here, unlike get_config's camelCase for the designer. With them
+      // absent the pickers always rendered "— none —" no matter what was stored, and `save`
+      // (which posts ...f) had nothing to send, so the setting was unreachable from the UI.
+      outletItemId: e.outlet_item_id || "",
+      switchItemId: e.switch_item_id || "",
+      lightItemId: e.light_item_id || "",
+    });
+    setItems((data.electricalItems || []).map((r) => ({
+      id: r.id, name: r.name, icon: r.icon || "\u26a1", mount: r.mount || "wall",
+      heightOffFloorIn: r.height_off_floor_in != null ? String(r.height_off_floor_in) : "",
+      priceWithPackage: r.price_with_package != null ? String(r.price_with_package) : "",
+      priceStandalone: r.price_standalone != null ? String(r.price_standalone) : "",
+      taxable: r.taxable !== false, active: r.active !== false,
+      internalOnly: r.internal_only === true, sortOrder: r.sort_order || 0,
+    })));
+  };
+  useEffect(() => { load(); }, [clientId]);
+
+  const set = (k, v) => setF((prev) => ({ ...prev, [k]: v }));
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical", ...f }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      const r2 = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_electrical_items", rows: items }) });
+      if (r2.error || (r2.data && r2.data.error)) throw new Error((r2.error && r2.error.message) || r2.data.error);
+      await load();
+      setMsg({ ok: "Saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  if (!f) return null;
+  const num = (k, label, unit, hint) => (
+    <label style={{ display: "block", minWidth: 160 }}>
+      <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <input type="number" min="0" step="0.5" value={f[k]} onChange={(e) => set(k, e.target.value)}
+          style={{ ...S.input, width: 90 }} />
+        <span style={{ fontSize: 12, color: "#64748B" }}>{unit}</span>
+      </span>
+      {hint && <span style={{ display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 }}>{hint}</span>}
+    </label>
+  );
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Electrical</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Set your wiring standards once and the designer lays them out on the customer&rsquo;s
+        building &mdash; a plug every so many feet, lights down the middle, a switch by the door.
+        The package is <b>one fixed price</b> covering that standard layout.{" "}
+        <b>Removing a device never reduces it</b>; only devices added <i>beyond</i> the standard
+        are charged, at that item&rsquo;s own price.
+      </p>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        <input type="checkbox" checked={f.enabled} onChange={(e) => set("enabled", e.target.checked)}
+          style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+        Offer an electrical package
+        <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off hides it entirely without clearing your standards</span>
+      </label>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 16 }}>
+        <label style={{ display: "block", minWidth: 200 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>What the customer sees</span>
+          <input value={f.packageLabel} onChange={(e) => set("packageLabel", e.target.value)} maxLength={60}
+            style={{ ...S.input, width: 200 }} />
+        </label>
+        <label style={{ display: "block", minWidth: 160 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>Package price</span>
+          <input type="number" min="0" step="1" value={f.packagePrice} placeholder="not offered"
+            onChange={(e) => set("packagePrice", e.target.value)} style={{ ...S.input, width: 120 }} />
+          <span style={{ display: "block", fontSize: 11, color: "#94A3B8", marginTop: 3 }}>Blank = not offered yet</span>
+        </label>
+      </div>
+
+      {/* One list, one rule (Carolyn 2026-09-03). Outlets, switches and lights are ordinary
+          items in the table below with two prices like everything else; the standards just say
+          WHICH item the package lays out. Leave one unset and the package lays none of those. */}
+      <div style={{ ...S.lbl, marginBottom: 8 }}>Your standards</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+        {[["outletItemId", "Outlets are"], ["switchItemId", "The switch is"], ["lightItemId", "Lights are"]].map(([k, label]) => (
+          <label key={k} style={{ display: "block", minWidth: 180 }}>
+            <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>{label}</span>
+            <select value={f[k] || ""} onChange={(e) => set(k, e.target.value || null)} style={{ ...S.input, width: 180 }}>
+              <option value="">&mdash; none &mdash;</option>
+              {/* `it.id` guard: an item added in this session has no id yet, and an option
+                  with value="" reads back as "— none —" the moment it is picked. Save first,
+                  then point a standard at it. */}
+              {items.filter((it) => it.id && (it.name || "").trim()).map((it) => (
+                <option key={it.id} value={it.id}>{it.name}</option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "flex-start", marginBottom: 14 }}>
+        {num("outletSpacingFt", "Outlet every", "ft", "measured around the walls")}
+        {num("outletHeightIn", "Outlet height", "in", "off the floor")}
+        {num("outletAboveBenchIn", "Above a workbench", "in", "used where a bench is in the way")}
+        {num("lightSpacingFt", "Light every", "ft", "down the length of the building")}
+        {num("switchHeightIn", "Switch height", "in", "one switch, by the door")}
+        {/* The panel sits with the other measurements because it has one too. The checkbox
+            rides alongside its height rather than in the row of unrelated toggles below. */}
+        <label style={{ display: "block", minWidth: 170 }}>
+          <span style={{ ...S.lbl, display: "block", marginBottom: 4 }}>Panel height</span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <input type="number" min="0" step="0.5" value={f.panelHeightIn} disabled={!f.includePanel}
+              onChange={(e) => set("panelHeightIn", e.target.value)}
+              style={{ ...S.input, width: 90, opacity: f.includePanel ? 1 : 0.5 }} />
+            <span style={{ fontSize: 12, color: "#64748B" }}>in</span>
+          </span>
+          {/* flex, not inline-flex: the height and its "in" above are an inline-flex span, so
+              an inline checkbox flowed onto the SAME line and sat on top of the unit. */}
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5, cursor: "pointer", fontSize: 12, color: "#475569" }}>
+            <input type="checkbox" checked={f.includePanel} onChange={(e) => set("includePanel", e.target.checked)}
+              style={{ width: 15, height: 15, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Include a panel
+          </label>
+        </label>
+      </div>
+
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center", marginBottom: 14 }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}
+          title="Available in the rep designer only - hidden from the customer-facing page. A rep-selected package still prices normally.">
+          <input type="checkbox" checked={f.internalOnly} onChange={(e) => set("internalOnly", e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+          Internal only
+        </label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", fontSize: 13 }}>
+          <input type="checkbox" checked={f.taxable} onChange={(e) => set("taxable", e.target.checked)}
+            style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+          Taxable
+        </label>
+      </div>
+
+      <p style={{ fontSize: 11.5, color: "#94A3B8", margin: "0 0 18px", maxWidth: 680 }}>
+        Every electrical thing lives in one list below, and each has <b>two prices</b> because
+        adding one while an electrician is already on site is a different job from a trip for it
+        alone. The package covers the standard layout of whichever items you named above;
+        anything beyond that is charged at the matching price.
+      </p>
+
+      <div style={{ ...S.lbl, marginBottom: 6 }}>Your electrical items</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 12px", maxWidth: 680 }}>
+        Anything else you wire &mdash; a ceiling fan, a flood light, a 220V outlet. Each one has{" "}
+        <b>two prices</b>, because they really are two different jobs: what you charge to add it{" "}
+        <b>to the package</b> while an electrician is already on site, and what you charge to fit
+        it <b>on its own</b> when there is no package. <b>Leave a price blank and you don&rsquo;t
+        offer it that way</b> &mdash; blank is not free, and it never falls back to the other price.
+      </p>
+      <div style={{ overflowX: "auto", marginBottom: 12 }}>
+        <table style={{ ...S.table, minWidth: 760 }}>
+          <thead>
+            <tr>
+              <th style={S.th}>Item</th>
+              <th style={S.th}>Icon</th>
+              <th style={S.th}>Mounts</th>
+              <th style={S.th} title="Inches off the floor. Blank for ceiling fittings that hang at the default height.">Height (in)</th>
+              <th style={S.th} title="Charged when the customer HAS the electrical package. Blank = can't be added to a package.">With package ($)</th>
+              <th style={S.th} title="Charged when there is NO package. Blank = only sold as part of a package.">On its own ($)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Rep designer only - hidden from the customer-facing page.">Internal</th>
+              <th style={{ ...S.th, textAlign: "center" }}>Taxable</th>
+              <th style={S.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((r, i) => {
+              const upd = (k, v) => setItems((p) => p.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+              return (
+                <tr key={r.id || ("new-" + i)}>
+                  <td style={S.td}><input value={r.name} onChange={(e) => upd("name", e.target.value)} maxLength={60} style={{ ...S.input, width: 150 }} /></td>
+                  <td style={S.td}><input value={r.icon} onChange={(e) => upd("icon", e.target.value)} maxLength={4} style={{ ...S.input, width: 48, textAlign: "center" }} /></td>
+                  <td style={S.td}>
+                    <select value={r.mount} onChange={(e) => upd("mount", e.target.value)} style={{ ...S.input, width: 100 }}>
+                      <option value="wall">On a wall</option>
+                      <option value="ceiling">Ceiling</option>
+                    </select>
+                  </td>
+                  <td style={S.td}><input type="number" min="0" value={r.heightOffFloorIn} onChange={(e) => upd("heightOffFloorIn", e.target.value)} style={{ ...S.input, width: 80 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={r.priceWithPackage} onChange={(e) => upd("priceWithPackage", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" placeholder="not offered" value={r.priceStandalone} onChange={(e) => upd("priceStandalone", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.internalOnly} onChange={(e) => upd("internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => upd("taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={S.td}>
+                    <button onClick={() => setItems((p) => p.filter((_, j) => j !== i))}
+                      style={{ background: "transparent", border: "none", cursor: "pointer", color: "#B91C1C", fontWeight: 700, fontSize: 13 }}>Remove</button>
+                  </td>
+                </tr>
+              );
+            })}
+            {!items.length && (
+              <tr><td colSpan={9} style={{ ...S.td, color: "#94A3B8", fontSize: 12.5 }}>No extra items yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={() => setItems((p) => p.concat([{ id: "", name: "", icon: "\u26a1", mount: "wall", heightOffFloorIn: "", priceWithPackage: "", priceStandalone: "", taxable: true, active: true, internalOnly: false, sortOrder: (p.length + 1) * 10 }]))}
+        style={{ ...S.btn("#F1F5F9", "#334155"), marginBottom: 14 }}>+ Add an item</button>
+
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save electrical"}</button>
+        {msg && <span style={{ fontSize: 12.5, color: msg.err ? "#B91C1C" : "#047857" }}>{msg.err || msg.ok}</span>}
+      </div>
+    </div>
+  );
+}
+
+function Insulation({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const TYPES = [["batt", "Batt"], ["spray_foam", "Spray Foam"]];
+  const AREAS = [["floor", "Floor"], ["walls", "Walls"], ["roof", "Roof"]];
+  const [cat, setCat] = useState(null);
+  const [cells, setCells] = useState({});
+  const [enabled, setEnabled] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    setEnabled(data.insulationEnabled === true);
+    const m = {};
+    (data.insulation || []).forEach((r) => {
+      m[r.ins_type + "|" + r.area] = {
+        ratePerSqft: r.rate_per_sqft != null ? String(r.rate_per_sqft) : "",
+        taxable: r.taxable !== false,
+        active: r.active !== false,
+        internalOnly: r.internal_only === true,
+      };
+    });
+    setCells(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const cellOf = (t, a) => cells[t + "|" + a] || { ratePerSqft: "", taxable: true, active: true, internalOnly: false };
+  // Offer / Taxable / Internal only are per TYPE, so a tick writes the same value to all three
+  // of that type's areas — the matrix stays one row per type, which is how a builder thinks
+  // about it ("we do batt, we don't do spray foam").
+  const setType = (t, field, val) => AREAS.forEach(([a]) => setCell(t, a, field, val));
+  const typeFlag = (t, field, dflt) => AREAS.every(([a]) => (cellOf(t, a)[field] !== undefined ? cellOf(t, a)[field] : dflt));
+  const setCell = (t, a, field, val) =>
+    setCells((p) => ({ ...p, [t + "|" + a]: { ...cellOf(t, a), [field]: val } }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const rows = [];
+      TYPES.forEach(([t]) => AREAS.forEach(([a]) => {
+        const c = cellOf(t, a);
+        rows.push({ type: t, area: a, ratePerSqft: String(c.ratePerSqft ?? "").trim(), taxable: c.taxable, active: c.active, internalOnly: c.internalOnly });
+      }));
+      // Refuse, never coerce -- a silently-zeroed rate would insulate a whole building free.
+      const bad = rows.filter((r) => r.ratePerSqft !== "" && (!Number.isFinite(Number(r.ratePerSqft)) || Number(r.ratePerSqft) < 0));
+      if (bad.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + bad.map((r) => r.type + "/" + r.area).join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_insulation", enabled, rows }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: "Saved " + (data.saved || 0) + " rate(s)" + (data.cleared ? ", " + data.cleared + " no longer offered" : "") + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Insulation</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Priced <b>per square foot</b>, worked out from the building the customer designed. Floor and
+        roof use the footprint; walls use the perimeter &times; the wall height, so a taller-wall
+        upgrade is included automatically. <b>Leave a rate blank and that combination isn&rsquo;t
+        offered</b> &mdash; the customer simply won&rsquo;t see it. They pick the areas they want and
+        each one lands as its own line on the quote.
+      </p>
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 14, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}
+          style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+        Offer insulation to customers
+        <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off hides it entirely without clearing your rates</span>
+      </label>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" \u00b7 ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (
+        <>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 640 }}>
+            <thead><tr>
+              <th style={S.th}></th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick a type you don't offer at all. Its rates are kept, but customers never see it.">Offer</th>
+              {AREAS.map(([a, lbl]) => <th key={a} style={S.th} title="Dollars per square foot. Blank = not offered.">{lbl} ($/sq ft)</th>)}
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected area still prices normally.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on insulation.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {TYPES.map(([t, tLbl]) => (
+                <tr key={t}>
+                  <td style={{ ...S.td, fontWeight: 700 }}>{tLbl}</td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={typeFlag(t, "active", true)} onChange={(e) => setType(t, "active", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                  {AREAS.map(([a]) => (
+                    <td key={a} style={S.td}>
+                      <input type="number" min="0" step="0.01" value={cellOf(t, a).ratePerSqft} placeholder="not offered"
+                        onChange={(e) => setCell(t, a, "ratePerSqft", e.target.value)} style={{ ...S.input, width: 110 }} />
+                    </td>
+                  ))}
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={typeFlag(t, "internalOnly", false)} onChange={(e) => setType(t, "internalOnly", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={typeFlag(t, "taxable", true)} onChange={(e) => setType(t, "taxable", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 14 }}>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save insulation"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function WallHeights({ viewingLabel = null, clientId = null }) {
+  // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [byStyle, setByStyle] = useState({});
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const m = {};
+    (data.styles || []).forEach((st) => { m[st.id] = []; });
+    (data.wallHeights || []).forEach((r) => {
+      (m[r.style_id] = m[r.style_id] || []).push({
+        id: r.id,
+        deltaIn: String(r.delta_in),
+        ratePerLf: r.rate_per_lf != null ? String(r.rate_per_lf) : "",
+        taxable: r.taxable !== false,
+        active: r.active !== false,
+        internalOnly: r.internal_only === true,
+        widthsFt: Array.isArray(r.widths_ft) ? r.widths_ft.map(Number) : null,
+        buildOnSite: r.build_on_site === true,
+        bosFeeBasis: r.bos_fee_basis || "each",
+        bosFeeRate: r.bos_fee_rate != null ? String(r.bos_fee_rate) : "",
+      });
+    });
+    setByStyle(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (styleId, idx, field, val) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
+  const addRow = (styleId) =>
+    setByStyle((p) => ({ ...p, [styleId]: [...(p[styleId] || []), { id: "", deltaIn: "", ratePerLf: "", taxable: true, active: true, internalOnly: false, widthsFt: null, buildOnSite: false, bosFeeBasis: "each", bosFeeRate: "" }] }));
+  const delRow = (styleId, idx) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).filter((_, i) => i !== idx) }));
+
+  const save = async (styleId, styleLabel) => {
+    setBusyId(styleId); setMsg(null);
+    try {
+      const rows = byStyle[styleId] || [];
+      // Refuse, never coerce -- the same posture as the rate grid. A silently-zeroed increase
+      // would quote a structural change at nothing.
+      const bad = rows.filter((r) => {
+        const d = Number(String(r.deltaIn).trim());
+        return !Number.isInteger(d) || d <= 0 || d > 48;
+      });
+      if (bad.length) throw new Error("Nothing was saved \u2014 every increase must be a whole number of inches between 1 and 48. Check: " + bad.map((r) => '"' + r.deltaIn + '"').join(", ") + ".");
+      const noWidths = rows.filter((r) => Array.isArray(r.widthsFt) && r.widthsFt.length === 0);
+      if (noWidths.length) throw new Error(`Nothing was saved — an increase with no widths ticked would never be offered to anyone. Tick at least one width, or untick Active to retire it: ${noWidths.map((r) => "+" + r.deltaIn + " in").join(", ")}.`);
+      const badRate = rows.filter((r) => {
+        const t = String(r.ratePerLf == null ? "" : r.ratePerLf).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badRate.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + badRate.map((r) => "+" + r.deltaIn + " in (\"" + r.ratePerLf + "\")").join(", ") + ".");
+      // A build-on-site fee is OPTIONAL (a builder may absorb it) but must be usable if typed.
+      // Caught here as well as on the server so the message names the row rather than arriving
+      // as a "skipped" line after the save has already half-run.
+      const badBos = rows.filter((r) => {
+        if (!r.buildOnSite) return false;
+        const t = String(r.bosFeeRate == null ? "" : r.bosFeeRate).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badBos.length) throw new Error("Nothing was saved \u2014 fix these build-on-site fee(s) first: " + badBos.map((r) => "+" + r.deltaIn + " in (\"" + r.bosFeeRate + "\")").join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: scoped({
+          action: "save_wall_heights",
+          styleId,
+          rows: rows.map((r) => ({
+            id: r.id || undefined,
+            deltaIn: Number(String(r.deltaIn).trim()),
+            ratePerLf: String(r.ratePerLf == null ? "" : r.ratePerLf).trim(),
+            taxable: r.taxable,
+            active: r.active,
+            internalOnly: r.internalOnly,
+            widthsFt: r.widthsFt,
+            buildOnSite: r.buildOnSite,
+            bosFeeBasis: r.bosFeeBasis,
+            bosFeeRate: String(r.bosFeeRate == null ? "" : r.bosFeeRate).trim(),
+          })),
+        }),
+      });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: styleLabel + ": saved " + (data.saved || 0) + " height(s)" + (data.deleted ? ", removed " + data.deleted : "") + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusyId(null);
+  };
+
+  // The widths this style actually sells, from its own sizes.
+  const widthsOf = (styleId) => [...new Set(((cat && cat.sizes) || [])
+    .filter((z) => z.style_id === styleId && z.active !== false)
+    .map((z) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((a, b) => a - b);
+
+  // null means "every width" — ticking one off has to materialise the full list first, or the
+  // living default would be lost the moment a builder unticks a single box.
+  const toggleWidth = (styleId, idx, w, on, all) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => {
+      if (i !== idx) return r;
+      const cur = Array.isArray(r.widthsFt) ? r.widthsFt : all;
+      const next = on ? [...new Set([...cur, w])].sort((a, b) => a - b) : cur.filter((x) => x !== w);
+      // Back to all ticked = back to the living default.
+      return { ...r, widthsFt: (all.length && next.length === all.length) ? null : next };
+    }) }));
+
+  const renderSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    const widths = widthsOf(st.id);
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
+        <div style={S.h2}>{st.label}</div>
+        {rows.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px" }}>
+            No taller-wall option offered on this style — customers see no wall-height choice.
+          </p>
+        ) : (
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
+            <thead><tr>
+              <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
+              <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
+              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
+              <th style={{ ...S.th, textAlign: "center" }}>Active</th>
+              <th style={S.th}></th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => [
+                <tr key={(r.id || ("new-" + i)) + "-main"}>
+                  <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
+                  <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
+                  <td style={S.td}>
+                    {widths.length === 0 ? <span style={{ color: "#94A3B8", fontSize: 12 }}>no sizes yet</span> : (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {widths.map((w) => {
+                          const on = !Array.isArray(r.widthsFt) || r.widthsFt.indexOf(w) !== -1;
+                          return (
+                            <label key={w} style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                              <input type="checkbox" checked={on} onChange={(e) => toggleWidth(st.id, i, w, e.target.checked, widths)} style={{ width: 14, height: 14, cursor: "pointer", accentColor: DOOR_MINT }} />
+                              {w}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
+                </tr>,
+                r.buildOnSite ? (
+                  <tr key={(r.id || ("new-" + i)) + "-bos"}>
+                    <td colSpan={8} style={{ ...S.td, background: "#F8FAFC" }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+                        <span style={{ fontWeight: 700, color: "#0F766E" }}>Built on site — upcharge</span>
+                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 190 }}>
+                          <option value="each">Flat fee for the job</option>
+                          <option value="sqft_building">Per sq ft of floor</option>
+                          <option value="perimeter_building">Per lineal ft of perimeter</option>
+                        </select>
+                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="no upcharge"
+                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 130 }} />
+                        <span style={{ color: "#64748B" }}>
+                          Leave blank if you don’t charge extra — the building is still marked built on site.
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ) : null,
+              ])}
+            </tbody>
+          </table>
+        )}
+        <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => addRow(st.id)} style={{ background: "transparent", border: "none", color: "#1B7895", fontWeight: 700, fontSize: 13, cursor: "pointer", padding: 0 }}>+ Add increase</button>
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>{busyId === st.id ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Wall Height Upgrades</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 660 }}>
+        Taller walls, offered per building style — hauling limits differ per building, so each
+        style carries its own list. The customer picks <b>one</b> increase for the whole building
+        and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
+        lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
+        offering it yet. Tick the <b>widths</b> each increase can be hauled at — a wider building
+        already has a taller roof, so a narrow one can take more. A width you add to a style
+        later arrives <b>unticked</b> here, so nothing is ever offered on a new size until you
+        say so. Tick <b>Built on site</b> on an increase too tall to haul under a bridge: the
+        customer sees “on site” beside that choice, the building is marked as a site build
+        rather than a delivery, and you can add the upcharge for sending a crew out.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (cat.styles || []).filter((st) => st.active !== false).map(renderSection)}
+    </div>
+  );
+}
+
+// ── Cladding (207) ──────────────────────────────────────────────────────────
+// Carolyn, 2026-09-07: "Move the cladding into options allowing people to select the cladding
+// they use... but keep the cladding as dropdown options as we have it worked into the 3D so
+// make sure you don't lose that."
+//
+// FOUR FIXED ROWS PER STYLE, never added or removed: we ship a texture and a relief profile for
+// each of the four, and a builder cannot invent a fifth. What is theirs is which ones they sell,
+// what each costs, and what the customer sees it called. The id underneath never changes, which
+// is what keeps the 3D renderer and every saved design working.
+//
+// Per STYLE rather than per tenant because a Greenhouse and a Lofted Barn do not sell the same
+// siding, and because the wall area — and so the price — differs anyway.
+const SS_CLADDING_ROWS = [
+  { id: "panel", label: "Panel Siding" },
+  { id: "lap", label: "Lap Siding" },
+  { id: "batten", label: "Board & Batten" },
+  { id: "agpanel", label: "Metal" },
+];
+// The product's SHARED pricing vocabulary, all seven of it (Carolyn 2026-09-07: "add all these
+// as options for the pricing"). Same names and same meanings as the Options header, which is
+// rendered above the table so a builder reads the definitions in place.
+//
+// Cladding is a whole-BUILDING option rather than something placed on the plan, so two of the
+// seven need saying out loud, and the header does:
+//   • sqft option — the option's area IS the wall area: perimeter × wall height.
+//   • lineal ft — a whole-building option has no length of its own, so its feet are the
+//     perimeter, which makes it the same sum as perimeter building. Both names are in the
+//     vocabulary and both price; the duplication is the vocabulary's, not ours.
+const SS_CLADDING_BASES = [
+  ["sqft_option", "sqft option — per sq ft of wall"],
+  ["sqft_building", "sqft building"],
+  ["lineal_ft", "lineal ft"],
+  ["perimeter_building", "perimeter building"],
+  ["each", "each"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
+
+function CladdingView({ viewingLabel = null, clientId = null }) {
+  // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [byStyle, setByStyle] = useState({});
+  const [busyId, setBusyId] = useState(null);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const saved = {};
+    (data.cladding || []).forEach((r) => { (saved[r.style_id] = saved[r.style_id] || {})[r.cladding_id] = r; });
+    const m = {};
+    (data.styles || []).forEach((st) => {
+      const own = saved[st.id] || {};
+      // The four rows always render, whether or not the tenant has a row for each. A style with
+      // no rows at all is not broken — it is a style offering builder's standard only — and it
+      // must still be fillable, which a data-driven row list would not allow.
+      m[st.id] = SS_CLADDING_ROWS.map((c) => {
+        const r = own[c.id] || null;
+        return {
+          claddingId: c.id,
+          builtIn: c.label,
+          labelOverride: (r && r.label_override) || "",
+          rate: r && r.rate != null ? String(r.rate) : "",
+          basis: (r && r.basis) || "sqft_option",
+          taxable: !r || r.taxable !== false,
+          active: !r || r.active !== false,
+          internalOnly: !!(r && r.internal_only),
+        };
+      });
+    });
+    setByStyle(m);
+  };
+  useEffect(() => { load(); }, []);
+
+  const setRow = (styleId, idx, field, val) =>
+    setByStyle((p) => ({ ...p, [styleId]: (p[styleId] || []).map((r, i) => (i === idx ? { ...r, [field]: val } : r)) }));
+
+  const save = async (styleId, styleLabel) => {
+    setBusyId(styleId); setMsg(null);
+    try {
+      const rows = byStyle[styleId] || [];
+      // Refuse, never coerce — nothing is sent until every rate reads as money, and the message
+      // names the rows at fault. The whole point is that a typo cannot become a silent $0.
+      const badRate = rows.filter((r) => {
+        const t = String(r.rate == null ? "" : r.rate).trim();
+        return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      });
+      if (badRate.length) {
+        throw new Error("Nothing was saved — fix these rate(s) first: " + badRate.map((r) => r.builtIn).join(", "));
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: scoped({
+          action: "save_cladding",
+          styleId,
+          rows: rows.map((r) => ({
+            claddingId: r.claddingId,
+            labelOverride: String(r.labelOverride || "").trim(),
+            rate: String(r.rate == null ? "" : r.rate).trim(),
+            basis: r.basis,
+            taxable: r.taxable,
+            active: r.active,
+            internalOnly: r.internalOnly,
+          })),
+        }),
+      });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: styleLabel + ": saved." + (skipped.length ? " " + skipped.length + " skipped." : ""), skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusyId(null);
+  };
+
+  const renderSection = (st) => {
+    const rows = byStyle[st.id] || [];
+    return (
+      <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
+        <div style={S.h2}>{st.label}</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 860 }}>
+            <thead><tr>
+              <th style={S.th}>Cladding</th>
+              <th style={S.th} title="What the customer sees this called. Leave blank to use our name.">Shown as</th>
+              <th style={S.th} title="The same seven methods the rest of Options uses — the definitions are above the table.">How it&rsquo;s priced</th>
+              <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={r.claddingId}>
+                  <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{r.builtIn}</td>
+                  <td style={S.td}>
+                    <input type="text" value={r.labelOverride} placeholder={r.builtIn} maxLength={60}
+                      onChange={(e) => setRow(st.id, i, "labelOverride", e.target.value)}
+                      style={{ ...S.input, width: 170 }} />
+                  </td>
+                  <td style={S.td}>
+                    {/* 230, not 160: "sqft option — per sq ft of wall" is the default and the
+                        longest, and a clipped method name is the one thing on this row a
+                        builder cannot afford to misread. */}
+                    <select value={r.basis} onChange={(e) => setRow(st.id, i, "basis", e.target.value)}
+                      style={{ ...S.input, width: 230 }}>
+                      {SS_CLADDING_BASES.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
+                    </select>
+                  </td>
+                  <td style={S.td}>
+                    <input type="number" min="0" step="0.01" value={r.rate} placeholder="not offered"
+                      onChange={(e) => setRow(st.id, i, "rate", e.target.value)}
+                      style={{ ...S.input, width: 120 }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={r.internalOnly}
+                      onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                  <td style={{ ...S.td, textAlign: "center" }}>
+                    <input type="checkbox" checked={r.taxable}
+                      onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)}
+                      style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <button onClick={() => save(st.id, st.label)} disabled={busyId === st.id} style={S.btn(DOOR_MINT, "#0F4C46")}>
+            {busyId === st.id ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Cladding</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        The siding a customer can choose, per building style — not every style takes every
+        cladding, and metal in particular is far from universal. Leave a rate <b>blank</b> and you
+        do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
+        else is an upcharge. Rename any of them under <b>Shown
+        as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
+        unaffected, because the siding itself is still the same one of our four.
+      </p>
+      {/* The SAME wording as the Options header, because it is the same vocabulary. Two
+          sentences are appended for cladding specifically: a whole-building option has no area
+          or length of its own, so `sqft option` and `lineal ft` need their meaning stated here
+          or a builder has to guess which one charges what. */}
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Set how cladding is priced &mdash;<b>each</b> = rate &times; count; <b>lineal ft</b> = rate
+        &times; total feet; <b>sqft option</b> = rate &times; option area;<b>sqft building</b> =
+        rate &times; (width &times; depth); <b>perimeter building</b> = rate &times; 2 &times;
+        (width + depth); <b>pct building price</b> = (rate &divide; 100) &times; base building
+        price; <b>pct estimate total</b> = (rate &divide; 100) &times; subtotal of all other lines,
+        resolved last.
+        <br />
+        For cladding the <b>option area</b> is the <b>wall</b> area &mdash; the perimeter &times;
+        the wall height &mdash; so a taller-walls upgrade is charged for automatically. And since a
+        whole building has no length of its own, <b>lineal ft</b> uses the perimeter, which makes
+        it the same sum as <b>perimeter building</b>.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (cat.styles || []).filter((st) => st.active !== false).map(renderSection)}
+    </div>
+  );
+}
+
 function LayoutPricing({ viewingLabel = null, clientId = null }) {
   // Operator "view as": scope catalog read + archive to the client on screen (see DoorsView).
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -2770,10 +3797,12 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   const buildRows = (data) => {
     const byKey = {}; (data.layoutPricing || []).forEach((r) => { byKey[r.item_key] = r; });
     // The ramp is managed entirely in the Ramp section now (mode/price/offer + archive), so it is
-    // no longer shown or archived here.
+    // no longer shown or archived here. The three electrical devices are not layout items at
+    // all any more — 206 made them ordinary electrical_items, so they cannot appear here.
     return (data.items || []).filter((it) => it.key !== "ramp").map((it) => {
       const p = byKey[it.key] || {};
-      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false };
+      return { item_key: it.key, label: it.label, pricing_method: p.pricing_method || "each", rate: p.rate != null ? String(p.rate) : "0", image_url: p.image_url || null, archived: !!it.archived, internalOnly: !!it.internalOnly, taxable: it.taxable !== false,
+        wallSnap: !!it.wallSnap, depthIn: it.depthIn != null ? String(it.depthIn) : "", heightOffFloorIn: it.heightOffFloorIn != null ? String(it.heightOffFloorIn) : "" };
     });
   };
 
@@ -2870,7 +3899,15 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       const rateOf = (r) => { const s = String(r.rate ?? "").trim(); return s === "" ? 0 : Number(s); };
       const bad = src.filter((r) => { const n = rateOf(r); return !Number.isFinite(n) || n < 0; });
       if (bad.length) throw new Error(`Nothing was saved — fix these rate(s) first, they aren't usable dollar amounts: ${bad.map((r) => `${r.label} ("${r.rate}")`).join(", ")}.`);
-      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null }));
+      // Dimensions ride the same Save prices click. Only wall-mounted items carry them, and a
+      // blank clears the override back to the master default — so they are sent as typed, not
+      // coerced, and an unusable one is named rather than silently becoming 0.
+      const dimBad = src.filter((r) => r.wallSnap && [r.depthIn, r.heightOffFloorIn].some((v) => {
+        const t = String(v ?? "").trim(); return t !== "" && (!Number.isFinite(Number(t)) || Number(t) < 0);
+      }));
+      if (dimBad.length) throw new Error(`Nothing was saved — fix these measurement(s) first, they aren't usable inch values: ${dimBad.map((r) => r.label).join(", ")}.`);
+      const payloadRows = src.map((r) => ({ item_key: r.item_key, pricing_method: r.pricing_method, rate: rateOf(r), imageUrl: r.image_url ?? null,
+        ...(r.wallSnap ? { depthIn: String(r.depthIn ?? "").trim(), heightOffFloorIn: String(r.heightOffFloorIn ?? "").trim() } : {}) }));
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_layout_pricing", rows: payloadRows } });
       if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
       await load();
@@ -2922,7 +3959,11 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
       {msg && msg.err && <div style={errStyle}>{msg.err}</div>}
       {msg && msg.ok && <div style={okStyle}>{msg.ok}</div>}
       <div style={S.card}>
-        <div style={S.h2}>Options</div>
+        {/* "Interior items", not "Options" (Carolyn 2026-09-07). A card called Options, inside
+            a tab called Options, inside the Interior group, said nothing about what it holds.
+            HEADING ONLY — the component, the save_layout_pricing action and every item_key are
+            untouched, so nothing joins on this string. */}
+        <div style={S.h2}>Interior items</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
           Set how each item customers can place on the floor plan is priced —
           <b>each</b> = rate × count; <b>lineal ft</b> = rate × total feet; <b>sqft option</b> = rate × option area;
@@ -2939,9 +3980,9 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
           <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Depth (in)</th><th style={S.th}>Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }}>Internal only</th><th style={S.th}></th>
               </tr></thead>
-              <tbody><SkelRows cols={6} rows={6} widths={["58%", "80%", "60%", "50%", "24%", "44%"]} /></tbody>
+              <tbody><SkelRows cols={8} rows={6} widths={["58%", "80%", "60%", "40%", "40%", "50%", "24%", "44%"]} /></tbody>
             </table>
           </div>
         ) : rows.length === 0 ? (
@@ -2954,7 +3995,7 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
             <div className="tight" style={{ overflowX: "auto", marginBottom: 14 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr>
-                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
+                <th style={S.th}>Item</th><th style={S.th}>How it’s priced</th><th style={S.th}>Rate (USD)</th><th style={S.th} title="Wall-mounted items only — how far it stands out from the wall, in inches. This is the depth drawn on the customer's plan.">Depth (in)</th><th style={S.th} title="Wall-mounted items only — how high off the floor it hangs, in inches. It is what lets a shelf sit above a workbench instead of colliding with it.">Height off floor (in)</th><th style={S.th}>Image</th><th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from customers’ placement buttons on the client-facing page (already-placed items still show).">Internal only</th><th style={{ ...S.th, textAlign: "center" }} title="Untick if you don’t charge sales tax on this option. It then sits under the non-taxable subtotal on quotes and invoices.">Taxable</th><th style={S.th}></th>
               </tr></thead>
               <tbody>
                 {rows.map((r) => r).sort((a, b) => (a.archived ? 1 : 0) - (b.archived ? 1 : 0)).map((r) => (
@@ -2967,6 +4008,18 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
                     </td>
                     <td style={S.td}>
                       <input type="number" min="0" step="0.01" value={r.rate} onChange={(e) => setRow(r.item_key, "rate", e.target.value)} style={{ ...S.input, width: 120 }} />
+                    </td>
+                    {/* Dimensions apply to wall-mounted items only; a dash reads as "not applicable
+                        here", which an empty box would not. Blank = fall back to our default. */}
+                    <td style={S.td}>
+                      {r.wallSnap
+                        ? <input type="number" min="0" step="0.5" value={r.depthIn} placeholder="default" onChange={(e) => setRow(r.item_key, "depthIn", e.target.value)} style={{ ...S.input, width: 96 }} />
+                        : <span style={{ color: "#CBD5E1" }}>—</span>}
+                    </td>
+                    <td style={S.td}>
+                      {r.wallSnap
+                        ? <input type="number" min="0" step="0.5" value={r.heightOffFloorIn} placeholder="default" onChange={(e) => setRow(r.item_key, "heightOffFloorIn", e.target.value)} style={{ ...S.input, width: 96 }} />
+                        : <span style={{ color: "#CBD5E1" }}>—</span>}
                     </td>
                     <td style={S.td}>
                       {r.image_url ? (
@@ -3058,6 +4111,25 @@ function fmtFtIn(inches) {
 }
 function ftInToInches(s) { const v = parseFtIn(s); return (typeof v === "number" && isFinite(v)) ? v : ""; }
 
+// How a catalog door is DRAWN in 3D (migration 186, widened by 187). Kept as one list in one
+// place because it is normalised at THREE sites in this file — the row→draft read, the
+// draft→save payload, and the <select>'s own value — and three hand-written ternaries pinned
+// to "plank" is exactly how the first three styles would have shipped unreachable.
+//
+// ⚠️ ANYTHING UNRECOGNISED MUST FALL BACK TO 'auto'. 186's header calls that out as
+// deliberate and `fixtureDoorStyle` in the designer relies on it: a typo, an older portal, or
+// a value written by a NEWER portal than this one can then only ever mean "draw it the way you
+// always did" — never a blank door. Keep this list in step with the CHECK constraint in 187
+// and with FIXTURE_CATEGORIES' door branch in portal-settings.
+const D3_DOOR_STYLES = ["plank", "zbrace", "xbrace", "rollup"];
+const D3_DOOR_STYLE_HINT = {
+  auto: "The photo above is laid onto the door in 3D. Photos taken at an angle look stretched on the building — switch to board-and-batten if this door looks skewed.",
+  plank: "Drawn as a real door: a framed panel of vertical boards with black strap hinges and a barn latch, in the door colour the customer picks. The photo above is still used on the estimate, but not in 3D.",
+  zbrace: "The same board-and-batten door with a single diagonal brace, rising from the hinge side.",
+  xbrace: "The same board-and-batten door with a crossed X brace across the lower panel.",
+  rollup: "Drawn as a roll-up: horizontal slats in side tracks with a lift handle. No hinges or latch. The photo above is still used on the estimate, but not in 3D.",
+};
+
 // The shared per-line catalog editor. `sizeWord` flips the second dimension's wording
 // ("height" for doors/windows, "length" for ramps — height_in holds the ramp LENGTH).
 function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, sizeWord = "height", hasSwingOp = false, viewingLabel = null, clientId = null, refreshKey = 0 }) {
@@ -3104,6 +4176,9 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     // fmtFtIn renders 0 as "" (right for a width, wrong here — it would turn a deliberate
     // floor-level window back into "use the default" on the next save), so 0 is spelled out.
     sill_in: d.sill_in != null ? (Number(d.sill_in) === 0 ? '0"' : fmtFtIn(d.sill_in)) : "", sill_mode: d.sill_mode === "variable" ? "variable" : "fixed",
+    // How the door is DRAWN in 3D (186). Anything unrecognised reads as "auto" — the look
+    // the app has always had — so an older row and a newer one cannot render differently.
+    door_style: D3_DOOR_STYLES.includes(d.door_style) ? d.door_style : "auto",
     image_url: d.image_url || null, active: d.active !== false, archived: d.archived === true, internalOnly: d.internal_only === true,
     // Sales tax (migration 148). Absent reads as TAXABLE — the column defaults true, so the
     // only way to be untaxed is for the builder to have said so.
@@ -3140,10 +4215,17 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     swingIn: !!r.swing_in, swingOut: !!r.swing_out, swingDefault: r.swing_default,
     opRight: !!r.op_right, opLeft: !!r.op_left, opDouble: !!r.op_double, opSlideUp: !!r.op_slideup, opDefault: r.op_default,
     ...(isDoorCat ? { colorMode: r.color_mode || "fixed", hasTrimColor: r.has_trim_color === true, fixedColorId: (r.color_mode || "fixed") === "fixed" ? (r.fixed_color_id || null) : null } : {}),
+    ...(isDoorCat ? { doorStyle: D3_DOOR_STYLES.includes(r.door_style) ? r.door_style : "auto" } : {}),
     // Every box ticked goes over as null ("all colors") so a window-color added later
     // automatically appears on unrestricted windows.
     ...(isWindowCat ? { windowColorIds: (r.window_color_ids === null || (winColors.length > 0 && winColors.every((c) => r.window_color_ids.includes(String(c.id))))) ? null : r.window_color_ids } : {}),
     ...(isWindowCat ? { sillIn: ftInToInches(r.sill_in), sillMode: r.sill_mode === "variable" ? "variable" : "fixed" } : {}),
+    // Height off the floor rides for DOORS as well since 2026-09-04 — a loft door is an
+    // ordinary door row whose sill is not zero (Carolyn @27:16: "that loft door goes with the
+    // doors"). sillMode stays a WINDOW-only key on purpose: portal-settings pins every door to
+    // 'fixed', so sending one would be a value the save throws away, and a payload field the
+    // server ignores is a field the next reader believes.
+    ...(isDoorCat ? { sillIn: ftInToInches(r.sill_in) } : {}),
     imageUrl: r.image_url || null, active: r.active !== false, archived: r.archived === true, internalOnly: r.internalOnly === true,
     taxable: r.taxable !== false,
   });
@@ -3268,8 +4350,12 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   // ── Excel round-trip. ASCII-only headers (a “×” becomes mojibake in Excel and the column
   // silently drops on re-import). The ID column is the row key: keep it to update a row,
   // leave it blank on rows you add. Photos never ride in the sheet (managed here). ──
+  // "Height off floor" appears in BOTH lists since 2026-09-04 — the door sheet needs it so a
+  // builder can set loft-door heights in bulk (see the edit panel). Adding a column is safe
+  // for anyone holding an older sheet: import matches columns BY NAME and an absent one is
+  // left untouched, so an old export re-imports exactly as it always did.
   const HEADERS = hasSwingOp
-    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
+    ? ["ID", "Style", "Label on plan", "Width", "Height", "Price", "Swing out", "Swing in", "Default swing", "Opens right", "Opens left", "Double", "Slide up", "Default operation", "Color mode", "Trim color", "Fixed color", "Height off floor", "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"]
     : ["ID", "Style", "Label on plan", "Width", sizeWord === "length" ? "Length" : "Height", "Price", ...(isWindowCat ? ["Colors", "Height off floor", "Placement"] : []), "Photo on estimate", "Active", "Internal only", "Taxable", "Archived"];
   const yn = (b) => (b ? "yes" : "no");
   // The Fixed color column carries the color's LABEL (ids mean nothing in Excel); import
@@ -3283,7 +4369,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
     return names.length ? names.join(", ") : "none";
   };
   const exportRows = () => rows.map((r) => hasSwingOp
-    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
+    ? [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), yn(r.swing_out), yn(r.swing_in), r.swing_default || "", yn(r.op_right), yn(r.op_left), yn(r.op_double), yn(r.op_slideup), r.op_default || "", r.color_mode || "fixed", yn(r.has_trim_color), fixedColorLabel(r), r.sill_in || "", yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]
     : [r.id || "", r.name, r.plan_label, r.width_in, r.height_in, r.price === "" ? "" : Number(r.price), ...(isWindowCat ? [winColorsCell(r), r.sill_in || "", (r.sill_mode === "variable" ? "variable" : "fixed")] : []), yn(r.show_image_on_estimate), yn(r.active), yn(r.internalOnly), yn(r.taxable), yn(r.archived)]);
   const doExport = async () => {
     if (dlBusy || rows.length === 0) return;
@@ -3403,8 +4489,13 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
         }
         // Height off floor / Placement (139), same absent-column-leaves-it-alone contract.
         // A BLANK cell is meaningful here and is not the same as an absent column: blank
-        // means "the standard 3'6"", so it goes over as null rather than being skipped.
-        if (isWindowCat && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
+        // means "the standard 3'6"" for a window and "on the floor" for a door, and either
+        // way it goes over as null rather than being skipped.
+        //
+        // Doors read the same column since 2026-09-04 (Carolyn's loft door) — the Placement
+        // column below stays window-only, because portal-settings pins every door to 'fixed'
+        // and importing a 'variable' onto one would be a value the save silently discards.
+        if ((isWindowCat || isDoorCat) && iSill >= 0) row.sillIn = ftInToInches(String(cols[iSill] == null ? "" : cols[iSill]).replace(/\s/g, ""));
         if (isWindowCat && iSillMode >= 0) {
           row.sillMode = /^\s*(variable|slide|adjustable)\b/i.test(String(cols[iSillMode] == null ? "" : cols[iSillMode])) ? "variable" : "fixed";
         }
@@ -3420,7 +4511,7 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
   };
 
   // ── Draft editing (one line at a time) ──
-  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
+  const blank = () => ({ id: null, name: "", plan_label: "", show_image_on_estimate: true, width_in: "", height_in: "", price: "", swing_in: false, swing_out: hasSwingOp, swing_default: null, op_right: hasSwingOp, op_left: false, op_double: false, op_slideup: false, op_default: null, color_mode: "fixed", has_trim_color: false, fixed_color_id: null, window_color_ids: null, sill_in: "", sill_mode: "fixed", door_style: "auto", image_url: null, active: true, archived: false, internalOnly: false, taxable: true });
   const setDraft = (patch) => setEdit((e) => (e ? { ...e, draft: { ...e.draft, ...patch } } : e));
   // Operation coherence: Double and Slide up are EXCLUSIVE — checking either clears the rest,
   // and checking Right/Left clears Double/Slide up (same rules as the designer expects).
@@ -3487,6 +4578,11 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
       const names = winColors.filter((c) => r.window_color_ids.includes(String(c.id))).map((c) => c.label);
       parts.push(names.length === 0 ? "no colors" : `colors: ${names.join(", ")}`);
     }
+    // A raised DOOR says so on its row. It is the one field that separates a loft door from a
+    // walk door in a list where both read "3' x 4'", and a builder scanning the list for the
+    // one they got wrong should not have to open each row to find it. Only when set, so an
+    // ordinary door's summary line is unchanged.
+    if (isDoorCat && String(r.sill_in || "").trim()) parts.push(`${String(r.sill_in).trim()} off the floor`);
     if (r.image_url && r.show_image_on_estimate) parts.push("photo on estimate");
     return parts.join("  ·  ");
   };
@@ -3608,7 +4704,36 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
           builder sells, so a transom and a picture window sat at the same height.
           Independent of the width/height fields above because it is not a size — it is
           where the window is INSTALLED. */}
-      {isWindowCat && (
+      {isDoorCat && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={fldLbl}>How it looks in 3D</div>
+          <select value={D3_DOOR_STYLES.includes(edit.draft.door_style) ? edit.draft.door_style : "auto"}
+            onChange={(e) => setDraft({ door_style: e.target.value })}
+            style={{ ...S.input, minWidth: 0, maxWidth: 380 }}>
+            <option value="auto">Use the photo above</option>
+            <option value="plank">Board-and-batten (built in 3D)</option>
+            <option value="zbrace">Board-and-batten with a Z brace</option>
+            <option value="xbrace">Board-and-batten with an X brace</option>
+            <option value="rollup">Roll-up / garage door</option>
+          </select>
+          <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
+            {D3_DOOR_STYLE_HINT[edit.draft.door_style] || D3_DOOR_STYLE_HINT.auto}
+          </div>
+        </div>
+      )}
+      {/* Height off the floor — ONE control for windows and doors since 2026-09-04, not two.
+          Carolyn's LOFT DOOR is a category='door' fixture that hangs high on a gable end
+          (@24:43 "it's called a loft door"; @27:16 "that loft door goes with the doors"), and
+          how far up IS the whole difference between it and a walk door. It is the same
+          question a window's sill answers, stored in the same column, so it is asked with the
+          same field rather than a parallel one that could drift in wording or units.
+
+          The PLACEMENT select stays window-only. 'variable' lets a shopper slide the opening
+          up and down the wall in 3D — Carolyn's transom — and a loft door's height is set by
+          where the builder's loft floor is, not by the customer. portal-settings pins every
+          door to 'fixed' on save, so offering the select here would be a control whose value
+          the server discards. */}
+      {(isWindowCat || isDoorCat) && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
             <div>
@@ -3621,22 +4746,29 @@ function FixtureCatalog({ category, noun, addLabel, namePh, labelPh, wPh, hPh, s
                   catch it; width and height only survive the same typo because the server
                   rejects a null width. */}
               <input value={edit.draft.sill_in || ""} onChange={(e) => setDraft({ sill_in: e.target.value.replace(/\s/g, "") })}
-                placeholder={`standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
+                placeholder={isDoorCat ? `on the floor` : `standard (3'6")`} style={{ ...S.input, minWidth: 0, width: 140 }} />
             </div>
-            <div>
-              <div style={fldLbl}>Placement</div>
-              <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
-                onChange={(e) => setDraft({ sill_mode: e.target.value })}
-                style={{ ...S.input, minWidth: 0 }}>
-                <option value="fixed">Fixed at this height</option>
-                <option value="variable">Customer can slide it up and down</option>
-              </select>
-            </div>
+            {isWindowCat && (
+              <div>
+                <div style={fldLbl}>Placement</div>
+                <select value={edit.draft.sill_mode === "variable" ? "variable" : "fixed"}
+                  onChange={(e) => setDraft({ sill_mode: e.target.value })}
+                  style={{ ...S.input, minWidth: 0 }}>
+                  <option value="fixed">Fixed at this height</option>
+                  <option value="variable">Customer can slide it up and down</option>
+                </select>
+              </div>
+            )}
           </div>
           <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>
-            {edit.draft.sill_mode === "variable"
-              ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
-              : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
+            {/* The door hint names the loft door outright. A builder reading "height off
+                floor" on a DOOR would reasonably assume it was a mistake, or a threshold
+                allowance, unless the field says what it is for. */}
+            {isDoorCat
+              ? `Leave blank for a normal door on the floor. Fill it in for a loft door — e.g. 7'6" puts it up on the gable end, above the walk door, with no ramp and no swing arc on the plan.`
+              : edit.draft.sill_mode === "variable"
+                ? `Starts at ${(edit.draft.sill_in || "").trim() || `3'6"`} and the customer can move it up or down the wall in 3D — for transoms and high windows beside a garage door.`
+                : `Always sits this far above the floor inside the building. Leave blank for the standard 3'6".`}
           </div>
         </div>
       )}
@@ -3818,6 +4950,41 @@ function DoorsView({ viewingLabel = null, clientId = null }) {
         re-import — rows are matched by the ID column, and rows missing from the file are never deleted.
       </p>
       <FixtureCatalog category="door" noun="door" addLabel="Add door" namePh="e.g. Steel door" labelPh="SD" wPh={'36"'} hPh={'80"'} hasSwingOp sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
+    </div>
+  );
+}
+
+// ─── Vents (Carolyn 2026-09-04 @25:19–27:14) ───
+// Ahsan asked whether a vent should be its own category or live with windows; she answered
+// the PRICING question instead, and that answer is what settles the shape: "most of the
+// time it comes with the building. But there are times when they have ... an upcharge for a
+// different vent ... I do think we need to put it in as an item for them to put in and say
+// no charge or it is a charge."
+//
+// So a vent is a fixture, not a boolean on the style. `price` already carries all three
+// states this needs and needs no new column: NULL = not offered, 0 = included in the
+// building, > 0 = an upcharge. That is the same convention doors and windows already use.
+//
+// ⚠️ NOT the same thing as `styleD3.gableVent`. That is a per-STYLE appearance field the
+// video AI infers ("omit the whole gableVent object if the gable ends carry no vent") — it
+// describes how this builder's buildings already look. This is a CATALOG item a customer
+// chooses and may be billed for. Both can be true of one building and they answer different
+// questions, so neither replaces the other.
+//
+// No swing, no operation, no trim colour, no sill: the shared validator forces that whole
+// group off for any non-door / non-window category, so a vent row is width, height, price.
+function VentsView({ viewingLabel = null, clientId = null }) {
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Vents</div>
+      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+        Gable and wall vents a customer can add to a building. Leave the <b>price blank</b> if you do not offer
+        one, set it to <b>0</b> if every building includes it at no charge, or enter an amount to charge for it —
+        the same three states the doors and windows lists use. Each vent is <b>one line</b>; click <b>Edit</b> to
+        change it and every line saves on its own. Drag <b>⠿</b> to set the order customers see. Sizes are
+        feet/inches — 12", 1'6" (no spaces).
+      </p>
+      <FixtureCatalog category="vent" noun="vent" addLabel="Add vent" namePh="e.g. Gable vent" labelPh="VNT" wPh={'12"'} hPh={'12"'} sizeWord="height" viewingLabel={viewingLabel} clientId={clientId} />
     </div>
   );
 }

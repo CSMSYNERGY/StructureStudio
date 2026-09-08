@@ -264,8 +264,10 @@ function pmComputeGroups(mode, rows, boardGroups, columns, ctx) {
 //   canEdit + onCellCommit(item, col, value) + onDropToGroup(item, group) +
 //   onDropOnRow(item, beforeItem) + onRowOpen(item) + onAddItem(group, name)
 //   activeItemId — the row whose modal is open (ACCENT outline, decision 25's marking)
-function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey, sortDir, onSort, canEdit, onCellCommit, onDropToGroup, onDropOnRow, onRowOpen, onAddItem, activeItemId }) {
+function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey, sortDir, onSort, canEdit, onCellCommit, onDropToGroup, onDropOnRow, onRowOpen, onAddItem, onReorderCols, activeItemId }) {
   const [dragId, setDragId] = useState(null);
+  const [dragColId, setDragColId] = useState(null);       // a header being dragged
+  const [colDropTarget, setColDropTarget] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);   // group key or "row:"+id
   const [editCell, setEditCell] = useState(null);       // itemId + ":" + colId
   const [newItemGroup, setNewItemGroup] = useState(null);
@@ -348,9 +350,31 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
           <tr>
             <th style={{ ...S.th, width: 28 }}></th>
             <SortTh label="Item" col="name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            {/* Column headers DRAG to reorder (Carolyn 2026-08-29) — the Monday gesture,
+                alongside the ▲/▼ in Board settings. Gated on dragColId exactly the way
+                row DnD gates on dragId, so the two drags can never cross: a header over
+                a row does nothing, a row over a header does nothing. Click-to-sort
+                survives because a real drag suppresses the click. The reorder moves the
+                column in the FULL list (hidden columns keep their slots). */}
             {visCols.map((c) => (
               <SortTh key={c.id} label={c.name} col={c.id} sortKey={sortKey} sortDir={sortDir} onSort={onSort}
-                style={c.width ? { width: c.width } : undefined} />
+                style={c.width ? { width: c.width } : undefined}
+                thProps={canEdit && onReorderCols ? {
+                  draggable: true,
+                  onDragStart: (e) => { setDragColId(c.id); e.dataTransfer.effectAllowed = "move"; },
+                  onDragEnd: () => { setDragColId(null); setColDropTarget(null); },
+                  onDragOver: (e) => { if (dragColId && dragColId !== c.id) { e.preventDefault(); e.stopPropagation(); setColDropTarget(c.id); } },
+                  onDrop: (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    if (dragColId && dragColId !== c.id) {
+                      const ids = columns.map((x) => x.id);
+                      ids.splice(ids.indexOf(c.id), 0, ids.splice(ids.indexOf(dragColId), 1)[0]);
+                      onReorderCols(ids);
+                    }
+                    setDragColId(null); setColDropTarget(null);
+                  },
+                  style: colDropTarget === c.id ? { background: "#EEF2FF", boxShadow: `inset 2px 0 0 ${ACCENT}` } : undefined,
+                } : undefined} />
             ))}
           </tr>
         </thead>
@@ -382,7 +406,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                       <span title="From a client's portal" style={{ fontSize: 9, fontWeight: 800, color: "#1B7895", background: "#E6F7FA", border: "1px solid #BEE9F1", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>CLIENT</span>
                     )}
                     {r.release_note_id && (
-                      <span title="On the roadmap tenants can see in What's New" style={{ fontSize: 9, fontWeight: 800, color: "#4F46E5", background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>ROADMAP</span>
+                      <span title="On the roadmap tenants can see in Support" style={{ fontSize: 9, fontWeight: 800, color: "#4F46E5", background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 4, padding: "1px 5px", marginLeft: 7, verticalAlign: 1, letterSpacing: 0.4 }}>ROADMAP</span>
                     )}
                   </td>
                   {visCols.map((c) => (

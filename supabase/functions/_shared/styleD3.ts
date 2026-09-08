@@ -63,6 +63,11 @@ const CLAMPS: Record<string, [number, number]> = {
   dormerWidthFt: [0, 12],     // along the ridge
   dormerRiseFt: [0, 6],       // above the slope it sits on
   dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
+  // How far a recessed porch eats INTO the building, at a gable end. Not a projection: the
+  // roof and the footprint do not move, the wall sets back. Same "0 is the off switch" rule
+  // as the two above. 12 ft is past any shed porch anyone sells; the renderer clamps again
+  // against the actual building so a 12 ft porch on a 12 ft shed cannot leave no building.
+  porchDepthFt: [0, 12],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -78,6 +83,11 @@ const D3_LEANTO_SIDES = ["left", "right"] as const;
 // every tenant's column the first time anyone opened and saved the calibration panel --
 // the same reasoning `eave` below is built on.
 const D3_DORMER_TYPES = ["gable", "transom"] as const;
+// Which gable end a recessed porch opens at. ABSENT means "front", like dormerType's absent
+// "gable": the renderer tests `!== "back"`, so a row that predates this field keeps its exact
+// render and styleD3.test.ts's deep-equal on `roof` keeps passing. Emitting a default here
+// would write it into every tenant's column the first time anyone saved the panel.
+const D3_PORCH_ENDS = ["front", "back"] as const;
 
 const num = (v: unknown): number | null => {
   const n = typeof v === "string" ? Number(v) : v;
@@ -119,7 +129,8 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // ⚠️ A CLAMPS entry is not enough — a key missing from THIS list is dropped silently,
   // which looks to a builder exactly like "the save didn't work". Add to both.
   for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn",
-                   "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU"]) {
+                   "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU",
+                   "porchDepthFt"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
@@ -133,6 +144,13 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // numeric loop above: clamped() destructures CLAMPS[key] and throws on a key with no entry.
   if ((D3_DORMER_TYPES as readonly string[]).includes(String(rawRoof.dormerType))) {
     roof.dormerType = String(rawRoof.dormerType);
+  }
+  // Which gable end the porch opens at. Stored whether or not porchDepthFt is currently above
+  // zero, exactly like leanToSide and dormerType, so turning the depth back up remembers the
+  // end. Out of the numeric loop for the same reason: clamped() destructures CLAMPS[key] and
+  // would throw on a key with no entry.
+  if ((D3_PORCH_ENDS as readonly string[]).includes(String(rawRoof.porchEnd))) {
+    roof.porchEnd = String(rawRoof.porchEnd);
   }
   // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
   // Urban style, read off a walk-around video; "fascia" = the painted trim board the

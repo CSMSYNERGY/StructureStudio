@@ -2,8 +2,10 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
+import { phoneKey } from "../_shared/phoneKey.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -45,14 +47,28 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  renders as "sent" — the safe floor — rather than leaking internal vocabulary. */
 const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"]);
 
-/** Canonical last-10-digits phone form for the ownership compare. The session identity is
- *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
- *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
- *  and hid every quote from a verified customer. Strips exactly one leading US "1" from
- *  an 11-digit string; nothing looser — any other shape compares as-is. */
-function phoneKey(value: unknown): string {
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+// phoneKey moved to _shared/phoneKey.ts (174) — see the note in customer-accept.
+
+/**
+ * A document link leaves this function only when it names an object in THIS project's own
+ * public storage.
+ *
+ * `designs.image_url` is written by the anon-callable save_design RPC (migration 104). That
+ * sanitiser pins the object PATH and deliberately NOT the host, which is the right trade
+ * where the value is only ever used to name one of this design's own objects server-side —
+ * but it means a stored value can read as a floor-plan URL and still point at any origin.
+ * The customer page hands whatever comes back straight to an anchor, and its own check is
+ * scheme-only, so the host has to be settled HERE, on the way out: the builder-branded
+ * "PDF" button must not be able to open somewhere that isn't ours.
+ *
+ * Fail-closed — with no SUPABASE_URL in the environment nothing matches, so a link is
+ * missing rather than unchecked.
+ */
+const STORAGE_ORIGIN = Deno.env.get("SUPABASE_URL") ?? "";
+const OWN_STORAGE_PREFIX = STORAGE_ORIGIN ? `${STORAGE_ORIGIN}/storage/v1/object/public/` : "";
+function ownStorageUrl(u: unknown): string | null {
+  const s = typeof u === "string" ? u.trim() : "";
+  return OWN_STORAGE_PREFIX && s.startsWith(OWN_STORAGE_PREFIX) ? s : null;
 }
 
 /**
@@ -93,6 +109,19 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   // deno-lint-ignore no-explicit-any
   let body: any;
   try { body = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
@@ -113,7 +142,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // one, company_name the config row's label). Both nullable; the frontend has its own
   // last-resort fallback.
   const [settingsRes, cfgRes] = await Promise.all([
-    admin.from("client_settings").select("business_name, invoice_in_ghl").eq("client_id", identity.clientId).maybeSingle(),
+    admin.from("client_settings").select("business_name, invoice_in_ghl, co_fee_label").eq("client_id", identity.clientId).maybeSingle(),
     admin.from("client_configs").select("company_name").eq("client_id", identity.clientId).maybeSingle(),
   ]);
   if (settingsRes.error) return dbFail(req, identity.clientId, "read business settings", settingsRes.error);
@@ -131,7 +160,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   // state the expression; this path pays one tenant scan instead.
   const { data: rows, error: designsErr } = await admin
     .from("designs")
-    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
+    .select("short_code, created_at, status, contact, selections, ghl_estimate_number, ghl_estimate_id, image_url, estimate_lines, accepted_snapshot, ss_quote_number, ss_quote_pdf_url, accepted_at, view3d_image_url")
     .eq("client_id", identity.clientId)
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
@@ -169,7 +198,7 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   const ackedByCode = new Map<string, any[]>();
   if (ssMode && mine.length > 0) {
     const { data: cos } = await admin.from("change_orders")
-      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, created_at, status, acknowledged_at")
+      .select("id, short_code, co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, created_at, status, acknowledged_at")
       .eq("client_id", identity.clientId)
       .in("status", ["pending_ack", "acknowledged"])
       .in("short_code", mine.map((d) => d.short_code));
@@ -182,6 +211,19 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         ackedByCode.set(co.short_code, acked);
         continue;
       }
+      // ⚠️ THE FEE HAS TO BE ON THIS CARD (found 2026-09-08, testing the customer's own
+      // page). Without it the customer read "Total: $2,800.00 → $2,800.00" on a change that
+      // costs them $150 and approved it believing it was free. The consent sentence they
+      // sign DOES name the fee — so the binding text was never wrong — but meeting a charge
+      // for the first time inside the small print of a signature box is exactly the harm
+      // Carolyn's "a rep is shown the fee before they start" rule exists to prevent, and the
+      // customer deserves the same treatment as the rep.
+      //
+      // `newTotal` is what they will owe if they approve: the change's own after-figure plus
+      // the fee and its tax. Computed here rather than in the browser so the page cannot
+      // arrive at a different number than the invoice does.
+      const coFee = Number(co.fee_cents) || 0;
+      const coFeeTax = Number(co.fee_tax_cents) || 0;
       const list = cosByCode.get(co.short_code) ?? [];
       list.push({
         id: co.id,
@@ -189,6 +231,12 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         description: co.description,
         totalBefore: co.total_before_cents == null ? null : co.total_before_cents / 100,
         totalAfter: co.total_after_cents == null ? null : co.total_after_cents / 100,
+        feeCents: coFee,
+        feeTaxCents: coFeeTax,
+        feeLabel: String(settingsRes.data?.co_fee_label ?? "").trim() || "Change order fee",
+        newTotal: co.total_after_cents == null
+          ? null
+          : Math.round(co.total_after_cents + coFee + coFeeTax) / 100,
         createdAt: co.created_at,
       });
       cosByCode.set(co.short_code, list);
@@ -214,19 +262,22 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   }
   if (ssMode && mine.length > 0) {
     const { data: invs } = await admin.from("invoice_sends")
-      .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at")
+      .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at, document_at")
       .eq("client_id", identity.clientId)
       .eq("issued_by", "structurestudio")
       .in("short_code", mine.map((d) => d.short_code));
     for (const iv of invs ?? []) {
       if (!["created", "sent"].includes(String(iv.status))) continue;
       const sentAt = Date.parse(String(iv.updated_at || "")) || 0;
+      // STALE is about the document (221); `sentAt` above stays the send, which is what
+      // the customer is shown. Two facts, two columns — see the migration.
+      const docAt = Date.parse(String(iv.document_at || iv.updated_at || "")) || 0;
       invByCode.set(iv.short_code, {
         number: iv.invoice_number ?? null,
         pdfUrl: iv.invoice_pdf_url ?? null,
         sentAt: iv.updated_at ?? null,
         signedAt: iv.signed_at ?? null,
-        stale: (lastAckByCode.get(iv.short_code) ?? 0) > sentAt,
+        stale: (lastAckByCode.get(iv.short_code) ?? 0) > docAt,
       });
     }
   }
@@ -255,7 +306,10 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
       createdAt: d.created_at,
       total: totalFromSnapshot(d?.estimate_lines),
       // SS mode: the 3-sheet quote document beats the bare floor plan when it exists.
-      pdfUrl: (ssMode && d.ss_quote_pdf_url) ? d.ss_quote_pdf_url : (d.image_url || null),
+      // Both go through ownStorageUrl — a value that isn't one of our own stored objects
+      // yields no link at all, and the SS document losing the gate still falls back to the
+      // floor plan rather than silently dropping the button.
+      pdfUrl: (ssMode ? ownStorageUrl(d.ss_quote_pdf_url) : null) ?? ownStorageUrl(d.image_url),
       // GHL's hosted estimate page (Accept/Reject live there); null-safe when no estimate.
       acceptUrl: estimateUrl(d.ghl_estimate_id),
       // SS-mode accept happens HERE (customer-accept, migration 124). These four fields
@@ -273,11 +327,17 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // The invoice, once one is out (migration 136). Null until the builder sends it.
           // `amountDue` is what the invoice actually bills — the quote total plus every
           // acknowledged change — so the card, the PDF and the sentence they sign agree.
+          //
+          // From the AGREED snapshot, not the live lines (2026-09-07): a rep staging a change
+          // rewrites estimate_lines before the customer has approved anything, and this is the
+          // number on the screen where they are being asked to approve it. `total` above stays
+          // live on purpose — that is the quote headline, and while a change is pending the
+          // customer is meant to see the old and new figures side by side on the change card.
           invoice: invByCode.has(d.short_code)
             ? {
               ...invByCode.get(d.short_code),
               amountDue: amountOwed(
-                d.estimate_lines,
+                agreedBaseline(d).lines,
                 ackedByCode.get(d.short_code) ?? [],
                 orderTotalByCode.get(d.short_code) ?? null,
               ),

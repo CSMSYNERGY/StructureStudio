@@ -49,6 +49,14 @@ function json(body: unknown, status = 200) {
 const MONDAY_API = "https://api.monday.com/v2";
 const MONDAY_FILE_API = "https://api.monday.com/v2/file";
 const APP_LABEL = "Structure Studio";
+// slug (feedback_submissions.source_app) -> the label on the boards' App dropdown.
+// Shared with app-feedback, which owns the other three; keep the two in step.
+const APP_LABELS: Record<string, string> = {
+  "structure-studio": "Structure Studio",
+  "framedup": "Framed UP",
+  "csm-studio": "CSM Studio",
+  "buildbridge": "BuildBridge",
+};
 
 const BOARDS = {
   bug: {
@@ -144,6 +152,28 @@ function toClientStatus(boardId: string, labelId: unknown, labelText: unknown): 
   return undefined;
 }
 
+// `refresh` is a READ the tenant triggers, so it may only ever carry a status change
+// FORWARD. During the parallel run, Projects (portal-projects) writes the client-facing
+// status without touching Monday, so Monday's label is legitimately stale for those
+// items — re-applying it would walk the tenant's own submission backwards once per
+// "Check for updates" click, indefinitely, with no way for them to stop it.
+//
+// Monday's status cell value carries its own `changed_at`, and every writer of
+// feedback_submissions.status (webhook, this function, portal-projects' propagateStatus)
+// stamps status_changed_at, so the two timestamps order the writes: only a Monday change
+// made AFTER the stored one wins. That keeps the documented last-writer-wins divergence
+// intact — a genuine later drag in Monday still lands — while a stale re-read cannot
+// overwrite anything. Missing either timestamp (a row from before status_changed_at was
+// stamped, or a cell Monday returns without one) falls back to applying it, which is what
+// keeps this a safety net for a webhook that never arrived.
+function mondayChangeIsNewer(mondayChangedAt: unknown, storedChangedAt: unknown): boolean {
+  if (typeof mondayChangedAt !== "string" || typeof storedChangedAt !== "string") return true;
+  const m = Date.parse(mondayChangedAt);
+  const s = Date.parse(storedChangedAt);
+  if (!Number.isFinite(m) || !Number.isFinite(s)) return true;
+  return m > s;
+}
+
 // A Monday update reaches the tenant ONLY when the team prefixes it with /client.
 // Everything else stays internal and is never stored on our side at all.
 const CLIENT_MARKER = /^\s*\/client\b[:\s-]*/i;
@@ -206,8 +236,10 @@ function statusAfterPush(kind: "bug" | "feature"): string {
 // updating ONLY the tenant mirror (feedback_submissions); it never touches pm_items.
 // A status dragged in Monday therefore updates what the tenant sees but not the
 // Projects board, and a later Projects status change overwrites the mirror — last
-// writer wins. The team works in Projects; cutover (MONDAY_PUSH_DISABLED=1, then
-// stripping the Monday code) ends the divergence.
+// writer wins. Last WRITER: `refresh` is a tenant-triggered read and is forward-only
+// (mondayChangeIsNewer), so re-reading a stale Monday label is not a write and can
+// never undo the Projects side. The team works in Projects; cutover
+// (MONDAY_PUSH_DISABLED=1, then stripping the Monday code) ends the divergence.
 // deno-lint-ignore no-explicit-any
 async function mirrorToProjects(admin: any, row: any): Promise<void> {
   try {
@@ -242,8 +274,23 @@ async function mirrorToProjects(admin: any, row: any): Promise<void> {
         const intake = labels.find((l: any) => l.intake === true) || labels[0];
         if (intake) values[c.id] = intake.id;
       } else if (c.type === "text" && c.name === "Client") {
-        values[c.id] = row.client_id;
-      } else if (c.type === "date" && c.name === "Date") {
+        // Cross-app rows (migration 161) carry NO tenant — leave the cell empty rather
+        // than printing "null"; the App column below says what they are instead.
+        if (row.client_id) values[c.id] = row.client_id;
+      } else if (c.type === "dropdown" && c.name === "App") {
+        // Which PRODUCT this came from. Matched by label, the same way Priority is, so
+        // the option ids stay editable in the UI. APP_LABELS maps the stored slug to the
+        // board's label; an unknown slug simply leaves the cell blank rather than
+        // guessing — a wrong App is worse than a missing one when you triage by it.
+        const label = APP_LABELS[row.source_app || "structure-studio"];
+        // deno-lint-ignore no-explicit-any
+        const opt = (c.settings?.options || []).find((o: any) => o.label === label);
+        if (opt) values[c.id] = [opt.id];
+      } else if (c.type === "date" && (c.name === "Created" || c.name === "Date")) {
+        // ⚠️ The column is called "Created" on both boards and always has been — this
+        // read "Date" until 2026-09-07, so the branch NEVER fired and every mirrored
+        // submission arrived with an empty date cell (half the bug board, when found).
+        // "Date" stays accepted so a board that renames the column back still works.
         values[c.id] = new Date().toISOString().slice(0, 10);
       } else if (c.type === "dropdown" && c.name === "Priority" && row.severity) {
         // deno-lint-ignore no-explicit-any
@@ -319,6 +366,19 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -359,14 +419,23 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
 
     // An attachment must live under this tenant's own prefix — the storage policy
     // enforces it on write, and this re-checks it before we hand the path to Monday.
+    // The `..` test is what makes the prefix test mean anything: storage-js drops the
+    // path straight into a URL and the fetch layer normalises `<me>/../<victim>/x` down
+    // to another tenant's object, which we would then read with the SERVICE key. Same
+    // guard as portal-schedule's photo path and portal-settings' .glb path.
     let attachmentPath: string | null = body.attachmentPath ? String(body.attachmentPath) : null;
-    if (attachmentPath && !attachmentPath.startsWith(clientId + "/")) {
+    if (attachmentPath && (!attachmentPath.startsWith(clientId + "/") || attachmentPath.includes(".."))) {
       return json({ error: "Attachment does not belong to this account." }, 403);
     }
 
     const meta = user.user_metadata || {};
+    // Identity comes from the VERIFIED user, never the body — the auth-model note at the
+    // top of this file is what makes "Submitted by" trustworthy in the Monday item and in
+    // My Submissions. A body field here let any member file as somebody else; no caller
+    // has ever sent one. The ladder down to the email local part and "Unknown" stays:
+    // submitter_name is NOT NULL (migration 054).
     const submitterName = String(
-      body.submitterName || meta.full_name || meta.name || (user.email || "").split("@")[0] || "Unknown",
+      meta.full_name || meta.name || (user.email || "").split("@")[0] || "Unknown",
     ).slice(0, 120);
 
     const ins = await admin.from("feedback_submissions").insert({
@@ -408,6 +477,22 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
       const upd = await admin.from("feedback_submissions")
         .update({ monday_item_id: itemId, monday_error: null, status: statusAfterPush(kind), updated_at: new Date().toISOString() })
         .eq("id", row.id).select().single();
+      // The Monday item EXISTS from here on. If the link-back fails the row reads as
+      // never-pushed with no error: the webhook matches on monday_item_id, refresh skips
+      // a null one, and retry_push would create a SECOND item (create_item is not
+      // idempotent). So record the orphan's id for whoever triages it. Best-effort and
+      // never re-thrown — falling into the catch below would write monday_error and tell
+      // the tenant the push failed while their item is live on the board.
+      if (upd.error) {
+        console.error("Monday link-back failed for submission", row.id, "item", itemId, upd.error.message);
+        try {
+          await admin.from("feedback_submissions")
+            .update({ monday_error: `push ok but link not saved (Monday item ${itemId}): ${upd.error.message}` })
+            .eq("id", row.id);
+        } catch (e2) {
+          console.error("orphan link-back note not saved for submission", row.id, e2 instanceof Error ? e2.message : String(e2));
+        }
+      }
       await mirrorToProjects(admin, { ...row, monday_item_id: itemId });  // backfill the Monday id
       return json({ ok: true, submission: upd.data ?? row, pushed: true });
     } catch (e) {
@@ -524,7 +609,7 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
   if (action === "refresh") {
     if (!token) return json({ ok: true, refreshed: 0 });
     const { data: rows } = await admin.from("feedback_submissions")
-      .select("id, monday_item_id, status")
+      .select("id, monday_item_id, status, status_changed_at")
       .eq("client_id", clientId)
       .not("monday_item_id", "is", null)
       .order("created_at", { ascending: false })
@@ -564,9 +649,16 @@ Deno.serve(withErrorLog("portal-feedback", async (req: Request) => {
         (c: any) => c.id === BOARDS.bug.colStatus || c.id === BOARDS.feature.colStatus,
       );
       let cellIndex: unknown = null;
-      try { cellIndex = statusCell?.value ? JSON.parse(statusCell.value)?.index : null; } catch { /* text fallback */ }
+      // `changed_at` rides in the same status cell value as `index` — it is what makes
+      // this refresh forward-only instead of authoritative (see mondayChangeIsNewer).
+      let cellChangedAt: unknown = null;
+      try {
+        const parsed = statusCell?.value ? JSON.parse(statusCell.value) : null;
+        cellIndex = parsed?.index ?? null;
+        cellChangedAt = parsed?.changed_at ?? null;
+      } catch { /* text fallback */ }
       const mapped = statusCell ? toClientStatus(itemBoard, cellIndex, statusCell.text) : undefined;
-      if (mapped && mapped !== row.status) {
+      if (mapped && mapped !== row.status && mondayChangeIsNewer(cellChangedAt, row.status_changed_at)) {
         await admin.from("feedback_submissions").update({
           status: mapped,
           status_changed_at: new Date().toISOString(),

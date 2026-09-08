@@ -1,10 +1,16 @@
-// Unit tests for postmark-events' pure pieces: mapEvent (Postmark payload → email_sends
+// Unit tests for postmark-events' pure pieces: mapEvent (provider payload → email_sends
 // patch) and timingSafeEqual (the shared-secret compare that gates the webhook). The
-// webhook cannot be exercised end-to-end without a live Postmark server, so the mapping
-// and the key check are pinned here.
+// webhook cannot be exercised end-to-end without a live provider, so the mapping and the
+// key check are pinned here.
+//
+// PROVIDER SWAPPED 2026-08-21 (Postmark → Resend, migration 113). These tests moved with
+// the function: the payload is Resend's ({ type, created_at, data: { email_id } }), the
+// legacy Postmark shape must now map to null, and the update must key on
+// email_sends.provider_message_id — postmark_message_id is documented DEAD and matching it
+// is what made this consumer a no-op.
 //
 // Run (from supabase/functions/):
-//   deno test --quiet --allow-env --node-modules-dir=none \
+//   deno test --quiet --allow-env --allow-read --node-modules-dir=none \
 //     --import-map=_shared/_test_stubs/import_map.json \
 //     _shared/_test_stubs/postmarkEvents_test.ts
 //
@@ -34,71 +40,129 @@ Deno.test("module registered exactly one handler through Deno.serve", () => {
   assertEquals(serveCalls, 1);
 });
 
-// ── mapEvent: the four spec'd cases ───────────────────────────────────────────
+// ── The ledger column the webhook keys on ─────────────────────────────────────
+//
+// The handler needs a database, so the one thing a unit test can still pin is WHICH column
+// the update matches — and that is exactly what broke: the function filtered on
+// postmark_message_id, a column 113 declares dead and null on every row, so every event
+// matched zero rows and the ledger never left 'sent'. Read the source and assert the
+// filter, since a passing mapEvent test says nothing about it.
 
-Deno.test("Delivery → status delivered + delivered_at from the event", () => {
-  const r = mapEvent({ RecordType: "Delivery", MessageID: "pm-1", DeliveredAt: "2026-08-10T12:00:00Z" });
+Deno.test("the update matches provider_message_id, never the dead postmark column", async () => {
+  const src = await Deno.readTextFile(new URL("../../postmark-events/index.ts", import.meta.url));
+  assertEquals(src.includes('.eq("provider_message_id"'), true, "must filter on provider_message_id");
+  assertEquals(src.includes('.eq("postmark_message_id"'), false, "must not filter on the dead column");
+});
+
+// ── mapEvent: the recorded events ─────────────────────────────────────────────
+
+Deno.test("email.delivered → status delivered + delivered_at from the event", () => {
+  const r = mapEvent({
+    type: "email.delivered",
+    created_at: "2026-08-22T12:00:00.000Z",
+    data: { email_id: "rs-1", created_at: "2026-08-22T11:59:00.000Z" },
+  });
   assertEquals(r, {
-    messageId: "pm-1",
-    patch: { status: "delivered", delivered_at: "2026-08-10T12:00:00Z" },
+    messageId: "rs-1",
+    patch: { status: "delivered", delivered_at: "2026-08-22T12:00:00.000Z" },
   });
 });
 
-Deno.test("Delivery without DeliveredAt still stamps a timestamp", () => {
-  const r = mapEvent({ RecordType: "Delivery", MessageID: "pm-2" });
+Deno.test("delivered_at is the EVENT time, not the email's created_at", () => {
+  const r = mapEvent({
+    type: "email.delivered",
+    created_at: "2026-08-22T12:00:00.000Z",
+    data: { email_id: "rs-2", created_at: "2026-08-22T09:00:00.000Z" },
+  });
+  assertEquals(r?.patch.delivered_at, "2026-08-22T12:00:00.000Z");
+});
+
+Deno.test("email.delivered without created_at still stamps a timestamp", () => {
+  const r = mapEvent({ type: "email.delivered", data: { email_id: "rs-3" } });
   assertEquals(r?.patch.status, "delivered");
   assertEquals(typeof r?.patch.delivered_at, "string");
 });
 
-Deno.test("Bounce → status bounced + bounced_at + 'Type: Description' reason", () => {
+Deno.test("email.bounced → bounced + bounced_at + 'Type/SubType: message' reason", () => {
   const r = mapEvent({
-    RecordType: "Bounce",
-    MessageID: "pm-3",
-    BouncedAt: "2026-08-10T12:34:56Z",
-    Type: "HardBounce",
-    Description: "The server was unable to deliver your message",
+    type: "email.bounced",
+    created_at: "2026-08-22T12:34:56.000Z",
+    data: {
+      email_id: "rs-4",
+      bounce: { type: "Permanent", subType: "General", message: "The recipient's address does not exist" },
+    },
   });
   assertEquals(r, {
-    messageId: "pm-3",
+    messageId: "rs-4",
     patch: {
       status: "bounced",
-      bounced_at: "2026-08-10T12:34:56Z",
-      bounce_reason: "HardBounce: The server was unable to deliver your message",
+      bounced_at: "2026-08-22T12:34:56.000Z",
+      bounce_reason: "Permanent/General: The recipient's address does not exist",
     },
   });
 });
 
-Deno.test("Bounce reason is capped at 300 chars", () => {
+Deno.test("email.bounced without a bounce object still records a bounce", () => {
+  const r = mapEvent({ type: "email.bounced", created_at: "2026-08-22T13:00:00.000Z", data: { email_id: "rs-5" } });
+  assertEquals(r?.patch.status, "bounced");
+  assertEquals(r?.patch.bounce_reason, "Bounce");
+});
+
+Deno.test("bounce reason is capped at 300 chars", () => {
   const r = mapEvent({
-    RecordType: "Bounce",
-    MessageID: "pm-4",
-    BouncedAt: "2026-08-10T00:00:00Z",
-    Type: "Transient",
-    Description: "x".repeat(500),
+    type: "email.bounced",
+    created_at: "2026-08-22T00:00:00.000Z",
+    data: { email_id: "rs-6", bounce: { type: "Transient", message: "x".repeat(500) } },
   });
   const reason = String(r?.patch.bounce_reason ?? "");
   assertEquals(reason.length, 300);
   assertEquals(reason.startsWith("Transient: xxx"), true);
 });
 
-Deno.test("SpamComplaint → status bounced, fixed reason, no bounced_at", () => {
-  const r = mapEvent({ RecordType: "SpamComplaint", MessageID: "pm-5" });
-  assertEquals(r, { messageId: "pm-5", patch: { status: "bounced", bounce_reason: "SpamComplaint" } });
+Deno.test("email.complained → bounced, authored reason, no bounced_at", () => {
+  const r = mapEvent({ type: "email.complained", created_at: "2026-08-22T14:00:00.000Z", data: { email_id: "rs-7" } });
+  assertEquals(r, {
+    messageId: "rs-7",
+    patch: { status: "bounced", bounce_reason: "Complaint: recipient reported this as spam" },
+  });
+});
+
+Deno.test("every patch stays inside the email_sends status CHECK", () => {
+  const allowed = ["claimed", "sent", "failed", "delivered", "bounced"];
+  for (const type of ["email.delivered", "email.bounced", "email.complained"]) {
+    const r = mapEvent({ type, created_at: "2026-08-22T15:00:00.000Z", data: { email_id: "rs-8" } });
+    assertEquals(allowed.includes(String(r?.patch.status)), true, `${type} wrote an out-of-vocabulary status`);
+  }
+});
+
+// ── mapEvent: everything we deliberately do not record ────────────────────────
+
+Deno.test("delivery_delayed is ignored — it is not terminal", () => {
+  assertEquals(mapEvent({ type: "email.delivery_delayed", data: { email_id: "rs-9" } }), null);
 });
 
 Deno.test("anything else → null (answer 200, record nothing)", () => {
-  assertEquals(mapEvent({ RecordType: "Open", MessageID: "pm-6" }), null);
-  assertEquals(mapEvent({ RecordType: "Click", MessageID: "pm-7" }), null);
-  assertEquals(mapEvent({ RecordType: "SubscriptionChange", MessageID: "pm-8" }), null);
+  assertEquals(mapEvent({ type: "email.sent", data: { email_id: "rs-10" } }), null);
+  assertEquals(mapEvent({ type: "email.opened", data: { email_id: "rs-11" } }), null);
+  assertEquals(mapEvent({ type: "email.clicked", data: { email_id: "rs-12" } }), null);
   assertEquals(mapEvent({}), null);
   assertEquals(mapEvent(null), null);
-  assertEquals(mapEvent("Delivery"), null);
+  assertEquals(mapEvent("email.delivered"), null);
 });
 
-Deno.test("missing MessageID → null even for a known RecordType", () => {
-  assertEquals(mapEvent({ RecordType: "Delivery", DeliveredAt: "2026-08-10T12:00:00Z" }), null);
-  assertEquals(mapEvent({ RecordType: "Bounce", MessageID: "" }), null);
-  assertEquals(mapEvent({ RecordType: "SpamComplaint", MessageID: 42 }), null);
+Deno.test("the legacy Postmark payload records nothing", () => {
+  // No Postmark webhook can post here (the account was declined) and its ids were never
+  // stored, so a parsed Postmark event could only ever write a patch that matches no row.
+  assertEquals(mapEvent({ RecordType: "Delivery", MessageID: "pm-1", DeliveredAt: "2026-08-10T12:00:00Z" }), null);
+  assertEquals(mapEvent({ RecordType: "Bounce", MessageID: "pm-2", Type: "HardBounce" }), null);
+  assertEquals(mapEvent({ RecordType: "SpamComplaint", MessageID: "pm-3" }), null);
+});
+
+Deno.test("missing email_id → null even for a recorded event type", () => {
+  assertEquals(mapEvent({ type: "email.delivered", created_at: "2026-08-22T12:00:00.000Z" }), null);
+  assertEquals(mapEvent({ type: "email.delivered", data: {} }), null);
+  assertEquals(mapEvent({ type: "email.bounced", data: { email_id: "" } }), null);
+  assertEquals(mapEvent({ type: "email.complained", data: { email_id: 42 } }), null);
 });
 
 // ── timingSafeEqual ───────────────────────────────────────────────────────────

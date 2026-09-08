@@ -132,13 +132,32 @@ export function computeRoofLine(
   return { amount, desc };
 }
 
-/** The fixed cladding vocabulary — visual-only, no price, no estimate line (the designer's
- *  D3_CLADDING list). id ↔ label both directions for validation and display. */
+/** The CLOSED cladding vocabulary — the designer's D3_CLADDING ids, all four of them.
+ *  id ↔ label both directions, as the FALLBACK for display and validation.
+ *
+ *  ⚠️ `batten` was missing here until 2026-09-07 and it was not cosmetic. This list is what
+ *  stage_order_attribute_change validated against, and `next.cladding` defaults to the
+ *  design's CURRENT value — so a design saved as Board & Batten made every attribute change
+ *  on its order fail with "That cladding isn't offered", including a pure roof-colour edit.
+ *  claddingLabel() also fell through to CLADDING_OPTIONS[0], printing "Builder's standard" in
+ *  the sentence the customer signs. Keep all four here; the designer offers all four.
+ *
+ *  Since 207 the OFFERED set and the customer-facing NAME are per tenant, per style
+ *  (style_cladding). This list is what a caller uses when it has no tenant rows to consult —
+ *  never the authority on what is offered. */
 export const CLADDING_OPTIONS: { id: string; label: string }[] = [
   { id: "", label: "Builder's standard" },
   { id: "lap", label: "Lap Siding" },
   { id: "panel", label: "Panel Siding" },
+  { id: "batten", label: "Board & Batten" },
   { id: "agpanel", label: "Metal" },
 ];
-export const claddingLabel = (id: unknown): string =>
-  (CLADDING_OPTIONS.find((c) => c.id === String(id ?? "")) || CLADDING_OPTIONS[0]).label;
+/** The built-in name. Pass `overrides` (cladding_id → label_override) to prefer what this
+ *  tenant calls it — the order screen and the change-order sentence both should, or the
+ *  customer signs a sentence naming a cladding they never saw on their quote. */
+export const claddingLabel = (id: unknown, overrides?: Record<string, string> | null): string => {
+  const key = String(id ?? "");
+  const own = overrides && overrides[key];
+  if (key && own && String(own).trim()) return String(own).trim();
+  return (CLADDING_OPTIONS.find((c) => c.id === key) || CLADDING_OPTIONS[0]).label;
+};

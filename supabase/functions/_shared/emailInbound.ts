@@ -248,6 +248,40 @@ export const UNATTRIBUTED_CLIENT_ID = "__unattributed__";
  * the delivered recipient — never fall back to `to`, whose forgeability is the whole point of
  * the ⛔ above.
  *
+ * STATUS OF THAT TEST: NOT RUN as of 2026-09-06. Nothing in the repo records a result, so the
+ * field is still treated as unproved, and the two rules below are what "unproved" buys us
+ * until someone runs it. Record the outcome HERE when it is run — this paragraph is the one
+ * place a later reader will look.
+ *
+ * ⚠️ AN UNPROVED FIELD MAY NEVER BE THE THING THAT NAMES A SECOND TENANT. Whatever the round
+ * trip turns out to say, a header-parsed address is only ever ONE candidate among the ones a
+ * true envelope field vouches for, and the caller resolves a tenant by DOMAIN. So this
+ * function refuses in the two shapes where the header-parsed field would otherwise be what
+ * decides WHICH tenant:
+ *
+ *   1. When a true envelope field produced a candidate, a header-parsed address is admitted
+ *      only on a domain that envelope evidence already names. It may confirm the routed
+ *      domain; it may not introduce a different one. (Same rule the ⛔ above applies to `to`,
+ *      and for the same reason: the accepting MTA's own record of where it routed the mail
+ *      outranks anything that travelled inside the message.)
+ *   2. When there is no envelope evidence at all — the shape we actually ship on — the
+ *      header-parsed addresses are the whole basis for the decision, so they must agree: one
+ *      domain admits them all, two or more admits NONE. A payload that names several tenants
+ *      is not a payload to pick from; picking from it is how a stranger's words land on
+ *      another builder's record.
+ *
+ * Both rules only ever REMOVE candidates, never add one, so the worst they can do is file a
+ * message unattributed — the trade the closing paragraph below states, and the cheap side of
+ * it. An ordinary reply names exactly one recipient and is untouched by either rule.
+ *
+ * ⚠️ THIS IS NOT THE WHOLE OF THE FIX. Two candidate domains that BOTH resolve to an active
+ * tenant are still settled by the caller's `.limit(1)` with no `order by`, i.e. by whichever
+ * row Postgres hands back first (email-inbound/index.ts, stage A, on both `inbound_domain`
+ * and `email_domain`). Since each of those columns is unique per tenant, a second hit is a
+ * second TENANT, so that pick is a cross-tenant pick. It must become the same refusal the
+ * caller already makes for an ambiguous contact — take two rows, accept only one — and this
+ * function cannot make it for it.
+ *
  * A PAYLOAD CARRYING NO USABLE RECIPIENT THEREFORE RESOLVES NOTHING, and the caller does not
  * discard it: email-inbound/index.ts logs `inbound_no_tenant` (shapes only, no addresses) and
  * STILL INSERTS the row, with contact_id and short_code null and client_id set to the
@@ -266,14 +300,20 @@ export const UNATTRIBUTED_CLIENT_ID = "__unattributed__";
  */
 export function envelopeRecipients(payload: unknown, m: unknown): string[] {
   const out: string[] = [];
-  const push = (v: unknown) => {
-    if (Array.isArray(v)) { v.forEach(push); return; }
-    if (v && typeof v === "object") { push((v as Record<string, unknown>).email ?? (v as Record<string, unknown>).address); return; }
-    const s = String(v ?? "").trim().toLowerCase();
-    // Tolerate a display-name wrapper; some MTAs put one on the envelope copy.
-    const bare = /<([^>]+)>/.exec(s)?.[1]?.trim() ?? s;
-    if (bare.includes("@") && bare.length < 320 && !out.includes(bare)) out.push(bare);
+  // The two grades are collected APART so the header-parsed one can be held to the extra
+  // rules in the docstring before it joins the list the caller picks a tenant from.
+  const collectorFor = (into: string[]) => {
+    const push = (v: unknown) => {
+      if (Array.isArray(v)) { v.forEach(push); return; }
+      if (v && typeof v === "object") { push((v as Record<string, unknown>).email ?? (v as Record<string, unknown>).address); return; }
+      const s = String(v ?? "").trim().toLowerCase();
+      // Tolerate a display-name wrapper; some MTAs put one on the envelope copy.
+      const bare = /<([^>]+)>/.exec(s)?.[1]?.trim() ?? s;
+      if (bare.includes("@") && bare.length < 320 && !into.includes(bare)) into.push(bare);
+    };
+    return push;
   };
+  const push = collectorFor(out);
 
   const p = (payload ?? {}) as Record<string, unknown>;
   const msg = (m ?? {}) as Record<string, unknown>;
@@ -291,7 +331,22 @@ export function envelopeRecipients(payload: unknown, m: unknown): string[] {
   }
 
   push(msg.recipient ?? p.recipient);   // Mailgun — envelope
-  push(msg.received_for);               // Resend — HEADER-parsed, not envelope; see the docstring
+
+  // Resend — HEADER-parsed, not envelope, forgeability unproved; see the docstring.
+  const headerParsed: string[] = [];
+  collectorFor(headerParsed)(msg.received_for);
+  if (headerParsed.length) {
+    const domainOf = (a: string) => a.split("@")[1] ?? "";
+    const envDomains = new Set(out.map(domainOf).filter(Boolean));
+    const hdrDomains = new Set(headerParsed.map(domainOf).filter(Boolean));
+    // 1. Envelope evidence exists ⇒ the header may confirm a domain it already names, never
+    //    introduce another. 2. No envelope evidence ⇒ the header IS the decision, so it has
+    //    to be unanimous: several domains name several tenants and none of them is provable.
+    const admissible = envDomains.size
+      ? headerParsed.filter((a) => envDomains.has(domainOf(a)))
+      : (hdrDomains.size === 1 ? headerParsed : []);
+    for (const a of admissible) if (!out.includes(a)) out.push(a);
+  }
   return out;
 }
 

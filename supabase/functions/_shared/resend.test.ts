@@ -703,6 +703,70 @@ Deno.test("omitted optional fields never appear on the wire", async () => {
   }
 });
 
+Deno.test("replyTo accepts an ARRAY and posts it as one — Resend's documented shape", async () => {
+  setup();
+  try {
+    // Widened 2026-09-06 so emailSend.ts can advertise the CRM routing address AND the
+    // sending staff member's own in one Reply-To (Carolyn 2026-09-04 @35:06). Resend's send
+    // reference documents the field as "Reply-to email address. For multiple addresses, send
+    // as an array of strings", and states a maximum only for `to` (50) — read off
+    // resend.com/docs/api-reference/emails/send-email on 2026-09-06.
+    const calls = stub(() => jsonResponse({ id: "m-3" }));
+    await rsSendEmail({
+      ...SEND,
+      replyTo: ["d.ss-abc@reply.builder.com", "sarah@builder.com"],
+    });
+    const body = JSON.parse(calls[0].body ?? "{}");
+    assert(Array.isArray(body.reply_to), `reply_to must stay an array, got ${JSON.stringify(body.reply_to)}`);
+    assertEquals(body.reply_to.length, 2);
+    assertEquals(body.reply_to[0], "d.ss-abc@reply.builder.com", "order is preserved on the wire — some clients honour only the first");
+    assertEquals(body.reply_to[1], "sarah@builder.com");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a ONE-address array collapses to a bare string — the wire is unchanged", async () => {
+  setup();
+  try {
+    // The whole point of replyToWire. Every send in the product today carries exactly one
+    // reply address; widening the type must not alter a single byte of what those post, or a
+    // wire diff during the rollout stops meaning anything.
+    const calls = stub(() => jsonResponse({ id: "m-4" }));
+    await rsSendEmail({ ...SEND, replyTo: ["owner@example.com"] });
+    assertEquals(JSON.parse(calls[0].body ?? "{}").reply_to, "owner@example.com");
+
+    // And a plain string is still a plain string — the pre-existing caller shape.
+    const calls2 = stub(() => jsonResponse({ id: "m-5" }));
+    await rsSendEmail({ ...SEND, replyTo: "owner@example.com" });
+    assertEquals(JSON.parse(calls2[0].body ?? "{}").reply_to, "owner@example.com");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("an EMPTY replyTo array leaves the key off the wire, never `[]`", async () => {
+  setup();
+  try {
+    // JSON.stringify only drops `undefined`, so without replyToWire an all-filtered list
+    // would post `"reply_to": []` — an undocumented shape, and 422s are permanent verdicts.
+    const calls = stub(() => jsonResponse({ id: "m-6" }));
+    await rsSendEmail({ ...SEND, replyTo: [] });
+    assert(!("reply_to" in JSON.parse(calls[0].body ?? "{}")), "omitted, not an empty array");
+
+    // Whitespace-only entries are not addresses either, and neither is a blank string.
+    const calls2 = stub(() => jsonResponse({ id: "m-7" }));
+    await rsSendEmail({ ...SEND, replyTo: ["  ", ""] });
+    assert(!("reply_to" in JSON.parse(calls2[0].body ?? "{}")), "whitespace is not an address");
+
+    const calls3 = stub(() => jsonResponse({ id: "m-8" }));
+    await rsSendEmail({ ...SEND, replyTo: "   " });
+    assert(!("reply_to" in JSON.parse(calls3[0].body ?? "{}")), "a blank string is not an address");
+  } finally {
+    teardown();
+  }
+});
+
 Deno.test("tags are sanitized to Resend's charset — the send survives a dotted slug", async () => {
   setup();
   try {

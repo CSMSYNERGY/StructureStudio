@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { foreignOrderPrefixOf } from "../_shared/billingOrderId.ts";
 
 // Deposyt subscription-lifecycle webhook → mirrors billing state into
 // public.billing_subscriptions (portal Billing tab reads that, never the gateway).
@@ -123,10 +124,7 @@ Deno.serve(withErrorLog("billing-webhook", async (req: Request) => {
     // order_id keeps the throw-and-retry behaviour that out-of-order ss_ events rely on
     // (see the reordering note on the delete case).
     const orderIdRaw = String(sub.order_id ?? sub.orderid ?? "");
-    const foreignOrderPrefix = (() => {
-      const m = /^([a-z]+)_/.exec(orderIdRaw);
-      return m && m[1] !== "ss" ? `${m[1]}_` : null;
-    })();
+    const foreignOrderPrefix = foreignOrderPrefixOf(orderIdRaw);
     const ackForeign = async () => {
       await done(true, `ignored: foreign-product subscription (order_id=${orderIdRaw})`);
       return json({ ok: true, ignored: "foreign-product subscription" });

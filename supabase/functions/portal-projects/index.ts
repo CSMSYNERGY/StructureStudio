@@ -1,6 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog } from "../_shared/logError.ts";
+import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
+import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
+import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
+import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -56,6 +60,48 @@ const CLIENT_STATUSES = new Set([
   "submitted", "in_review", "planned", "in_progress", "needs_info", "shipped", "declined", "duplicate",
 ]);
 const LABEL_KINDS = new Set(["done", "working", "stuck"]);
+
+// ── Where an item came from ──────────────────────────────────────────────────
+// Carolyn 2026-09-07: "I need to see a log of the created date and the source of which
+// it was added." Every item already carried the answer, spread across four fields
+// (created_by_email, feedback_submission_id, release_note_id, monday_item_id) — nobody
+// could see it. Nothing new is stored: the label is DERIVED on read, so it is right for
+// every existing item without a backfill and can never drift from the row it describes.
+//
+// Order matters, most specific first. A linked submission is the strongest claim — it
+// names a real person and the product they were using. A Monday id only means "this was
+// imported", which is also true of many rows that have a better story to tell.
+const APP_LABELS_ORIGIN: Record<string, string> = {
+  "structure-studio": "Structure Studio",
+  "framedup": "Framed UP",
+  "csm-studio": "CSM Studio",
+  "buildbridge": "BuildBridge",
+};
+// deno-lint-ignore no-explicit-any
+function originOf(item: any, sub: any): { createdAt: string | null; label: string } {
+  const createdAt = item?.created_at ?? null;
+  const by = String(item?.created_by_email || "");
+  const who = (e: string) => (e.includes("@") ? e.split("@")[0] : e);
+
+  if (sub) {
+    const app = String(sub.source_app || "structure-studio");
+    const name = sub.submitter_name || who(String(sub.submitter_email || "")) || "someone";
+    if (app !== "structure-studio") {
+      return { createdAt, label: `Reported by ${name} in ${APP_LABELS_ORIGIN[app] || app}` };
+    }
+    // A builder's own portal — naming WHICH builder is the useful half.
+    return { createdAt, label: `Reported by ${name} from the ${sub.client_id || "builder"} portal` };
+  }
+  if (item?.release_note_id || by === "roadmap") {
+    return { createdAt, label: "Synced from the What's New roadmap" };
+  }
+  if (by === "expo-runway") {
+    return { createdAt, label: "Filed from the Expo Runway plan" };
+  }
+  if (by) return { createdAt, label: `Added by ${who(by)} on the board` };
+  if (item?.monday_item_id) return { createdAt, label: "Imported from monday.com" };
+  return { createdAt, label: "Added on the board" };
+}
 
 function str(v: unknown, max: number): string {
   return typeof v === "string" ? v.trim().slice(0, max) : "";
@@ -180,6 +226,48 @@ function sanitizeValues(columns: any[], raw: any, personIds: Set<string>): Recor
   return out;
 }
 
+// The three cells a NEW item should never arrive empty. Carolyn 2026-09-07, having added
+// one by hand: "it did not automatically select the app. This needs to happen."
+//
+// Every one of these was already being set by `mirrorToProjects` for a submission coming in
+// from a builder or another product — and by nothing at all for an item a person adds.
+// So a hand-added card landed with no App (invisible to an App filter), no Status (falling
+// into the __none bucket whenever the board is grouped by status) and no Created date.
+//
+// Columns are matched by TYPE + NAME and options by LABEL, never by uuid — the same rule
+// mirrorToProjects follows (portal-feedback/index.ts:279), because seed ids differ per
+// environment and option ids stay editable in the UI. A board without one of these columns
+// (roadmap has no App) simply gets fewer defaults; a missing option is left blank rather
+// than guessed, since a wrong App is worse than a missing one when you triage by it.
+//
+// ⚠️ These fill GAPS ONLY. Anything the caller sent survives untouched — that is what keeps
+// a FramedUp report labelled Framed UP instead of being overwritten to Structure Studio.
+const HOME_APP_LABEL = "Structure Studio";
+// deno-lint-ignore no-explicit-any
+function defaultValues(columns: any[], already: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const has = (id: string) => {
+    const v = already[id];
+    return v !== undefined && v !== null && v !== "" && !(Array.isArray(v) && v.length === 0);
+  };
+  for (const c of columns || []) {
+    if (has(c.id)) continue;
+    if (c.type === "status") {
+      // deno-lint-ignore no-explicit-any
+      const labels = (c.settings?.labels || []) as any[];
+      const intake = labels.find((l) => l.intake === true) || labels[0];
+      if (intake) out[c.id] = intake.id;
+    } else if (c.type === "dropdown" && c.name === "App") {
+      // deno-lint-ignore no-explicit-any
+      const opt = (c.settings?.options || []).find((o: any) => o.label === HOME_APP_LABEL);
+      if (opt) out[c.id] = [opt.id];
+    } else if (c.type === "date" && c.name === "Created") {
+      out[c.id] = new Date().toISOString().slice(0, 10);
+    }
+  }
+  return out;
+}
+
 // Rebuild a saved view's snapshot. Shared by the whole operator team, so it is
 // whitelist-rebuilt exactly like column settings and item values: unknown keys dropped,
 // every string capped, and the column ids it names checked against this board. A view
@@ -229,6 +317,19 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -242,15 +343,27 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const user = userData?.user;
   if (userErr || !user) return json({ error: "Not signed in." }, 401);
 
-  // 2. Operator membership — service role (app_operators has no browser policies).
+  // 2. WHICH DOOR — see _shared/projectsAccess.ts, which owns the rule and is tested.
   const admin = createClient(supabaseUrl, serviceKey);
-  const { data: op, error: opErr } = await admin
-    .from("app_operators")
-    .select("user_id, email, can_write, display_name")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (opErr) return json({ error: opErr.message }, 500);
-  if (!op) return json({ error: "Operator access required." }, 403);
+  let access: Awaited<ReturnType<typeof resolveProjectsAccess>>;
+  try { access = await resolveProjectsAccess(admin, user.id); }
+  catch (e) { return json({ error: (e as Error).message }, 500); }
+  if (!access) return json({ error: "Operator access required." }, 403);
+  const op = access.op;
+  const teamAcc = access.teamAcc;
+
+  // A SUPPORT operator is refused here, at the door.
+  //
+  // Migration 176's note further down this file already claimed "the Admin + Projects
+  // consoles refused". Half of that was true: adminAuth.ts really does deny the Admin
+  // console outright. Projects was only ever HIDDEN — ssClampTab drops the tab and
+  // 12-shell.jsx will not route to it — and a hidden tab is a courtesy, not a control.
+  // Anyone holding the session could POST here directly and read every builder's setup
+  // state. Zero support operators exist today, so nothing has leaked; the moment the
+  // first one is flagged it would, which is why this lands before that switch is used.
+  if (op && op.support_only) {
+    return json({ error: "Support accounts can't open Projects — that console is for platform operators." }, 403);
+  }
 
   // deno-lint-ignore no-explicit-any
   let payload: any;
@@ -259,11 +372,43 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
   const action = String(payload?.action || "");
 
   const READ_ACTIONS = new Set(["list_boards", "get_board", "get_item", "sign_attachment", "setup_template", "setup_overview", "setup_client_items"]);
-  if (!READ_ACTIONS.has(action) && !op.can_write) {
-    return json({ error: "This operator account is read-only." }, 403);
+
+  // ── THREE CLASSES OF ACTION, AND THE SPLIT IS THE SECURITY DESIGN ───────────────────────
+  //
+  // The second door admits CSM staff to the BOARD. It must not, by doing so, hand them the
+  // two things that live in this same function and are not board data at all.
+  //
+  //   1. BOARD actions — either door. Read/write by READ_ACTIONS vs the writer's own level:
+  //      an operator's can_write, or a team member's projects:edit. Same split, two sources.
+  //
+  //   2. setup_* — OPERATORS ONLY. These read and write every builder's onboarding progress,
+  //      which is customer data wearing a Projects-shaped URL. Someone granted the bug board
+  //      gets the bug board, not a list of every client's setup state.
+  //
+  //   3. THE ROSTER AND OPERATOR TOGGLES — operators with write access, only. add_person,
+  //      save_person, remove_person and the three set_operator_* actions are how platform
+  //      operator access is handed out. Without this line a CSM assistant granted
+  //      projects:edit could open the people editor and mint themselves an operator — the
+  //      exact escalation the previous commit closed from the other direction. The roster is
+  //      managed from Settings -> Team now anyway, so this surface is operator-side
+  //      reconciliation and nothing a team member needs.
+  const OPERATOR_ONLY = new Set([
+    "add_person", "save_person", "remove_person",
+    "set_operator_access", "set_operator_write", "set_operator_support",
+  ]);
+  if (!op && (action.startsWith("setup_") || OPERATOR_ONLY.has(action))) {
+    return json({ error: "That part of Projects is for platform operators." }, 403);
   }
 
-  const actorEmail = op.email || user.email || user.id;
+  // The writer check, from whichever door let them in. A team member's level is the `projects`
+  // area they were granted on the Team screen — view reads, edit writes — which is why an
+  // area was the right shape for the grant and a boolean was not.
+  const canWrite = op ? !!op.can_write : accCanEdit(teamAcc as Record<string, Level>, "projects");
+  if (!READ_ACTIONS.has(action) && !canWrite) {
+    return json({ error: op ? "This operator account is read-only." : "You have view-only access to Projects." }, 403);
+  }
+
+  const actorEmail = (op && op.email) || user.email || user.id;
   // Best-effort activity log — accountability for shared write access; never blocks.
   const act = async (boardId: string | null, itemId: string | null, action: string, detail: Record<string, unknown> = {}) => {
     try {
@@ -289,6 +434,48 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
     const { data, error } = await admin.from("pm_people").select("id").eq("active", true);
     if (error) throw error;
     return new Set((data || []).map((r: { id: string }) => r.id));
+  };
+  // ⚠️ THE GUARD THAT WAS MISSING. Returns a refusal sentence, or null to proceed.
+  //
+  // pm_find_user_by_email searches ALL of auth.users with no tenant filter — it has to,
+  // because an operator legitimately need not belong to any tenant. But nothing downstream
+  // ever asked WHOSE login came back. So an operator could type a builder's sales rep's
+  // address into the people editor, get a linked profile, tick "operator", and hand that
+  // builder's employee read access to every OTHER builder's account.
+  //
+  // portal-commissions closes the mirror image of this at its own door — "an operator login
+  // can never be adopted into a tenant" — and has since it was written. This is the same
+  // rule pointed the other way, and it was never written down: a TENANT login can never be
+  // adopted into the operator roster.
+  //
+  // Three outcomes, and the middle one is the whole reason this is a helper and not a
+  // one-line `if`:
+  //   * no client_users row  -> ALLOWED. This is the ordinary platform operator, who
+  //     belongs to no tenant at all. resolveTenant supports exactly this and a test pins
+  //     it; refusing here would lock out the people this console exists for.
+  //   * an INTERNAL tenant   -> ALLOWED. Carolyn and Ahsan are on structure-studio.
+  //   * a customer's tenant  -> REFUSED, by name, so the reason is obvious on screen.
+  // Is this roster row OWNED by Settings → Team? Returns the refusal sentence, or null.
+  //
+  // Since the mirror landed, a team member's name, email and membership are written from
+  // Settings → Team and re-applied on every change there. Editing them here would appear to
+  // work and then be quietly reverted by somebody else's unrelated save — the worst kind of
+  // bug, because the person who made the edit is never the person who sees it undone.
+  //
+  // ⚠️ Only rows on an INTERNAL tenant are team-managed. A row belonging to no tenant is the
+  // ordinary platform operator (or a login-less subcontractor) and stays fully editable, as
+  // it always was.
+  const teamManagedRefusal = async (userId: string | null, what: string): Promise<string | null> => {
+    if (!userId) return null;
+    const { clientId, internal } = await loginTenant(admin, userId);
+    if (!clientId || !internal) return null;
+    return `That person comes from Settings → Team, so ${what} there instead — a change here would be overwritten by their next team update.`;
+  };
+
+  const foreignLoginRefusal = async (userId: string, who: string): Promise<string | null> => {
+    const { clientId, internal } = await loginTenant(admin, userId);
+    if (!clientId || internal) return null;
+    return `${who} signs in as a member of the "${clientId}" account, so they cannot be given operator access — that would let one builder's staff open every other builder's account. Give them a separate CSM Synergy login first.`;
   };
   // deno-lint-ignore no-explicit-any
   const getItem = async (id: string): Promise<any> => {
@@ -326,7 +513,6 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
 
     const columns = await boardColumns(board.id);
     const statusCol = columns.find((c) => c.type === "status");
-    const notesCol = columns.find((c) => c.type === "long_text");
     // Status is set ONCE, at creation, from how real the roadmap entry is — and never
     // touched again.
     // deno-lint-ignore no-explicit-any
@@ -353,15 +539,27 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       const values: Record<string, unknown> = {};
       const label = n.status === "planned" ? planned : idea;
       if (statusCol && label) values[statusCol.id] = label.id;
-      if (notesCol && n.detail) values[notesCol.id] = String(n.detail).slice(0, 8000);
-      const { error: iErr } = await admin.from("pm_items").insert({
+      const { data: made, error: iErr } = await admin.from("pm_items").insert({
         board_id: board.id, group_id: group.id,
         name: String(n.title || "Untitled").slice(0, 200),
         values, position: pos, release_note_id: n.id,
         created_by_email: "roadmap",
-      });
+      }).select("id").single();
       // A single clashing row must not abort the whole board load.
       if (iErr) { console.error("roadmap sync failed for note", n.id, iErr.message); continue; }
+      // The note's DETAIL opens the thread rather than filling a "Notes" column. It used
+      // to go into whatever long_text column the board happened to have, which meant
+      // deleting that column silently dropped the detail from every future roadmap card
+      // (Carolyn emptied both boards' Notes columns into their threads on 2026-08-29).
+      // Internal: the tenant-facing copy of this text is the release note itself.
+      if (n.detail && made) {
+        const { error: uErr } = await admin.from("pm_updates").insert({
+          item_id: made.id, author_email: "roadmap",
+          body: String(n.detail).slice(0, 8000),
+          client_visible: false, attachments: [],
+        });
+        if (uErr) console.error("roadmap detail note failed for", n.id, uErr.message);
+      }
       pos += 1024;
       added++;
     }
@@ -406,7 +604,16 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             .eq("board_id", b.id).is("archived_at", null);
           counts[b.id] = count || 0;
         }
-        return json({ boards, counts, canWrite: !!op.can_write });
+        // Columns and the roster ride along so the quick-add form can offer each board's
+        // real App / Priority / Status / Due / Assignee without a second round trip when
+        // you change the board dropdown. Keyed by board id; `people` is one global list
+        // (pm_people has no client_id — see _shared/pmRoster.ts).
+        const colsByBoard: Record<string, unknown[]> = {};
+        for (const b of boards || []) colsByBoard[b.id] = await boardColumns(b.id);
+        const { data: people, error: pErr } = await admin.from("pm_people")
+          .select("id, name, email, user_id, active").eq("active", true).order("position");
+        if (pErr) throw pErr;
+        return json({ boards, counts, canWrite, columns: colsByBoard, people });
       }
 
       case "get_board": {
@@ -418,7 +625,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         // Opening the roadmap board pulls in any new roadmap entries. Only for an
         // operator who can write — a read-only account should never trigger inserts —
         // and never fatal: a sync problem must not take the board down with it.
-        if (board.slug === "roadmap" && op.can_write) {
+        if (board.slug === "roadmap" && canWrite) {
           try { await syncRoadmap(board); } catch (e) {
             console.error("roadmap sync:", e instanceof Error ? e.message : String(e));
           }
@@ -437,7 +644,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (viewsRes.error) throw viewsRes.error;
         return json({
           board, columns, groups: groupsRes.data, items: itemsRes.data,
-          people: opsRes.data, views: viewsRes.data, canWrite: !!op.can_write,
+          people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }
 
@@ -464,7 +671,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         let submission = null;
         if (item.feedback_submission_id) {
           const { data: sub } = await admin.from("feedback_submissions")
-            .select("id, client_id, submitter_name, submitter_email, kind, title, detail, severity, status, status_changed_at, attachment_path, created_at")
+            .select("id, client_id, source_app, source_ref, submitter_name, submitter_email, kind, title, detail, severity, status, status_changed_at, attachment_path, created_at")
             .eq("id", item.feedback_submission_id).maybeSingle();
           if (sub) {
             let attachmentUrl = null;
@@ -475,7 +682,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             submission = { ...sub, attachmentUrl };
           }
         }
-        return json({ item, updates, activity: actRes.data, submission, canWrite: !!op.can_write });
+        return json({ item, updates, activity: actRes.data, submission, canWrite, origin: originOf(item, submission) });
       }
 
       case "sign_attachment": {
@@ -725,7 +932,10 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           groupId = g.id;
         }
         const [columns, opIds] = await Promise.all([boardColumns(boardId), personIdSet()]);
-        const values = sanitizeValues(columns, payload.values, opIds);
+        // Whatever the form sent, then App / Status / Created filled in where it didn't.
+        // The order is the whole point: defaults never overwrite a chosen value.
+        const chosen = sanitizeValues(columns, payload.values, opIds);
+        const values = { ...chosen, ...defaultValues(columns, chosen) };
         const { data: maxRow } = await admin.from("pm_items").select("position")
           .eq("group_id", groupId).order("position", { ascending: false }).limit(1).maybeSingle();
         const { data: item, error } = await admin.from("pm_items").insert({
@@ -890,13 +1100,49 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           .select("id, name, email, user_id, active").order("position");
         if (error) throw error;
         const { data: ops, error: oErr } = await admin.from("app_operators")
-          .select("user_id, can_write, can_bill");
+          .select("user_id, can_write, can_bill, support_only");
         if (oErr) throw oErr;
         const byUser = new Map((ops || []).map((o) => [o.user_id, o]));
+
+        // WHERE DOES EACH PERSON COME FROM? Three shapes now, and the editor renders each
+        // differently because editing the wrong one silently does nothing:
+        //
+        //   teamManaged — their name, email and membership are owned by Settings → Team, so
+        //     changing them here would be overwritten by the next write over there. The
+        //     editor shows them read-only with a link; save_person and remove_person refuse.
+        //   foreignTenant — a login on a BUILDER's tenant. Should not exist (the guard added
+        //     2026-09-02 refuses to create one) but historic rows can, and an operator
+        //     needs to be able to SEE that rather than wonder why the toggles refuse.
+        //   neither — the manual row: a login-less subcontractor, or an operator who is on
+        //     no tenant at all. ⚠️ Fully editable, exactly as before. That last case is the
+        //     ordinary platform operator and must never be treated as a mistake.
+        const linkedIds = (people || []).map((pp) => pp.user_id).filter(Boolean);
+        const cuRows = linkedIds.length
+          ? (await admin.from("client_users").select("user_id, client_id, role, title, access").in("user_id", linkedIds)).data || []
+          : [];
+        const internalOf = new Map<string, boolean>();
+        for (const cid of new Set(cuRows.map((r: { client_id: string }) => r.client_id))) {
+          try { internalOf.set(cid, await isInternalTenant(admin, cid)); }
+          catch { internalOf.set(cid, false); }
+        }
+        // deno-lint-ignore no-explicit-any
+        const cuByUser = new Map<string, any>(cuRows.map((r: { user_id: string }) => [r.user_id, r]));
+
         return json({
           people: (people || []).map((pp) => {
             const o = pp.user_id ? byUser.get(pp.user_id) : null;
-            return { ...pp, isOperator: !!o, canWrite: !!(o && o.can_write) };
+            const cu = pp.user_id ? cuByUser.get(pp.user_id) : null;
+            const internal = cu ? !!internalOf.get(cu.client_id) : false;
+            return {
+              ...pp,
+              isOperator: !!o, canWrite: !!(o && o.can_write), supportOnly: !!(o && o.support_only),
+              teamManaged: !!cu && internal,
+              foreignTenant: cu && !internal ? cu.client_id : null,
+              title: cu && internal ? cu.title : null,
+              projectsLevel: cu && internal
+                ? effectiveAccess(cu.role, cu.title, cu.access)["projects"] || "none"
+                : null,
+            };
           }),
           me: user.id,
         });
@@ -920,6 +1166,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           if (hit) {
             const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
             if (taken) return json({ error: "Someone with that login is already on the list." }, 409);
+            // Refuse the LINK, not the person. They can still be added and assigned work
+            // by name — it is only the login (and the operator access it would make
+            // grantable) that is withheld.
+            const refusal = await foreignLoginRefusal(hit.id, name);
+            if (refusal) return json({ error: refusal }, 403);
             userId = hit.id;
           }
         }
@@ -937,6 +1188,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row) return json({ error: "That person is not on the list." }, 404);
+        // Name and email belong to Settings → Team for a team-managed row. `active` is NOT
+        // in that set and stays editable here: archiving somebody off the board is a Projects
+        // decision, and it is what remove_person does.
+        if (payload.name !== undefined || payload.email !== undefined) {
+          const refusal = await teamManagedRefusal(row.user_id, "rename or re-address them");
+          if (refusal) return json({ error: refusal }, 409);
+        }
         const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
         if (payload.name !== undefined) {
           const name = str(payload.name, 80);
@@ -953,7 +1211,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
             const hit = Array.isArray(found) ? found[0] : found;
             if (hit) {
               const { data: taken } = await admin.from("pm_people").select("id").eq("user_id", hit.id).maybeSingle();
-              if (!taken) patch.user_id = hit.id;
+              // Same rule as add_person: a builder's own login never becomes a linked
+              // profile. The email is still saved — it is a contact detail — but the
+              // link, and the operator grant it would unlock, is not made.
+              const refusal = taken ? "taken" : await foreignLoginRefusal(hit.id, String(patch.name || row.name));
+              if (!taken && !refusal) patch.user_id = hit.id;
             }
           }
         }
@@ -971,6 +1233,13 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         const id = str(payload.id, 40);
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row) return json({ ok: true });
+        // A team-managed person leaves the board by having Projects taken away on the Team
+        // screen — set_access deactivates them here for you. Removing them from this side
+        // would last exactly until their next team update re-synced them.
+        {
+          const refusal = await teamManagedRefusal(row.user_id, "remove their Projects access");
+          if (refusal) return json({ error: refusal }, 409);
+        }
         // Deactivate rather than delete: they leave every picker, but the work they were
         // already assigned keeps showing their name instead of a bare id.
         const { error } = await admin.from("pm_people")
@@ -991,6 +1260,11 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           return json({ error: "You cannot remove your own access." }, 400);
         }
         if (enabled) {
+          // The load-bearing check. A profile can be linked to a builder's login by data
+          // that predates the guard above, so the grant itself has to ask again rather
+          // than trusting that the link was made under the new rule.
+          const refusal = await foreignLoginRefusal(row.user_id, row.name);
+          if (refusal) return json({ error: refusal }, 403);
           const { data: has } = await admin.from("app_operators").select("user_id").eq("user_id", row.user_id).maybeSingle();
           if (!has) {
             // New access starts READ-ONLY. Seeing builders' accounts is the small grant;
@@ -1013,11 +1287,47 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         return json({ ok: true });
       }
 
+      // Migration 176. The switch that turns a platform operator into a SUPPORT one: in
+      // view-as they wear the VIEWED tenant's owner access map instead of the blanket
+      // operator god view, Billing forced off, and the Admin + Projects consoles refused
+      // (adminAuth denies this account outright — the browser only hides the tabs).
+      //
+      // Carolyn, 2026-09-01, on why it exists: "he needs to be able to mirror it ... to where
+      // he can see just exactly what they have permission to." Without it the only way to
+      // check a builder's own permissions was to make a login on their tenant.
+      case "set_operator_support": {
+        const id = str(payload.id, 40);
+        const supportOnly = payload.supportOnly === true;
+        const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
+        if (!row || !row.user_id) return json({ error: "That person does not have operator access." }, 400);
+        // Not yourself. Turning your own account into support mid-session takes away the
+        // Admin and Projects consoles — including THIS screen — and the way back is SQL.
+        if (row.user_id === user.id) {
+          return json({ error: "You cannot put your own account into support mode — you would lose this screen." }, 400);
+        }
+        // Defence in depth: if a foreign login somehow already holds an operator row
+        // (granted before the guard existed), do not let this screen keep tuning it.
+        const supRefusal = await foreignLoginRefusal(row.user_id, row.name);
+        if (supRefusal) return json({ error: supRefusal }, 403);
+        const { error } = await admin.from("app_operators").update({ support_only: supportOnly }).eq("user_id", row.user_id);
+        if (error) throw error;
+        const { error: aErr } = await admin.from("admin_audit").insert({
+          action: "operator_support_only", target_client_id: null, row_count: null,
+          note: `operator:${actorEmail} set support_only=${supportOnly} for ${row.email || row.name}`,
+        });
+        if (aErr) throw new Error(`Could not record this change in the audit log: ${aErr.message}`);
+        return json({ ok: true });
+      }
+
       case "set_operator_write": {
         const id = str(payload.id, 40);
         const canWrite = payload.canWrite === true;
         const { data: row } = await admin.from("pm_people").select("*").eq("id", id).maybeSingle();
         if (!row || !row.user_id) return json({ error: "That person does not have operator access." }, 400);
+        // Same reasoning as set_operator_support: never widen a grant this screen would
+        // now refuse to create.
+        const wrRefusal = await foreignLoginRefusal(row.user_id, row.name);
+        if (wrRefusal) return json({ error: wrRefusal }, 403);
         const { error } = await admin.from("app_operators").update({ can_write: canWrite }).eq("user_id", row.user_id);
         if (error) throw error;
         const { error: aErr } = await admin.from("admin_audit").insert({
@@ -1057,6 +1367,22 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         };
         if (row.image_url === undefined) return json({ error: "That is not a setup screenshot URL." }, 400);
         if (payload.active !== undefined) row.active = payload.active === true;
+        // ⚠️ THE `!== undefined` IDIOM IS LOAD-BEARING for all three of these. Every edit in
+        // the editor is a WHOLE-ROW save that resends title/detail/linkPage/section/imageUrl
+        // (the 📷 handler, Enable/Disable, the gate buttons), and none of them sends the
+        // others — so "omitted" has to mean "unchanged", never "clear it".
+        if (payload.requiresFeature !== undefined) {
+          const rf = str(payload.requiresFeature, 40);
+          // Validated at WRITE time against the one list portal-billing's own map is kept
+          // in step with. A typo stored here would padlock a step for every builder,
+          // forever, with nothing on screen to say why — and the read path deliberately
+          // fails open, so it would never surface as an error either.
+          if (rf && !FEATURE_KEYS.includes(rf)) {
+            return json({ error: `"${rf}" is not a feature key. Pick one from the list.` }, 400);
+          }
+          row.requires_feature = rf || null;   // "" clears it
+        }
+        if (payload.builderVisible !== undefined) row.builder_visible = payload.builderVisible === true;
         if (id) {
           const { error } = await admin.from("setup_template_items").update(row).eq("id", id);
           if (error) throw error;
@@ -1116,7 +1442,24 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       }
 
       case "setup_template_delete": {
-        const { error } = await admin.from("setup_template_items").delete().eq("id", str(payload.id, 40));
+        const delId = str(payload.id, 40);
+        // ⚠️ A delete NULLs tenant_setup_items.template_item_id (on delete set null), and
+        // both gates are read THROUGH that link — so deleting a hidden or gated template
+        // row would silently un-hide and un-lock the step in every builder's list, with
+        // nothing on any screen to say it happened. Refuse; "Hide from builders" is what
+        // the operator meant, and it is reversible.
+        const { data: delRow } = await admin.from("setup_template_items")
+          .select("requires_feature, builder_visible").eq("id", delId).maybeSingle();
+        if (delRow && (delRow.builder_visible === false || delRow.requires_feature)) {
+          const { count } = await admin.from("tenant_setup_items")
+            .select("id", { count: "exact", head: true }).eq("template_item_id", delId);
+          if ((count || 0) > 0) {
+            return json({
+              error: `${count} builder${count === 1 ? " has" : "s have"} this step. Deleting it here would un-hide and un-lock their copies — hide it instead.`,
+            }, 409);
+          }
+        }
+        const { error } = await admin.from("setup_template_items").delete().eq("id", delId);
         if (error) throw error;
         return json({ ok: true });
       }
@@ -1135,15 +1478,25 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
       // Who is set up, and who is stuck — every tenant with a list, plus the ones with none.
       case "setup_overview": {
         const { data: rows, error } = await admin.from("tenant_setup_items")
-          .select("client_id, completed_at");
+          .select("client_id, completed_at, template_item_id");
         if (error) throw error;
         const { data: clients, error: cErr } = await admin.from("client_configs").select("client_id");
         if (cErr) throw cErr;
+        // Steps we have not finished building are not counted, so this card reads the same
+        // denominator the BUILDER sees (portal-setup's `list` drops them outright). Locked
+        // steps are NOT excluded here: that would mean one entitlement computation per
+        // tenant on a screen that lists every tenant, and the per-client card below is
+        // where a specific builder's padlocks are worth showing.
+        const { data: hidden, error: hErr } = await admin.from("setup_template_items")
+          .select("id").eq("builder_visible", false);
+        if (hErr) throw hErr;
+        const hiddenIds = new Set((hidden || []).map((h: { id: string }) => h.id));
         const byClient = new Map<string, { clientId: string; total: number; done: number; lastAt: string | null }>();
         for (const c of clients || []) {
           byClient.set(c.client_id, { clientId: c.client_id, total: 0, done: 0, lastAt: null });
         }
         for (const r of rows || []) {
+          if (r.template_item_id && hiddenIds.has(r.template_item_id)) continue;
           const e = byClient.get(r.client_id) || { clientId: r.client_id, total: 0, done: 0, lastAt: null };
           e.total++;
           if (r.completed_at) {
@@ -1174,6 +1527,12 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if ((count || 0) > 0) {
           return json({ error: "That builder already has a setup list. Add or remove steps on it instead." }, 409);
         }
+        // ⚠️ `builder_visible = false` rows ARE COPIED, deliberately — do not "helpfully"
+        // filter them out here or in admin-catalog's create_client. Hidden means "we have
+        // not built this yet", and the payoff is that flipping it true later reveals the
+        // step for everyone at once. Skipping them at assign time would quietly exclude
+        // every builder who signed up in the meantime, which is the whole thing this was
+        // built to avoid. `active` is the flag that means "leave it out of new lists".
         const { data: tpl, error: tErr } = await admin.from("setup_template_items")
           .select("*").eq("active", true).order("position");
         if (tErr) throw tErr;
@@ -1232,7 +1591,7 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
           ? {
             completed_at: new Date().toISOString(),
             completed_by_kind: "team",
-            completed_by_name: (str(op.display_name, 120) || String(actorEmail).split("@")[0]),
+            completed_by_name: (str(op && op.display_name, 120) || String(actorEmail).split("@")[0]),
           }
           : { completed_at: null, completed_by_kind: null, completed_by_name: null };
         const { error } = await admin.from("tenant_setup_items").update(patch).eq("id", id);

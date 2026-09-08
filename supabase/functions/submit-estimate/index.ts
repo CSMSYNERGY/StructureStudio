@@ -1,16 +1,23 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
+// The ONE permission model (migration 100). Imported here so the staff-only pricing gate below
+// asks what a person may DO rather than whether a client_users row exists — a driver and a
+// crew leader are in that table too. ⚠️ access.ts is bundled per function: a change to it means
+// redeploying every consumer, and this function is one of them.
+import { canEdit, effectiveAccess } from "../_shared/access.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { deHtml, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -82,9 +89,73 @@ const isEmail = (v: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 // deHtml moved to _shared/estimateLines.ts (2026-08-24): the SS invoice in portal-settings
 // renders the same estimate_lines snapshot and must de-render it identically.
 
+// Entity-escape a value that is about to be interpolated into HTML we author. Same chain and
+// same ORDER as the quote-terms escape in step 8 (& first, or the later replacements' own
+// ampersands get double-escaped), plus the quote character, because one use of this is inside
+// an attribute. `deHtml` unescapes in the reverse order, so an escaped value still round-trips
+// back to its original text on the two PDFs.
+const escHtml = (v: unknown): string =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+// Does this bearer token even claim to be a person? A Supabase user JWT carries `sub`; the
+// public anon key is a well-formed JWT with none, which is why getUser() rejects it. Reading
+// the shape first lets the public designer — which always sends that key — skip an auth round
+// trip that is certain to fail. Deliberately STRUCTURAL rather than a compare against
+// SUPABASE_ANON_KEY: that env value and the literal baked into the browser bundle ship through
+// different pipelines, and the day they drift a compare would invert in silence (the reasoning
+// _shared/resolveTenant.ts records for its own classifier).
+const hasSubject = (token: string): boolean => {
+  try {
+    const part = token.split(".")[1];
+    if (!part) return false;
+    const b = part.replace(/-/g, "+").replace(/_/g, "/");
+    const claims = JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
+    return typeof claims?.sub === "string" && (claims.sub as string).length > 0;
+  } catch {
+    return false;
+  }
+};
+
+// PER-TENANT SUBMIT CAP (2026-09-06). This endpoint is reachable with the public anon key, and
+// one call spends the tenant's money: several CRM API calls, a branded email to whatever
+// address the body names, a sales-tax lookup that can be a metered Avalara request, and the
+// wallet debit behind it. `capture-lead`, the other anonymous surface, has been capped since
+// 2026-07-30; this one never was.
+//
+// Two deliberate differences from that cap:
+//   1. STAFF ARE EXEMPT. A rep works inside their own tenant all day and must never be locked
+//      out of it by a flood aimed at the public designer.
+//   2. A BREACH REFUSES, LOUDLY. capture-lead answers ok:true because a dropped lead-gate
+//      capture is invisible and harmless. A dropped QUOTE is neither — the shopper would wait
+//      for an email that is never coming — so this answers 429, and creates nothing: no
+//      contact, no opportunity, no estimate, no email.
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_PER_TENANT = 20;   // generous: a real public designer sees single digits/minute
+// A breach logs only while the count sits in [MAX, MAX+2], so a sustained flood writes ~3 rows
+// per window instead of one per request. app_errors has NO fingerprint dedupe in this project,
+// so self-limiting here is the only thing stopping our own log becoming the amplification.
+const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
+
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
 
   let payload: any;
   try { payload = await req.json(); }
@@ -114,11 +185,25 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, email_provider, email_domain_status, email_domain, email_from_local, email_from_name, invoice_in_ghl, email_template_copy, ss_tax_rate, ss_tax_label, ss_tax_delivery")
     .eq("client_id", clientId)
     .single();
-  if (settingsErr || !settings || !settings.ghl_location_id || !settings.ghl_api_key) {
-    return json({ error: `No GHL credentials configured for client "${clientId}". Ask an admin to set them via the admin panel.` }, 400);
+  if (settingsErr || !settings) {
+    // No settings row at all: the owner has not opened Settings yet, so there is neither a CRM
+    // nor a paperwork mode to issue the quote through. Shopper-facing wording, not an admin's.
+    return json({ error: `${clientId} hasn't finished setting up quotes yet — please try again later, or contact them directly.` }, 400);
   }
-  const locationId = settings.ghl_location_id;
-  const apiKey = settings.ghl_api_key;
+  // A CRM is OPTIONAL (Carolyn 2026-09-02: "a new builder that will not use GHL ... we just save
+  // the contact in our database"). The contact is already in crm_contacts before we run —
+  // save_design stamps designs.contact_id (migration 133) — so nothing about the customer is
+  // lost when there is no CRM to mirror them into. What a tenant DOES need is somewhere to issue
+  // the quote: either the CRM (invoice_in_ghl = true, the default) or StructureStudio's own
+  // paperwork (invoice_in_ghl = false). Neither → refuse, in words a shopper can act on.
+  const crmConnected: boolean = Boolean(settings.ghl_location_id && settings.ghl_api_key);
+  if (!crmConnected && settings.invoice_in_ghl !== false) {
+    return json({
+      error: `${clientId} isn't set up to send quotes yet. (For the business: connect your CRM, or switch quotes to Structure Studio paperwork, under Settings → CRM Connection.)`,
+    }, 400);
+  }
+  const locationId: string = settings.ghl_location_id || "";
+  const apiKey: string = settings.ghl_api_key || "";
   const pipelineId: string | null = settings.ghl_pipeline_id || null;
   const sendQuoteStageId: string | null = settings.ghl_stage_send_quote_id || null;
 
@@ -134,8 +219,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // WHO ISSUES THE PAPERWORK (migration 121). Default TRUE — and read as "anything but an
   // explicit false is the CRM", so a tenant whose row predates the column, or whose value is
   // null for any reason, gets today's GHL path rather than silently switching to a document
-  // StructureStudio has never sent for them. The credential check above is deliberately NOT
-  // relaxed for SS mode: the contact upsert and the opportunity still go to the CRM either way.
+  // StructureStudio has never sent for them. In SS mode the contact upsert and the opportunity
+  // still go to the CRM WHEN ONE IS CONNECTED (crmConnected above); without one they are simply
+  // skipped and the quote is issued from our own records.
   const invoiceInGhl: boolean = settings.invoice_in_ghl !== false;
 
   // Sales tax (migration 148) — SS mode only. In CRM mode GHL's own tax engine computes it from
@@ -202,9 +288,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // quote, opportunity value, and QuickBooks snapshot. The embedded portal designer calls
   // supabase.functions.invoke with the signed-in rep's JWT (its client shares the portal's
   // persisted session); the public designer sends the bare anon key. So: honour these
-  // fields only when the Authorization JWT resolves to a real user who is a member of
-  // THIS tenant (client_users) or a platform operator (app_operators — a view-as operator
-  // has no client_users row on the viewed tenant). Otherwise STRIP them and log; the
+  // fields only when the Authorization JWT resolves to a real user who MAY PRICE A QUOTE on
+  // THIS tenant — designer or designs at 'edit' (migration 100), not merely a client_users
+  // row, which a Driver and a Crew Leader both have — or to a platform operator
+  // (app_operators — a view-as operator has no client_users row on the viewed tenant, so
+  // there is no per-area map to resolve for them). Otherwise STRIP them and log; the
   // submission still goes through at full price, because a shopper must never be blocked
   // by fields they didn't knowingly send. Known, accepted cost: an anonymous re-submit of
   // a rep-built design loses the rep's delivery fee/discounts until a rep resubmits (the
@@ -221,51 +309,168 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   let allowedDiscounts: any[] = Array.isArray(discounts) ? discounts : [];
   let allowedDeliveryFee: number = Number(deliveryFee) || 0;
   let allowedCustomOptions: any[] = Array.isArray(customOptions) ? customOptions : [];
+  // RESOLVED UNCONDITIONALLY (2026-09-06). This used to run only when the body carried a
+  // pricing field, which left it undefined for the two other decisions that need it: the
+  // per-tenant submit cap immediately below — a busy rep must not be throttled out of their
+  // own tenant — and the send diagnostics in step 10, where the provider's raw response is a
+  // rep's debug channel and not something an anonymous shopper should read back. It costs at
+  // most one auth round trip, and only for a request that actually presents a user token.
   let staffCaller = false;
-  if (wantsDiscounts || wantsDeliveryFee || wantsNonTaxableCustom) {
-    try {
-      const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-      if (token) {
-        // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
-        // same primary defence _shared/resolveTenant.ts documents for the portal functions.
-        const { data: userData } = await supabase.auth.getUser(token);
-        const userId = userData?.user?.id;
-        if (userId) {
-          const [memRes, opRes] = await Promise.all([
-            supabase.from("client_users").select("user_id").eq("user_id", userId).eq("client_id", clientId).limit(1),
-            supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
-          ]);
-          staffCaller = Boolean((memRes.data && memRes.data.length) || opRes.data);
-        }
+  // MAY THIS PERSON AMEND A SIGNED ORDER? Separate from staffCaller on purpose: pricing a
+  // quote and re-opening an agreement the customer already committed to are different acts,
+  // and Carolyn granted them separately ("Change Orders is the only feature they shouldn't
+  // have unless given permission in the team settings"). Until 2026-09-07 this endpoint
+  // asked neither question — it raises its change orders as the SERVICE ROLE, so migration
+  // 188's per-person policy never applied to this path at all, and a rep with
+  // change_orders:none could open an accepted design from Pipeline, resubmit, and mint a
+  // change order the Team screen says they may not raise.
+  let mayAmendCaller = false;
+  try {
+    const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+    // The bare anon key is a valid JWT with no `sub`, so getUser() rejects it — the
+    // same primary defence _shared/resolveTenant.ts documents for the portal functions.
+    // hasSubject() is that same check made locally, so the public designer never pays for
+    // a round trip whose answer is already known.
+    if (token && hasSubject(token)) {
+      const { data: userData } = await supabase.auth.getUser(token);
+      const userId = userData?.user?.id;
+      if (userId) {
+        const [memRes, opRes] = await Promise.all([
+          // limit(1), not maybeSingle(): a duplicate client_users row must not lock a rep out
+          // of their own tenant (the reasoning _shared/resolveTenant.ts records for its read).
+          supabase.from("client_users").select("role, title, access").eq("user_id", userId).eq("client_id", clientId).limit(1),
+          supabase.from("app_operators").select("user_id").eq("user_id", userId).maybeSingle(),
+        ]);
+        // MEMBERSHIP IS NOT PERMISSION (audit 2026-09-06). A client_users row only says "works
+        // here": a Driver and a Crew Leader are in that table too, and both resolve to
+        // designer:none / designs:none, yet the old `row exists` test let either of them apply
+        // a discount, a delivery fee or a tax exemption through this endpoint. Ask the one
+        // permission model instead. sales_rep is designer:'edit', so every rep-built delivery
+        // fee and discount still applies exactly as before.
+        const memberRow = memRes.data && memRes.data[0];
+        const mayPrice = memberRow
+          ? (() => {
+            const acc = effectiveAccess(memberRow.role, memberRow.title, memberRow.access);
+            // canEdit() compares against the shared level vocabulary — never a `=== "edit"`
+            // against something that returns a boolean.
+            return canEdit(acc, "designer") || canEdit(acc, "designs");
+          })()
+          : false;
+        // The app_operators bypass stays: a platform operator in view-as has NO client_users
+        // row on the tenant they are viewing, so there is no map to resolve for them.
+        staffCaller = Boolean(opRes.data) || mayPrice;
+        mayAmendCaller = Boolean(opRes.data) ||
+          (memberRow
+            ? canEdit(effectiveAccess(memberRow.role, memberRow.title, memberRow.access), "change_orders")
+            : false);
       }
-    } catch (e) {
-      // A failed staff check treats the caller as anonymous — fail CLOSED on money: the
-      // quote goes out at full price rather than honouring an unverified discount.
-      console.warn("submit-estimate: staff check failed:", (e as Error).message);
     }
-    if (!staffCaller) {
-      allowedDiscounts = [];
-      allowedDeliveryFee = 0;
-      // Not emptied — the charges stand; only the tax exemption is refused.
-      allowedCustomOptions = allowedCustomOptions.map((co: any) => ({ ...co, taxable: true }));
-      // Logged (never thrown) so triage can see stripping happen — a legit rep whose
-      // session expired mid-designer shows up here, not as a silently smaller quote.
-      logEdgeError({
-        fn: "submit-estimate",
-        req,
-        clientId,
-        code: "unauthorized_pricing_fields",
-        message: "Anonymous caller sent staff-only pricing fields (discounts/deliveryFee) — stripped; estimate submitted at full price.",
-        context: {
-          designId: String(designId),
-          discountCount: Array.isArray(discounts) ? discounts.length : 0,
-          discountTotal: Array.isArray(discounts)
-            ? discounts.reduce((s: number, d: any) => s + Math.abs(Number(d?.amount) || 0), 0)
-            : 0,
-          deliveryFee: Number(deliveryFee) || 0,
-        },
-      }).catch(() => {});
+  } catch (e) {
+    // A failed staff check treats the caller as anonymous — fail CLOSED on money: the
+    // quote goes out at full price rather than honouring an unverified discount.
+    console.warn("submit-estimate: staff check failed:", (e as Error).message);
+  }
+
+  // 2d. PER-TENANT SUBMIT CAP — see RATE_* at module scope for why this exists and why it
+  // refuses rather than dropping quietly. Placed HERE deliberately: after the beta pre-flight
+  // (so beta mode still refuses first, before anything is created anywhere) and before the
+  // contact upsert, so a refused submission leaves no contact, opportunity, estimate or email
+  // behind. It also sits ahead of the pricing-strip log below, so a flood carrying discounts
+  // cannot write one app_errors row per request.
+  //
+  // Counted in `rate_buckets` (migration 204): one row per tenant, a fixed window. The count
+  // has to be per REQUEST rather than per row touched — unlike capture-lead's many-different-
+  // phones shape, the damaging shape here is ONE design resubmitted in a loop, which moves no
+  // row count at all because `designs` is UPDATEd and never inserted.
+  //
+  // FAILS OPEN on any storage error, the same posture capture-lead's cap takes: one bad read
+  // must not silence a tenant's quotes. That also means the cap is inert until migration 204
+  // has been applied by hand.
+  if (!staffCaller) {
+    const bucket = `submit-estimate:${clientId}`;
+    const nowMs = Date.now();
+    const { data: rl, error: rlErr } = await supabase
+      .from("rate_buckets")
+      .select("window_started_at, hits")
+      .eq("bucket", bucket)
+      .maybeSingle();
+    if (!rlErr) {
+      const startedAt = rl?.window_started_at ? Date.parse(String(rl.window_started_at)) : NaN;
+      const inWindow = Number.isFinite(startedAt) && (nowMs - startedAt) < RATE_WINDOW_MS;
+      const hits = inWindow ? (Number(rl?.hits) || 0) : 0;
+      // COUNT FIRST, THEN DECIDE. The obvious order - refuse at the cap, increment below -
+      // freezes the counter at exactly RATE_MAX: the increment sits on the path the refusal
+      // already returned from. `hits` then reads MAX forever inside the window, the
+      // [MAX, MAX+2] log window is true on EVERY refused request, and the breach log becomes
+      // the flood's amplifier - one severity=error row per attacker request, which is the
+      // opposite of what it is for. Incrementing first lets the count climb past the cap, so
+      // the window really is three rows per window.
+      const nextHits = hits + 1;
+      // Best-effort: a failed write only means this request went uncounted, which is the same
+      // direction as the fail-open read above.
+      await supabase.from("rate_buckets").upsert({
+        bucket,
+        window_started_at: inWindow ? rl!.window_started_at : new Date(nowMs).toISOString(),
+        hits: nextHits,
+        updated_at: new Date(nowMs).toISOString(),
+      }, { onConflict: "bucket" });
+      if (nextHits > RATE_MAX_PER_TENANT) {
+        if (nextHits <= RATE_LOG_CEILING) {
+          await logEdgeError({
+            fn: "submit-estimate",
+            req,
+            clientId,
+            code: "rate_limited",
+            // Deliberately the default severity (error), matching capture-lead: a breach on
+            // the expensive anonymous surface is a signal someone should look at, not a
+            // routine refusal to file away. The [MAX+1, MAX+2] window above is what keeps it
+            // from becoming the flood's amplifier.
+            message: `submit-estimate rate cap hit - ${nextHits} submissions in ${RATE_WINDOW_MS / 1000}s; submission refused`,
+            context: { hits: nextHits, limit: RATE_MAX_PER_TENANT, windowMs: RATE_WINDOW_MS },
+          });
+        }
+        return json({
+          error: `${businessName} is receiving a lot of quote requests right now. Nothing was submitted - please wait a minute and send yours again.`,
+          retryAfterSeconds: Math.ceil(RATE_WINDOW_MS / 1000),
+        }, 429);
+      }
     }
+  }
+
+  if ((wantsDiscounts || wantsDeliveryFee || wantsNonTaxableCustom) && !staffCaller) {
+    allowedDiscounts = [];
+    allowedDeliveryFee = 0;
+    // Not emptied — the charges stand; only the tax exemption is refused.
+    allowedCustomOptions = allowedCustomOptions.map((co: any) => ({ ...co, taxable: true }));
+    // Logged (never thrown) so triage can see stripping happen — a legit rep whose
+    // session expired mid-designer shows up here, not as a silently smaller quote.
+    logEdgeError({
+      fn: "submit-estimate",
+      req,
+      clientId,
+      code: "unauthorized_pricing_fields",
+      message: "Caller without designer access sent staff-only pricing fields (discounts/deliveryFee) — stripped; estimate submitted at full price.",
+      context: {
+        designId: String(designId),
+        discountCount: Array.isArray(discounts) ? discounts.length : 0,
+        discountTotal: Array.isArray(discounts)
+          ? discounts.reduce((s: number, d: any) => s + Math.abs(Number(d?.amount) || 0), 0)
+          : 0,
+        deliveryFee: Number(deliveryFee) || 0,
+      },
+      // INFO, not a fault. The comment above already says what this is: the gate WORKING —
+      // an unauthorised caller's pricing fields were stripped and the quote went out at full
+      // price. Nothing broke, nothing needs repairing, and there is no action for whoever
+      // reads the fault queue. Filed at the default severity it sat in that queue permanently
+      // while the product was behaving exactly as designed.
+      //
+      // Kept as a row rather than dropped, deliberately, and for the reason migration 140
+      // gives: a refusal that fires CONSTANTLY is a bug in disguise. A real rep whose session
+      // expired mid-designer shows up here, and a run of these is how you would notice.
+      //   select message, count(*) from app_errors where severity='info' group by 1
+      //   having count(*) > 20 order by 2 desc;
+      severity: "info",
+    }).catch(() => {});
   }
 
   // 2b. Address handling. The React form collects street/city/state/zip optionally
@@ -293,9 +498,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     countryCode: contact?.country || "US",
   } : null;
 
-  // 3. Upsert contact
+  // 3. Upsert contact — into the CRM, when there is one. Without a CRM the contact already
+  //    lives in crm_contacts (save_design, migration 133) and contactId stays null, which is
+  //    exactly what every later step treats as "no CRM object to link".
   let contactId: string | null = existingDesign.ghl_contact_id || null;
-  try {
+  if (crmConnected) try {
     const r = await fetch("https://services.leadconnectorhq.com/contacts/upsert", {
       method: "POST",
       headers: ghlHeaders,
@@ -308,7 +515,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }),
     });
     if (!r.ok) {
-      return json({ error: `Failed to upsert contact: ${r.status} ${await r.text()}` }, 502);
+      // AUTHORED SENTENCE, RAW BODY TO THE LOG (portal-settings' `dbFail` contract, and the
+      // reason it exists): this response is read by an anonymous caller, and the CRM's own
+      // body carries the tenant's location id and account shape. Triage still gets every
+      // byte, just not through the shopper's browser.
+      const body = await r.text();
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: `ghl_contact_upsert_${r.status}`,
+        message: `GHL contact upsert failed (${r.status}): ${body.slice(0, 2000)}`,
+        context: { designId: String(designId) },
+      });
+      return json({ error: "We couldn't save your details with this business's CRM just now. Please try again in a moment." }, 502);
     }
     const d = await r.json();
     contactId = d?.contact?.id || contactId;
@@ -426,6 +643,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // style-specific layout_item_pricing overrides.
   const norm = (s: unknown) => String(s ?? "").toLowerCase().replace(/[×✕]/g, "x").replace(/\s+/g, "");
   let styleRowId: string | null = null;
+  // 8 ft is the fallback the whole product uses when a style declares nothing — same default
+  // as the browser's d3ResolveStyleSpec.
+  let styleBaseWallHeightFt = 8;
   let sizeRowId: string | null = null;       // reused below for the size's included-item quantities
   let styleLabel = style;            // display-name fallback if the style row isn't found
   let styleImageUrl: string | null = null;   // building-style photo, attached to the building line
@@ -467,11 +687,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   }
 
   try {
-    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate, taxable").eq("client_id", clientId);
+    const stRes = await supabase.from("building_styles").select("id, key, label, image_url, show_image_on_estimate, taxable, d3").eq("client_id", clientId);
     const styleRow = (stRes.data || []).find((r: any) => norm(r.key) === norm(style) || norm(r.label) === norm(style));
     if (styleRow) {
       styleRowId = styleRow.id;
       styleLabel = styleRow.label || style;
+      // The style's OWN wall height, which anything priced by wall AREA has to start from.
+      // Read here rather than in the wall-height block because it is true whether or not the
+      // customer bought an upgrade. See the resolvedWallHeightFt comment below for why this
+      // had to be fixed.
+      const baseWall = Number((styleRow.d3 || {}).wallHeightFt);
+      if (Number.isFinite(baseWall) && baseWall > 0) styleBaseWallHeightFt = baseWall;
       styleImageUrl = styleRow.image_url || null;
       styleShowImage = styleRow.show_image_on_estimate !== false;
       styleTaxable = styleRow.taxable !== false;
@@ -612,6 +838,333 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   const buildingArea = buildingWidthFt * buildingDepthFt;             // sqft_building
   const buildingPerimeter = 2 * (buildingWidthFt + buildingDepthFt);  // perimeter_building
 
+  // ── Electrical package ─────────────────────────────────────────────────────
+  // Carolyn's rule: "removing one doesn't discount it, extras charged per device."
+  //     charge = package + SUM over device types of max(0, placed - auto) * rate
+  // The auto counts are RECOMPUTED here from this building's dimensions and the tenant's own
+  // stored standards — never taken from the body, which sends only a boolean. Trusting a count
+  // from the browser would let a forged payload claim a huge standard layout and make every
+  // extra device free.
+  //
+  // They are then merged into includedMap, so the netting and the "(included)" $0 line come
+  // from pushItem exactly as they do for a size inclusion. That is the whole reason this rule
+  // needed no new pricing code: max(0, placed - included) already IS "removing never discounts".
+  // COVERAGE IS PER ITEM now (206). The three devices became ordinary electrical_items, so
+  // nothing electrical merges into includedMap or prices through pushItem any more — the one
+  // rule below covers every electrical thing:
+  //     price  = package ? price_with_package : price_standalone
+  //     charge = max(0, placed - covered) * price
+  let elecCovered: Record<string, number> = {};
+  let electricalPkg: { label: string; price: number; taxable: boolean; includePanel: boolean;
+                       panelHeightIn: number; outletSpacingFt: number; lightSpacingFt: number } | null = null;
+  if (selections?.electrical === true) {
+    const esRes = await supabase.from("electrical_settings")
+      .select("enabled, package_price, package_label, taxable, include_panel, panel_height_in, outlet_spacing_ft, light_spacing_ft, outlet_item_id, switch_item_id, light_item_id")
+      .eq("client_id", clientId).maybeSingle();
+    // Refuse rather than silently price nothing — the same posture as an unpriced size.
+    if (esRes.error) {
+      return json({ error: "Could not read your electrical settings just now. Try resubmitting in a moment." }, 400);
+    }
+    const es = esRes.data as {
+      enabled: boolean; package_price: number | null; package_label: string | null;
+      taxable: boolean | null; include_panel: boolean | null; panel_height_in: number | null;
+      outlet_spacing_ft: number | null; light_spacing_ft: number | null;
+      outlet_item_id: string | null; switch_item_id: string | null; light_item_id: string | null } | null;
+    if (!es || es.enabled !== true) {
+      return json({ error: "The electrical package isn't switched on for this account. Turn it on in the portal under Settings → Options → Electrical, then resubmit." }, 400);
+    }
+    if (es.package_price == null) {
+      return json({ error: "The electrical package has no price set, so it can't be quoted. Set it in the portal under Settings → Options → Electrical." }, 400);
+    }
+    const outletSp = Number(es.outlet_spacing_ft) > 0 ? Number(es.outlet_spacing_ft) : 6;
+    const lightSp = Number(es.light_spacing_ft) > 0 ? Number(es.light_spacing_ft) : 10;
+    // MIRRORS electricalAutoCounts in the designer twins, line for line — floor for outlets
+    // around the perimeter, round for lights along the length, exactly one switch. If one side
+    // is ever changed, change both: a mismatch shows the customer one number and bills another.
+    const autoCounts: Record<string, number> = {
+      outlet: Math.max(1, Math.floor(buildingPerimeter / outletSp)),
+      lightFixture: Math.max(1, Math.round(buildingDepthFt / lightSp)),
+      lightSwitch: 1,
+    };
+    // Roll the role counts onto whichever ITEM each role points at. Summed rather than
+    // assigned: nothing stops a builder pointing two roles at the same item, and if they do the
+    // package should cover both counts of it rather than silently one.
+    const roleItem: Record<string, string | null> = {
+      outlet: es.outlet_item_id, lightFixture: es.light_item_id, lightSwitch: es.switch_item_id,
+    };
+    for (const role of Object.keys(autoCounts)) {
+      const itemId = roleItem[role];
+      if (!itemId) continue;   // no item designated -> the package lays none of these out
+      elecCovered[String(itemId)] = (elecCovered[String(itemId)] || 0) + autoCounts[role];
+    }
+    electricalPkg = {
+      label: es.package_label || "Electrical Package",
+      price: Number(es.package_price),
+      taxable: es.taxable !== false,
+      includePanel: es.include_panel !== false,
+      panelHeightIn: Number(es.panel_height_in) || 60,
+      outletSpacingFt: outletSp,
+      lightSpacingFt: lightSp,
+    };
+  }
+
+  // ── Taller walls (172) ──────────────────────────────────────────────────────────────────
+  // A SELECTION charge, not a placed item: nothing is on the floor plan, so this deliberately
+  // sits outside pushItem and outside the inclusion / declined-item machinery entirely. The
+  // customer picks ONE increase for the whole building and it is charged per lineal foot of
+  // perimeter — Carolyn's Lofted Barn +6" at $2/lf on a 12x24 is 72 lf x $2 = $144.
+  //
+  // The rate is re-read from the table here and NEVER taken from the payload: get_config
+  // publishes it to an anonymous browser, so a forged body could otherwise price its own
+  // upgrade. An increase that is not offered, not active, or not priced is a hard 400 — the
+  // same posture as an unpriced size above, and for the same reason: emailing a quote that
+  // silently charged $0 for a real structural change is worse than refusing to send one.
+  // Resolved wall height in feet — the style's standard plus whatever increase was chosen.
+  // Insulation's WALL area depends on it, and so does cladding priced by wall_sqft, which is
+  // why taller walls had to land first.
+  //
+  // 🔴 THIS STARTED AT A HARDCODED 8 UNTIL 2026-09-07, and it was a real mispricing. The
+  // browser's preview resolves the style's own height (d3CustomerWallHeightFt → the style's
+  // d3.wallHeightFt); the server did not, so on any style whose standard is not 8 ft the
+  // customer was SHOWN one insulation figure and BILLED another — against a comment two
+  // blocks down insisting the two "must agree to the penny". Seven live styles are affected
+  // (six at 6.4–7 ft, one at 7 ft), all of them over-billed. Carolyn's call was to fix both
+  // at once rather than let cladding inherit the same bug.
+  let resolvedWallHeightFt = styleBaseWallHeightFt;
+  const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
+  if (wallHeightDeltaIn > 0) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price a wall-height upgrade: the style "${style}" is not in your catalog.` }, 400);
+    }
+    const whRes = await supabase.from("style_wall_heights")
+      .select("delta_in, rate_per_lf, taxable, active, widths_ft, build_on_site, bos_fee_basis, bos_fee_rate")
+      .eq("client_id", clientId).eq("style_id", styleRowId).eq("delta_in", wallHeightDeltaIn).maybeSingle();
+    const wh = whRes.data as {
+      rate_per_lf: number | null; taxable: boolean | null; active: boolean; widths_ft: number[] | null;
+      build_on_site: boolean | null; bos_fee_basis: string | null; bos_fee_rate: number | null } | null;
+    if (whRes.error || !wh || !wh.active || wh.rate_per_lf == null) {
+      return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Wall Height Upgrades, then resubmit.` }, 400);
+    }
+    // Offered on this WIDTH? Total haul height is wall + roof and the roof grows with width, so
+    // an increase legal on an 8 wide can be illegal on a 14. The browser already filters the
+    // picker, but this is the check that counts: the payload is attacker-controlled, and a
+    // building that cannot be hauled is not a quote we can honour. NULL widths_ft = every width.
+    if (Array.isArray(wh.widths_ft) && !wh.widths_ft.some((w) => Number(w) === buildingWidthFt)) {
+      return json({ error: `A ${wallHeightDeltaIn}" wall-height increase isn't available on a ${buildingWidthFt} ft wide "${styleLabel}" — taller walls are limited by width for hauling. Choose standard height or a narrower building.` }, 400);
+    }
+    const whRate = Number(wh.rate_per_lf) || 0;
+    resolvedWallHeightFt = Math.max(5, Math.min(14, resolvedWallHeightFt + wallHeightDeltaIn / 12));
+    targetItems.push(tagLine({
+      name: `Taller Walls (+${wallHeightDeltaIn} in)`,
+      qty: buildingPerimeter,
+      amount: whRate,
+      priceId: "",
+      productId: "",
+      attachments: [],
+      currency: "USD",
+      type: "one_time",
+      description: `${buildingPerimeter} ft of wall at $${whRate.toFixed(2)} per foot`,
+    }, { kind: "wall_height", nonTaxable: wh.taxable === false }));
+
+    // ── Built on site (183) ───────────────────────────────────────────────────────────
+    // Not a product the customer shopped for — a CONSEQUENCE of asking for a wall too tall to
+    // haul. Carolyn, 2026-09-01: "if they build it on site, then they can tip it then ... but
+    // then it becomes a build on site building", and "they always charge more for a build on
+    // site ... because they're sending the crew out there to build."
+    //
+    // The flag and the fee both come off the row we JUST validated, so no second lookup and no
+    // second chance to disagree with it: if the increase is offered at this width, so is its
+    // consequence. One increase is ever selected, so exactly one fee can ever apply.
+    //
+    // ⚠️ A NULL FEE IS NOT AN ERROR, and this is the one place this block departs from the one
+    // above. An unpriced INCREASE is a hard 400, because a builder who forgot to price what
+    // they are selling must not have it quoted at $0. An unpriced build-on-site fee is a
+    // builder who absorbs the cost — Carolyn says they always charge, but that is her market,
+    // not a constraint. The building is still built on site; there is simply no line.
+    {
+      const bosRate = Number(wh.bos_fee_rate) || 0;
+      // Same vocabulary as layout_item_pricing, so all three already have geometry here.
+      const bosBasis = bosBasisOf(wh.bos_fee_basis);
+      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter);
+      const bosDesc = bosBasis === "sqft_building"
+        ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "perimeter_building"
+        ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+        : "Crew and equipment to build on your site";
+      if (bosCharges(wh.build_on_site, wh.bos_fee_rate, bosQty)) {
+        targetItems.push(tagLine({
+          // Named for what it IS, not for what triggered it: the customer is buying an
+          // on-site build, and the wall height is why. The line above already says the height.
+          name: "Built On Site",
+          qty: bosQty,
+          amount: bosRate,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: `${bosDesc} — walls this tall cannot be hauled`,
+          // Taxability is INHERITED from the increase that caused it rather than given its own
+          // column. They are one decision on one row, and a builder who marks taller walls
+          // non-taxable has already said what they think about this charge.
+        }, { kind: "build_on_site", nonTaxable: wh.taxable === false }));
+      }
+    }
+  }
+
+  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
+  // HERE rather than beside the layout add-ons that also use it, because cladding registers into
+  // it and `const` has no hoisting — a declaration below the first use is a TDZ ReferenceError
+  // at runtime, on the one code path that would only fire for a builder who chose that method.
+  // deno-lint-ignore no-explicit-any
+  const deferredPctLines: { item: any; rate: number }[] = [];
+
+  // ── Cladding (207) ──────────────────────────────────────────────────────────────────────
+  // The third SELECTION charge, and it copies the wall-height shape exactly: nothing is on the
+  // floor plan, so this sits outside pushItem and the inclusion machinery, and the rate is
+  // re-read from the table rather than trusted from the payload — get_config publishes it to
+  // an anonymous browser.
+  //
+  // ⚠️ KEY ON `claddingId`, NOT `cladding`. The submit payload deliberately carries both:
+  // `cladding` is the human LABEL the estimate template prints, `claddingId` is the stable id
+  // the design row stores. Matching on the label would break the moment a builder renamed it.
+  //
+  // A rate of 0 produces NO LINE, not a $0 one. Cladding was free for every tenant before this
+  // shipped and the migration seeded them all at 0 = included; emitting a zero line for it
+  // would add a row to every estimate in the product overnight.
+  const claddingId = String((selections as Record<string, unknown>).claddingId ?? "").trim();
+  if (claddingId) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price cladding: the style "${style}" is not in your catalog.` }, 400);
+    }
+    const scRes = await supabase.from("style_cladding")
+      .select("cladding_id, label_override, rate, basis, taxable, active")
+      .eq("client_id", clientId).eq("style_id", styleRowId).eq("cladding_id", claddingId).maybeSingle();
+    const sc = scRes.data as {
+      cladding_id: string; label_override: string | null; rate: number | null;
+      basis: string | null; taxable: boolean | null; active: boolean } | null;
+    // Not offered / not active / no rate is a hard 400, the posture the other two use: a quote
+    // that silently charged $0 for a siding upgrade the builder does sell is worse than one we
+    // refuse to send.
+    if (scRes.error || !sc || !sc.active || sc.rate == null) {
+      return json({ error: `That cladding isn't offered on "${styleLabel}". Set it in the portal under Settings → Options → Cladding, then resubmit.` }, 400);
+    }
+    const cladRate = Number(sc.rate) || 0;
+    if (cladRate > 0) {
+      // ALL SEVEN pricing methods (221), meaning exactly what the Options header says. Two read
+      // specially because cladding is a whole-building option rather than a placed item:
+      // sqft_option's "option area" is the WALL area (perimeter x wall height, so a taller-wall
+      // upgrade is charged for automatically), and lineal_ft's "total feet" is the perimeter,
+      // which makes it identical to perimeter_building here on purpose — both names are in the
+      // vocabulary and both must price. MIRRORS the designer's cladShape switch exactly; if one
+      // side changes, change both, or the customer is shown one number and billed another.
+      const basis = String(sc.basis || "sqft_option");
+      const cladWallArea = Math.round(buildingPerimeter * resolvedWallHeightFt);
+      const cladShape: { qty: number; unit: string } =
+        basis === "sqft_option"          ? { qty: cladWallArea,      unit: "sq ft of wall" }
+        : basis === "sqft_building"      ? { qty: buildingArea,      unit: "sq ft of building" }
+        : basis === "lineal_ft"          ? { qty: buildingPerimeter, unit: "ft of wall" }
+        : basis === "perimeter_building" ? { qty: buildingPerimeter, unit: "ft of perimeter" }
+        : /* each / pct_* */               { qty: 1,                 unit: "" };
+      // The tenant's own name for it, falling back to the built-in — the customer must read the
+      // same words on the estimate that they read on the designer.
+      const cladName = (sc.label_override || "").trim()
+        || (String((selections as Record<string, unknown>).cladding ?? "").trim())
+        || claddingId;
+      if (cladShape.qty > 0) {
+        // pct_building_price resolves here (the base price is already known). pct_estimate_total
+        // CANNOT: it is a share of every OTHER line, so it goes out at 0 and joins the existing
+        // step 7a pass, which recomputes it against a fixed base — the same machinery layout
+        // add-ons have used since 006, and the reason multiple percentage lines never compound.
+        const cladAmount =
+          basis === "pct_building_price" ? (cladRate / 100) * buildingPrice
+          : basis === "pct_estimate_total" ? 0
+          : cladRate;
+        const cladLine = tagLine({
+          name: cladName,
+          qty: cladShape.qty,
+          amount: cladAmount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description:
+            basis === "pct_building_price" ? `${cladRate}% of the building price`
+            : basis === "pct_estimate_total" ? `${cladRate}% of the rest of this quote`
+            : cladShape.unit
+              ? `${cladShape.qty} ${cladShape.unit} at $${cladRate.toFixed(2)} each`
+              : `${cladName} for this building`,
+        }, { kind: "cladding", nonTaxable: sc.taxable === false });
+        targetItems.push(cladLine);
+        if (basis === "pct_estimate_total") deferredPctLines.push({ item: cladLine, rate: cladRate });
+      }
+    }
+  }
+
+  // ── Insulation (177) ────────────────────────────────────────────────────────────────────
+  // The second SELECTION charge, and it copies the wall-height shape exactly: nothing is placed
+  // on the plan, so it sits outside pushItem and outside the inclusion / declined-item
+  // machinery. One line per area, which is what makes "entire building" a UI shortcut rather
+  // than a stored fourth rate — three ticks produce three lines here either way.
+  //
+  // Every rate is re-read from the catalog and every square footage is re-derived. The browser
+  // never sees a rate at all for insulation, so there is nothing to forge; but the AREAS come
+  // from the payload, and an area that is not offered is a hard 400 rather than a silent skip.
+  const insSel = Array.isArray(selections.insulation) ? selections.insulation : [];
+  if (insSel.length) {
+    if (!styleRowId) {
+      return json({ error: `Cannot price insulation: the style "${style}" is not in your catalog.` }, 400);
+    }
+    // The master switch is checked HERE too, not just in get_config. A tenant who turned
+    // insulation off should not be billable for it by a stale browser tab or a forged body.
+    const insOn = await supabase.from("client_settings").select("insulation_enabled").eq("client_id", clientId).maybeSingle();
+    if (insOn.error || !insOn.data || insOn.data.insulation_enabled !== true) {
+      return json({ error: "Insulation isn't switched on for this account. Turn it on in the portal under Settings → Options → Insulation, then resubmit." }, 400);
+    }
+    const ioRes = await supabase.from("insulation_offerings")
+      .select("ins_type, area, rate_per_sqft, taxable, active").eq("client_id", clientId);
+    // Refuse rather than price nothing: a read failure here would otherwise drop a real charge
+    // off the quote silently, which is the same hazard the unpriced-size 400 exists for.
+    if (ioRes.error) return json({ error: "Could not read your insulation rates just now. Try resubmitting in a moment." }, 400);
+    const offers = (ioRes.data ?? []) as { ins_type: string; area: string; rate_per_sqft: number | null; taxable: boolean | null; active: boolean }[];
+    const AREA_LABEL: Record<string, string> = { floor: "Floor", walls: "Walls", roof: "Roof" };
+    const TYPE_LABEL: Record<string, string> = { batt: "Batt", spray_foam: "Spray Foam" };
+    // roof == floor is the v1 simplification the builder's rate absorbs; walls are GROSS
+    // (perimeter x height, no opening deduction). The browser's insulationSqft is the same
+    // three lines — they must agree or the preview and the quote disagree.
+    const sqftOf = (area: string) =>
+      area === "walls" ? Math.round(buildingPerimeter * resolvedWallHeightFt) : Math.round(buildingArea);
+    // Deduplicate by AREA: one area cannot be insulated twice, and a duplicated entry would
+    // otherwise bill it twice over.
+    const seenAreas = new Set<string>();
+    for (const raw of insSel) {
+      const pick = raw as { type?: unknown; area?: unknown };
+      const type = String(pick?.type ?? "").trim();
+      const area = String(pick?.area ?? "").trim();
+      if (!type || !area || seenAreas.has(area)) continue;
+      seenAreas.add(area);
+      const off = offers.find((o) => o.ins_type === type && o.area === area);
+      if (!off || !off.active || off.rate_per_sqft == null) {
+        return json({ error: `${TYPE_LABEL[type] || type} insulation isn't offered for the ${AREA_LABEL[area] || area}. Set it in the portal under Settings → Options → Insulation, then resubmit.` }, 400);
+      }
+      const sqft = sqftOf(area);
+      if (sqft <= 0) continue;
+      const rate = Number(off.rate_per_sqft) || 0;
+      targetItems.push(tagLine({
+        name: `${TYPE_LABEL[type] || type} Insulation — ${AREA_LABEL[area] || area}`,
+        qty: sqft,
+        amount: rate,
+        priceId: "",
+        productId: "",
+        attachments: [],
+        currency: "USD",
+        type: "one_time",
+        description: `${sqft} sq ft at $${rate.toFixed(2)} per sq ft`,
+      }, { kind: "insulation", nonTaxable: off.taxable === false }));
+    }
+  }
+
   // Resolve a layout add-on to a GHL line item using its configured pricing_method. `amount`
   // is always PER-UNIT; GHL multiplies it by qty. `count` is how many of the item were placed;
   // lengthFt / optionSqft carry the per-measure quantity for the two measured methods:
@@ -623,7 +1176,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //   pct_building_price -> qty=count,     amount=(rate/100) × base building price
   //   pct_estimate_total -> qty=count,     amount resolved LAST against the running subtotal
   // An item with no configured pricing row (or rate) lands at $0. GHL products are never consulted.
-  const deferredPctLines: { item: any; rate: number }[] = [];
+  // (declared above the cladding block — `const` is not hoisted, and cladding registers here)
   const pushItem = (
     search: string | string[],
     itemKey: string | undefined,
@@ -927,6 +1480,106 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const desc = summary.workbenches.map((wb: any) => `${wb.wall ? wb.wall + " wall " : ""}${wb.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
     pushItem(["Workbench/Pegboard", "Workbench", "Pegboard", "Per Foot"], "workbench", desc, { count: summary.workbenches.length, lengthFt: totalFt });
   }
+  // Shelves follow the workbench rule exactly: every run of one type summed into ONE lineal_ft
+  // line, so a size inclusion nets once rather than once per shelf. Single and double are
+  // separate item_keys because they are separate buttons and separate prices to the builder.
+  for (const [key, field, names] of [
+    ["shelf", "shelves", ["Single Shelf", "Shelf", "Shelving", "Shelves"]],
+    ["doubleShelf", "doubleShelves", ["Double Shelf", "Double Shelving", "Shelves"]],
+  ] as [string, string, string[]][]) {
+    const rows = (summary as Record<string, unknown>)[field];
+    if (!Array.isArray(rows) || rows.length === 0) continue;
+    const totalShelfFt = rows.reduce((s: number, r: any) => s + (Number(r.lengthFt) || 1), 0);
+    const shelfDesc = rows.map((r: any) => `${r.wall ? r.wall + " wall " : ""}${r.lengthFt || 1}ft`).join(", ") + " (priced per foot)";
+    pushItem(names, key, shelfDesc, { count: rows.length, lengthFt: totalShelfFt });
+  }
+  // ── Electrical ─────────────────────────────────────────────────────────────
+  // The package line first; every device and item is then priced by the ONE rule in the items
+  // block below, netting against elecCovered. A plan holding exactly the standard layout
+  // produces "(in the package)" $0 lines under it — which is what the customer should see: the
+  // package covers them, and the quote says so item by item.
+  if (electricalPkg) {
+    const autoOut = Math.max(1, Math.floor(buildingPerimeter / electricalPkg.outletSpacingFt));
+    const autoLight = Math.max(1, Math.round(buildingDepthFt / electricalPkg.lightSpacingFt));
+    targetItems.push(tagLine({
+      name: electricalPkg.label,
+      qty: 1,
+      amount: electricalPkg.price,
+      priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+      description: [
+        `${autoOut} outlet${autoOut === 1 ? "" : "s"} at ${electricalPkg.outletSpacingFt} ft spacing`,
+        `${autoLight} light${autoLight === 1 ? "" : "s"} at ${electricalPkg.lightSpacingFt} ft spacing`,
+        "1 switch",
+        electricalPkg.includePanel ? `electrical panel included, ${electricalPkg.panelHeightIn}" off the floor` : "no electrical panel",
+      ].join(", "),
+    }, { kind: "electrical", nonTaxable: electricalPkg.taxable === false }));
+  }
+  // ── The builder's own electrical items ─────────────────────────────────────
+  // Priced SERVER-SIDE from electrical_items by id — the body sends counts, never money (the
+  // 2026-08-20 audit finding on fixture doors: a snapshot price used to be trusted verbatim).
+  //
+  // WHICH price applies is decided by whether the package was taken, and a NULL in that column
+  // means the item is not offered that way at all. It is deliberately NOT a fallback to the
+  // other column: a builder who priced a fan only as a package add-on has not agreed to sell it
+  // on its own, and quietly charging the other number would invent a price they never set.
+  {
+    const rawItems = Array.isArray((summary as Record<string, unknown>).electricalItems)
+      ? (summary as Record<string, unknown>).electricalItems as { id?: unknown; qty?: unknown }[]
+      : [];
+    if (rawItems.length > 0) {
+      const wanted = [...new Set(rawItems.map((r) => String(r?.id ?? "")).filter(Boolean))];
+      const eiRes = await supabase.from("electrical_items")
+        .select("id, name, price_with_package, price_standalone, taxable, active, internal_only")
+        .eq("client_id", clientId).in("id", wanted);
+      // Refuse rather than silently drop a real charge — the unpriced-size posture.
+      if (eiRes.error) {
+        return json({ error: "Could not read your electrical items just now. Try resubmitting in a moment." }, 400);
+      }
+      const byId = new Map(((eiRes.data ?? []) as {
+        id: string; name: string; price_with_package: number | null; price_standalone: number | null;
+        taxable: boolean | null; active: boolean; internal_only: boolean }[]).map((r) => [String(r.id), r]));
+      const hasPkg = electricalPkg != null;
+      for (const raw of rawItems) {
+        const id = String(raw?.id ?? "");
+        const qty = Math.max(0, Math.floor(Number(raw?.qty) || 0));
+        if (!id || qty <= 0) continue;
+        const ei = byId.get(id);
+        if (!ei || !ei.active) {
+          return json({ error: "One of the electrical items on this design is no longer in your catalog. Remove it from the layout, or re-add it in the portal under Settings → Options → Electrical." }, 400);
+        }
+        // What the package already lays out of THIS item. max(0, …) is what keeps
+        // "removing one doesn't discount it" true, exactly as it was when the devices were
+        // layout items netting against includedMap.
+        const covered = hasPkg ? (elecCovered[id] || 0) : 0;
+        const chargeable = Math.max(0, qty - covered);
+        if (covered > 0 && chargeable <= 0) {
+          // Wholly covered: a $0 line so the customer can see it IS in the package rather than
+          // wondering why something on their plan has no line at all.
+          targetItems.push(tagLine({
+            name: `${ei.name} (in the package)`, qty, amount: 0,
+            priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+            description: "Included in the electrical package",
+          }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
+          continue;
+        }
+        const price = hasPkg ? ei.price_with_package : ei.price_standalone;
+        if (price == null) {
+          return json({ error: hasPkg
+            ? `"${ei.name}" has no price set for adding to the electrical package. Set one in the portal under Settings → Options → Electrical, then resubmit.`
+            : `"${ei.name}" is only sold as part of the electrical package. Add the package to this design, or set a standalone price for it in the portal.` }, 400);
+        }
+        targetItems.push(tagLine({
+          name: ei.name,
+          qty: chargeable,
+          amount: Number(price),
+          priceId: "", productId: "", attachments: [], currency: "USD", type: "one_time",
+          description: covered > 0
+            ? `${covered} in the electrical package, ${chargeable} extra`
+            : (hasPkg ? "Added to the electrical package" : "Electrical item"),
+        }, { kind: "electrical_item", nonTaxable: ei.taxable === false }));
+      }
+    }
+  }
   if (summary.lofts > 0) {
     // qty/amount are derived from the loft's configured method inside pushItem: per-unit (each)
     // uses the loft count, per-area (sqft_option) uses total loft sqft.
@@ -1055,6 +1708,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const wcr = await supabase.from("window_colors").select("id, label, rate").eq("client_id", clientId).in("id", wColorIds);
       for (const r of wcr.data ?? []) winColorMap.set(String(r.id), { label: String(r.label || ""), rate: Number(r.rate) || 0 });
     }
+    // Shutter / flower-box colours (Carolyn 2026-09-03). Re-resolved from `colors` by id and
+    // accepted ONLY from rows ticked for TRIM — the same palette the designer offers and the
+    // same trust posture as the door colours above. A forged, stale or foreign id falls back
+    // to the snapshot label, which buys an attacker nothing here: the money on a dressing line
+    // comes from layout_item_pricing, never from the colour.
+    const dressIds = [...new Set(windows.flatMap((w: any) => [w && w.shutterColorId, w && w.flowerBoxColorId]).filter(Boolean).map(String))];
+    const dressColorMap = new Map<string, string>();
+    if (dressIds.length) {
+      const dcr = await supabase.from("colors").select("id, label, trim").eq("client_id", clientId).in("id", dressIds);
+      for (const r of dcr.data ?? []) if (r.trim === true) dressColorMap.set(String(r.id), String(r.label || ""));
+    }
+    const dressLabel = (id: unknown, fallback: unknown): string | null => {
+      const k = id ? String(id) : "";
+      return (k && dressColorMap.get(k)) || (k && fallback ? String(fallback) : null);
+    };
+    // Named on the window's OWN line as well as priced on its own line below. The two are not
+    // redundant: this text is lost whenever the window itself is $0 or included (the `continue`
+    // below drops the whole line), and the priced line is what survives that case.
+    const dressDesc = (w: any): string | null => {
+      const bits: string[] = [];
+      if (w && w.shutters) { const l = dressLabel(w.shutterColorId, w.shutterColorLabel); bits.push(l ? `shutters: ${l}` : "shutters"); }
+      if (w && w.flowerBox) { const l = dressLabel(w.flowerBoxColorId, w.flowerBoxColorLabel); bits.push(l ? `flower box: ${l}` : "flower box"); }
+      return bits.length ? bits.join(" · ") : null;
+    };
     const wg = new Map<string, { name: string; price: number; qty: number; desc: string; fixtureItemId: string | null }>();
     for (const w of windows) {
       // Same rule as fixture doors above: a FOUND catalog row always wins (NULL/0 price =
@@ -1073,8 +1750,23 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const price = basePrice + colorRate;
       if (!(price > 0)) continue;   // $0 / unpriced = included, no line
       const name = (String(w.name || "Window").trim()) || "Window";
-      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, w.wall ? `${w.wall} wall` : null].filter(Boolean).join(" · ");
-      const key = `${name}|${price}|${colorText || ""}`;
+      const dressText = dressDesc(w);
+      // WHERE IT IS. `wall` is one of front/back/left/right and a dormer window has none — its
+      // face is not a wall, so the designer sends `wall: null` and `dormer: true` rather than
+      // inventing a fifth value (2026-09-07). A client that predates the flag sends neither and
+      // reads exactly as it always did.
+      const place = w && w.dormer ? "in the dormer" : (w && w.wall ? `${w.wall} wall` : null);
+      const desc = [w.widthIn && w.heightIn ? `${fmtFtIn(w.widthIn)}×${fmtFtIn(w.heightIn)}` : null, colorText, dressText, place].filter(Boolean).join(" · ");
+      // The dressing joins the group key for the same reason the colour does: two otherwise
+      // identical windows, one with shutters and one without, are two different products to
+      // the shop, and collapsing them into one line would describe both by whichever arrived
+      // first.
+      //
+      // ⚠️ So does the dormer flag, and that one is not cosmetic: `wall` is deliberately NOT in
+      // this key (two identical windows on different walls are one line, which is right), so a
+      // dormer window would otherwise fold into an identical wall window's group and be
+      // described by that window's wall — telling the shop to build both on the front.
+      const key = `${name}|${price}|${colorText || ""}|${dressText || ""}|${w && w.dormer ? "dormer" : ""}`;
       const g = wg.get(key) || { name, price, qty: 0, desc, fixtureItemId: (w.fixtureItemId || null) };
       g.qty++; wg.set(key, g);
     }
@@ -1088,6 +1780,56 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         priceId: "", productId: "", attachments: (im && im.show && im.url) ? imgAttachments(im.url) : [],
         currency: "USD", type: "one_time", description: g.desc || "",
       }, { kind: "window", nonTaxable: g.fixtureItemId ? fixtureTaxable.get(String(g.fixtureItemId)) === false : false }));
+    }
+
+    // ── Shutters and flower boxes as their own priced lines (Carolyn 2026-09-04) ──────────
+    // "Add them as priced items, but for now they are priced 0." The rate is a real
+    // layout_item_pricing key, so the day she charges for them is a rate change and not a
+    // deploy. Mirrors computeLayoutPricingRows in the designer exactly — same grouping (by
+    // colour), same flat rate × count — so the previewed quote and the emailed one agree.
+    //
+    // ⚠ PUSHED EVEN AT $0, which no other block on this endpoint does. Every
+    // `if (!(price > 0)) continue` above is right, because a free window is still on the plan
+    // drawing and still in the window schedule. Dressing has no second home: skip the line and
+    // the customer's design shows shutters while the estimate, the PDF, the GHL opportunity and
+    // the estimate_lines snapshot QuickBooks invoices from never mention them, and the shop
+    // builds a bare window. That is the "I ordered shutters" dispute, and nothing on screen
+    // looks wrong while it happens.
+    //
+    // ⚠ The rate is read as a FLAT amount whatever pricing_method its row carries — unlike the
+    // pushItem path above, which resolves the method. Per-square-foot shutters are not a thing,
+    // and the designer's preview does the same, which is the property that actually matters.
+    //
+    // ⚠ QuickBooks: these arrive as kind "layout_item" with item_key "shutters"/"flowerBox".
+    // qboInvoice falls back to the tenant's kind-level `layout_item||` mapping, which is how
+    // these maps are normally set up — but a tenant who mapped every item_key individually and
+    // set no kind-level default will get a loud "unmapped: layout_item:shutters" and a Retry
+    // button, not a silent wrong invoice.
+    for (const spec of [
+      { itemKey: "shutters", name: "Shutters", on: "shutters", cid: "shutterColorId", clab: "shutterColorLabel" },
+      { itemKey: "flowerBox", name: "Flower Box", on: "flowerBox", cid: "flowerBoxColorId", clab: "flowerBoxColorLabel" },
+    ]) {
+      const rate = layoutRates.get(spec.itemKey)?.rate || 0;
+      const dgr = new Map<string, { label: string | null; qty: number }>();
+      for (const w of windows) {
+        if (!w || !(w as any)[spec.on]) continue;
+        const id = (w as any)[spec.cid] ? String((w as any)[spec.cid]) : "";
+        const g = dgr.get(id) || { label: dressLabel(id, (w as any)[spec.clab]), qty: 0 };
+        g.qty++; dgr.set(id, g);
+      }
+      for (const g of dgr.values()) {
+        targetItems.push(tagLine({
+          name: g.label ? `${spec.name} — ${g.label}` : spec.name,
+          qty: g.qty,
+          amount: rate,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: `${g.qty} window${g.qty === 1 ? "" : "s"}`,
+        }, { kind: "layout_item", itemKey: spec.itemKey, nonTaxable: layoutTaxable.get(spec.itemKey) === false }));
+      }
     }
   }
 
@@ -1154,6 +1896,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (summary.windows > 0) placedKeys.add("window");
     if (summary.lofts > 0) placedKeys.add("loft");
     if (Array.isArray(summary.workbenches) && summary.workbenches.length > 0) placedKeys.add("workbench");
+    if (Array.isArray(summary.shelves) && summary.shelves.length > 0) placedKeys.add("shelf");
+    if (Array.isArray(summary.doubleShelves) && summary.doubleShelves.length > 0) placedKeys.add("doubleShelf");
     if (rampCount > 0) placedKeys.add("ramp");
     if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
     // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.
@@ -1301,7 +2045,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }, { kind: "delivery", nonTaxable: !ssTaxDelivery }));
   }
 
-  // 7b. Opportunity link/create. Pick the most-recently-updated opp for this contact and
+  // 7b. Opportunity link/create. Pick THIS DESIGN'S opportunity when it already has one, else
+  // the most-recently-updated opp for this contact, and
   // refresh its name/value/stage; if it's won we leave it alone and create a new one
   // (won deals are closed shed sales — a fresh quote is a new pursuit). If it's lost we
   // update it back to status "open". Failures here are non-fatal — the estimate still
@@ -1333,41 +2078,55 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         `https://services.leadconnectorhq.com/opportunities/search?location_id=${encodeURIComponent(locationId)}&contact_id=${encodeURIComponent(contactId)}`,
         { headers: ghlHeaders }
       );
-      let mostRecent: any = null;
+      // THE DESIGN'S OWN OPPORTUNITY FIRST (audit 2026-09-06). The search is by CONTACT, and
+      // one contact can hold several deals — a customer pricing two buildings has one per
+      // design. Taking whichever was updated most recently meant a resubmit of design A
+      // renamed, revalued and restaged design B's deal, silently, on a path where every
+      // failure is a console.warn. When the design already carries an opportunity id, that id
+      // IS the answer; the most-recent heuristic stays only for a design that has never been
+      // linked to one.
+      let targetOpp: any = null;
       if (sr.ok) {
         const sd = await sr.json();
         const opps: any[] = Array.isArray(sd?.opportunities) ? sd.opportunities : [];
         if (opps.length > 0) {
-          mostRecent = opps.slice().sort((a, b) => {
-            const at = new Date(a.updatedAt || a.dateUpdated || a.createdAt || 0).getTime();
-            const bt = new Date(b.updatedAt || b.dateUpdated || b.createdAt || 0).getTime();
-            return bt - at;
-          })[0];
+          const ownId = existingDesign.ghl_opportunity_id ? String(existingDesign.ghl_opportunity_id) : "";
+          targetOpp = (ownId
+            ? opps.find((o) => String(o?.id ?? o?._id ?? "") === ownId)
+            : null) || null;
+          if (!targetOpp) {
+            targetOpp = opps.slice().sort((a, b) => {
+              const at = new Date(a.updatedAt || a.dateUpdated || a.createdAt || 0).getTime();
+              const bt = new Date(b.updatedAt || b.dateUpdated || b.createdAt || 0).getTime();
+              return bt - at;
+            })[0];
+          }
         }
       } else {
         console.warn("Opportunity search failed:", sr.status, await sr.text());
       }
 
-      const foundStatus = mostRecent ? String(mostRecent.status || "").toLowerCase() : null;
+      const foundStatus = targetOpp ? String(targetOpp.status || "").toLowerCase() : null;
       const skipUpdateBecauseWon = foundStatus === "won";
 
-      if (mostRecent && !skipUpdateBecauseWon) {
+      if (targetOpp && !skipUpdateBecauseWon) {
         const updateBody: any = { name: oppName, monetaryValue: oppValue };
         if (pipelineId) updateBody.pipelineId = pipelineId;
         if (sendQuoteStageId) updateBody.pipelineStageId = sendQuoteStageId;
         if (foundStatus === "lost") updateBody.status = "open";
+        const targetOppId = String(targetOpp.id ?? targetOpp._id ?? "");
         const ur = await fetch(
-          `https://services.leadconnectorhq.com/opportunities/${mostRecent.id}`,
+          `https://services.leadconnectorhq.com/opportunities/${targetOppId}`,
           { method: "PUT", headers: ghlHeaders, body: JSON.stringify(updateBody) }
         );
         if (ur.ok) {
-          opportunityId = mostRecent.id;
+          opportunityId = targetOppId;
         } else {
           console.warn("Opportunity update failed:", ur.status, await ur.text());
-          opportunityId = mostRecent.id; // still link the estimate to it
+          opportunityId = targetOppId; // still link the estimate to it
         }
       } else if (pipelineId && sendQuoteStageId) {
-        // No opp found, OR most-recent is won → create a fresh opportunity
+        // No opp found, OR the one this design belongs to is won → create a fresh opportunity
         const cr = await fetch(
           `https://services.leadconnectorhq.com/opportunities/`,
           {
@@ -1423,8 +2182,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Only attach a URL that points at THIS tenant's floor-plans prefix — never a caller-supplied
   // external URL — so an attacker can't graft arbitrary links onto a tenant's branded estimate.
   const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+  // TRAVERSAL, NOT JUST A PREFIX (audit 2026-09-07). `startsWith` alone accepts
+  // `<prefix>../<other-tenant>/file.pdf`: every consumer of these URLs — GHL's attachment
+  // fetcher, the customer's mail client, quotePdf's server-side fetch and the portal's <img>
+  // — resolves the dot-segments first, so the object actually served sits OUTSIDE this
+  // tenant's folder and someone else's public file gets grafted onto this tenant's branded
+  // quote. `new URL` resolves the same segments (including the %2e spellings) before the
+  // comparison, so a string that passes can only ever resolve inside the prefix. Returns the
+  // caller's own string unchanged so nothing downstream sees a re-encoded value, and returns
+  // null — never a 4xx — on failure: a shopper must not be blocked by a field they did not
+  // knowingly send, exactly as an absent URL behaves today.
+  const tenantStorageUrl = (value: unknown): string | null => {
+    const raw = String(value ?? "");
+    if (!raw.startsWith(expectedPdfPrefix)) return null;
+    try {
+      return new URL(raw).href.startsWith(expectedPdfPrefix) ? raw : null;
+    } catch {
+      return null; // unparsable — treat as absent
+    }
+  };
   const estimateAttachments: any[] = [];
-  if (imageUrl && String(imageUrl).startsWith(expectedPdfPrefix)) {
+  if (tenantStorageUrl(imageUrl)) {
     estimateAttachments.push({
       id: designId,
       name: `${designId}.pdf`,
@@ -1437,7 +2215,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // only this tenant's own validated storage URL is embedded (never a caller-supplied link). GHL
     // renders the description as HTML; if it keeps the <a> the link is clickable, otherwise the URL
     // is at least visible/copyable.
-    const pdfLink = `<a href="${imageUrl}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
+    // ESCAPED, not just prefix-checked (audit 2026-09-06). The guard above fixes the START of
+    // the URL; everything after the tenant's own prefix is still body-supplied text, and this
+    // interpolation is HTML — a `"` in the tail would close the attribute and let the rest of
+    // the value become markup on a document the tenant's customer reads (and, via the line's
+    // `desc`, on the QuickBooks push). deHtml drops anchors whole, so the two PDFs are
+    // unaffected either way.
+    const pdfLink = `<a href="${escHtml(imageUrl)}" target="_blank" rel="noopener noreferrer">View floor plan (PDF)</a>`;
     buildingLine.description = buildingLine.description ? `${pdfLink}<br>${buildingLine.description}` : pdfLink;
   }
 
@@ -1575,7 +2359,15 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const { data: allocated, error: allocErr } = await supabase
         .rpc("allocate_ss_quote_number", { p_client_id: clientId });
       if (allocErr) {
-        return json({ error: `Could not allocate a quote number: ${allocErr.message}` }, 502);
+        // Authored sentence out, raw Postgres text to the log — portal-settings' `dbFail`
+        // contract. A driver message can carry column names, constraint text and row values,
+        // and this response is read by an anonymous shopper.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "ss_quote_number_alloc_failed",
+          message: `allocate_ss_quote_number failed: ${allocErr.message}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't issue a quote number for this business just now. Please try again in a moment." }, 502);
       }
       ssQuoteNumber = allocated ? String(allocated) : null;
     }
@@ -1630,14 +2422,51 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       };
     }
 
+    // WHAT THE CUSTOMER OWES, TAX INCLUDED (audit 2026-09-06). `oppValue` is the pre-tax
+    // subtotal — it is computed back in step 7b for the CRM opportunity, before the tax stamp
+    // above exists — so printing it as the "Quote total" in the email put a smaller number in
+    // front of the customer than the PDF, the change-order row and the change-order
+    // description, all three of which read this snapshot. Read once, here, from the object
+    // that was just stamped, so the emailed figure IS the persisted one.
+    //
+    // GHL mode is deliberately untouched: its snapshot carries no `tax` key (GHL's own engine
+    // computes tax from the line categories), and totalFromSnapshot's legacy branch clamps an
+    // over-discount differently from the pooled one, so `oppValue` stays correct there.
+    const ssTotal = totalFromSnapshot(estimateLines) ?? oppValue;
+
+    // METERED (migration 179) — and ONLY a real Avalara answer costs anything. A `fallback`
+    // resolve never left the building: it means Avalara is unconfigured, the address had no
+    // state/postcode, or the lookup failed, and billing a tenant for our own outage is the
+    // one outcome worth being careful about. Inert until `tax_lookup` is armed.
+    //
+    // Deliberately AFTER the stamp and deliberately unable to fail the submit: the tax is
+    // already on the snapshot and the customer is waiting on their quote. Losing a charge
+    // costs cents; losing the quote costs the builder a sale.
+    if (resolved.source === "avalara") {
+      const meter = await chargeTaxCalculation(supabase, {
+        clientId,
+        kind: "tax_lookup",
+        idem: taxLookupIdem(clientId, String(designId), resolved.rate, resolved.jurisdiction),
+        refType: "design",
+        refId: String(designId),
+        memo: `Sales tax lookup${resolved.jurisdiction ? ` — ${resolved.jurisdiction}` : ""}`,
+      });
+      if (!meter.charged && meter.reason === "error") {
+        logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "tax_meter",
+          message: `tax_lookup charge failed for ${designId}`,
+        }).catch(() => {});
+      }
+    }
+
     // The plan PDF the designer just uploaded becomes sheets 2-3 (floor plan, four-sided 3D).
     // Same tenant-prefix guard the GHL attachment path uses — never a caller-supplied external
     // URL, since this one is fetched server-side.
-    const planUrl = imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null;
+    const planUrl = tenantStorageUrl(imageUrl);
     // The plain-image twins for the order screen's sidebar cards (migration 127) — same
     // prefix guard, persisted below. SS branch only, so the CRM path never writes them.
-    const planImg = planImageUrl && String(planImageUrl).startsWith(expectedPdfPrefix) ? String(planImageUrl) : null;
-    const view3dImg = view3dImageUrl && String(view3dImageUrl).startsWith(expectedPdfPrefix) ? String(view3dImageUrl) : null;
+    const planImg = tenantStorageUrl(planImageUrl);
+    const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
 
     let quotePdfUrl: string | null = null;
@@ -1715,7 +2544,11 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     //   * treating the pending CO's own baseline as "signed" — after a void there IS no
     //     pending CO, and the next resubmit read the live revision. The baseline is now a
     //     property of the design's agreement, so a void changes nothing about it.
-    let changeOrder: { coNo: number | null; description: string; totalBefore: number | null } | null = null;
+    // `draft` and `id` are set only on the update arm: a change opened by open_amendment and
+    // still being worked on. They decide whether the customer hears about this save at all.
+    let changeOrder:
+      { coNo: number | null; description: string; totalBefore: number | null; draft?: boolean; id?: string }
+      | null = null;
     if (existingDesign.accepted_at) {
       // THE REVISION GOES ONTO THE DESIGN BEFORE THE CO EXISTS. 153's stamp trigger reads
       // designs.estimate_lines at ACKNOWLEDGMENT, so "what the customer just agreed to" is
@@ -1729,15 +2562,49 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // Only on the post-acceptance path, because that is the only place a CO can be raised,
       // and it is a re-write of the same value the persist below sends — idempotent, so a
       // failure here changes nothing that the persist below does not already report durably.
+      // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07) ─────────────────
+      // BEFORE the first write, which is the whole point of putting it here. The design's
+      // priced revision lands two lines down and the guard trigger would refuse the change
+      // order a moment later — leaving the design revised, no change order recorded, and
+      // the customer's quote email already out. Refusing first leaves nothing half-done.
+      //
+      // Both answers come from the same places the rest of the system asks: the gate
+      // function migration 210 installed (which the change_orders trigger also calls, so a
+      // refusal here and a refusal there can never disagree), and the one permission model.
+      {
+        const { data: gate } = await supabase.rpc("order_amendment_gate", {
+          p_client_id: clientId, p_short_code: designId,
+        });
+        if (gate && (gate as Record<string, unknown>).open !== true) {
+          return json({
+            error: String((gate as Record<string, unknown>).reason ??
+              "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
+            reason: "locked",
+          }, 409);
+        }
+        if (!mayAmendCaller) {
+          return json({
+            error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
+            reason: "not_permitted",
+          }, 403);
+        }
+      }
+
       const { error: preCoErr } = await supabase.from("designs")
-        .update({ estimate_lines: estimateLines, updated_at: new Date().toISOString() })
+        .update({ estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines), updated_at: new Date().toISOString() })
         .eq("short_code", designId);
       if (preCoErr) console.warn("pre-change-order estimate_lines persist failed:", preCoErr.message);
       // Hoisted above the diff: the null-diff arm needs it too.
+      // Includes a DRAFT deliberately: open_amendment creates one and the rep then edits the
+      // design, so the row this resubmit belongs to already exists. Without 'draft' here the
+      // upsert below would try to insert a second live row and hit the one-live index.
       const { data: existingCo } = await supabase.from("change_orders")
-        .select("id, co_no, version_before, snapshot_before")
+        // `status` since 2026-09-07: the email decision below turns on whether the row this
+        // resubmit lands on is still a DRAFT, and without the column it reads undefined and
+        // every save in amendment mode mails the customer.
+        .select("id, co_no, status, version_before, snapshot_before")
         .eq("client_id", clientId).eq("short_code", designId)
-        .eq("status", "pending_ack").eq("source", "design_edit")
+        .in("status", ["draft", "pending_ack"]).eq("source", "design_edit")
         .limit(1).maybeSingle();
       const base = agreedBaseline(existingDesign);
       const coDescription = changeOrderDescription(base.lines, estimateLines);
@@ -1757,7 +2624,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
               status: "void",
               void_reason: "The design was resubmitted back to what the customer approved — nothing left to acknowledge.",
             })
-            .eq("id", existingCo.id).eq("status", "pending_ack");
+            // A DRAFT counts: a rep who opened a change, edited, and put everything back is
+            // the ordinary "undo" case, and leaving the draft open would hold the unlock they
+            // spent. The guard trigger's void branch releases it.
+            .eq("id", existingCo.id).in("status", ["draft", "pending_ack"]);
           if (voidErr) console.warn("change order auto-void failed:", voidErr.message);
         }
       } else {
@@ -1783,14 +2653,50 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           const { error: coErr } = await supabase.from("change_orders")
             .update({ ...coFields, version_before: existingCo.version_before ?? coFields.version_before })
             .eq("id", existingCo.id);
-          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal };
-          else console.warn("change order update failed:", coErr.message);
+          // `draft` rides along so the email decision below can see it. Deliberately NOT
+          // flipped to pending_ack here: a rep in amendment mode saves repeatedly while they
+          // work, and deciding the customer should be asked to approve it is a separate,
+          // explicit act (finalize_amendment).
+          if (!coErr) changeOrder = { coNo: existingCo.co_no, description: coDescription, totalBefore: oldTotal, draft: String(existingCo.status) === "draft", id: existingCo.id };
+          else {
+            // DURABLE, not console-only. The revision is already on the design (the pre-CO
+            // persist above), so a failed CO write leaves a signed order carrying lines the
+            // customer never acknowledged and nothing pending to stop send_invoice — and this
+            // project's runtime console stream is not reliably queryable, so app_errors is the
+            // only place triage would ever see it. Still not fatal: the customer is waiting and
+            // the revision is real, so the send continues exactly as before.
+            console.warn("change order update failed:", coErr.message);
+            await logEdgeError({
+              fn: "submit-estimate", req, clientId, code: "change_order_write_failed",
+              message: `change order update failed for ${designId}: ${coErr.message}`,
+              context: {
+                designId: String(designId),
+                coId: existingCo.id,
+                coNo: existingCo.co_no,
+                totalBefore: oldTotal,
+                totalAfter: newTotal,
+              },
+            });
+          }
         } else {
           const { data: coRow, error: coErr } = await supabase.from("change_orders")
             .insert({ client_id: clientId, short_code: designId, source: "design_edit", ...coFields })
             .select("co_no").maybeSingle();
           if (!coErr) changeOrder = { coNo: coRow?.co_no ?? null, description: coDescription, totalBefore: oldTotal };
-          else console.warn("change order insert failed:", coErr.message);
+          else {
+            // Same reasoning as the update arm above: no pending CO means an unacknowledged
+            // revision is invoiceable, and console.warn is not queryable here.
+            console.warn("change order insert failed:", coErr.message);
+            await logEdgeError({
+              fn: "submit-estimate", req, clientId, code: "change_order_write_failed",
+              message: `change order insert failed for ${designId}: ${coErr.message}`,
+              context: {
+                designId: String(designId),
+                totalBefore: oldTotal,
+                totalAfter: newTotal,
+              },
+            });
+          }
         }
       }
     }
@@ -1810,7 +2716,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const intendedTo = String(contact?.email || "").trim();
     let emailed = false;
     let emailReason: string | null = null;
-    if (intendedTo || redirectToTestInbox) {
+    // ⚠️ A DRAFT CHANGE ORDER EMAILS NOBODY (2026-09-07). open_amendment creates a draft and
+    // the rep then works in the designer, saving as they go — and every save lands here. Left
+    // alone, each one would send the customer "here is a change to approve" for a change that
+    // is half-made and may be discarded, with a Review & Approve link to a document they
+    // cannot act on (customer-quotes shows pending_ack only). The rep decides when to ask,
+    // and that decision has its own action. The ESTIMATE email is suppressed too: an
+    // amendment is not a new quote, and sending "your quote is ready" mid-edit is worse.
+    const draftAmendment = !!(changeOrder && changeOrder.draft);
+    if (draftAmendment) {
+      emailReason = "change still open — nothing sent to the customer yet";
+    } else if (intendedTo || redirectToTestInbox) {
       const content = changeOrder
         ? changeOrderEmail({
           businessName,
@@ -1824,7 +2740,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // designs.estimate_lines. Recomputing prints the drifted total in the email while
           // the CO and the customer's quote page show the agreed one (153).
           totalBefore: changeOrder.totalBefore,
-          totalAfter: oppValue,
+          // The same tax-inclusive figure the CO row stamped as total_after_cents. `totalBefore`
+          // is deliberately NOT recomputed — it carries the CO's own stamped baseline.
+          totalAfter: ssTotal,
           reviewUrl: myQuotesUrl(clientId, req),
           quoteTerms: quoteTerms || null,
         })
@@ -1835,7 +2753,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           phone: businessPhone || null,
           website: businessWebsite || null,
           estimateNumber: ssQuoteNumber,
-          total: oppValue,
+          // Tax-inclusive, matching the quote PDF's Total row and the customer portal.
+          total: ssTotal,
           styleLabel,
           sizeLabel: size,
           estimateUrl: myQuotesUrl(clientId, req),
@@ -1868,6 +2787,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         ghl_contact_id: contactId,
         ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
         estimate_lines: estimateLines,
+        // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
+        total_cents: designTotalCents(estimateLines),
         ss_quote_number: ssQuoteNumber,
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
         ...(planImg ? { plan_image_url: planImg } : {}),
@@ -1918,7 +2839,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // A resubmit after the customer signed raised (or refreshed) a pending change order —
       // the designer surfaces "awaiting the customer's approval" instead of a routine
       // success line.
-      ...(changeOrder ? { changeOrder: { coNo: changeOrder.coNo, pending: true } } : {}),
+      // `pending` is FALSE for a draft, and the designer's success screen turns on it: a
+      // draft is not with the customer, so the banner that says "they need to approve this"
+      // would be a lie and Push to Invoice would be hidden for a reason that is not true yet.
+      ...(changeOrder
+        ? { changeOrder: { coNo: changeOrder.coNo, id: changeOrder.id ?? null, draft: !!changeOrder.draft, pending: !changeOrder.draft } }
+        : {}),
       betaMode: effectiveBetaMode,
       betaRedirected: redirectToTestInbox,
       betaRedirectedTo: redirectToTestInbox ? betaEmail : null,
@@ -1947,36 +2873,77 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const r2 = await fetch(url, { method, headers: ghlHeaders, body: JSON.stringify(stripped) });
       if (r2.ok) { r = r2; lineImagesStripped = true; console.warn("Estimate retried without line-item images (GHL rejected attachments)."); }
     }
-    // A stored ghl_estimate_id goes stale in two real, observed ways: staff DELETE the estimate
-    // inside GHL while tidying the location (GHL then answers the PUT 404 "Unable to find estimate
-    // with the given estimateId"), or the customer ACCEPTS it and GHL refuses further edits with
-    // 400 "Estimate is already accepted". Until now either one returned a terminal 502, and since
-    // nothing cleared the column, EVERY later resubmit of that design failed identically — the
-    // design could never produce a quote again without hand-editing the row. Both shapes are in
-    // app_errors against a real tenant. So: fall back to creating a fresh estimate, and let the
-    // new id replace the stale one where it is persisted below.
+    // A stored ghl_estimate_id goes stale in two real, observed ways, and they are NOT the same
+    // event even though GHL surfaces both on the PUT:
+    //
+    //   • GONE (404) — staff DELETED the estimate inside GHL while tidying the location. There
+    //     is no paperwork any more and nobody agreed to anything, so recreating is a plain
+    //     recovery. Before this existed every later resubmit of that design failed identically
+    //     and the design could never produce a quote again without hand-editing the row.
+    //
+    //   • LOCKED (400 "already accepted") — the CUSTOMER ACCEPTED it. The estimate still exists
+    //     and it is an agreement. Recreating it silently issued a second estimate under a new
+    //     number, emailed it, repointed the design, overwrote the line snapshot with no
+    //     change-order gate, reset the opportunity stage, and let the next status sync
+    //     downgrade the design from accepted back to sent — all reported to the caller as an
+    //     ordinary success. REFUSE instead, before any email is sent and before the persist
+    //     below, and say what happened in words the person can act on. (A staff override would
+    //     also need designs.accepted_at stamped on the CRM accept path so sync-design-status'
+    //     floor stops the downgrade; that is a different function and is not done here.)
     if (!r.ok && existingEstimateId) {
       const staleBody = await r.text();
       const gone = r.status === 404;
       const locked = r.status === 400 && /already\s*(been\s*)?accepted/i.test(staleBody);
-      if (gone || locked) {
+      if (locked) {
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "estimate_already_accepted",
+          severity: "info",
+          message: `resubmit refused — the CRM estimate is already accepted: ${staleBody.slice(0, 1000)}`,
+          context: { designId: String(designId), estimateId: existingEstimateId },
+        });
+        return json({
+          error: "This customer has already accepted this estimate, so it can't be changed or re-sent. " +
+            "Start a new quote for the revised design, or amend the accepted one in your CRM.",
+          alreadyAccepted: true,
+        }, 409);
+      }
+      if (gone) {
         console.warn(`submit-estimate: stale ghl_estimate_id (${r.status}) — creating a fresh estimate instead`);
-        // A fresh estimate number, NOT the old one: when the estimate was merely accepted it still
-        // exists in GHL, so reusing its number would collide. The deleted case does not care.
+        // A fresh estimate number, NOT the old one: the deleted case does not care, and a fresh
+        // number is the honest answer for a document nobody can look back at.
         const recreatePayload = { ...finalPayload, invoiceNumber: uniqueSequence.toString() };
         const rc = await fetch(`https://services.leadconnectorhq.com/invoices/estimate`,
           { method: "POST", headers: ghlHeaders, body: JSON.stringify(recreatePayload) });
         if (!rc.ok) {
-          return json({ error: `Failed to recreate estimate after a stale id: ${rc.status} ${await rc.text()}` }, 502);
+          // Authored sentence out, provider body to the log: the CRM's own text carries the
+          // tenant's location id, and this response reaches an anonymous caller.
+          const rcBody = await rc.text();
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_estimate_recreate_${rc.status}`,
+            message: `GHL estimate recreate after a stale id failed (${rc.status}): ${rcBody.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+          return json({ error: "We couldn't rebuild this estimate in the business's CRM. Please try again in a moment." }, 502);
         }
         r = rc;
         recreatedFromStale = true;
       } else {
-        return json({ error: `Failed to update estimate: ${r.status} ${staleBody}` }, 502);
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: `ghl_estimate_update_${r.status}`,
+          message: `GHL estimate update failed (${r.status}): ${staleBody.slice(0, 2000)}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't update this estimate in the business's CRM. Please try again in a moment." }, 502);
       }
     }
     if (!r.ok) {
-      return json({ error: `Failed to create estimate: ${r.status} ${await r.text()}` }, 502);
+      const body = await r.text();
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: `ghl_estimate_create_${r.status}`,
+        message: `GHL estimate create failed (${r.status}): ${body.slice(0, 2000)}`,
+        context: { designId: String(designId) },
+      });
+      return json({ error: "We couldn't create this estimate in the business's CRM. Please try again in a moment." }, 502);
     }
     const d = await r.json();
     estimateId = d?._id || d?.estimate?._id || (recreatedFromStale ? null : existingEstimateId);
@@ -1990,11 +2957,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //     everyone else (and every Resend failure) gets today's GHL action:"email" send.
   //     Recipient is the tenant's test inbox when beta mode is on, otherwise the customer
   //     — see the header for where each path implements that. `betaEmail` was already
-  //     validated above, so by here beta mode implies a usable address. We capture the GHL
-  //     response (status + body) and return it as `sendDebug` so failures don't hide
-  //     behind a generic 200 — the React app or curl caller can inspect what GHL rejected,
-  //     `sentTo` says who actually received it, `provider` says which sender delivered it,
-  //     and `provider` carries the ledger outcome whenever the own-domain path was attempted.
+  //     validated above, so by here beta mode implies a usable address. We report the send as
+  //     `sendDebug` so failures don't hide behind a generic 200 — `status`/`ok` say whether it
+  //     worked (the designer relies on `ok` so it cannot claim a false success), `sentTo` says
+  //     who actually received it, `provider` says which sender delivered it, and `provider`
+  //     carries the ledger outcome whenever the own-domain path was attempted.
+  //
+  //     ⚠️ `body` IS NOT THE PROVIDER'S BODY FOR AN ANONYMOUS CALLER (audit 2026-09-06). This
+  //     whole response goes back to a public, anon-key caller, and the CRM's send responses
+  //     echo `altId` — the tenant's location id, which the 400 further up this function
+  //     deliberately masks and which every other surface in the product masks too. So the raw
+  //     text goes to app_errors, `body` carries a sentence we authored, and the provider's own
+  //     words are kept for a STAFF caller, for whom this is a real debug channel. `sendDetail`
+  //     below is the one place that decides.
   let sendDebug: {
     status: number | null;
     ok: boolean;
@@ -2009,6 +2984,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     sentTo: [],
     provider: "ghl",
   };
+  /** Staff get the provider's own words (capped); everyone else gets the authored sentence. */
+  const sendDetail = (raw: string, authored: string): string =>
+    staffCaller ? raw.slice(0, 2000) : authored;
   try {
     if (estimateId) {
       const hostedUrl = estimateUrl(estimateId);
@@ -2038,7 +3016,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         );
         sendDebug.status = mr.status;
         sendDebug.ok = mr.ok;
-        sendDebug.body = (await mr.text()).slice(0, 2000); // cap to avoid huge responses
+        const manualRaw = await mr.text();
+        sendDebug.body = sendDetail(
+          manualRaw,
+          mr.ok
+            ? "The estimate was marked as sent in the CRM."
+            : "The CRM would not mark the estimate as sent; the estimate email was sent through the CRM instead.",
+        );
+        if (!mr.ok) {
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_send_manually_${mr.status}`,
+            message: `GHL send_manually failed (${mr.status}): ${manualRaw.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+        }
 
         if (mr.ok) {
           // (b) Formal estimate PDF — BEST-EFFORT, own-domain path only. Any failure here
@@ -2094,7 +3085,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             estimateUrl: hostedUrl,
             // Same tenant-prefix guard as the estimate attachment in step 8 — never a
             // caller-supplied external URL in a customer's email.
-            pdfUrl: imageUrl && String(imageUrl).startsWith(expectedPdfPrefix) ? String(imageUrl) : null,
+            pdfUrl: tenantStorageUrl(imageUrl),
             formalPdfUrl,
             quoteTerms: quoteTerms || null,
           });
@@ -2116,16 +3107,20 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             // a second send call on an already-'sent' estimate (double-send verified safe
             // 2026-08-10), so the recovery path is today's exact sender. The failed
             // attempt stays inspectable in sendDebug.ownDomain.
+            // `reason` is our own fixed vocabulary and is safe for anyone; `error` is the mail
+            // provider's raw text, so it follows the same staff-only rule as `body`. The field
+            // was already optional, so its absence is a shape the caller already handles.
             sendDebug.ownDomain = {
               sent: false,
               reason: outcome.reason,
-              ...(outcome.error ? { error: outcome.error } : {}),
+              ...(outcome.error && staffCaller ? { error: outcome.error } : {}),
             };
           }
         } else {
           // send_manually refused → the estimate was never flipped to 'sent'; the GHL
-          // email send below both flips and emails, so fall through to it.
-          console.warn("Estimate send_manually failed:", mr.status, sendDebug.body);
+          // email send below both flips and emails, so fall through to it. The provider's
+          // own text is already in app_errors (logged where the response was read).
+          console.warn("Estimate send_manually failed:", mr.status);
         }
       }
 
@@ -2150,15 +3145,30 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         );
         sendDebug.status = r.status;
         sendDebug.ok = r.ok;
-        sendDebug.body = (await r.text()).slice(0, 2000); // cap to avoid huge responses
-        if (!r.ok) console.warn("Estimate send failed:", r.status, sendDebug.body);
-        else console.log("Estimate send OK:", r.status, sendDebug.body.slice(0, 200));
+        const sendRaw = await r.text();
+        sendDebug.body = sendDetail(
+          sendRaw,
+          r.ok
+            ? "The estimate email was accepted by the CRM."
+            : "The CRM refused to send the estimate email.",
+        );
+        if (!r.ok) {
+          console.warn("Estimate send failed:", r.status);
+          await logEdgeError({
+            fn: "submit-estimate", req, clientId, code: `ghl_estimate_send_${r.status}`,
+            message: `GHL estimate email send failed (${r.status}): ${sendRaw.slice(0, 2000)}`,
+            context: { designId: String(designId) },
+          });
+        } else console.log("Estimate send OK:", r.status);
       }
     } else {
       sendDebug.body = "no estimateId after create/update";
     }
   } catch (e) {
-    sendDebug.body = `send threw: ${(e as Error).message}`;
+    sendDebug.body = sendDetail(
+      `send threw: ${(e as Error).message}`,
+      "The estimate email could not be sent.",
+    );
     console.warn("Estimate send error:", (e as Error).message);
   }
 
@@ -2173,6 +3183,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       ghl_estimate_number: estimateNumber || existingDesign.ghl_estimate_number || null,
       ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
       estimate_lines: estimateLines,
+      total_cents: designTotalCents(estimateLines),
       updated_at: new Date().toISOString(),
     })
     .eq("short_code", designId);

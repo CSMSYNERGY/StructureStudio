@@ -93,6 +93,7 @@ async function call(
   method: "GET" | "POST" | "DELETE",
   url: string,
   form?: Record<string, string>,
+  extraHeaders?: Record<string, string>,
 ): Promise<any> {
   const pair = basicAuthPair();
   if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
@@ -106,6 +107,7 @@ async function call(
         Accept: "application/json",
         Authorization: `Basic ${btoa(`${pair.user}:${pair.pass}`)}`,
         ...(form ? { "Content-Type": "application/x-www-form-urlencoded" } : {}),
+        ...(extraHeaders ?? {}),
       },
       body: form ? new URLSearchParams(form).toString() : undefined,
     });
@@ -245,6 +247,59 @@ export function validateIntake(intake: Partial<BuilderIntake>, hasEin: boolean):
   }
   for (const [label, v] of [["street", intake.street], ["city", intake.city], ["region", intake.region], ["postal code", intake.postalCode]] as const) {
     if (!String(v ?? "").trim()) problems.push(`The registered ${label} is required.`);
+  }
+  return problems;
+}
+
+/**
+ * Cheap pre-flight on the campaign copy — the paragraphs the CARRIERS read. Every rule here is
+ * either a hard Twilio limit or a documented TCR rejection cause, and each one caught here is a
+ * vetting fee and a week not spent.
+ *
+ * ⚠️ THIS DID NOT EXIST UNTIL 2026-09-01, AND THE FIRST REAL REGISTRATION PROVED WHY IT HAD TO.
+ * The submit button was `disabled={busy}` and nothing else, and the server read `p.copy` only in
+ * a LATER branch. So the first live builder submitted with `messageFlow` EMPTY and BOTH sample
+ * messages EMPTY — placeholders showing through untouched inputs — while the screen told her
+ * "Everything is filled in."
+ *
+ * ⚠️ AN EMPTY MessageFlow IS A DOCUMENTED REJECTION, not a blank field. TCR reads it against the
+ * consent language actually present on the builder's website, so "" is a refusal waiting to
+ * happen rather than an unanswered question.
+ *
+ * ⚠️ ENFORCED SERVER-SIDE BECAUSE THE BROWSER IS NOT THE ONLY CALLER, and because the portal
+ * artifact reaches production a week after this function does. The portal mirrors these rules to
+ * grey the button out and say why; THIS is what makes them true.
+ */
+export function validateCampaignCopy(copy: Partial<CampaignCopy>): string[] {
+  const problems: string[] = [];
+
+  const desc = String(copy.description ?? "").trim();
+  if (desc.length < 40) {
+    problems.push("Say a bit more about what you will text customers about — the carriers want a full sentence, not a few words.");
+  } else if (desc.length > 4096) {
+    problems.push("That description is longer than the carriers accept. Keep it under about 4,000 characters.");
+  }
+
+  const flow = String(copy.messageFlow ?? "").trim();
+  if (flow.length < 40) {
+    problems.push("Describe where customers agree to be texted, in a full sentence. Leaving this out is one of the most common reasons the carriers reject a registration.");
+  } else if (flow.length > 4096) {
+    problems.push("That consent description is longer than the carriers accept. Keep it under about 4,000 characters.");
+  }
+
+  const samples = (Array.isArray(copy.messageSamples) ? copy.messageSamples : [])
+    .map((s) => String(s ?? "").trim()).filter(Boolean);
+  if (samples.length < 2) problems.push("Two example messages are required. Write ones you would really send.");
+  if (samples.length > 5) problems.push("Five example messages is the most the carriers accept.");
+  if (samples.some((s) => s.length < 20)) {
+    problems.push("One of the example messages is too short — write it out the way you would actually send it.");
+  }
+  if (samples.some((s) => s.length > 1024)) {
+    problems.push("One of the example messages is longer than a text message can be.");
+  }
+  // The single most-cited campaign rejection: no visible opt-out in the samples.
+  if (samples.length && !samples.some((s) => /\bSTOP\b/i.test(s))) {
+    problems.push("At least one example has to show people how to stop. Keep “Reply STOP to opt out” in it.");
   }
   return problems;
 }
@@ -500,14 +555,90 @@ export type CampaignCopy = {
   helpMessage?: string;
 };
 
+/** ⚠️ BOTH URLS ARE MANDATORY, AND OMITTING THEM IS A ONE-SECOND REJECTION.
+ *
+ *  TCR made `PrivacyPolicyUrl` and `TermsAndConditionsUrl` required on campaign registration on
+ *  2026-06-30. We collected both from the builder, stored them, showed them back on the form —
+ *  and never put them on the wire, so two live campaigns were refused 1.1 SECONDS after creation
+ *  with 30908 (PRIVACY_POLICY_URL) + 30882 (TERMS_AND_CONDITIONS_URL). A verdict that fast is
+ *  field validation, not a review: nothing had crawled anything. A whole day was lost to the
+ *  theory that the marketing site was at fault, and the tell was hiding in plain sight —
+ *  **the plain v1 GET omits both keys entirely**, so the resource looked complete. Ask for them
+ *  with `X-Twilio-Api-Version: v1.2` and they read `null`.
+ *
+ *  Callers pass them explicitly rather than through `CampaignCopy`: they are intake fields the
+ *  builder typed once on their details screen, not the paragraphs they author per campaign. */
+/** The one POST both campaign writes share.
+ *
+ *  ⚠️ NOT `call()`, and this is deliberate: `MessageSamples` is a REPEATED key and a
+ *  `Record<string,string>` cannot hold a duplicate, so the body has to be a URLSearchParams
+ *  built by hand.
+ *
+ *  ⚠️ `X-Twilio-Api-Version: v1.2` is sent on purpose. It is what makes the two policy-URL
+ *  fields visible on the Usa2p resource at all — the plain v1 view drops them, which is
+ *  precisely how they stayed null and unnoticed through two rejections. Proven against the
+ *  live API with this header on both the write and the read-back. */
+async function campaignPost(url: string, params: URLSearchParams): Promise<any> {
+  // ⚠️ ASSERT THE WIRE, NOT THE ARGUMENTS — this is the check that would have caught the
+  // 2026-09-02 rejection and `requirePolicyUrls` would not have. The arguments were correct
+  // that day: both URLs were typed, validated, stored and echoed back on the form. What was
+  // wrong was the gap between them and the request body, and every guard we had inspected
+  // the wrong side of it. This is the last statement before the bytes leave, so a future
+  // refactor that drops an `append` cannot be quiet about it.
+  for (const key of ["PrivacyPolicyUrl", "TermsAndConditionsUrl"]) {
+    if (!String(params.get(key) ?? "").trim()) {
+      throw new TrustHubError({
+        message: `The campaign request is missing ${key}. The carriers refuse a campaign without a privacy policy and terms URL.`,
+        status: 400, code: 0, permanent: true,
+      });
+    }
+  }
+  const pair = basicAuthPair();
+  if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
+  await throttle();
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Basic ${btoa(`${pair.user}:${pair.pass}`)}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "X-Twilio-Api-Version": "v1.2",
+    },
+    body: params.toString(),
+  });
+  const text = await res.text();
+  let body: any = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { /* ignore */ }
+  if (!res.ok) {
+    const code = typeof body?.code === "number" ? body.code : 0;
+    throw new TrustHubError({
+      message: `Twilio refused the campaign (HTTP ${res.status}, code ${code}).`,
+      status: res.status, code, permanent: PERMANENT_CODES.has(code), detail: body,
+    });
+  }
+  return body;
+}
+
+function requirePolicyUrls(privacyPolicyUrl: string, termsUrl: string): void {
+  if (!/^https?:\/\//i.test(privacyPolicyUrl) || !/^https?:\/\//i.test(termsUrl)) {
+    throw new TrustHubError({
+      message: "The carriers require a public privacy policy URL and a terms URL before a campaign can be registered.",
+      status: 400, code: 0, permanent: true,
+    });
+  }
+}
+
 export async function createCampaign(opts: {
   serviceSid: string;
   brandSid: string;
   useCase: string;
   copy: CampaignCopy;
+  privacyPolicyUrl: string;
+  termsUrl: string;
   hasEmbeddedLinks?: boolean;
   hasEmbeddedPhone?: boolean;
-}): Promise<{ campaignSid: string; status: string }> {
+}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+  requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
   const form: Record<string, string> = {
     BrandRegistrationSid: opts.brandSid,
     Description: opts.copy.description,
@@ -515,6 +646,8 @@ export async function createCampaign(opts: {
     UsAppToPersonUsecase: opts.useCase,
     HasEmbeddedLinks: String(!!opts.hasEmbeddedLinks),
     HasEmbeddedPhone: String(!!opts.hasEmbeddedPhone),
+    PrivacyPolicyUrl: opts.privacyPolicyUrl,
+    TermsAndConditionsUrl: opts.termsUrl,
   };
   // ⚠️ MessageSamples is a REPEATED key, not a comma-joined string — Twilio wants one
   // MessageSamples= parameter per sample. That is why this is built by hand rather than
@@ -529,49 +662,117 @@ export async function createCampaign(opts: {
   if (opts.copy.optOutMessage) params.append("OptOutMessage", opts.copy.optOutMessage);
   if (opts.copy.helpMessage) params.append("HelpMessage", opts.copy.helpMessage);
 
-  const pair = basicAuthPair();
-  if (!pair) throw new TrustHubError({ message: "Twilio credentials are not configured.", status: 0, code: 0, permanent: true });
-  await throttle();
-  const res = await fetch(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Basic ${btoa(`${pair.user}:${pair.pass}`)}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: params.toString(),
-  });
-  const text = await res.text();
-  let body: any = {};
-  try { body = text ? JSON.parse(text) : {}; } catch { /* ignore */ }
-  if (!res.ok) {
-    const code = typeof body?.code === "number" ? body.code : 0;
-    throw new TrustHubError({
-      message: `Twilio refused the campaign (HTTP ${res.status}, code ${code}).`,
-      status: res.status, code, permanent: PERMANENT_CODES.has(code), detail: body,
-    });
-  }
-  return { campaignSid: String(body?.sid ?? ""), status: String(body?.campaign_status ?? body?.status ?? "PENDING") };
-}
-
-export async function fetchCampaign(serviceSid: string): Promise<{ status: string; sid: string | null }> {
-  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`);
+  const body = await campaignPost(`${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p`, params);
   return {
-    status: String(r?.campaign_status ?? r?.status ?? ""),
-    sid: r?.sid ? String(r.sid) : null,
+    campaignSid: String(body?.sid ?? ""),
+    status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
+    policyUrlsEchoed: policyUrlsEchoed(body),
   };
 }
 
 /**
- * ⚠️ THERE IS NO UPDATE OPERATION ON A CAMPAIGN. The Usa2p resource supports create, fetch,
- * read and delete — nothing else. Deleting a FAILED campaign and re-creating it is vetted as
- * a NEW submission and charges the vetting fee AGAIN. The free remediation path is a human
- * editing it in the Twilio Console.
+ * ✅ A REJECTED CAMPAIGN IS EDITED IN PLACE — IT IS NEVER DELETED AND RE-CREATED.
  *
- * So this is exposed for the RELEASE path (stopping the monthly fee when a builder leaves),
- * not as a retry mechanism. The operator flow for a rejection is: fix it in the Console,
- * then re-poll.
+ * `UpdateUsAppToPerson` is `POST` to the campaign's own path. Twilio's rule is that **the
+ * vetting fee is assessed once per campaign**, so resubmitting the same resource is free and
+ * unlimited, while delete-and-recreate buys a second vetting. This file asserted the exact
+ * opposite for weeks ("THERE IS NO UPDATE OPERATION"), and that single false comment is what
+ * made destruction look like the only road — it cost a live campaign on 2026-09-02.
+ * Verified against Twilio's OpenAPI spec and then against the live API: a campaign already in
+ * FAILED state accepts this call and goes back to IN_PROGRESS with its `errors` array cleared.
+ *
+ * ⚠️ The seven fields below are ALL REQUIRED by the update contract — this is not a patch, it
+ * is a whole-resource write, so a caller that omits one gets a 400. `UsAppToPersonUsecase`,
+ * the keywords and the opt-in/out/help messages are **create-only** and cannot be corrected
+ * here; getting those wrong really does mean starting over.
  */
+export async function updateCampaign(opts: {
+  serviceSid: string;
+  campaignSid: string;
+  copy: CampaignCopy;
+  privacyPolicyUrl: string;
+  termsUrl: string;
+  hasEmbeddedLinks?: boolean;
+  hasEmbeddedPhone?: boolean;
+}): Promise<{ campaignSid: string; status: string; policyUrlsEchoed: boolean }> {
+  requirePolicyUrls(opts.privacyPolicyUrl, opts.termsUrl);
+  const params = new URLSearchParams();
+  params.append("Description", opts.copy.description);
+  params.append("MessageFlow", opts.copy.messageFlow);
+  params.append("HasEmbeddedLinks", String(!!opts.hasEmbeddedLinks));
+  params.append("HasEmbeddedPhone", String(!!opts.hasEmbeddedPhone));
+  params.append("AgeGated", "false");
+  params.append("DirectLending", "false");
+  params.append("PrivacyPolicyUrl", opts.privacyPolicyUrl);
+  params.append("TermsAndConditionsUrl", opts.termsUrl);
+  for (const sample of opts.copy.messageSamples.slice(0, 5)) params.append("MessageSamples", sample);
+
+  const body = await campaignPost(
+    `${MESSAGING}/Services/${opts.serviceSid}/Compliance/Usa2p/${opts.campaignSid}`,
+    params,
+  );
+  return {
+    campaignSid: String(body?.sid ?? opts.campaignSid),
+    status: String(body?.campaign_status ?? body?.status ?? "PENDING"),
+    policyUrlsEchoed: policyUrlsEchoed(body),
+  };
+}
+
+/** Did the campaign Twilio just wrote come BACK carrying both policy URLs?
+ *
+ *  ⚠️ REPORTED, NEVER THROWN, and the distinction is load-bearing. By the time this can be
+ *  answered the campaign EXISTS and has been vetted; throwing here would abandon a live,
+ *  billed resource before its SID was written down — the orphan bug the Messaging Service
+ *  comment in portal-sms already documents once. The caller records a false, which is how a
+ *  silent regression of the 09-02 shape becomes a log row instead of another lost week. */
+function policyUrlsEchoed(body: any): boolean {
+  return !!String(body?.privacy_policy_url ?? "").trim()
+    && !!String(body?.terms_and_conditions_url ?? "").trim();
+}
+
+/** ⚠️ READ THE ITEM, NOT THE COLLECTION. `GET …/Compliance/Usa2p` answers an ENVELOPE —
+ *  `{ compliance: [ … ], meta: { … } }` — so `r.campaign_status` off the top level is
+ *  ALWAYS `undefined`. `normalizeCampaignStatus("")` then returns "PENDING", which means
+ *  this poller could never once report APPROVED or FAILED: for its whole life it answered
+ *  "still waiting" no matter what the carriers had decided, and Event Streams was silently
+ *  the only thing moving the state machine. Anything that depended on the poll as a backstop
+ *  — a missed webhook, a sink that was never wired — simply never recovered. */
+export async function fetchCampaign(
+  serviceSid: string,
+): Promise<{
+  status: string; sid: string | null; privacyPolicyUrl: string; termsUrl: string;
+  errors: unknown[]; description: string; messageFlow: string; messageSamples: string[];
+}> {
+  // ⚠️ `X-Twilio-Api-Version: v1.2` OR THIS READ IS BLIND TO THE TWO FIELDS THE 09-02 OUTAGE
+  // WAS ABOUT. The plain v1 view omits both keys entirely — not null, ABSENT — so a poller
+  // without this header reports a campaign as complete while the carriers hold nothing. It
+  // is the single cheapest way to prove what Twilio actually has, which is why the compliance
+  // check reads them from here rather than from our own row.
+  const r = await call("GET", `${MESSAGING}/Services/${serviceSid}/Compliance/Usa2p`, undefined, {
+    "X-Twilio-Api-Version": "v1.2",
+  });
+  const one = Array.isArray(r?.compliance) ? r.compliance[0] : r;
+  return {
+    privacyPolicyUrl: String(one?.privacy_policy_url ?? ""),
+    termsUrl: String(one?.terms_and_conditions_url ?? ""),
+    // ⚠️ THE REASONS, READ FROM THE SOURCE. Relying on the Event Streams webhook to deliver
+    // these is how the rejection card ended up rendering "They told us why" over an empty
+    // list: one missed delivery and the builder never learns what was wrong. Twilio holds
+    // the verdict either way, so read it.
+    errors: Array.isArray(one?.errors) ? one.errors : [],
+    // What the carriers ACTUALLY hold, which is not always what our row holds — an operator
+    // editing the campaign through the API leaves the two out of step, and then the form
+    // shows text that was never submitted.
+    description: String(one?.description ?? ""),
+    messageFlow: String(one?.message_flow ?? ""),
+    messageSamples: Array.isArray(one?.message_samples) ? one.message_samples.map(String) : [],
+    status: String(one?.campaign_status ?? one?.status ?? ""),
+    sid: one?.sid ? String(one.sid) : null,
+  };
+}
+
+/** The RELEASE path — stopping the monthly fee when a builder leaves. It is NOT the fix for a
+ *  rejection: see `updateCampaign` above, which is free where this is destructive. */
 /** ⚠️ THE CAMPAIGN SID BELONGS ON THE PATH. Without it Twilio answers 405 (code 20004,
  *  "does not support the attempted HTTP method DELETE"), which reads like a permissions or
  *  API-version problem rather than a missing path segment. Proven against the live API on
@@ -686,8 +887,20 @@ export function normalizeBrandStatus(raw: string): string {
 export function normalizeCampaignStatus(raw: string): string {
   const v = String(raw ?? "").trim().toUpperCase();
   switch (v) {
-    case "VERIFIED": case "APPROVED": return "APPROVED";
-    case "FAILED": case "REJECTED": return "FAILED";
+    // ⚠️ TWO VOCABULARIES, AND MISSING ONE STALLS A BUILDER SILENTLY. The REST resource says
+    // VERIFIED / REJECTED; **Event Streams says `success` / `failure`**, and the whole point of
+    // this function is to flatten that difference. `failure` was missing until 2026-09-01, so
+    // it fell through `default` and was stored VERBATIM as "FAILURE" — which is not "FAILED",
+    // so twilio-events never set status='campaign_failed', never set needs_attention, and
+    // never cleared next_poll_at.
+    //
+    // The real cost: TCR rejected the first live campaign 0.1s after submission, the rejection
+    // arrived and was recorded, and the builder's screen still read "Final review — the
+    // carriers are reviewing how you plan to use texting… Nothing for you to do." It would have
+    // said that forever. Exactly the shape of the Monday webhook bug in CLAUDE.md: the
+    // subscription's vocabulary is not the payload's vocabulary.
+    case "VERIFIED": case "APPROVED": case "SUCCESS": return "APPROVED";
+    case "FAILED": case "REJECTED": case "FAILURE": return "FAILED";
     case "PENDING": case "IN_PROGRESS": return "PENDING";
     default: return v || "PENDING";
   }

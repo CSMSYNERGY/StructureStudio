@@ -202,20 +202,40 @@ async function processEvents(admin: any, events: any[]): Promise<void> {
     const campaignRaw = String(d.campaignregistrationstatus ?? d.campaignStatus ?? "");
     if (campaignRaw) {
       const s = normalizeCampaignStatus(campaignRaw);
-      patch.campaign_status = s;
-      if (s === "APPROVED" && reg.status === "campaign_pending") {
+      // ⚠️ A DECIDED CAMPAIGN NEVER GOES BACK TO PENDING. Twilio delivers these events out of
+      // order — on 2026-09-02 the failure landed at 18:01:12.969 and the SUBMITTED event that
+      // preceded it by Twilio's own clock arrived 246ms LATER, overwriting FAILED with PENDING.
+      // The row then disagreed with itself for hours (`status` rejected, `campaign_status`
+      // pending) and the screen it produced could not be reasoned about. A verdict is terminal
+      // until our own code resubmits, which is the only thing that writes PENDING back.
+      const settled = reg.campaign_status === "APPROVED" || reg.campaign_status === "FAILED";
+      if (!(s === "PENDING" && settled)) patch.campaign_status = s;
+      // ⚠️ PROMOTE FROM `campaign_failed` TOO. A rectified campaign is approved FROM the failed
+      // state — that is the whole point of the free in-place resubmit — and gating this on
+      // `campaign_pending` alone left the builder staring at "the carriers turned this one
+      // down" over an APPROVED campaign, with no route to the number step, forever.
+      if (s === "APPROVED" && ["campaign_pending", "campaign_failed"].includes(String(reg.status))) {
         patch.status = "campaign_approved";
         patch.next_poll_at = null;
+        patch.needs_attention = false;
+        patch.attention_note = null;
+        patch.last_errors = [];
       }
       if (s === "FAILED") {
         patch.status = "campaign_failed";
         patch.next_poll_at = null;
         patch.needs_attention = true;
-        // No campaign update API exists — the free fix is the Console.
-        patch.attention_note = "The carriers rejected the campaign. It has to be corrected in the Twilio Console.";
+        patch.attention_note = "The carriers turned down the way this campaign describes its texting. Fix the wording and send it again — resending costs nothing.";
       }
       handled++;
     }
+    // ⚠️ THE ONE THING THE BUILDER ACTUALLY NEEDS, AND IT USED TO BE THROWN AWAY. Twilio names
+    // the failing fields (30908 PRIVACY_POLICY_URL, 30882 TERMS_AND_CONDITIONS_URL, …) right
+    // here, and nothing stored them: `last_errors` was only ever written on the BRAND path, so
+    // the rejection card rendered "They told us why. Fix what they named" over an empty list.
+    // Two campaigns were refused for the same two fields without that ever reaching a screen.
+    const campErrs = d.campaignregistrationerrors ?? d.campaignRegistrationErrors ?? null;
+    if (Array.isArray(campErrs)) patch.last_errors = campErrs;
     // The CM… campaign SID, kept in its own column so it can never be confused with the QE…
     const cm = String(d.campaignsid ?? d.campaignSid ?? "");
     if (cm) patch.campaign_cm_sid = cm;

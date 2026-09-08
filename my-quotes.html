@@ -64,6 +64,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
 .consent-row{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;color:#334155;margin:12px 0}
 .consent-row input{width:auto;margin-top:2px}
 .accepted-line{margin-top:10px;font-size:13px;font-weight:600;color:#15803D}
+/* The deep-linked card, so a customer arriving from a texted link can see WHICH quote
+   the link meant even when they have several. Fades out on its own. */
+.quote-card.is-linked{box-shadow:0 0 0 3px rgba(61,54,114,.35);transition:box-shadow .5s ease}
 </style>
 </head>
 <body>
@@ -105,7 +108,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       <div id="phone-error" class="error" role="alert" hidden></div>
     </div>
     <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
-    <p class="hint">
+    <!-- HIDDEN, not deleted (audit 2026-09-06). customer-auth refuses channel="email"
+         outright: it used to resolve a proven email to an UNPROVEN phone by scanning
+         designs and mint the session on that phone, and save_design is anon-callable, so
+         anyone could plant the pair. Leaving the button visible would offer a customer a
+         route that now answers with an error - worse than never offering it. The whole
+         email code path below is intact so re-enabling is removing this `hidden` once the
+         channel is re-keyed to a proven email identity. Zero customers are affected:
+         customer_email_otps has never held a row, and all 15 live sessions came via SMS. -->
+    <p class="hint" id="use-email-wrap" hidden>
       <button id="use-email-btn" class="linkish" type="button">Use my email instead</button>
     </p>
   </section>
@@ -227,8 +238,33 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     else { el.textContent = ""; el.hidden = true; }
   }
 
+  /**
+   * The DEEP-LINK target: which quote/invoice this link was built for (`?q=SS-…`).
+   *
+   * Carolyn 2026-09-01: sitting across the table from a customer, the rep sends them a
+   * link and they sign on their own phone. Landing them on a sign-in page and asking them
+   * to find their own quote is the friction that made that not work.
+   *
+   * IT GRANTS NOTHING. The code is only a pointer — the customer still signs in with the
+   * texted code, and `customer-quotes` only ever returns designs whose contact phone
+   * matches the verified session. Open someone else's link on your own number and no card
+   * matches: the page renders your quotes exactly as it always did. That is the same
+   * posture the short code already has in the floor-plan URL.
+   */
+  function readDeepRef() {
+    try {
+      var v = new URLSearchParams(location.search).get("q");
+      if (v && /^[A-Za-z0-9_-]{4,32}$/.test(v.trim())) return v.trim();
+    } catch (e) { /* very old browser — no deep link, everything else still works */ }
+    return null;
+  }
+
   // ── State ──
   var clientId = resolveTenant();
+  // Survives the whole sign-in journey by being page-level: this is a single page that
+  // never navigates, so a customer who arrives cold still lands on their invoice after
+  // the code. Cleared once used so a later re-render does not yank the page around.
+  var deepRef = readDeepRef();
   var tokenKey = clientId ? "ssq_token_" + clientId : null;
   var nameKey = clientId ? "ssq_name_" + clientId : null;
   var bizKey = clientId ? "ssq_biz_" + clientId : null;
@@ -320,6 +356,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     (email ? $("email-input") : $("phone-input")).focus();
   }
   $("use-email-btn").addEventListener("click", function () {
+    // Belt and braces with the `hidden` on the wrapper above: the server refuses the email
+    // channel, so switching to it can only produce an error screen. A stray click - devtools,
+    // a stale cached page, an extension unhiding things - must not reach it.
+    if ($("use-email-wrap").hidden) return;
     setChannel(channel === "email" ? "sms" : "email");
   });
   $("email-input").addEventListener("input", function () { custEmail = this.value.trim(); });
@@ -486,6 +526,62 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       return "$" + n.toFixed(2);
     }
   }
+  // Every figure the pay block prints, derived in ONE place and kept PURE so preflight can
+  // lift it out of the shipped file and execute it against fixtures (see
+  // checkMyQuotesPayFigures in scripts/preflight.mjs). This page is not compiled, not
+  // eslinted and unknown to deno check — its tax block is covered the same way for exactly
+  // this reason, and a pay panel is strictly more money than a tax line.
+  //
+  // Takes CENTS (what customer-pay speaks) and returns display strings via fmtMoney, which
+  // takes DOLLARS. That conversion happens here, once.
+  function payFigures(opt) {
+    var out = { rows: [], askCents: 0, canPay: false, notice: null, noticeTone: "info" };
+    if (!opt) return out;
+    var settled = opt.settledCents || 0;
+    var pending = opt.pendingCents || 0;
+    var bal = (opt.balanceCents === null || opt.balanceCents === undefined) ? null : opt.balanceCents;
+    var deposit = (opt.depositCents === null || opt.depositCents === undefined) ? null : opt.depositCents;
+
+    if (bal !== null && bal <= 0 && pending <= 0) {
+      out.rows.push({ label: "Paid in full", value: fmtMoney(settled / 100), tone: "good" });
+      return out;
+    }
+    // A bank payment that has not funded is NOT money, and the ask is deliberately not
+    // reduced by it — that would look like credit for money nobody has. The button is
+    // removed instead: the way a customer pays twice is by being shown one that still says
+    // they owe it.
+    if (pending > 0) {
+      out.notice = "Bank transfer submitted — clearing. Nothing more to do.";
+      out.noticeTone = "wait";
+      if (bal !== null) out.rows.push({ label: "Balance", value: fmtMoney(bal / 100), tone: "muted" });
+      return out;
+    }
+    if (!opt.canPay) {
+      out.notice = opt.message || null;
+      if (bal !== null && bal > 0) out.rows.push({ label: "Balance", value: fmtMoney(bal / 100), tone: "muted" });
+      return out;
+    }
+    out.canPay = true;
+    out.askCents = opt.askCents || 0;
+    if (opt.askKind === "deposit") {
+      out.rows.push({ label: "Due now", value: fmtMoney(out.askCents / 100), tone: "big" });
+      if (bal !== null) {
+        out.rows.push({
+          label: settled > 0 ? "Paid so far" : "Invoice total",
+          value: fmtMoney((settled > 0 ? settled : bal) / 100),
+          tone: "muted",
+        });
+      }
+      if (deposit !== null && settled > 0) {
+        out.rows.push({ label: "Balance after this", value: fmtMoney((bal - out.askCents) / 100), tone: "muted" });
+      }
+    } else {
+      out.rows.push({ label: settled > 0 ? "Balance" : "Amount due", value: fmtMoney(out.askCents / 100), tone: "big" });
+      if (settled > 0) out.rows.push({ label: "Paid so far", value: fmtMoney(settled / 100), tone: "muted" });
+    }
+    return out;
+  }
+
   function fmtDate(v) {
     if (!v) return null;
     var d = new Date(v);
@@ -586,11 +682,42 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     for (var i = 0; i < quotes.length; i++) {
       list.appendChild(quoteCard(quotes[i] || {}));
     }
+
+    applyDeepLink(list);
+  }
+
+  /**
+   * Land the customer ON the invoice the link was built for, with the sign panel already
+   * open. Runs after the cards exist, and only once — `deepRef` is cleared here so a later
+   * re-render (signing, a change order) never scrolls the page out from under them.
+   *
+   * Silent when it does not match. A link opened on a different number, or after the
+   * quote is gone, simply renders the normal list: no error, and nothing is revealed
+   * about whether that code exists.
+   */
+  function applyDeepLink(list) {
+    if (!deepRef) return;
+    var want = deepRef;
+    deepRef = null;
+
+    var card = list.querySelector('[data-ref="' + (window.CSS && CSS.escape ? CSS.escape(want) : want) + '"]');
+    if (!card) return;
+
+    card.classList.add("is-linked");
+    setTimeout(function () { card.classList.remove("is-linked"); }, 2600);
+    try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { card.scrollIntoView(); }
+
+    // Open the signature panel for them. Only when there IS one — a signed or not-yet
+    // invoiced quote just gets the highlight, never a panel that cannot do anything.
+    var signBtn = card.querySelector("[data-sign-invoice]");
+    if (signBtn) setTimeout(function () { signBtn.click(); }, 420);
   }
 
   function quoteCard(q) {
     var card = document.createElement("div");
     card.className = "quote-card";
+    // The deep link finds its card by this, not by index — the list order is the server's.
+    if (q.quoteRef) card.setAttribute("data-ref", String(q.quoteRef));
 
     // Top row: estimate number + status chip
     var top = document.createElement("div");
@@ -722,6 +849,22 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       var sgnDate = fmtDate(inv.signedAt);
       sgn.textContent = "Invoice signed ✓" + (sgnDate ? " · " + sgnDate : "");
       card.appendChild(sgn);
+      // The signed invoice is the ONE document that carries their signature certificate, so
+      // the link has to OUTLIVE the signature rather than disappear along with invoiceBlock.
+      // It is the same file it was before signing — customer-accept appends the certificate
+      // page to it in place — so `inv.pdfUrl` stays correct here.
+      var signedPdf = safeUrl(inv.pdfUrl);
+      if (signedPdf) {
+        var sLink = document.createElement("a");
+        sLink.className = "btn btn-secondary";
+        sLink.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px;display:inline-block";
+        sLink.href = signedPdf; sLink.target = "_blank"; sLink.rel = "noopener";
+        sLink.textContent = "Invoice " + (inv.number ? String(inv.number) + " " : "") + "(PDF)";
+        card.appendChild(sLink);
+      }
+      // ...and this is where the road used to end. A signed invoice with money outstanding
+      // is the open action, so it takes the position invoiceBlock had.
+      card.appendChild(payBlock(q));
     } else if (inv) {
       card.appendChild(invoiceBlock(q, inv));
     }
@@ -794,7 +937,22 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     if (co.description) {
       var desc = document.createElement("div");
       desc.style.cssText = "font-size:13px;color:#334155;white-space:pre-wrap;margin-top:6px";
-      desc.textContent = String(co.description);   // textContent — never innerHTML
+      // The GENERATED description ends with its own "Total: A -> B" line, and the card
+      // prints that same pair as its own row directly underneath — so the customer read the
+      // figures twice, which looks like a mistake in a document they are about to sign.
+      // Trimmed only when it is the LAST line and the card is going to say it anyway; a
+      // manual change order's typed words are never touched.
+      var dtxt = String(co.description);
+      if (co.totalBefore != null || co.totalAfter != null) {
+        // Split-and-pop rather than a multiline regex: this file is hand-written HTML with
+        // no build step and no linter behind it, and an escape that survives one edit and
+        // not the next takes the WHOLE page down for every customer. Plain string work
+        // cannot be mangled the same way.
+        var dlines = dtxt.split(String.fromCharCode(10));
+        if (dlines.length > 1 && /^Total:/.test(dlines[dlines.length - 1])) dlines.pop();
+        dtxt = dlines.join(String.fromCharCode(10));
+      }
+      desc.textContent = dtxt;   // textContent — never innerHTML
       box.appendChild(desc);
     }
     var beforeStr = fmtMoney(co.totalBefore);
@@ -804,6 +962,23 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       totals.style.cssText = "font-size:13px;font-weight:700;margin-top:6px";
       totals.textContent = (beforeStr || "—") + " → " + (afterStr || "—");
       box.appendChild(totals);
+    }
+    // THE FEE, NAMED, BEFORE THEY APPROVE ANYTHING (2026-09-08). Without this the card read
+    // "$2,800.00 → $2,800.00" on a change carrying a $150 fee, and the customer met that
+    // charge for the first time in the consent sentence — or worse, on the invoice.
+    var feeTotal = (Number(co.feeCents) || 0) + (Number(co.feeTaxCents) || 0);
+    if (feeTotal > 0) {
+      var fee = document.createElement("div");
+      fee.style.cssText = "font-size:13px;color:#B45309;margin-top:6px";
+      fee.textContent = "+ " + (co.feeLabel || "Change order fee") + ": " + fmtMoney(feeTotal / 100);
+      box.appendChild(fee);
+      var nt = fmtMoney(co.newTotal);
+      if (nt) {
+        var newTot = document.createElement("div");
+        newTot.style.cssText = "font-size:13px;font-weight:800;margin-top:4px;color:#92400E";
+        newTot.textContent = "New order total: " + nt;
+        box.appendChild(newTot);
+      }
     }
     var btn = document.createElement("button");
     btn.type = "button";
@@ -818,6 +993,255 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   // The invoice awaiting signature, rendered inside its quote's card (migration 136).
   // Green rather than the change order's amber: this is the expected happy path, not a
   // complication — the customer accepted, the builder billed, one signature closes it.
+  // ── Paying (migration 174) ──────────────────────────────────────────────────────────
+  // Renders lazily: the figures and the tokenizer URL both come from the server, because
+  // what is payable is a server decision (deposit vs balance, the pending-ACH block, the
+  // signature gate) and because this repo is PUBLIC — no CardPointe host may appear in a
+  // file a customer downloads.
+  function payBlock(q) {
+    var box = document.createElement("div");
+    box.style.cssText = "margin-top:12px;border:1px solid #BFDBFE;background:#EFF6FF;border-radius:10px;padding:12px";
+    var status = document.createElement("div");
+    status.style.cssText = "font-size:13px;color:#475569";
+    status.textContent = "Checking what's left to pay…";
+    box.appendChild(status);
+
+    callFn("customer-pay", { action: "pay_options", token: token, quoteRef: q.quoteRef })
+      .then(function (r) {
+        if (invalidSession(r)) { box.textContent = ""; return; }
+        if (!r.ok || !r.data || r.data.error) {
+          // A tenant who has not switched payments on simply has no pay surface, rather
+          // than one that sits there failing.
+          box.textContent = "";
+          return;
+        }
+        renderPay(box, q, r.data);
+      })
+      .catch(function () { box.textContent = ""; });
+    return box;
+  }
+
+  function renderPay(box, q, opt) {
+    box.textContent = "";
+    var fig = payFigures(opt);
+
+    for (var i = 0; i < fig.rows.length; i++) {
+      var row = fig.rows[i];
+      var line = document.createElement("div");
+      line.className = row.tone === "big" ? "qc-tax-total" : "qc-tax-row";
+      line.style.cssText = "display:flex;justify-content:space-between;gap:12px;" +
+        (row.tone === "big" ? "font-size:17px;font-weight:800;color:#0F172A;margin-bottom:2px" : "font-size:13px;color:#475569");
+      var l = document.createElement("span"); l.textContent = row.label;
+      var v = document.createElement("span");
+      v.style.cssText = "font-variant-numeric:tabular-nums;font-weight:" + (row.tone === "big" ? "800" : "700");
+      v.textContent = row.value || "—";
+      line.appendChild(l); line.appendChild(v);
+      box.appendChild(line);
+    }
+
+    if (fig.notice) {
+      var n = document.createElement("div");
+      n.style.cssText = "font-size:13px;margin-top:8px;line-height:1.45;color:" +
+        (fig.noticeTone === "wait" ? "#92400E" : "#475569");
+      n.textContent = fig.notice;
+      box.appendChild(n);
+      if (fig.noticeTone === "wait") {
+        var sub = document.createElement("div");
+        sub.style.cssText = "font-size:12px;color:#64748B;margin-top:4px;line-height:1.45";
+        sub.textContent = "Bank transfers take 2–3 business days. If it doesn't go through we'll let you know and you can try again.";
+        box.appendChild(sub);
+      }
+    }
+    if (!fig.canPay) return;
+
+    // A standing disclaimer BEFORE the card is entered, because whether a fee applies
+    // cannot be known until the card is — the brands forbid surcharging debit. It also
+    // points at the cheaper rail, which is in everyone's interest.
+    var disc = document.createElement("div");
+    disc.style.cssText = "font-size:12px;color:#64748B;margin-top:8px;line-height:1.45";
+    disc.textContent = "A card fee may apply. Paying by bank transfer or debit card avoids it.";
+    box.appendChild(disc);
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-primary";
+    btn.style.cssText = "width:100%;margin-top:10px;font-size:15px;padding:12px 14px";
+    btn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+    btn.addEventListener("click", function () { openPayPanel(box, q, opt, fig, btn); });
+    box.appendChild(btn);
+  }
+
+  function openPayPanel(box, q, opt, fig, btn) {
+    // Toggle, the same idiom as the accept and sign panels — this page has no modal
+    // pattern, and a fixed overlay plus a mobile keyboard plus an iframe is the layout
+    // that traps a customer with no visible way out.
+    var open = box.querySelector(".sign-panel");
+    if (open) {
+      open.parentNode.removeChild(open);
+      btn.className = "btn btn-primary";
+      btn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+      return;
+    }
+    // Demoted to secondary while the panel is open. It is the SAME button re-labelled, and
+    // left as a primary it was the loudest thing on the card — a big dark "Cancel" sitting
+    // above the form the customer is meant to fill in. The primary weight belongs to the
+    // Pay button at the bottom of the panel, which is the action.
+    btn.className = "btn btn-secondary";
+    btn.textContent = "Cancel";
+
+    var panel = document.createElement("div");
+    panel.className = "sign-panel";
+    panel.style.cssText = "margin-top:12px";
+
+    var rail = "card";
+    var tabs = document.createElement("div");
+    tabs.className = "sign-tabs";
+    var frameWrap = document.createElement("div");
+    frameWrap.style.cssText = "margin-top:10px";
+    var errEl = document.createElement("div");
+    errEl.className = "err";
+    errEl.style.cssText = "margin-top:8px";
+    var payToken = null, payExpiry = null;
+
+    var payBtn = document.createElement("button");
+    payBtn.type = "button";
+    payBtn.className = "btn btn-primary";
+    payBtn.style.cssText = "width:100%;margin-top:12px;font-size:15px;padding:12px 14px";
+    payBtn.disabled = true;
+    payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+
+    function mountFrame() {
+      frameWrap.textContent = "";
+      payToken = null; payExpiry = null; payBtn.disabled = true;
+      setError(errEl, "");
+      var f = document.createElement("iframe");
+      f.title = "Payment details";
+      f.setAttribute("scrolling", "no");
+      f.setAttribute("frameborder", "0");
+      // Height comes from the SERVER (cpTokenizerHeight) so this page and the portal's
+      // modal cannot drift. Too short is not cosmetic: at the original 132px the CVV sat
+      // below the fold of a non-scrolling frame, so the form could not be completed and
+      // nothing errored. The fallbacks only matter for a cached page mid-deploy.
+      var tk = opt.tokenizer || {};
+      var h = rail === "ach" ? (tk.achHeight || 130) : (tk.cardHeight || 265);
+      f.style.cssText = "width:100%;border:0;display:block;height:" + h + "px";
+      f.src = rail === "ach" ? opt.tokenizer.achUrl : opt.tokenizer.cardUrl;
+      frameWrap.appendChild(f);
+      if (rail === "ach") {
+        var hint = document.createElement("div");
+        hint.style.cssText = "font-size:12px;color:#64748B;margin-top:6px;line-height:1.45";
+        hint.textContent = "Find these at the bottom of a cheque, or in your banking app. Routing number first, then a slash, then your account number.";
+        frameWrap.appendChild(hint);
+      }
+      return f;
+    }
+
+    // ⚠️ THE ORIGIN TEST IS THE WHOLE SECURITY OF THIS LISTENER. This page holds a session
+    // token in localStorage and had no message listener at all before now; without this,
+    // any page that opened this one could post a forged token and we would hand it to the
+    // server. The origin comes from customer-pay, so it can never be attacker-chosen.
+    var frame = null;
+    var onMsg = function (e) {
+      if (e.origin !== opt.tokenizer.origin) return;
+      if (!frame || e.source !== frame.contentWindow) return;
+      var m = null;
+      try { m = JSON.parse(e.data); } catch (err) { return; }
+      if (m && m.validationError) { payToken = null; payBtn.disabled = true; setError(errEl, m.validationError); return; }
+      if (m && m.errorCode && String(m.errorCode) !== "0") {
+        payToken = null; payBtn.disabled = true;
+        setError(errEl, m.errorMessage || "That doesn't look right — check it and try again.");
+        return;
+      }
+      var tok = m && (m.token || m.message);
+      if (!tok) return;
+      setError(errEl, "");
+      payToken = String(tok); payExpiry = m.expiry || null; payBtn.disabled = false;
+      if (rail === "card") probeSurcharge();
+    };
+    window.addEventListener("message", onMsg, false);
+
+    var feeEl = document.createElement("div");
+    feeEl.style.cssText = "font-size:13px;margin-top:8px;line-height:1.45;color:#92400E";
+    function probeSurcharge() {
+      feeEl.textContent = "";
+      callFn("customer-pay", { action: "surcharge_probe", token: token, quoteRef: q.quoteRef, payToken: payToken })
+        .then(function (r) {
+          if (!r.ok || !r.data) return;
+          if (r.data.applies === true && r.data.chargeCents) {
+            feeEl.textContent = "A " + r.data.percent + "% card fee applies to this card — you'll be charged " +
+              fmtMoney(r.data.chargeCents / 100) + ".";
+            payBtn.textContent = "Pay " + fmtMoney(r.data.chargeCents / 100);
+          } else if (r.data.applies === false) {
+            feeEl.style.color = "#475569";
+            feeEl.textContent = "No card fee on this card.";
+          }
+        })
+        .catch(function () { /* a fee we could not look up must never block a payment */ });
+    }
+
+    ["card", "ach"].forEach(function (id) {
+      var t = document.createElement("button");
+      t.type = "button";
+      t.className = "sign-tab" + (id === rail ? " is-on" : "");
+      t.textContent = id === "card" ? "Card" : "Bank account";
+      t.addEventListener("click", function () {
+        rail = id;
+        var all = tabs.querySelectorAll(".sign-tab");
+        for (var j = 0; j < all.length; j++) all[j].className = "sign-tab";
+        t.className = "sign-tab is-on";
+        feeEl.textContent = "";
+        payBtn.textContent = "Pay " + fmtMoney(fig.askCents / 100);
+        // A reload rather than a field toggle: the two rails need different tokenizer
+        // parameters (a bank account is typed as routing/account, which needs the full
+        // keyboard), and a reload correctly discards whatever was typed in the other tab.
+        frame = mountFrame();
+      });
+      tabs.appendChild(t);
+    });
+
+    panel.appendChild(tabs);
+    panel.appendChild(frameWrap);
+    panel.appendChild(feeEl);
+    panel.appendChild(errEl);
+    panel.appendChild(payBtn);
+    box.appendChild(panel);
+    frame = mountFrame();
+
+    payBtn.addEventListener("click", function () {
+      if (!payToken) { setError(errEl, "Enter your details above first."); return; }
+      payBtn.disabled = true;
+      var was = payBtn.textContent;
+      payBtn.textContent = "Paying…";
+      callFn("customer-pay", {
+        action: "pay",
+        token: token,
+        quoteRef: q.quoteRef,
+        rail: rail,
+        payToken: payToken,
+        expiry: payExpiry || undefined,
+        // The echo that keeps three numbers identical: what is on screen, what the token
+        // was minted against, and what is charged. The SERVER decides the figure.
+        confirmChargeCents: fig.askCents,
+      })
+        .then(function (r) {
+          window.removeEventListener("message", onMsg, false);
+          if (invalidSession(r)) {
+            token = null; lsDel(tokenKey); show("phone");
+            setError($("phone-error"), "Your session expired. Enter your number and we'll text you a new code.");
+            return;
+          }
+          if (r.ok && r.data && r.data.ok) { loadQuotes(); return; }
+          payBtn.disabled = false; payBtn.textContent = was;
+          window.addEventListener("message", onMsg, false);
+          setError(errEl, errText(r, "That payment didn't go through. Check the details and try again."));
+        })
+        .catch(function () {
+          payBtn.disabled = false; payBtn.textContent = was;
+          setError(errEl, "Couldn't reach the server. Check your connection and try again.");
+        });
+    });
+  }
+
   function invoiceBlock(q, inv) {
     var box = document.createElement("div");
     box.style.cssText = "margin-top:12px;border:1px solid #BBF7D0;background:#F0FDF4;border-radius:10px;padding:12px";
@@ -863,6 +1287,8 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       btn.className = "btn btn-primary";
       btn.style.cssText = "width:auto;margin-top:10px;font-size:14px;padding:10px 14px";
       btn.textContent = "Review & Sign Invoice";
+      // Marked so a deep link can open this panel without guessing at button text.
+      btn.setAttribute("data-sign-invoice", "1");
       btn.addEventListener("click", function () { toggleSignPanel(box, q, btn, null, inv); });
       box.appendChild(btn);
     }

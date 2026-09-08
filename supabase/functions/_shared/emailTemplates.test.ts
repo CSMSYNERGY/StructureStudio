@@ -40,6 +40,9 @@ const baseInvoice = () => ({
   quoteTerms: "Net 15.",
 });
 
+/** The stored shape of client_settings.email_template_copy (migration 138) for one kind. */
+const tplCopy = (invoice: Record<string, unknown>) => ({ invoice });
+
 Deno.test("esc escapes every HTML-significant character and survives nullish", () => {
   assert(esc(`<script>&"'`) === "&lt;script&gt;&amp;&quot;&#39;", `esc got: ${esc(`<script>&"'`)}`);
   assert(esc(null) === "", "esc(null) must be empty");
@@ -208,6 +211,7 @@ Deno.test("white-label: no platform branding anywhere in any output", () => {
     estimateEmail(baseEstimate()),
     estimateEmail({ ...baseEstimate(), docWord: "quote" }),
     invoiceEmail(baseInvoice()),
+    invoiceEmail({ ...baseInvoice(), templateCopy: tplCopy({ subject: "Invoice {number}", intro: "Thanks from {business}." }) }),
     acceptanceEmail(baseAcceptance()),
     changeOrderEmail(baseChangeOrder()),
     testEmail({ businessName: "Junior Barns", fromAddress: "info@juniorbarns.example.com" }),
@@ -249,4 +253,121 @@ Deno.test("formalPdfUrl renders a second PDF link; absent renders nothing formal
   const without = estimateEmail(baseEstimate());
   assertNotIncludes(without.html, "View your estimate (PDF)");
   assertNotIncludes(without.text, "Estimate (PDF):");
+});
+
+// ── Per-tenant wording on the INVOICE email (migration 138) ──────────────────────────
+// The wording screen offers an Invoice tab and email_save_template stores the "invoice"
+// kind, so the builder's subject and opening line have to actually reach the invoice.
+
+Deno.test("invoice tenant copy replaces the subject and the opening line", () => {
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    templateCopy: tplCopy({
+      subject: "Invoice {number} for {total} from {business}",
+      intro: "Your barn is on its way! Here is invoice {number} for {total}.",
+    }),
+  });
+  assert(o.subject === "Invoice 000012 for $500.00 from Junior Barns", `subject was: ${o.subject}`);
+  assertIncludes(o.html, "Your barn is on its way! Here is invoice 000012 for $500.00.");
+  assertIncludes(o.text, "Your barn is on its way! Here is invoice 000012 for $500.00.");
+  // The shipped wording is replaced, not appended.
+  assertNotIncludes(o.html, "Thank you for your business.");
+  assertNotIncludes(o.text, "Thank you for your business.");
+  // Structure stays ours: the rows, the CTA and the footer are untouched by a wording edit.
+  assertIncludes(o.html, "Amount due");
+  assertIncludes(o.html, "View Invoice");
+  assertIncludes(o.html, "Net 15.");
+});
+
+Deno.test("invoice copy on the sign path replaces the wording without touching the sign CTA", () => {
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    signUrl: "https://app.example.com/my-quotes?client=junior-barns",
+    templateCopy: tplCopy({ subject: "Please sign invoice {number}", intro: "One last step — sign invoice {number}." }),
+  });
+  assert(o.subject === "Please sign invoice 000012", `subject was: ${o.subject}`);
+  assertIncludes(o.html, "One last step — sign invoice 000012.");
+  assertIncludes(o.html, "Review &amp; Sign Your Invoice");
+  assertIncludes(o.text, "Review and sign your invoice: https://app.example.com/my-quotes?client=junior-barns");
+});
+
+Deno.test("invoice copy fills every token the wording screen advertises", () => {
+  // {building} has no invoice-side value, but it must still resolve: fillTokens leaves an
+  // UNKNOWN token verbatim, so an unsupplied one would ship a literal "{building}".
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    templateCopy: tplCopy({ subject: "{business} {number} {total} {building} {customer} {nope}" }),
+  });
+  assertNotIncludes(o.subject, "{building}");
+  assertNotIncludes(o.subject, "{customer}");
+  assertNotIncludes(o.subject, "{business}");
+  assertNotIncludes(o.subject, "{number}");
+  assertNotIncludes(o.subject, "{total}");
+  assertIncludes(o.subject, "Junior Barns 000012 $500.00");
+  // An unknown token stays verbatim on purpose — a typo the builder can see and fix.
+  assertIncludes(o.subject, "{nope}");
+  // Supplied by a caller that has the contact name, the {customer} token fills.
+  const named = invoiceEmail({
+    ...baseInvoice(),
+    customerName: "Pat Example",
+    templateCopy: tplCopy({ intro: "Hi {customer}, invoice {number} is ready." }),
+  });
+  assertIncludes(named.html, "Hi Pat Example, invoice 000012 is ready.");
+});
+
+Deno.test("invoice copy is escaped in the html half and raw in the text half", () => {
+  // The intro is builder-authored text landing in a customer's inbox — the whole reason
+  // the feature is copy-only. Escaping is what keeps it copy.
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    templateCopy: tplCopy({ intro: `Payment plans & terms: read "our policy" first.` }),
+  });
+  assertIncludes(o.html, "Payment plans &amp; terms: read &quot;our policy&quot; first.");
+  assertNotIncludes(o.html, `read "our policy"`);
+  assertIncludes(o.text, `Payment plans & terms: read "our policy" first.`);
+});
+
+Deno.test("invoice copy carrying markup is dropped, not half-escaped", () => {
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    templateCopy: tplCopy({ subject: "<b>Pay now</b>", intro: `<img src=x onerror=alert(1)>` }),
+  });
+  assertNotIncludes(o.html, "<b>");
+  assertNotIncludes(o.html, "onerror");
+  assertNotIncludes(o.subject, "<b>");
+  // Dropping the field means the shipped wording shows, not a blank.
+  assert(o.subject === "Invoice 000012 from Junior Barns", `subject was: ${o.subject}`);
+  assertIncludes(o.html, "Thank you for your business.");
+});
+
+Deno.test("invoice subject stays one line even with tenant copy", () => {
+  const o = invoiceEmail({
+    ...baseInvoice(),
+    businessName: "Acme\r\nBcc: evil@example.com",
+    templateCopy: tplCopy({ subject: "Invoice {number}\nfrom {business}" }),
+  });
+  assert(!/[\r\n]/.test(o.subject), `subject must not contain CR/LF: ${JSON.stringify(o.subject)}`);
+});
+
+Deno.test("absent, blank or wrong-kind invoice copy keeps the shipped wording byte for byte", () => {
+  // A tenant who never opens the wording screen must see no change whatsoever.
+  const shipped = invoiceEmail(baseInvoice());
+  const inert: unknown[] = [
+    undefined,
+    null,
+    "not an object",
+    42,
+    {},
+    { invoice: null },
+    { invoice: {} },
+    { invoice: { subject: "   ", intro: "" } },
+    // Another kind's wording must never leak onto the invoice.
+    { estimate: { subject: "Estimate wording" }, quote: { intro: "Quote wording" } },
+  ];
+  for (const templateCopy of inert) {
+    const o = invoiceEmail({ ...baseInvoice(), templateCopy });
+    assert(o.subject === shipped.subject, `subject drifted for ${JSON.stringify(templateCopy)}: ${o.subject}`);
+    assert(o.html === shipped.html, `html drifted for ${JSON.stringify(templateCopy)}`);
+    assert(o.text === shipped.text, `text drifted for ${JSON.stringify(templateCopy)}`);
+  }
 });

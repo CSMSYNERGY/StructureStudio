@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<!--
+  dev/setup-shot.html — SCREENSHOT HARNESS for Projects → Client Setup.
+
+  WHY IT EXISTS. CLAUDE.md's standing rule (Carolyn 2026-08-28) is that shipping a change to
+  a Settings surface includes re-capturing that setup step's screenshot. A Claude session has
+  no portal login, so the obvious route — sign in, view-as a demo tenant, crop — is closed.
+  This runs the REAL shipped portal artifact against a stubbed Supabase client instead, so the
+  pixels come from portal.app.compiled.js and the data comes from a real demo tenant. Nothing
+  here re-implements a card; if a card changes, this picture changes with it.
+
+  It is a DEV TOOL. It is served by nothing, referenced by no page, and must never be.
+
+  USE
+    1. Serve the repo root (.claude/launch.json → ss-jenna, port 5687).
+    2. http://localhost:5687/dev/setup-shot            — all three groups, every card
+       ...?only=LayoutPricing,Electrical               — just those cards, in their own groups
+       ...?w=1800                                     — render wider, which renders SHORTER
+    3. Capture crisply (the in-app browser pane downscales; Chrome headless does not):
+       chrome --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2          --window-size=1400,<content height> --virtual-time-budget=10000          --screenshot=out.png "http://localhost:5687/dev/setup-shot?only=LayoutPricing"
+       Read the content height off the page first: document.getElementById("shot").scrollHeight.
+       KEEP SHOTS WIDE AND SHORT — the checklist renders image_url as a ~50px-tall thumbnail
+       (10-projects.jsx), so a tall portrait image becomes an unreadable sliver.
+
+  REFRESHING setup-shot-data.js
+    It is one canned `portal-settings` `catalog` response — the single action all eight Options
+    cards load from — dumped from the demo tenant structure-studio. Re-dump it by reproducing
+    that action's SELECT list (portal-settings/index.ts, `if (action === "catalog")`) in SQL and
+    writing `window.__SS_CATALOG = <json>;`. Use a DEMO tenant, never one with real customers.
+-->
+<html lang="en"><head><meta charset="UTF-8"/>
+<title>Setup screenshot harness — Options tab</title>
+<style>
+
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F6F9FE}
+/* PLACEHOLDERS RECEDE. Carolyn, 2026-09-02: "I want it VERY light and barely
+   readable" — a placeholder is a hint, not content, and the UA default (#757575,
+   and inheriting the field's 600 weight) reads as heavily as a real value. Set
+   here rather than in S.input because ::placeholder is not reachable from an
+   inline style object. `opacity:1` is load-bearing for Firefox, which applies its
+   own placeholder opacity on top of the colour. TYPED TEXT IS UNTOUCHED — S.input
+   keeps #1E293B, so what someone actually writes stays fully legible. */
+input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500}
+/* Dashboard shell: fluid, full-width sidebar layout. The sidebar sticks to the viewport
+   while the page scrolls; below 900px it collapses to an icon rail. Logged-out views
+   center themselves (PortalApp wraps them in a 920px container). */
+.ss-shell{display:flex;min-height:100vh;align-items:stretch}
+.ss-side{width:240px;flex:0 0 240px;background:#FFF;border-right:1px solid #E7EBF0;display:flex;flex-direction:column;padding:16px 14px 12px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.ss-brand{display:block;padding:2px 4px 14px;border-bottom:1px solid #F1F5F9;margin-bottom:10px}
+.ss-logo{display:block;width:100%;height:auto}
+
+.ss-navlabel{font-size:9.5px;font-weight:800;letter-spacing:.13em;text-transform:uppercase;color:#94A3B8;padding:10px 10px 4px;margin-top:4px;white-space:nowrap}
+.ss-nav{display:flex;flex-direction:column;gap:2px}
+.ss-nav a,.ss-nav button{display:flex;align-items:center;gap:11px;padding:8px 11px;border-radius:8px;font-size:13.5px;font-weight:600;color:#475569;text-decoration:none;cursor:pointer;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
+.ss-nav a svg,.ss-nav button svg{width:17px;height:17px;flex-shrink:0;stroke:#94A3B8}
+.ss-nav a:hover,.ss-nav button:hover{background:#F1F5F9;color:#1E293B}
+.ss-nav a:hover svg,.ss-nav button:hover svg{stroke:#475569}
+.ss-nav a.active,.ss-nav button.active{background:#DBEAFF;color:#3D3672;font-weight:700}
+.ss-nav a.active svg,.ss-nav button.active svg{stroke:#3D3672}
+/* Label fills the row and truncates so the status pill always pins to the same far-right
+   edge — long labels (Delivery Schedule, Self Serve Displays) would otherwise shove their
+   pill out of the column. Full text stays available via each button's title tooltip. */
+.ss-nav .lbl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ss-nav .soon{margin-left:auto;white-space:nowrap;font-size:9px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#0F4C46;background:#75E6DA;border-radius:6px;padding:2px 6px;flex-shrink:0}
+.ss-nav .lock{width:13px;height:13px;margin-left:auto;flex-shrink:0;opacity:.6;stroke:#94A3B8}
+.ss-nav .soon + .lock{margin-left:6px}
+.ss-nav .active .soon{background:#3D3672;color:#75E6DA}
+.ss-spacer{flex:1}
+.ss-foot{border-top:1px solid #F1F5F9;padding-top:12px}
+.ss-newlink{display:flex;align-items:center;gap:6px;font-size:12px;color:#64748B;text-decoration:underline;text-underline-offset:2px;cursor:pointer;margin-bottom:12px;padding:0 4px;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
+.ss-newlink:hover{color:#1B7895}
+.ss-newlink svg{width:14px;height:14px;flex-shrink:0}
+.ss-user-wrap{position:relative;margin-bottom:2px}
+.ss-user{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:9px;cursor:pointer;outline:none}
+.ss-user-wrap:hover .ss-user,.ss-user-wrap:focus-within .ss-user{background:#F1F5F9}
+.ss-user .uchev{width:13px;height:13px;margin-left:auto;color:#94A3B8;flex-shrink:0}
+.ss-user-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:5px;display:none;z-index:80}
+.ss-user-wrap:hover .ss-user-menu,.ss-user-wrap:focus-within .ss-user-menu{display:block}
+.ss-user-menu button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
+.ss-user-menu button:hover{background:#FEF2F2;color:#DC2626}
+/* Operator account switcher — click-toggled (NOT hover: the hover menu popping over
+   content is what Carolyn flagged), opens UPWARD like .ss-user-menu. Its initials tile
+   restyles .ss-clogo for the white rail (the original is white-on-dark for the topbar). */
+.ss-switch-wrap{position:relative;margin-bottom:10px}
+.ss-switch{display:flex;align-items:center;gap:10px;width:100%;padding:7px 8px;border-radius:9px;border:1px solid #E2E8F0;background:#F8FAFC;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch:hover{background:#F1F5F9}
+.ss-switch .ss-clogo{width:30px;height:30px;background:#3D3672;border-color:#3D3672;color:#FFF;font-size:11px}
+.ss-switch .stext{min-width:0;display:flex;flex-direction:column}
+.ss-switch .sname{font-size:12.5px;font-weight:800;color:#1E293B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-switch .srole{font-size:10.5px;font-weight:600;color:#94A3B8;white-space:nowrap}
+.ss-switch .uchev{width:13px;height:13px;margin-left:auto;color:#94A3B8;flex-shrink:0}
+.ss-switch-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#FFF;border:1px solid #E2E8F0;border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,0.28);padding:6px;z-index:90}
+.ss-switch-menu input{width:100%;box-sizing:border-box;border:1px solid #CBD5E1;border-radius:7px;padding:7px 9px;font-size:12.5px;font-family:inherit;margin-bottom:5px}
+.ss-switch-list{max-height:264px;overflow-y:auto}
+.ss-switch-list button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:12.5px;font-weight:700;padding:7px 8px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-list button:hover{background:#F1F5F9}
+.ss-switch-list button.cur{background:#FEF3C7}
+.ss-switch-list .ss-clogo.sm{width:24px;height:24px;background:#EEF2FF;border-color:#C7D2FE;color:#3D3672;font-size:10px}
+.ss-switch-list .nm{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-switch-list .vw{margin-left:auto;font-size:10.5px;font-weight:800;color:#92400E;background:#FEF3C7;border-radius:6px;padding:2px 7px;flex-shrink:0}
+.ss-switch-note{font-size:12px;color:#94A3B8;font-weight:600;padding:8px}
+.ss-switch-exit{display:block;width:100%;margin-top:5px;background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;font-size:12.5px;font-weight:800;padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
+.ss-switch-exit:hover{background:#FFEDD5}
+/* Sign Out owns the red hover; a neutral item must not look destructive. */
+.ss-user-menu button.neutral:hover{background:#F1F5F9;color:#1E293B}
+.ss-user-menu button svg{width:15px;height:15px;flex-shrink:0}
+.ss-avatar{width:34px;height:34px;border-radius:50%;background:#DBEAFF;border:1px solid #C3D9F7;color:#3D3672;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:800;flex-shrink:0}
+.ss-user .uname{font-size:13px;font-weight:700;color:#1E293B;line-height:1.15;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.ss-user .umail{font-size:11px;color:#94A3B8;margin-top:1px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.ss-topbar{background:linear-gradient(100deg,#3D3672 0%,#2B4C7E 52%,#1B7895 100%);padding:14px 24px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:40}
+.ss-topbar .ttl{font-size:18px;font-weight:800;color:#FFF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.ss-topbar .ttl span{color:#C9DCEA;font-weight:600;font-size:13px;margin-left:10px}
+.ss-topbar .tenant{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0}
+.ss-clogo{width:34px;height:34px;border-radius:8px;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.32);display:flex;align-items:center;justify-content:center;color:#FFF;flex-shrink:0;font-size:12px;font-weight:800}
+.ss-tname{font-size:15.5px;font-weight:800;color:#FFF;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.ss-body{flex:1;padding:20px 24px}
+.ss-inner{max-width:1240px}
+/* Designer tab: fixed-height shell, the embedded designer scrolls inside its host
+   (body scroll would double-scroll under the sticky topbar). */
+.ss-main.ss-designer-active{height:100vh;height:100dvh}
+.ss-main.ss-designer-active .ss-body{padding:0;overflow:hidden;min-height:0;display:flex;flex-direction:column}
+.ss-designer-host{flex:1;min-height:0;width:100%;overflow:auto;background:#F8FAFC}
+/* (The .ss-admin-active / .ss-admin-host rules that used to live here existed only to give
+   the Admin IFRAME a full-height, single-scroller host. Admin is native as of 2026-07-30 —
+   it renders inside .ss-inner like Settings, so it needs no special layout at all.) */
+.ss-main.ss-viewing{box-shadow:inset 0 3px 0 #B45309}
+.ss-stage-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:2px}
+@media (max-width:680px){.ss-stage-grid{grid-template-columns:1fr}}
+@media (max-width:900px){
+  .ss-side{width:68px;flex-basis:68px;padding:18px 10px;align-items:center}
+  /* The lockup is 3.65:1 — at 48px wide it would be a 13px sliver, unreadable and
+     mistakable for a stray line. There is no square mark in this logo (the favicon is
+     deliberately favicon-only), so the collapsed rail goes purely to icons. */
+  .ss-brand{display:none}
+  /* The switcher needs readable tenant names; a 48px-wide list serves nobody, and the
+     sidebar's own overflow-y would clip a fly-out. The Accounts page covers this mode. */
+  .ss-navlabel,.ss-nav .lbl,.ss-nav .soon,.ss-nav .lock,.ss-newlink span,.ss-user .utext,.ss-user .uchev,.ss-user-menu .mtext,.ss-switch-wrap{display:none}
+  .ss-nav{width:100%}
+  .ss-nav a,.ss-nav button{justify-content:center;gap:0;padding:10px 0}
+  .ss-newlink{justify-content:center;padding:0}
+  .ss-user{justify-content:center}
+  .ss-foot{width:100%}
+  .ss-user-menu button{justify-content:center;padding:10px 0}
+}
+@media (max-width:560px){
+  .ss-topbar{padding:12px 14px}
+  .ss-topbar .ttl span{display:none}
+  .ss-tname{display:none}
+  .ss-body{padding:14px 12px}
+}
+/* Options-tab catalog tables: tighter gutters so the wide fixture tables (Doors/Windows/Ramps,
+   now carrying the Internal-only column) fit without a horizontal scroll bar. Scoped to the
+   .tight wrapper so the shared S.td padding is untouched for every other table. */
+.tight th,.tight td{padding-left:6px;padding-right:6px}
+.tight td{padding-top:8px;padding-bottom:8px}
+.tight input{box-sizing:border-box}
+
+/* Harness only: white page, no chrome, so a crop of #shot matches the existing
+   setup-screens captures (card on white, nothing else). */
+body{background:#FFF}
+#root{display:none}
+#shot{background:#FFF;padding:14px 18px;width:1400px}  /* ?w= overrides */
+</style>
+</head><body>
+<div id="root"></div>
+<div id="shot"></div>
+<script src="/vendor/react-18.2.0.production.min.js"></script>
+<script src="/vendor/react-dom-18.2.0.production.min.js"></script>
+<script src="/dev/setup-shot-data.js"></script>
+<script>
+// ── Fake Supabase ────────────────────────────────────────────────────────────
+// The portal bundle destructures createClient at module scope (portal/01-core.jsx:2),
+// so replacing it here routes EVERY read the real cards make through this stub. The
+// one response that matters is portal-settings `catalog` — all eight Options cards
+// load from that single action — and it is REAL DATA, pulled from the demo tenant
+// structure-studio and dumped to setup-shot-data.js. Nothing is hand-drawn.
+var noop = function(){ return { data: null, error: null }; };
+var SESSION = { access_token: "harness", token_type: "bearer", expires_in: 3600,
+  expires_at: Math.floor(Date.now()/1000) + 3600,
+  user: { id: "00000000-0000-0000-0000-000000000000", email: "harness@example.invalid" } };
+// NOTHING may reach production from a screenshot harness. ssLogError writes app_errors with
+// a RAW fetch (01-core.jsx:88), bypassing the stubbed client entirely, so the host is
+// blocked here as well — a dev harness must never file rows in the real error queue.
+var __realFetch = window.fetch.bind(window);
+window.fetch = function(input, init){
+  var u = String((input && input.url) || input || "");
+  if (u.indexOf("supabase.co") !== -1) {
+    return Promise.resolve(new Response('{"ok":true}', { status: 200, headers: { "content-type": "application/json" } }));
+  }
+  return __realFetch(input, init);
+};
+function tableStub() {
+  var t = {};
+  ["select","eq","is","in","order","limit","gte","lte","neq","filter"].forEach(function(m){ t[m] = function(){ return t; }; });
+  t.maybeSingle = t.single = function(){ return Promise.resolve({ data: null, error: null }); };
+  t.then = function(res){ return Promise.resolve({ data: [], error: null }).then(res); };
+  return t;
+}
+window.supabase = { createClient: function(){
+  return {
+    auth: {
+      // A session must LOOK present: ssInvoke's no-session guard (01-core.jsx:303) short-
+      // circuits every call with "Your session is reconnecting" otherwise, and the cards
+      // render their error state instead of their data.
+      getSession: function(){ return Promise.resolve({ data: { session: SESSION }, error: null }); },
+      getUser: function(){ return Promise.resolve({ data: { user: SESSION.user }, error: null }); },
+      onAuthStateChange: function(){ return { data: { subscription: { unsubscribe: function(){} } } }; },
+      signOut: function(){ return Promise.resolve({ error: null }); },
+    },
+    from: function(){ return tableStub(); },
+    rpc: function(){ return Promise.resolve({ data: null, error: null }); },
+    channel: function(){ var ch = { on: function(){ return ch; }, subscribe: function(){ return ch; }, unsubscribe: function(){ return Promise.resolve("ok"); } }; return ch; },
+    removeChannel: function(){ return Promise.resolve("ok"); },
+    storage: { from: function(){ return { upload: noop, getPublicUrl: function(){ return { data: { publicUrl: "" } }; } }; } },
+    functions: { invoke: function(name, opts){
+      var action = opts && opts.body && opts.body.action;
+      if (name === "portal-settings" && action === "catalog") {
+        return Promise.resolve({ data: window.__SS_CATALOG, error: null });
+      }
+      return Promise.resolve({ data: { ok: true }, error: null });
+    } },
+  };
+} };
+
+// ── Lift the SHIPPED bundle ──────────────────────────────────────────────────
+// Same technique the designer verification used: run the real compiled artifact and
+// publish the components out of its IIFE scope, rather than re-implementing anything.
+// The bundle also boots PortalApp into #root as it runs; that is why #root exists and is
+// hidden — it renders the portal's own login screen, which we do not want in the shot.
+fetch("/portal.app.compiled.js").then(function(r){ return r.text(); }).then(function(src){
+  // Injected at the TOP of the IIFE, not the bottom: the body has an early return, so a
+  // line appended at the end never runs. Every component here is a hoisted function
+  // declaration, so they are all defined before the first statement executes.
+  var head = "(function(){if(!window.__ssBootBlocked){";
+  var i = src.indexOf(head) + head.length;
+  var patched = src.slice(0, i) + "window.__SSX={OptionsGroup:OptionsGroup,WallHeights:WallHeights,DoorsView:DoorsView,WindowsView:WindowsView,VentsView:VentsView,RampsView:RampsView,CladdingView:CladdingView,LayoutPricing:LayoutPricing,Electrical:Electrical,Insulation:Insulation};" + src.slice(i);
+  (0, eval)(patched);
+  var X = window.__SSX, e = React.createElement;
+  var p = { viewingLabel: null, clientId: "structure-studio" };
+  var q = new URLSearchParams(location.search);
+  var only = q.get("only");
+  // ?w= widens the render. A card is fluid, so a wider shot is a SHORTER shot — which is what
+  // the checklist wants (see the header note about thumbnails).
+  if (q.get("w")) document.getElementById("shot").style.width = String(Number(q.get("w")) || 1400) + "px";
+  var groups = [
+    ["Building", "Structural upgrades to the building itself", [["WallHeights", X.WallHeights]]],
+    ["Exterior", "Anything that goes on the outside of the building",
+      [["DoorsView", X.DoorsView], ["WindowsView", X.WindowsView], ["VentsView", X.VentsView], ["RampsView", X.RampsView], ["CladdingView", X.CladdingView]]],
+    ["Interior", "Anything that goes on the inside",
+      [["LayoutPricing", X.LayoutPricing], ["Electrical", X.Electrical], ["Insulation", X.Insulation]]],
+  ];
+  var kids = groups.map(function(g){
+    var cards = g[2].filter(function(c){ return !only || only.split(",").indexOf(c[0]) !== -1; });
+    if (!cards.length) return null;
+    return e(X.OptionsGroup, { key: g[0], title: g[0], hint: g[1] },
+      cards.map(function(c){ return e(c[1], Object.assign({ key: c[0] }, p)); }));
+  }).filter(Boolean);
+  ReactDOM.createRoot(document.getElementById("shot")).render(e(React.Fragment, null, kids));
+});
+</script>
+</body></html>

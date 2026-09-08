@@ -93,7 +93,13 @@ function ssLogError(source, message, code, context, severity) {
         p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: ssResolvedClientId || params.get("client") || null,
-        p_url: location.href.slice(0, 600),
+        // Fragment stripped, never the query string. A password-reset/invite landing is
+        // `/portal#access_token=<jwt>&…&type=recovery`, and supabase-js clears that hash only at
+        // the END of _getSessionFromURL — so a boot_component_missing row, a window.onerror or an
+        // unhandledrejection firing first put the account's email, sub and a truncated token in
+        // this column. `?view=` MUST survive: it is what tells triage a row was written inside an
+        // operator view-as session (see the attribution latch in the invoke wrapper below).
+        p_url: String(location.href).split("#")[0].slice(0, 600),
         p_context: context || null,
         p_severity: severity || "error",
       }),
@@ -119,9 +125,75 @@ window.addEventListener("unhandledrejection", (e) => { const r = e && e.reason; 
 // What was missing is that the degraded tab was SILENT — a tenant loses the designer and
 // nobody finds out. One row, at block scope rather than inside DesignerTab, so it cannot fire
 // twice on a re-render and is not a side effect in render.
-if (!window.StructureStudio) {
-  ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not", "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only" });
+// — and it is now loaded ON DEMAND, so the check above moved with it. The tag in
+// portal.html carries type="ss/designer-src": the browser ignores it, and this loader reads
+// the URL (content hash and all) off it and injects the real script the first time a designer
+// surface renders. Firing boot_component_missing at boot would now be a lie on EVERY page
+// load, so it fires only when an actual load attempt fails — which is the case that was
+// worth knowing about in the first place.
+//
+// ONE in-flight promise, cached forever. Two designer surfaces can mount at once
+// (DesignerTab and DesignerSettings), a tab can be opened, closed and reopened, and none of
+// that may start a second download.
+let ssDesignerLoad = null;
+
+function ssDesignerSrc() {
+  const tag = document.querySelector('script[type="ss/designer-src"]');
+  // Never guess an unbusted URL as a fallback: a missing tag means the page shipped wrong,
+  // and fetching /structure-studio.component.compiled.js with no ?v= would serve whatever a
+  // CDN or service worker had cached from a previous release — a stale designer is worse
+  // than an honest failure message.
+  return tag ? tag.getAttribute("src") : null;
 }
+
+window.ssLoadDesigner = function () {
+  if (window.StructureStudio) return Promise.resolve(window.StructureStudio);
+  if (ssDesignerLoad) return ssDesignerLoad;
+  const src = ssDesignerSrc();
+  ssDesignerLoad = new Promise((resolve, reject) => {
+    if (!src) return reject(new Error("no ss/designer-src tag in the page"));
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = () => {
+      // A 200 that published nothing is the shape a truncated or HTML-substituted asset
+      // takes — onload fires either way, so presence of the global is the only real proof.
+      if (window.StructureStudio) resolve(window.StructureStudio);
+      else reject(new Error("the module loaded but published no StructureStudio global"));
+    };
+    s.onerror = () => reject(new Error("the module failed to load"));
+    document.head.appendChild(s);
+  });
+  ssDesignerLoad.catch((e) => {
+    // Let the next attempt retry: a designer that failed once on a flaky network must not be
+    // dead for the rest of the session, and the user's retry is a page-level refresh away
+    // either way.
+    ssDesignerLoad = null;
+    ssLogError("boot", "the shared component module did not load (structure-studio.component.compiled.js) — the portal still works, the Designer tab does not: " + (e && e.message), "boot_component_missing", { app: "portal", missing: ["structure-studio.component.compiled.js"], degraded: "designer-tab-only", src: src });
+  });
+  return ssDesignerLoad;
+};
+
+// PREFETCH, not defer-to-click. The bytes are off the boot path but still arrive while the
+// portal sits idle, so opening the Designer tab reads a warm cache instead of starting a
+// 110 KB download under a spinner. rel="prefetch" is deliberately the LOWEST priority the
+// platform offers — it yields to every request the visible page makes.
+//
+// requestIdleCallback where it exists (not Safari), a timer everywhere else. Either way it is
+// after first paint, which is the only property that matters.
+(function () {
+  const warm = () => {
+    if (window.StructureStudio || ssDesignerLoad) return;
+    const src = ssDesignerSrc();
+    if (!src) return;
+    const l = document.createElement("link");
+    l.rel = "prefetch";
+    l.as = "script";
+    l.href = src;
+    document.head.appendChild(l);
+  };
+  if (typeof requestIdleCallback === "function") requestIdleCallback(warm, { timeout: 4000 });
+  else setTimeout(warm, 2500);
+})();
 // ── Operator "view as" tenant override (transport-level) ──────────────────────
 // While an operator has another tenant's portal open, every portal-settings /
 // portal-billing / sync-design-status call must act on THAT tenant. This is a property of
@@ -143,7 +215,7 @@ let ssTargetClientId = null;   // set by Dashboard during render; null when not 
 // would inject targetClientId and hand operators exactly that. The function itself refuses
 // a targetClientId with a 403, so adding it here would break every operator call rather
 // than quietly widening access — that pairing is intentional, not an oversight to fix.
-const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms"];
+const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-status", "qbo-oauth-connect", "portal-schedule", "portal-setup", "portal-sms", "portal-payments"];
 
 // Capture every portal-settings edge-function error in one place by wrapping invoke.
 //
@@ -154,6 +226,35 @@ const SS_TENANT_SCOPED_FNS = ["portal-settings", "portal-billing", "sync-design-
 // portal-settings call in operator view-as resolved the OPERATOR'S OWN tenant. The fix
 // is to mint ONE instance, wrap it, and pin it as an own data property so it shadows
 // the prototype getter (verify in a console: `sb.functions === sb.functions` → true).
+// ── Is this page going away? ─────────────────────────────────────────────────────────────
+// A fetch that was in flight when the browser navigates or the tab closes REJECTS, and
+// supabase-js surfaces that as FunctionsFetchError — the same shape as a genuine "the
+// function is unreachable" failure, because Chrome reports both as `TypeError: Failed to
+// fetch`. The error alone cannot tell them apart; only knowing the page was leaving can.
+//
+// Left unclassified it is filed as a FAULT. Running the new smoke suite produced 186 such
+// rows in two hours (portal-settings status, portal-billing status, get_profile) purely
+// because the test navigates the moment __ssAppBooted flips. A REAL user clicking away
+// mid-load produces the identical row, which is why 57 had already accumulated before the
+// suite existed. That volume is not harmless: it is exactly what buries a real
+// unreachable-function incident in the queue the severity split exists to keep clean.
+//
+// ⚠️ THE FLAG IS THE ONLY DISCRIMINATOR, AND IT IS DELIBERATELY NARROW. `pagehide` and
+// `beforeunload` fire when this document is actually being torn down or replaced. Do NOT
+// widen this to `document.visibilityState === "hidden"`: a backgrounded tab is hidden while
+// still very much alive, and a function that becomes unreachable there is a real outage we
+// need to hear about. Over-filtering here would hide the very incidents this row exists for.
+//
+// Never reset: once a page is leaving it does not come back. A bfcache restore fires
+// `pageshow` on a page that never ran this line again in a state that matters here — the
+// app re-mounts and re-runs its effects — so clearing it would only reopen the window.
+let ssPageLeaving = false;
+try {
+  const ssMarkLeaving = () => { ssPageLeaving = true; };
+  addEventListener("pagehide", ssMarkLeaving, { capture: true });
+  addEventListener("beforeunload", ssMarkLeaving, { capture: true });
+} catch (_pl) { /* an environment without these events just keeps the old classification */ }
+
 const __ssFunctions = sb.functions;
 const __ssInvoke = __ssFunctions.invoke.bind(__ssFunctions);
 __ssFunctions.invoke = async (name, opts) => {
@@ -275,12 +376,36 @@ __ssFunctions.invoke = async (name, opts) => {
       //   select message, count(*) from app_errors where severity = 'info'
       //   group by 1 having count(*) > 20 order by 2 desc;
       const st = (res.error && res.error.ssStatus) || null;
+      // A transport failure on a page that is ALREADY LEAVING is the navigation killing its
+      // own request, not the function being unreachable. Same treatment, and for the same
+      // reason, as `session_reconnecting` above: demoted to info under its OWN code so it
+      // stays countable, never dropped. `status` is null on this path by definition — a
+      // request that never completed has no HTTP status — which is what distinguishes it
+      // from a 5xx the server actually sent while the user happened to be navigating.
+      const ssAborted = ssPageLeaving && st === null
+        && (res.error && res.error.name) === "FunctionsFetchError";
+      // A DELIBERATE 5xx REFUSAL. The status split below reads 4xx as "the product declined"
+      // and everything else as "something broke" — but a few refusals have to answer 5xx, and
+      // they say so with the x-ss-refusal header (logError.ts, and the `refusal()` helpers in
+      // customer-auth / customer-pay / portal-payments / portal-settings). Without reading it,
+      // "Taking cards isn't switched on for this account yet" — a tenant who simply has not
+      // enabled payments — filed as a FAULT every time the Orders tab loaded for them.
+      //
+      // ⚠️ THIS ONLY WORKS BECAUSE THE FUNCTIONS NOW NAME IT IN Access-Control-Expose-Headers.
+      // A custom header is invisible to cross-origin JS otherwise, and this read would return
+      // null forever while looking perfectly correct. If a new function grows a refusal()
+      // helper, it must expose the header too or its 5xx refusals land back in the fault queue.
+      let ssRefusal = false;
+      try {
+        const ctx = res.error && res.error.context;
+        ssRefusal = !!(ctx && ctx.headers && ctx.headers.get("x-ss-refusal") === "1");
+      } catch (_r) { /* an unreadable context must never cost us the row */ }
       ssLogError(SS_ERR_SOURCE, (res.error && res.error.message) || (res.data && res.data.error),
-        (res.error && res.error.name) || null,
+        ssAborted ? "fetch_aborted_navigating" : ((res.error && res.error.name) || null),
         { fn: name, action: opts && opts.body && opts.body.action, target: injected,
           status: st,
           reason: (res.error && res.error.ssReason) || null },
-        (st >= 400 && st < 500) ? "info" : "error");
+        (ssAborted || ssRefusal || (st >= 400 && st < 500)) ? "info" : "error");
     }
   } catch (_) {}
   // Tripwire. portal-settings echoes the tenant it actually resolved. If it disagrees with
@@ -375,12 +500,16 @@ const TAB_META = {
   // NOT renamed: "Deals". She talked herself out of it at 15:00 — "a quote can also mean you
   // do more than one quote for one deal, so let's leave it on the deals side right now."
   designs: ["Pipeline", "Customer designs and quotes — as a list or a pipeline board"],
-  leads: ["Contacts", "Everyone who has enquired, and their activity"],
-  orders: ["Orders", "Track accepted quotes from sale to delivery — coming soon"],
-  releases: ["What's New", "Latest features and fixes"],
+  contacts: ["Contacts", "Everyone who has enquired, and their activity"],
+  orders: ["Orders", "Track accepted quotes from sale to payment and delivery"],
+  support: ["Support", "Get set up, report a problem, request a feature, and see what's new"],
   settings: ["Settings", "Structures, options, colors, branding & estimates, connection, QuickBooks, and billing"],
   quickbooks: ["QuickBooks", "QuickBooks Online connection and invoice item mappings"],
-  "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices — coming soon"],
+  // Not "— coming soon" any more: RealTime Pricing shipped 2026-08-28 inside Settings →
+  // Structures. This string is the page-header subtitle (12-shell.jsx), and it sits directly
+  // above a card that already says the feature is available — so leaving it made the one page
+  // a deep link lands on contradict itself. The other three teasers keep the suffix.
+  "on-demand-pricing": ["RealTime Pricing", "Live building costs from your lumber prices"],
   "build-schedule": ["Build Schedule", "Track buildings from order to done"],
   "delivery-schedule": ["Delivery Schedule", "Plan truck loads and manage deliveries"],
   "inventory": ["Inventory", "Buildings on your lots, ready to sell"],
@@ -406,11 +535,24 @@ const TAB_META = {
 // `_redirects` needs `/portal/* /portal.html 200` for these to survive a cold load. A plain
 // static server ignores _redirects, so deep links only work on beta/production — locally
 // the app still runs, it just always boots at /portal.html.
+const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
   if (parts[0] !== "portal" && parts[0] !== "portal.html") return { page: null, sub: null };
-  return { page: parts[1] || null, sub: parts[2] || null };
+  // Old tab ids that must keep resolving. `leads` was renamed to `contacts` on 2026-09-02 so
+  // the URL matches the label and the server-side permission area, both already "contacts".
+  // `releases` became `support` on 2026-08-30 (Carolyn) — the page had already outgrown its
+  // name: it carries the setup checklist and two-way submission threads, not just a changelog.
+  // Its sub-paths ride the alias for free, which matters because /portal/releases/setup and
+  // /portal/releases/mine are both linked from elsewhere in the product.
+  // Three live shapes depend on this: /portal/leads (nav + bookmarks), /portal/leads/c-<uuid>
+  // (record deep links and browser history), and /portal/designs/people (the merged-era alias).
+  // Without it every caller does `TAB_META[p.page] ? p.page : "designs"`, so a stale link would
+  // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
+  // existing replaceState then rewrites the address bar to the new path, with no history entry.
+  const page = parts[1] || null;
+  return { page: (page && SS_TAB_ALIASES[page]) || page, sub: parts[2] || null };
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -429,10 +571,20 @@ function ssIsBetaHost() {
   return /(^|\.)beta(-[a-z0-9-]+)?(\.|--)/.test(h);
 }
 
-// The four teaser tabs the Coming Soon group points at. On a production host the nav
+// The three teaser tabs the Coming Soon group points at. On a production host the nav
 // group is hidden AND these routes clamp (hiding a nav item does not remove its route —
 // TAB_META is what grants routability, and bookmarked deep links exist).
-const SS_SOON_TABS = ["on-demand-pricing", "rent-to-own-contracts", "reports", "self-serve-display-units"];
+//
+// ⛔ "on-demand-pricing" is NOT one of them any more, and must not come back. RealTime
+// Pricing left the Coming Soon group on 2026-08-28 and shipped inside Settings → Structures;
+// 12-shell.jsx kept its route and its landing card "for old deep links" — but the id stayed
+// in this array, and the clamp below runs BEFORE every role check, `canAdmin` included. So a
+// production owner who bookmarked the tab while it was in the nav was bounced to Pipeline
+// with no pointer to the feature they pay for, and could not reach the card 12-shell.jsx
+// renders for exactly that person. quickbooks and view-3d got the same nav-entry-removed
+// treatment and were correctly never listed here; this now matches them. The other three
+// stay clamped on production (Carolyn 2026-08-27, "Go ahead and do it, yes").
+const SS_SOON_TABS = ["rent-to-own-contracts", "reports", "self-serve-display-units"];
 
 // Keeps the query string (?view=<clientId> is orthogonal to the path and must survive
 // every navigation) and drops any hash.
@@ -441,18 +593,20 @@ function ssPagePath(page, sub) {
   return base + (window.location.search || "");
 }
 
-// Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
-// (product news), and the coming-soon teaser tabs (previews, no data). Everything else is
+// Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
+// setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
+// data). Everything else is
 // admin-only. SUPERSEDED for anyone whose tenant row carries per-area access (migration
 // 100) — see TAB_AREA below; this list is the fallback for the older binary shape.
-const NONADMIN_TABS = ["designer", "designs", "leads", "orders", "releases", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
+const NONADMIN_TABS = ["designer", "designs", "contacts", "orders", "support", "on-demand-pricing", "inventory", "repairs", "view-3d", "build-schedule", "delivery-schedule", "rent-to-own-contracts", "self-serve-display-units", "commissions", "reports"];
 
 // Which permission area each page needs to be VISIBLE (migration 100). The server ships the
 // caller's resolved map on the status call and enforces it on every action regardless —
 // this only decides what is worth showing, so that a driver sees a portal made of the four
 // things they do rather than a wall of tabs that 403.
 //
-// A page absent from this map is not access-controlled: "releases" is product news, and the
+// A page absent from this map is not access-controlled: "support" is product news plus a
+// person's own submissions, and the
 // coming-soon teasers render no tenant data at all.
 const TAB_AREA = {
   designer: "designer",
@@ -461,7 +615,7 @@ const TAB_AREA = {
   // tab needed EITHER because it showed both; a rep granted only contacts must not get the
   // customer-designs list back through a tab that no longer contains it.
   designs: "designs",
-  leads: "contacts",
+  contacts: "contacts",
   inventory: "inventory",
   orders: "orders",
   "build-schedule": "build_schedule",
@@ -482,6 +636,13 @@ const SETTINGS_TAB_AREA = {
   options: "settings_options",
   colors: "settings_options",
   branding: "settings_branding",
+  // Company (2026-09-04) is the Business Details card lifted out of Branding into its own
+  // sub-tab. It writes the SAME client_settings.business_* columns through the SAME global
+  // save, which the server gates settings_branding:edit — so it must share that area or the
+  // sub-tab appears for someone the server will refuse. A new area here would also mean a
+  // new row in _shared/access.ts AND its hand-maintained SQL twin `area_level_for()`, for a
+  // split that grants nothing new.
+  company: "settings_branding",
   connection: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
@@ -498,19 +659,94 @@ const SETTINGS_TAB_AREA = {
 const SETTINGS_AREAS = ["settings_structures", "settings_options", "settings_branding",
   "settings_crm", "settings_quickbooks", "settings_team", "settings_billing", "settings_email"];
 
-// 'own' (commissions) counts as read — see canRead in _shared/access.ts. Kept deliberately
-// tiny and mirrored rather than imported: portal.html has no module loader, and the SERVER
-// is the enforcement point, so a drift here costs a wrong tab and never wrong access.
+// 'own' counts as read — see canRead in _shared/access.ts. TWO areas speak it now:
+// commissions ("your own payouts") and, since migration 193, contacts ("the customers you
+// own or follow"). Kept deliberately tiny and mirrored rather than imported: portal.html has
+// no module loader, and the SERVER is the enforcement point, so a drift here costs a wrong
+// tab and never wrong access.
 function ssCanRead(access, area) {
   const v = access && access[area];
   return v === "view" || v === "edit" || v === "own";
 }
-// The write half. 'own' is NOT write: it means "your own commission rows", a read scope, and
-// treating it as edit would let a rep act on an area they can only look at. Mirrored from
-// canWrite in _shared/access.ts for the same reason ssCanRead is — the server enforces, this
-// only decides what is worth rendering.
+// The write half. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead
+// is — and it has to mirror the ownWrites rule too, not just the 'edit' comparison.
+//
+// 'own' means "your rows only" and each area says separately whether that WRITES:
+//   contacts    — yes, since 2026-09-07 (Carolyn: "let dealers edit their own contacts"), so
+//                 the contact editor, note box, activity form and SMS/email composers all
+//                 render for a dealer. The server narrows each one to their own customers
+//                 (portal-settings' CONTACT_ROW_SCOPE); this only decides what is offered.
+//   commissions — no. 'own' there is "see your own payout", and a rep editing their own
+//                 commission is what the whole feature exists to prevent.
+//
+// OWN_WRITE_AREAS is the browser's copy of that flag. It is small enough to be worth the
+// duplication and dangerous enough to be worth naming: adding an area to it without the
+// server agreeing renders buttons that 403, and the reverse hides a button somebody has
+// every right to press.
+const OWN_WRITE_AREAS = new Set(["contacts"]);
 function ssCanWrite(access, area) {
-  return !!access && access[area] === "edit";
+  if (!access) return false;
+  const v = access[area];
+  return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
+}
+
+// ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
+//
+// TAB_AREA above answers "may this person open this page". This answers a question the
+// portal has never had to ask before: "and are they seeing all of it?"
+//
+// Carolyn, 2026-09-04 @1:02:16, on a builder whose salespeople are independent dealers: "he
+// also doesn't want them to see each other's quotes either … they would only see the list,
+// the pipelines or the quotes that they have created themselves … if the owner wants the
+// employees to see, then they just toggle the button in the settings." The button is the
+// `contacts` switch on the Team screen, and its new setting is 'own'.
+//
+// ⚠️ THE AREA THAT SCOPES A LIST IS NOT THE AREA THAT REVEALS IT, and that is the whole
+// reason this is a second registry rather than a flag on TAB_AREA. Carolyn, same call
+// @1:09:30: "we do not ever assign deals. We only assign contacts and followers." A design
+// has no assignee; it is visible because its CUSTOMER is. So the Pipeline is REVEALED by
+// `designs` and SCOPED by `contacts`, and mapping a tab to one area for both questions would
+// have quietly made the wrong switch do the work.
+//
+// ⚠️ THIS IS A COURTESY, exactly as the nav is. The rows are already gone by the time they
+// reach here — migration 193's restrictive policies narrow the browser's own PostgREST reads
+// (Pipeline, Contacts, browsing leads) and portal-settings narrows what it returns, because
+// the service role is BYPASSRLS and gets nothing from those policies. What this registry is
+// for is EXPLAINING a short list, so a rep whose pipeline just halved reads a sentence
+// instead of filing a bug.
+const ROW_SCOPE_AREA = {
+  designs: "contacts",     // the Pipeline: designs, scoped by whose customer they belong to
+  contacts: "contacts",    // the customer list itself
+  orders: "contacts",      // orders_designs is filtered server-side by the same rule
+  inventory: "contacts",   // the ESTIMATES on a lot building; the buildings themselves are not
+};
+
+// Is this person limited to their own rows in this area? The mirror of ownContactsOnly() in
+// _shared/access.ts, and the only place the literal 'own' is compared for a row scope here.
+//
+// Owners can never be narrowed and no check for that is needed at this altitude either: the
+// server resolves an owner to 'edit' on every area before consulting their stored map, so
+// `access.contacts` is never 'own' in a map the portal was handed.
+function ssOwnRowsOnly(access, area) {
+  return !!access && access[area] === "own";
+}
+
+// Is the list on this tab currently showing only the caller's own rows?
+function ssRowScoped(access, tab) {
+  const area = ROW_SCOPE_AREA[tab];
+  return !!area && ssOwnRowsOnly(access, area);
+}
+
+// The sentence to put above a scoped list. Returns null when nothing is being hidden, so a
+// caller can render it unconditionally.
+//
+// It names the RULE ("assigned to you or following") rather than a count, deliberately: a
+// count would have to come from a second, unscoped read, which is the leak this whole
+// feature exists to close.
+function ssRowScopeNote(access, tab) {
+  if (!ssRowScoped(access, tab)) return null;
+  return "You're seeing the customers assigned to you or that you're following. "
+    + "Ask an owner or admin if you need to see everyone's.";
 }
 function ssCanSeeTab(tab, access) {
   if (!access) return NONADMIN_TABS.includes(tab);   // pre-migration-100 shape: old behaviour
@@ -531,11 +767,12 @@ function ssCanSeeTab(tab, access) {
 // the pre-migration-100 shape lands exactly where it always did; then the first page the
 // person actually holds an area for (TAB_AREA[x] required — the no-data teaser tabs pass
 // ssCanSeeTab for everyone and would otherwise win over a page they were granted); then
-// "releases": product news, no tenant data, never refused for any access map.
+// "support": product news and one's own submissions, no other tenant data, never refused
+// for any access map — which is why it is the last-resort landing page below.
 function ssFallbackTab(access) {
   if (ssCanSeeTab("designs", access)) return "designs";
   const t = NONADMIN_TABS.find((x) => x !== "designs" && TAB_AREA[x] && ssCanSeeTab(x, access));
-  return t || "releases";
+  return t || "support";
 }
 
 // "accounts", "admin" and "projects" are operator-gated (independent of tenant role) and sit
@@ -547,12 +784,30 @@ function ssFallbackTab(access) {
 // to sit ABOVE Dashboard's early returns (tenant loading / no tenant) — a hook below them
 // changes the hook count between renders, which is React error #310 and a blank screen.
 // The comment on `designerOpened` says the same thing; this is the second time it has bitten.
-function ssClampTab(tab, isOperator, canAdmin, access) {
+// `canProjects` is the SECOND door into the Projects console (migration 183): a CSM Synergy
+// team member granted the `projects` area on Settings → Team, who is not an operator at all.
+// It defaults to `isOperator` so every existing caller keeps exactly today's behaviour —
+// this function is called from three places and one of them is a hook-order-sensitive
+// effect, so a required parameter would be a silent behaviour change at whichever call site
+// somebody missed.
+function ssClampTab(tab, isOperator, canAdmin, access, supportView = false, canProjects = isOperator) {
   // Teaser routes exist only where the Coming Soon group renders. Checked before the
   // role branches on purpose: an admin bookmark to /portal/reports on production should
   // land on a real page, not an unreleased teaser the sidebar no longer offers.
   if (SS_SOON_TABS.includes(tab) && !ssIsBetaHost()) return ssFallbackTab(access);
-  if (tab === "accounts" || tab === "admin" || tab === "projects") return isOperator ? tab : ssFallbackTab(access);
+  // Accounts is the SWITCHER, and a support operator needs it — it is how they reach the
+  // next builder. Admin and Projects are the operator CONSOLES (the admin console is where
+  // delete_client lives, and Projects is our internal bug board), and someone standing in a
+  // builder's shoes has no business in either. Splitting the old single line is the whole
+  // difference; `supportView` defaults false so every existing caller is unchanged.
+  if (tab === "accounts") return isOperator ? tab : ssFallbackTab(access);
+  if (tab === "admin") return (isOperator && !supportView) ? tab : ssFallbackTab(access);
+  // Projects splits off from Admin here. The two used to share a line because both meant
+  // "platform operator", and they no longer do: Admin is where delete_client lives and stays
+  // operator-only, while Projects is a board a CSM team member can be granted from Settings →
+  // Team without any access to builders' accounts. `!supportView` still applies to both —
+  // someone standing in a builder's shoes has no business in either console.
+  if (tab === "projects") return (canProjects && !supportView) ? tab : ssFallbackTab(access);
   // Owners, admins and operators are never clamped — an owner locked out of their own
   // portal by a permission bug is the one failure this feature must not have.
   if (canAdmin) return tab;
@@ -567,7 +822,11 @@ const S = {
   card: { background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, padding: 20, marginBottom: 16 },
   h2: { fontSize: 15, fontWeight: 800, color: "#1E293B", marginBottom: 12, letterSpacing: 0.3 },
   lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 },
-  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
+  // fontFamily is NOT decoration here: a bare <textarea> defaults to MONOSPACE in
+  // every browser, so the ten textareas that render through this token wrote notes and
+  // emails in a typeface that appears nowhere else in the product. `inherit` takes the
+  // body font for both tag types, so a field finally looks like the page it sits on.
+  input: { width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "8px 10px", fontSize: 13, fontWeight: 600, fontFamily: "inherit", color: "#1E293B", background: "#FFF", boxSizing: "border-box" },
   btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }),
   err: { background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", color: "#DC2626", fontSize: 13, fontWeight: 600, marginBottom: 12 },
   okMsg: { background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "10px 14px", color: "#15803D", fontSize: 13, fontWeight: 600, marginBottom: 12 },
@@ -648,6 +907,28 @@ function fmtDate(iso) {
   if (!iso) return "—";
   try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
+}
+// "Sep 2, 26" — the pipeline card's date, where three of them share one 240px column and
+// "Sep 2, 2026" three times does not fit (Carolyn, 2026-09-07: "I want to have the date fields
+// on the cards to only have 2 digit year to allow for more space").
+//
+// KEEPS THE MONTH NAME rather than going to 9/2/26, which is two characters shorter. Numeric
+// dates are read day-first by half the world, and these three sit side by side where a
+// misread is silent — the month name is what makes that impossible. Carolyn chose this.
+//
+// ONE definition, not a format string inlined per call site: a card showing "Sep 2, 26" beside
+// a record showing "Sep 2, 2026" is the kind of drift nobody files a bug about.
+function fmtDateShort(iso) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
+  catch { return iso; }
+}
+// A whole-dollar figure for the pipeline card. Cents are dropped on purpose — the card answers
+// "how big is this deal", not "what is on the invoice", and $7,507.50 costs three characters
+// that the close date needs. The record and the invoice still show the exact amount.
+function fmtMoneyWhole(cents) {
+  if (cents == null || !Number.isFinite(Number(cents))) return null;
+  return "$" + Math.round(Number(cents) / 100).toLocaleString("en-US");
 }
 // Capitalize each word of a building-style name for display. Designs store the style as
 // either its label ("Farmland") or its lowercase key ("cabin"), so normalize to Title Case.
@@ -792,7 +1073,97 @@ function ShareLinkCard({ clientId }) {
         <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy"}</button>
         <a href={link} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Open ↗</a>
       </div>
+      <EmbedCodeBlock clientId={clientId} />
     </div>
+  );
+}
+
+// ─── The iframe embed, under the link it is built from ───
+//
+// Carolyn, 2026-09-03, about a builder whose website is built on ShedPro and who wants our
+// configurator inside it: "so we need to do that." Ahsan: "in the settings, we'll add another
+// section under this, URL one ... so they can copy an iframe code, which will be totally
+// different from this one. In the iframe code, we can prioritize 3D." Carolyn: "prioritize,
+// you mean prioritize that the 3D stays open ... and I think that's good."
+//
+// So it lives INSIDE the share-link card rather than in a card of its own — it is the same
+// link wearing a different hat, and splitting them would invite a builder to paste the plain
+// URL into an iframe and wonder why the 3D never opened.
+//
+// The only difference from the plain link is `&open3d=1`, which ssOpen3DRequested reads in the
+// designer: it docks the VIEW-ONLY 3D panel beside the plan on arrival. It cannot open the
+// editor — that still goes through the contact gate — so the embed shows the building without
+// handing an anonymous visitor the full designer.
+function EmbedCodeBlock({ clientId }) {
+  const [copied, setCopied] = useState(false);
+  const src = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&open3d=1`;
+  // width:100% so it fits whatever column the builder's site gives it; a fixed height because
+  // an iframe cannot size itself to its content cross-origin, and 900 is tall enough for the
+  // plan and the docked 3D side by side on a desktop layout.
+  const snippet = `<iframe src="${src}" width="100%" height="900" style="border:0;max-width:100%" title="Design your building" loading="lazy" allowfullscreen></iframe>`;
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(snippet).then(done, () => window.prompt("Copy the embed code:", snippet));
+    else window.prompt("Copy the embed code:", snippet);
+  };
+  return (
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #E2E8F0" }}>
+      <div style={{ fontSize: 13, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Put it on your website</div>
+      <p style={{ fontSize: 12, color: "#64748B", marginBottom: 10 }}>
+        Paste this where you want the designer to appear. It opens with the 3D view already showing beside the plan.
+        Designs still land in your list, exactly like the link above.
+      </p>
+      <textarea
+        readOnly
+        rows={3}
+        onFocus={(e) => e.target.select()}
+        value={snippet}
+        style={{ ...S.input, width: "100%", boxSizing: "border-box", fontFamily: "monospace", fontSize: 11.5, lineHeight: 1.5, resize: "vertical" }}
+      />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        <button onClick={copy} style={S.btn(copied ? "#15803D" : "#1E293B", "#FFF")}>{copied ? "✓ Copied" : "Copy embed code"}</button>
+        <a href={src} target="_blank" rel="noopener" style={{ ...S.btn("#F1F5F9", "#334155"), textDecoration: "none", border: "1px solid #E2E8F0" }}>Preview ↗</a>
+      </div>
+    </div>
+  );
+}
+
+// ─── Paid add-ons, named for a human ───
+// How a feature key reads in tenant-facing copy, and whether pointing someone at Billing
+// would actually help. `buyable: false` means there is nothing to purchase — view_3d is
+// operator-GRANTED only (see view3dUnlocked in 12-shell.jsx, which reads
+// entitlement.granted rather than entitlement.features for exactly this reason), so
+// "Add 3D — see Billing" would send a builder to a page with no such button. Used by the
+// setup checklist's padlocked rows; keep the keys in step with _shared/featureCheck.ts's
+// FEATURE_KEYS, which is what the operator editor validates against.
+const SS_FEATURE_LABELS = {
+  schedule_builds:     { label: "Scheduling",           buyable: true },
+  quickbooks_sync:     { label: "QuickBooks Sync",      buyable: true },
+  on_demand_pricing:   { label: "Real-Time Pricing",    buyable: true },
+  crm:                 { label: "the Built-in CRM",     buyable: true },
+  simple_layout:       { label: "Simple Layout",        buyable: true },
+  self_serve_displays: { label: "Self Serve Displays",  buyable: false },
+  view_3d:             { label: "3D",                   buyable: false },
+};
+const ssFeatureLabel = (key) => (SS_FEATURE_LABELS[key] || {}).label || "an add-on";
+// What an operator may tag a setup step with. Mirrors FEATURE_KEYS in
+// _shared/featureCheck.ts, which validates the save and rejects anything else — a typo
+// stored here would padlock a step for every builder forever, with nothing on screen to
+// say why. `full_suite` is absent on purpose: it is a bundle you buy, never a requirement.
+const SS_SETUP_FEATURE_CHOICES = [
+  "schedule_builds", "quickbooks_sync", "on_demand_pricing", "crm", "view_3d", "self_serve_displays", "simple_layout",
+];
+
+// The portal's padlock, in one place. The nav rail draws its own copy inline (12-shell.jsx
+// navItem) because that one is CSS-classed `.lock` and positioned by the rail's stylesheet;
+// this is the same glyph for anything that just needs to render a lock inline.
+function SsLock({ size = 13, color = "#94A3B8", title = "Locked" }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke={color}
+      strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+      role="img" aria-label={title} style={{ flexShrink: 0 }}>
+      <rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
   );
 }
 
@@ -1033,6 +1404,29 @@ const fnError = async (err) => {
   return m;
 };
 
+// ─── Status pill ───
+// The tinted lozenge that says what a design's status IS — distinct from StatusChips below,
+// which are the FILTER controls (outlined, dotted, and carrying counts). This markup was
+// written out three times before it was a component: the Pipeline list's Status cell, the
+// Contacts list, and the Orders estimate column. Two of those are here; Contacts and Orders
+// keep their own because they label things this enum does not cover (Contacts' synthetic
+// "browsing" group, Orders' own estimate states).
+//
+// `small` is the board-card size. A pipeline card is 190px wide at its narrowest and the
+// pill shares a line with a date and a quote number, so the full-size pill (12px text,
+// 4x12 padding) pushes the quote number onto its own line at that width.
+function StatusPill({ status, small = false }) {
+  const st = normStatus(status);
+  const c = STATUS_COLORS[st];
+  return (
+    <span style={{
+      background: c.bg, color: c.fg, borderRadius: 20, whiteSpace: "nowrap", fontWeight: 700,
+      padding: small ? "1px 7px" : "4px 12px",
+      fontSize: small ? 10.5 : 12,
+    }}>{STATUS_LABELS[st]}</span>
+  );
+}
+
 // ─── Status filter chips (Designs + Contacts) ───
 // Carolyn, 2026-06-18: filters so a client can tell leads from customers at a glance — the
 // urgency came from Junior Barns selling three buildings in one day.
@@ -1083,13 +1477,20 @@ function StatusChips({ counts, value, onChange, extra = [] }) {
 // Clickable header cell. Clicking cycles the direction on the active column and
 // selects a new column (starting ascending). A faded ▲ hints unsorted columns
 // are clickable; the active column shows a solid ▲/▼ in the brand accent.
-function SortTh({ label, col, sortKey, sortDir, onSort, style }) {
+function SortTh({ label, col, sortKey, sortDir, onSort, style, thProps }) {
   const active = sortKey === col;
   return (
     <th
+      {...(thProps || {})}
       onClick={() => onSort(col)}
       title={`Sort by ${label}`}
-      style={{ ...(style || S.th), cursor: "pointer", userSelect: "none" }}
+      // ⚠️ MERGE, never `style || S.th`. That fallback meant any caller passing a style
+      // — PMTable passes {width} for columns that have one — REPLACED the header
+      // typography wholesale, so those headers fell back to the browser's default <th>
+      // (big, black, centred) while widthless ones kept the real style. On a Projects
+      // board that showed up as every column added through the UI (no width) rendering
+      // differently from the seeded ones (Carolyn 2026-08-29, spotted on "Due").
+      style={{ ...S.th, ...(style || {}), cursor: "pointer", userSelect: "none", ...((thProps || {}).style || {}) }}
     >
       {label}
       <span style={{ marginLeft: 4, fontSize: 9, verticalAlign: "middle", color: active ? ACCENT : "#CBD5E1" }}>
@@ -1204,9 +1605,20 @@ function CardHead({ title, count, desc, right, children }) {
 // LISTS must be derived from ALL loaded rows (never the filtered subset) so a filter can never
 // hide its own options; status-chip counts likewise stay full-list so they don't shuffle.
 const FCTRL = { display: "flex", flexDirection: "column", gap: 3 };
+// The filter-bar heading. S.lbl carries `marginBottom: 4` for the stacked forms it was
+// written for, but FCTRL is a flex column that already spaces its children with `gap: 3` —
+// so inside a filter bar the two stack and every heading floated 7px above its own box.
+// Carolyn, 2026-09-07, looking at the Pipeline bar: "line up the boxes ... by moving the
+// headings of the filter boxes up a tad bit." Dropping the redundant margin is that tad:
+// the headings sit against their controls, and every control rises 4px.
+const FLBL = { ...S.lbl, marginBottom: 0 };
+// A heading-shaped hole, for a control that has no heading but must line up with ones that
+// do (the Pipeline search box). Deliberately built from FLBL rather than a measured pixel
+// offset, so it stays exactly one heading tall if the type ever changes.
+const FLBL_SPACER = { ...FLBL, visibility: "hidden" };
 function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
   return (
-    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+    <div style={FCTRL}><span style={FLBL}>{label}</span>
       <select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...S.input, padding: "6px 8px", minWidth: 120 }}>
         <option value="all">{allLabel}</option>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -1216,7 +1628,7 @@ function FacetSelect({ label, value, onChange, options, allLabel = "All" }) {
 }
 function DateRange({ label, from, to, onFrom, onTo }) {
   return (
-    <div style={FCTRL}><span style={S.lbl}>{label}</span>
+    <div style={FCTRL}><span style={FLBL}>{label}</span>
       <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
         <input type="date" value={from} onChange={(e) => onFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }} />
         <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>
@@ -1301,17 +1713,46 @@ const ssTabCache = new Map();
 // shape as ssTargetClientId above, so a tab deep in the tree can key its cache correctly
 // without every component in between growing a prop it does not otherwise use.
 let ssCurrentUserId = null;
-function ssSetCurrentUser(id) {
-  if (id !== ssCurrentUserId) { ssCurrentUserId = id || null; ssTabCache.clear(); }
+// ...and HOW MUCH of the tenant they were allowed to see when those payloads were fetched.
+// A permission change does not sign anybody out, so without this a rep an owner has just
+// moved to contacts:'own' keeps painting the full customer list from cache for up to
+// SS_TAB_CACHE_MAX_AGE — server-side narrowing that the browser then undoes from memory.
+//
+// `null` means "not told", which keys exactly as this cache always has: every existing
+// caller passes one argument and is unchanged. Pass the resolved access map's contacts level
+// (ssOwnRowsOnly's input) once the status call has landed.
+let ssCurrentRowScope = null;
+function ssSetCurrentUser(id, rowScope = null) {
+  if (id !== ssCurrentUserId || rowScope !== ssCurrentRowScope) {
+    ssCurrentUserId = id || null;
+    ssCurrentRowScope = rowScope || null;
+    ssTabCache.clear();
+  }
+}
+// The row scope alone, because WHO you are and WHICH ROWS you may see arrive in different
+// components at different times: the user id lands in PortalApp when auth resolves, and the
+// resolved access map lands in Dashboard when the status call returns — usually a second or
+// two later, and again whenever an owner flips somebody's Contacts switch.
+//
+// Without this the scope could only ever be set at sign-in, when it is not known yet, so a
+// narrowed rep would keep serving the full list out of the tab cache for up to its 10-minute
+// max age. Idempotent, and it clears the cache only on an actual change — which is what makes
+// it safe to call during a render, the same property ssTargetClientId relies on. It touches no
+// React state, so it cannot provoke the re-render loop that shape normally invites.
+function ssSetRowScope(rowScope) {
+  const next = rowScope || null;
+  if (next !== ssCurrentRowScope) { ssCurrentRowScope = next; ssTabCache.clear(); }
 }
 
 // The key carries WHO as well as WHAT. Tenant, because an operator viewing another builder
 // must never see the previous one's rows; user id, because portal-commissions scopes
 // list_entries to the CALLER (a rep sees only their own lines, and rates are hidden unless
 // they may see them), so a payload keyed by tenant alone would leak across a sign-out and
-// sign-in on the same machine.
+// sign-in on the same machine; and the row scope, because the SAME person on the SAME tenant
+// gets a different set of rows before and after an owner flips their Contacts switch.
 function ssCacheKey(fn, action, tenant) {
-  return (ssCurrentUserId || "anon") + "|" + (tenant || "own") + "|" + fn + "|" + action;
+  return (ssCurrentUserId || "anon") + "|" + (tenant || "own")
+    + (ssCurrentRowScope ? "|" + ssCurrentRowScope : "") + "|" + fn + "|" + action;
 }
 function ssCacheGet(fn, action, tenant) {
   if (!SS_TAB_CACHE_ON) return null;

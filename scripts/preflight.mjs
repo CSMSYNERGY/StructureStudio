@@ -18,6 +18,13 @@
 //        no-unreachable, no-dupe-else-if, no-self-assign, valid-typeof, use-isnan
 //      Plus: no road back to in-browser Babel — no type="text/babel" tags and no served
 //      babel-standalone tag on any page (the vendored Babel is the OFFLINE compiler now).
+//   1b. The hand-mirrored twins must not DRIFT. StructureStudio.jsx and
+//      structure-studio.component.js are the same designer maintained by hand in two
+//      dialects (CLAUDE.md: "any non-trivial edit must be mirrored in both files"). Linting
+//      them both — which is all this gate did — cannot see a one-sided edit: each half stays
+//      perfectly valid on its own, so the drift passes, compiles, and ships. Their bodies are
+//      compared line by line after normalising the three documented dialect differences, and
+//      the report NAMES the region on both sides. See the section comment in run().
 //   2. The vendored-dependency lock: all three pages must reference the SAME three /vendor/
 //      library files (React, ReactDOM, supabase-js), every one must exist in the repo, and
 //      none may be loaded from a CDN again.
@@ -27,6 +34,16 @@
 //      between index.html and portal.html; whether each hash matches its artifact's real
 //      bytes is checked by the artifact drift gate (recompile-and-diff via compile.mjs),
 //      which also refuses a stale or hand-edited artifact.
+//   3b. The artifacts are MINIFIED (since 2026-09-06), which the drift gate alone cannot
+//      police: a minifier that renamed a window.* publish or moved the boot flag out of first
+//      position changes the recompiled bytes and the committed bytes together, so the byte
+//      compare stays green while the boot machinery is dead. Three invariants are therefore
+//      asserted on the shipped text — the __ssBootBlocked guard is the first thing each
+//      wrapper touches, __ssAppBooted is the LAST statement of each app artifact's guarded
+//      body, and every cross-script window.* publish is still present by name. Plus the
+//      minifier version pin: terser's output is deterministic per version, so a mismatched
+//      copy would report every artifact as permanently STALE, blaming sources that are
+//      perfectly fresh.
 //   4. The dependency boot guard is present on all three pages, byte-identical across them,
 //      linted with the same correctness rules as the sources (its body swallows every
 //      runtime error by design, so a typo inside is a silent no-op that byte-identity alone
@@ -139,6 +156,168 @@ function lint(label, code, lineOffset = 0) {
 // (babelBlocks() lived here until 2026-08-13 — the pages carry no inline app code now;
 // the extracted .jsx sources are linted as whole files instead.)
 
+// ── The hand-mirrored twins: normalise, then compare ──────────────────────────────────────
+//
+// StructureStudio.jsx (the ES-module canon) and structure-studio.component.js (the
+// browser/global dialect the pages actually ship) are the SAME ~14,000-line designer, kept in
+// step BY HAND — CLAUDE.md: "Any non-trivial edit must be mirrored in both files or the
+// browser deliverable will drift from the JSX source. There is no generator." Nothing checked
+// it. Both files have been LINTED here since this gate existed, and a lint cannot see this
+// class of bug: each half is perfectly valid on its own, so a one-sided edit passes every
+// rule, compiles cleanly and ships. The .js is what customers run; the .jsx is what the next
+// person reads and edits — so the drift is invisible until someone "fixes" something in the
+// copy that never ran, or mirrors a later change on top of a body that already disagreed.
+//
+// Only THREE differences are legitimate (CLAUDE.md), and all three are dialect, not behaviour:
+//   (1) the module top — `const {useState,…}=React;` / `= ReactDOM;` / `= window.supabase;`
+//       global destructures instead of `import … from "react"` and friends;
+//   (2) `export default function StructureStudio` in the .jsx, a plain declaration in the .js;
+//   (3) the module bottom — the .js publishes window.StructureStudio / window.ssAllowedOrigin
+//       (and has no createRoot; mounting belongs to the host pages).
+// Each is normalised BY SHAPE, never by position: the `= window.supabase` destructure already
+// sits 27 lines below its .jsx import, and line numbers move the moment anyone edits above
+// them. A positional rule that silently stops matching is this file's signature failure.
+//
+// COMMENTS AND BLANK LINES ARE DROPPED FROM BOTH SIDES, deliberately, and the choice is worth
+// stating because it is the difference between a rule people keep and a rule people delete:
+//   * The twins legitimately carry the SAME prose in DIFFERENT PLACES. The .jsx explains the
+//     removed feedback widget in its header; the .js explains it 13,900 lines lower, next to
+//     where the widget used to be. Comparing comments would fail on a clean tree, and the only
+//     way to pass would be the line-number special-casing this rule exists to avoid.
+//   * They also differ by one blank line (a double blank at StructureStudio.jsx:8098). Blank
+//     lines and comments compile to NOTHING — both twins produce identical artifacts across
+//     that difference — so failing a push over it would be this gate arguing about formatting,
+//     which its own header forbids, on a file 14,000 lines long. That is how a correctness
+//     gate gets switched off by the first person it annoys.
+// Dropping them costs this rule nothing it exists for: it removes no code, so every real body
+// edit still lands in the comparison. What it does not catch is a comment that drifts — which
+// ships no bug, and which the mirror rule's own author already treats as free to differ.
+const TWIN_DIALECT_LINES = [
+  // (1) The .jsx's imports, and the .js's global destructures that stand in for them. `import`
+  // anchored at column 0 with a following space: a dynamic `import(` has no space and is
+  // always indented inside a function, so nothing real is dropped.
+  /^import\s/,
+  /^const\s*\{[^}]*\}\s*=\s*(?:React|ReactDOM|window\.supabase)\s*;?\s*$/,
+  // (3) The two publishes the host pages' mount blocks read back off window.
+  /^window\.(?:StructureStudio|ssAllowedOrigin)\s*=\s*[A-Za-z_$][\w$]*\s*;?\s*$/,
+];
+
+// One twin reduced to its comparable body: { n: 1-based line in the ORIGINAL file, text }.
+// The original line number rides along so a failure can point at the real file.
+function twinBody(text) {
+  const out = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].replace(/\s+$/, "");
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//")) continue;
+    if (TWIN_DIALECT_LINES.some((re) => re.test(line))) continue;
+    // (2) The export keyword, stripped rather than matched against a known line.
+    out.push({ n: i + 1, text: line.replace(/^export default (?=(?:async )?function\b)/, "") });
+  }
+  return out;
+}
+
+// How many consecutive equal lines count as "the two sides line up again", and how far to look
+// for that. Three lines is enough that a repeated `  }` or `  );` cannot fake a resync; 300 is
+// far more than any real one-sided edit and keeps the worst case at ~135k string compares.
+const TWIN_SYNC = 3;
+const TWIN_WINDOW = 300;
+
+// Walk the two bodies together and return every region where they disagree. The look-ahead
+// resync is the whole point of not using a plain index compare: ONE line inserted on one side
+// would otherwise renumber the remaining ~6,000 and report the entire rest of the file as
+// drifted, which tells a reader nothing and is exactly the kind of output people learn to skip.
+function twinRegions(a, b) {
+  const regions = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i].text === b[j].text) { i++; j++; continue; }
+    let sync = null;
+    // Smallest total edit first (d = di + dj), so the region reported is the smallest one that
+    // explains the difference — a changed line, not "everything until the next coincidence".
+    for (let d = 1; d <= TWIN_WINDOW && !sync; d++) {
+      for (let di = 0; di <= d; di++) {
+        const dj = d - di;
+        if (i + di + TWIN_SYNC > a.length || j + dj + TWIN_SYNC > b.length) continue;
+        let ok = true;
+        for (let k = 0; k < TWIN_SYNC; k++) {
+          if (a[i + di + k].text !== b[j + dj + k].text) { ok = false; break; }
+        }
+        if (ok) { sync = { di, dj }; break; }
+      }
+    }
+    regions.push({
+      jsx: a.slice(i, i + (sync ? sync.di : a.length - i)),
+      comp: b.slice(j, j + (sync ? sync.dj : b.length - j)),
+      jsxAt: a[i],
+      compAt: b[j],
+      resynced: !!sync,
+    });
+    if (!sync) return regions;   // no way back into step — everything after is one region
+    i += sync.di;
+    j += sync.dj;
+  }
+  // A tail on one side only: one twin ends while the other still has body left.
+  if (i < a.length || j < b.length) {
+    regions.push({
+      jsx: a.slice(i), comp: b.slice(j), jsxAt: a[i] ?? null, compAt: b[j] ?? null, resynced: false,
+    });
+  }
+  return regions;
+}
+
+// Takes the two texts as arguments (rather than reading the files) so --self-test can hand it
+// deliberately drifted variants and prove it fails — the my-quotes check's shape, same reason.
+const TWIN_JSX = "StructureStudio.jsx";
+const TWIN_COMP = "structure-studio.component.js";
+const TWIN_MAX_REPORTED = 5;
+
+function checkTwinDrift(jsxText, compText) {
+  const errors = [];
+  const a = twinBody(jsxText);
+  const b = twinBody(compText);
+
+  // Vacuity guard, the lesson this script keeps re-learning: a normaliser that has quietly
+  // stopped seeing the file compares two empty lists and reports two identical twins. Scaled
+  // to the file rather than a fixed number, so it cannot start crying wolf as the designer
+  // grows or shrinks — today each side keeps 10,301 of ~14,100 lines.
+  const rawA = jsxText.split("\n").length;
+  const rawB = compText.split("\n").length;
+  if (a.length * 4 < rawA || b.length * 4 < rawB) {
+    errors.push(`twin drift: the normaliser kept only ${a.length}/${rawA} line(s) of ${TWIN_JSX} `
+      + `and ${b.length}/${rawB} of ${TWIN_COMP} — it has stopped seeing most of the file, so `
+      + "this rule would pass because it is comparing almost nothing. Fix twinBody() in "
+      + "scripts/preflight.mjs rather than leaving a check that cannot fail.");
+    return errors;
+  }
+
+  const regions = twinRegions(a, b);
+  // Both sides get a real line number even when a region is empty on one of them: the anchor
+  // is the next line that side WOULD have had, which is where the missing code belongs.
+  const side = (file, own, anchor, lastLine) => (own.length
+    ? `${file}:${own[0].n}`
+    : `${file}:${anchor ? anchor.n : lastLine} (nothing here)`);
+  const excerpt = (own) => (own.length ? own[0].text.trim().slice(0, 110) : "(no line — this side is missing it)");
+  for (const r of regions.slice(0, TWIN_MAX_REPORTED)) {
+    errors.push(`twin drift — the hand-mirrored designer copies disagree here `
+      + `(${r.jsx.length} line(s) vs ${r.comp.length}`
+      + `${r.resynced ? "" : "; they never line up again after this point"}):`
+      + `\n      ${side(TWIN_JSX, r.jsx, r.jsxAt, rawA)}\n          ${excerpt(r.jsx)}`
+      + `\n      ${side(TWIN_COMP, r.comp, r.compAt, rawB)}\n          ${excerpt(r.comp)}`
+      + "\n      Mirror the edit into BOTH files (CLAUDE.md). Only the module top, the export-default "
+      + "keyword and the window.* publishes at the bottom may differ; comments and blank lines are "
+      + "ignored, so this is real code.");
+  }
+  if (regions.length > TWIN_MAX_REPORTED) {
+    errors.push(`twin drift: ${regions.length - TWIN_MAX_REPORTED} further drifting region(s) not `
+      + "listed. That many usually means an edit landed in one twin only and was never mirrored "
+      + `at all — diff the two files directly: git diff --no-index ${TWIN_JSX} ${TWIN_COMP}`);
+  }
+  return errors;
+}
+
 function run(files) {
   const errors = [];
 
@@ -175,6 +354,12 @@ function run(files) {
         + "`npm run compile` if a page or source changed, and commit the clean file.");
     }
   }
+
+  // ── The hand-mirrored twins must not drift ───────────────────────────────
+  // The rule itself, its normalisation and the reasoning behind every exemption live with
+  // checkTwinDrift() above. It runs on the in-memory map like every other rule here, which is
+  // what lets --self-test inject a one-sided edit and prove the gate fails on it.
+  errors.push(...checkTwinDrift(files[TWIN_JSX], files[TWIN_COMP]));
 
   // No going back to in-browser compilation. A text/babel tag on a page would
   // load-bearing-ly do NOTHING now (babel-standalone is not served), and a
@@ -417,12 +602,21 @@ function run(files) {
           + "relative src resolves to portal.html at HTTP 200 and the script dies on HTML with "
           + "only the sentinel to notice. Use a leading /");
       }
-      if (!/\sdefer\b/.test(attrs)) {
+      // THE ONE EXEMPTION, and it is not a loophole: `type="ss/designer-src"` is an unknown
+      // script type, so the browser never fetches or executes the tag — it is a URL carrier
+      // for window.ssLoadDesigner(), which injects the real script on demand. `defer` and
+      // `async` describe when a script RUNS, and this one never runs, so both rules are
+      // vacuous here. The shape is still held to root-absolute above (the loader copies the
+      // src verbatim, so /portal/settings/... would break exactly as it did for a real tag)
+      // and is separately required to be BACKED BY A LOADER below — removing the eager
+      // tag without one would otherwise pass every check and ship a dead Designer tab.
+      const isSrcPointer = /\stype="ss\/designer-src"/.test(attrs);
+      if (!isSrcPointer && !/\sdefer\b/.test(attrs)) {
         errors.push(`${f}: compiled tag for "${t[2]}" is missing \`defer\` — without it the script `
           + "executes mid-parse, before the boot guard has run, so a failed library gets the old "
           + "blank-page throw instead of the failure screen");
       }
-      if (/\sasync\b/.test(attrs)) {
+      if (!isSrcPointer && /\sasync\b/.test(attrs)) {
         errors.push(`${f}: compiled tag for "${t[2]}" carries \`async\` — async abandons document `
           + "order, so the page's mount can run before the shared component has published itself");
       }
@@ -436,6 +630,30 @@ function run(files) {
     if (comp < 0) {
       errors.push(`${f}: no /structure-studio.component.compiled.js tag — this page mounts the `
         + "shared module and cannot work without it");
+    } else if (f === "portal.html" && /<script[^>]*type="ss\/designer-src"/.test(files[f])) {
+      // The portal loads the designer ON DEMAND. index.html is deliberately NOT allowed to do
+      // this: there the module IS the page, so an eager tag in document order is the whole
+      // contract, and the branch below still holds it to that.
+      //
+      // Two halves have to hold together or the Designer tab dies in a way nothing notices:
+      // the page must not ALSO load it eagerly (that restores the cost this removed while
+      // looking correct), and the loader must be in the bundle. `portal.app.jsx` here is the
+      // VIRTUAL concatenation of PORTAL_PARTS, not a file on disk — which is the point: a
+      // part dropped from that list is exactly how this breaks, and it disappears from this
+      // text the moment it does.
+      if (/<script[^>]*\sdefer[^>]*src="\/structure-studio\.component\.compiled\.js/.test(files[f])) {
+        errors.push("portal.html: the designer is BOTH an on-demand source pointer and loaded "
+          + "eagerly — the eager tag makes the loader pointless and the page still pays "
+          + "the 437 KB parse the pointer exists to avoid");
+      }
+      // ASSIGNMENT, not a mention. `includes("window.ssLoadDesigner")` was satisfied by
+      // 06-3d.jsx's CALL SITE, so renaming the definition left the check green and the
+      // loader undefined - the precise failure this is here to catch.
+      if (!/window\.ssLoadDesigner\s*=/.test(files["portal.app.jsx"])) {
+        errors.push('portal.html points at the designer with type="ss/designer-src" (nothing '
+          + "loads it) but no portal part defines window.ssLoadDesigner — the Designer tab "
+          + "would render its failure message forever. Check 01-core.jsx is still in PORTAL_PARTS");
+      }
     } else if (own >= 0 && comp > own) {
       errors.push(`${f}: the shared component tag sits AFTER the page's own app tag — deferred `
         + "scripts run in document order, so the mount would run before StructureStudio exists`");
@@ -483,47 +701,27 @@ function run(files) {
   }
 
   // Every action in a gated edge function must have a line in that function's GATES table.
+  // The rule itself is checkGateTable(); the functions it runs over are DISCOVERED rather than
+  // listed, because the four-name array that used to sit here left portal-sms — ten gates,
+  // three of them able to spend the tenant's money — checked by nothing at all.
   //
-  // WHY THIS IS A PUSH-BLOCKING RULE. Per-person access (migration 100) is enforced by one
-  // table per function, checked in resolveTenant before dispatch. That design is only sound
-  // while the table is COMPLETE: these functions are long `if (action === "x")` chains, so a
-  // branch is reachable the moment it is written. resolveTenant refuses actions missing from
-  // the table, which turns the mistake into a 403 instead of an open endpoint — but a 403 on
-  // a brand-new feature reads like a bug in the feature, and the tempting fix is to widen the
-  // gate rather than to write the right one. Catching it here says exactly what is wrong.
-  // The reverse (a table entry with no branch) is caught too: a stale line is a claim that
-  // something is protected when nothing by that name exists.
-  for (const fn of ["portal-settings", "portal-schedule", "portal-billing", "sync-design-status"]) {
-    const src = readFileSync(join(root, "supabase", "functions", fn, "index.ts"), "utf8");
-    const start = src.indexOf("const GATES: GateTable = {");
-    if (start < 0) {
-      errors.push(`supabase/functions/${fn}/index.ts: no GATES table — every JWT-authenticated `
-        + "function must declare one (see _shared/access.ts)");
-      continue;
-    }
-    const rest = src.slice(start);
-    const end = rest.search(/\n\};/);
-    const table = rest.slice(0, end);
-    const body = rest.slice(end);
-    // [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so
-    // the table could not satisfy this rule for it by ANY spelling. The only ways out were
-    // renaming a deployed action or --no-verify -- i.e. a correctness gate teaching people to
-    // bypass it. Surfaced by the 3D merge, which grafted six such actions in at once.
-    const gated = new Set([...table.matchAll(/^\s*([a-z0-9_]+)\s*:/gm)].map((m) => m[1]));
-    const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
-    for (const a of used) {
-      if (!gated.has(a)) {
-        errors.push(`supabase/functions/${fn}/index.ts: action "${a}" has no entry in GATES — `
-          + "add the area and level it requires, or it is refused at runtime");
-      }
-    }
-    for (const a of gated) {
-      if (!used.has(a)) {
-        errors.push(`supabase/functions/${fn}/index.ts: GATES lists "${a}" but no branch handles `
-          + "it — remove the stale entry so the table describes what actually exists");
-      }
-    }
+  // The old "no GATES table" arm is gone with the array: a function that loses its table leaves
+  // `gates: GATES` dangling, which the deno check below fails on. What CANNOT be caught that
+  // way is discovery going blind, so that is what is guarded here.
+  const gatedFns = gatedFunctions();
+  if (!gatedFns.length) {
+    errors.push(`${FUNCTIONS_DIR}/: no function declares \`${GATES_DECL}\` — either the gate `
+      + "model was renamed or this discovery has gone blind; re-anchor it in "
+      + "scripts/preflight.mjs rather than leaving every gated function unchecked");
   }
+  for (const g of gatedFns) errors.push(...checkGateTable(g.fn, g.src));
+
+  // The permission model's two hand-maintained copies must agree. See checkAreaMirror().
+  errors.push(...checkAreaMirror(files));
+
+  // ...and every contacts write must know which ROW it is allowed to touch. See
+  // checkContactRowScope() — this is the guard for the write half of contacts:'own'.
+  errors.push(...checkContactRowScope(files));
 
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
@@ -561,21 +759,60 @@ const load = () => Object.fromEntries([
   ["StructureStudio.jsx", read("StructureStudio.jsx")],
 ]);
 
-// ── Compiled artifacts: the drift gate ───────────────────────────────────────────────────
+// ── Compiled artifacts: the drift gate, the minifier pin, and the shape gate ─────────────
 // The pages ship artifacts compiled OFFLINE from the sources linted above (scripts/
-// compile.mjs, using the vendored babel-standalone as the compiler). Recompile-and-diff is
-// deliberately the freshness rule — strictly stronger than any manifest bookkeeping, since
-// a hand-edited artifact with self-consistent bookkeeping still fails a byte compare. Also
-// covers the content-hash ?v= busters on every page. Runs on real disk files, like the
-// deno steps, so it lives outside run(files).
+// compile.mjs, using the vendored babel-standalone as the compiler and terser as the
+// minifier). Recompile-and-diff is deliberately the freshness rule — strictly stronger than
+// any manifest bookkeeping, since a hand-edited artifact with self-consistent bookkeeping
+// still fails a byte compare. Also covers the content-hash ?v= busters on every page. Runs
+// on real disk files, like the deno steps, so it lives outside run(files).
+//
+// Two things the byte compare cannot do on its own, both added with minification
+// (2026-09-06):
+//   • The PIN. terser's output is deterministic per version, so an unpinned or mismatched
+//     copy makes every artifact look permanently STALE to whoever has the other one — a
+//     failure whose message would otherwise point at the sources, which are fine.
+//   • The SHAPE. A minifier that renamed a window.* publish, or hoisted the boot flag out of
+//     first position, would change source-derived bytes and artifact bytes TOGETHER: the
+//     drift gate stays green while the boot machinery is dead. So the three runtime
+//     invariants are asserted on the shipped text (compile.mjs: checkArtifactShape).
 async function artifactCheck() {
-  const { checkArtifacts, compileSource } = await import("./compile.mjs");
-  // Vacuity guard, the lesson this script keeps re-learning: a compiler that silently
-  // stopped compiling must not read as "everything is fresh".
-  if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
-    return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
+  const { checkArtifacts, checkArtifactShape, compileSource, installedTerserVersion, TERSER_VERSION, PROBE_SOURCE } =
+    await import("./compile.mjs");
+
+  const installed = installedTerserVersion();
+  if (installed === null) {
+    return ["terser is not installed — scripts/compile.mjs cannot build the artifacts, so nothing "
+      + "below could be checked. Run `npm install` (package-lock.json is gitignored, so it is "
+      + "`npm install`, not `npm ci`)."];
   }
-  return checkArtifacts();
+  if (installed !== TERSER_VERSION) {
+    return [`terser ${installed} is installed but package.json pins ${TERSER_VERSION} — the minifier's `
+      + "output is deterministic per version and the drift gate byte-compares, so this would report "
+      + "every artifact as STALE no matter how many times they were rebuilt. Run `npm install`."];
+  }
+
+  // Vacuity guard, the lesson this script keeps re-learning: a compiler that silently
+  // stopped compiling must not read as "everything is fresh". Wrapped, because compileSource
+  // now has a dependency that can be absent and a throw here would print a stack, not a fix.
+  try {
+    if (!compileSource(PROBE_SOURCE, "probe.jsx").includes("React.createElement")) {
+      return ["compile self-check failed: the vendored Babel produced no JSX output — the artifact drift gate cannot run"];
+    }
+  } catch (e) {
+    return [`compile self-check failed: ${e && e.message ? e.message : e}`];
+  }
+
+  const problems = checkArtifacts();
+  // The shape gate reads what is COMMITTED — the bytes that actually ship. When an artifact is
+  // stale the drift gate above has already said so; skipping missing files keeps one cause from
+  // printing twice.
+  const committed = {};
+  for (const t of TARGETS) {
+    if (existsSync(join(root, t.out))) committed[t.out] = read(t.out).replace(/\r\n/g, "\n");
+  }
+  problems.push(...checkArtifactShape(committed));
+  return problems;
 }
 
 // ── my-quotes.html: the customer's sales-tax breakdown ───────────────────────────────────
@@ -592,6 +829,118 @@ async function artifactCheck() {
 //
 // Takes the html as an argument (rather than reading the file) so --self-test can hand it a
 // deliberately broken variant and prove this check actually fails.
+// Lifts payFigures() + fmtMoney() out of the shipped page and executes them, so a copy in this
+// file cannot drift into passing while the page itself is broken. payFigures decides what a
+// customer is asked to pay; the case that matters most is a clearing bank transfer removing
+// the button, because a button that still says you owe it is how a customer pays twice.
+function checkMyQuotesPayFigures(html) {
+  const errors = [];
+  const lines = html.split("\n");
+  const takeBlock = (needle) => {
+    const start = lines.findIndex((l) => l.includes(needle));
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = start; i < lines.length; i++) {
+      for (const ch of lines[i]) { if (ch === "{") depth++; else if (ch === "}") depth--; }
+      if (depth === 0 && i > start) return lines.slice(start, i + 1).join("\n");
+    }
+    return null;
+  };
+
+  const fmtSrc = takeBlock("function fmtMoney(");
+  const figSrc = takeBlock("function payFigures(");
+  if (!fmtSrc || !figSrc) {
+    errors.push("my-quotes.html: payFigures() or fmtMoney() is gone — that function decides what a "
+      + "customer is asked to pay, and it is the only automated coverage this page's pay panel has. "
+      + "If it was removed on purpose, remove this check too.");
+    return errors;
+  }
+
+  let fig;
+  try {
+    fig = new Function("opt", [fmtSrc, figSrc, "return payFigures(opt);"].join("\n"));
+  } catch (e) {
+    errors.push("my-quotes.html: payFigures() does not parse in isolation — " + e.message);
+    return errors;
+  }
+
+  const cases = [
+    ["deposit set, nothing paid",
+      { canPay: true, askCents: 100000, askKind: "deposit", balanceCents: 365000, settledCents: 0, pendingCents: 0, depositCents: 100000 },
+      (r) => r.canPay === true && r.askCents === 100000 && r.rows[0].value === "$1,000.00"],
+    ["no deposit: the ask is the balance",
+      { canPay: true, askCents: 365000, askKind: "balance", balanceCents: 365000, settledCents: 0, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === true && r.rows[0].value === "$3,650.00"],
+    // THE ONE THAT MATTERS: a clearing bank transfer must remove the button entirely.
+    ["pending ACH covers the ask",
+      { canPay: false, reason: "pending_clearing", askCents: 0, balanceCents: 365000, settledCents: 0, pendingCents: 365000, depositCents: null },
+      (r) => r.canPay === false && /clearing/i.test(r.notice || "")],
+    ["pending ACH covers only PART of it — still no button",
+      { canPay: false, reason: "pending_clearing", askCents: 0, balanceCents: 365000, settledCents: 0, pendingCents: 10000, depositCents: null },
+      (r) => r.canPay === false],
+    ["paid in full: no ask, no button",
+      { canPay: false, reason: "paid_in_full", askCents: 0, balanceCents: 0, settledCents: 365000, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === false && r.rows.length === 1 && /Paid in full/.test(r.rows[0].label)],
+    ["overpaid never renders a negative ask",
+      { canPay: false, reason: "paid_in_full", askCents: 0, balanceCents: -5000, settledCents: 370000, pendingCents: 0, depositCents: null },
+      (r) => r.canPay === false && !r.rows.some((x) => /-/.test(x.value))],
+    ["an empty payload renders nothing rather than throwing",
+      null,
+      (r) => r.canPay === false && r.rows.length === 0],
+  ];
+
+  for (const [name, input, ok] of cases) {
+    let out;
+    try {
+      out = fig(input);
+    } catch (e) {
+      errors.push(`my-quotes.html payFigures — ${name}: threw ${e.message}`);
+      continue;
+    }
+    if (!ok(out)) {
+      errors.push(`my-quotes.html payFigures — ${name}: got ${JSON.stringify(out)}`);
+    }
+  }
+  return errors;
+}
+
+
+// ── The customer-facing standalone pages must PARSE ────────────────────────────────────
+// 2026-09-08: a multiline regex whose newline escapes did not survive an edit landed in
+// my-quotes.html. One SyntaxError takes the whole inline script down, so the page rendered
+// ZERO characters — for every customer of every tenant — and it shipped because nothing here
+// looks at that file's syntax. preflight lints the three app pages and both component twins;
+// my-quotes.html is where customers ACCEPT QUOTES, SIGN INVOICES AND PAY, and it had no gate
+// at all. The two checks below it assert CONTENT, which a file that cannot parse still passes.
+//
+// Deliberately a parse check and not the full lint: these pages are hand-written ES5-ish
+// browser JS with globals the lint config knows nothing about, so `no-undef` would drown the
+// gate in false positives and get switched off — which is how a rule stops existing. Parsing
+// is the property that matters: a page that parses degrades, a page that does not is blank.
+function checkStandalonePagesParse(files) {
+  const errors = [];
+  for (const [name, html] of Object.entries(files)) {
+    // Inline blocks only — a src= tag is somebody else's file.
+    const blocks = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)];
+    if (!blocks.length) {
+      errors.push(`${name}: no inline <script> found — this check has lost its subject, so it `
+        + "is asserting nothing. Fix the pattern rather than deleting the rule.");
+      continue;
+    }
+    blocks.forEach((b, i) => {
+      const line = html.slice(0, b.index).split("\n").length;
+      try {
+        // eslint-disable-next-line no-new-func
+        new Function(b[1]);
+      } catch (e) {
+        errors.push(`${name}:${line}  <script #${i + 1}> does not parse — ${e.message}. `
+          + "A SyntaxError here renders the page completely blank for every customer.");
+      }
+    });
+  }
+  return errors;
+}
+
 function checkMyQuotesTaxBreakdown(html) {
   const errors = [];
   const lines = html.split("\n");
@@ -716,6 +1065,521 @@ function edgeEntrypoints() {
     .sort();
 }
 
+// ── Gated edge functions: the GATES ⇄ action cross-check ─────────────────────────────────
+// Discovered rather than listed, for the reason this file opens with: a second hand-kept list
+// is how this gate has twice reported clean while running zero rules. The four-name array that
+// used to live inside run() was exactly that mistake — portal-sms shipped a GATES table of ten
+// actions, three of which SPEND THE TENANT'S MONEY, covered by nothing at all, because nobody
+// added its name to the array. Now a new gated function is checked the day it lands.
+const GATES_DECL = "const GATES: GateTable = {";
+
+function gatedFunctions() {
+  const dir = join(root, FUNCTIONS_DIR);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith("_"))
+    .map((e) => ({ fn: e.name, path: join(dir, e.name, "index.ts") }))
+    .filter((f) => existsSync(f.path))
+    .map((f) => ({ fn: f.fn, src: readFileSync(f.path, "utf8") }))
+    .filter((f) => f.src.includes(GATES_DECL))
+    .sort((a, b) => a.fn.localeCompare(b.fn));
+}
+
+// Sticky (`y`) on purpose: walkBlock anchors these at a known offset rather than searching.
+//
+// [a-z0-9_] not [a-z_]: an action name carrying a DIGIT (save_style_d3) never matched, so the
+// table could not satisfy this rule for it by ANY spelling. The only ways out were renaming a
+// deployed action or --no-verify -- i.e. a correctness gate teaching people to bypass it.
+// Surfaced by the 3D merge, which grafted six such actions in at once.
+const GATE_KEY = /([a-z0-9_]+)\s*:/y;
+const CASE_LABEL = /case\s*"([^"]+)"\s*:/y;
+
+// A gate name follows the table's `{` or a comma; a `case` label follows the switch's `{`, a
+// previous case's `:`, or the end of the previous case's block or statement.
+const KEY_AFTER = new Set(["{", ","]);
+const CASE_AFTER = new Set(["{", "}", ";", ":"]);
+
+function skipString(src, i) {
+  const q = src[i];
+  for (let j = i + 1; j < src.length; j++) {
+    if (src[j] === "\\") { j++; continue; }
+    if (src[j] === q) return j + 1;
+    // An unterminated quote must not swallow the rest of the file and take the brace depth
+    // with it. Only a template literal legitimately spans lines.
+    if (q !== "`" && src[j] === "\n") return j;
+  }
+  return src.length;
+}
+
+// Walk the braced block whose `{` sits at `open`. Returns { end, hits }: `end` is the index
+// just past the matching `}` (-1 if the braces never balance), and `hits` are `token`'s capture
+// groups matched at DEPTH 1 of that block, outside comments and strings, and only where the
+// preceding significant character is in `after` — so a match can never start mid-identifier.
+//
+// Character-level rather than line-anchored, and that is load-bearing three times over:
+//   - sync-design-status writes its whole table on ONE line, which has no line anchor at all.
+//     The old `/\n\};/` extent search ran straight past it into the next object and the old
+//     `/^\s*name:/gm` then matched nothing -- zero gates, zero actions, a silent pass on a
+//     function that was already named in the checked list.
+//   - every entry in all five tables happens to sit on one line TODAY. Wrap one and a
+//     line-anchored scan harvests `area` and `level` as gate names, reporting two phantom
+//     stale entries. Depth is what tells a gate name from a field of its value.
+//   - portal-sms holds a SECOND switch (`switch (reg.status)`, in advanceOne) whose ten labels
+//     are states, not actions. Scoping the case scan to the dispatch block's own braces is the
+//     only thing keeping those out of the action set.
+function walkBlock(src, open, token, after) {
+  const hits = [];
+  let depth = 0;
+  let prev = "";
+  let i = open;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "/" && src[i + 1] === "/") {
+      const nl = src.indexOf("\n", i);
+      i = nl < 0 ? src.length : nl + 1;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      const e = src.indexOf("*/", i + 2);
+      i = e < 0 ? src.length : e + 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { i = skipString(src, i); prev = c; continue; }
+    if (c === "{") { depth++; prev = c; i++; continue; }
+    if (c === "}") {
+      depth--;
+      prev = c;
+      i++;
+      if (depth === 0) return { end: i, hits };
+      continue;
+    }
+    if (/\s/.test(c)) { i++; continue; }
+    if (depth === 1 && after.has(prev)) {
+      token.lastIndex = i;
+      const m = token.exec(src);
+      if (m) { hits.push(m[1]); prev = ":"; i = token.lastIndex; continue; }
+    }
+    prev = c;
+    i++;
+  }
+  return { end: -1, hits };
+}
+
+// Every action a gated edge function dispatches must have a line in that function's GATES
+// table, and every line in that table must have a branch.
+//
+// WHY THIS IS A PUSH-BLOCKING RULE. Per-person access (migration 100) is enforced by one table
+// per function, checked in resolveTenant before dispatch. That design is only sound while the
+// table is COMPLETE: a branch is reachable the moment it is written. resolveTenant refuses
+// actions missing from the table, which turns the mistake into a 403 instead of an open
+// endpoint -- but a 403 on a brand-new feature reads like a bug in the feature, and the
+// tempting fix is to widen the gate rather than to write the right one. Catching it here says
+// exactly what is wrong. The reverse (a table entry with no branch) is caught too: a stale line
+// is a claim that something is protected when nothing by that name exists.
+//
+// Takes its subject as an ARGUMENT, like checkMyQuotesTaxBreakdown above, so --self-test can
+// feed it a mutated source and prove each direction really fires.
+// Repo-relative read that yields null instead of throwing. `read()` above is for files this
+// script requires; these two are for files a RULE discovers, where "absent" is an answer the
+// rule reports itself rather than a crash with no context.
+const readIfExists = (f) => { try { return readFileSync(join(root, f), "utf8"); } catch { return null; } };
+const listMigrations = () => {
+  try {
+    return readdirSync(join(root, "supabase/migrations"))
+      .filter((f) => f.endsWith(".sql"))
+      .sort()
+      .map((f) => "supabase/migrations/" + f);
+  } catch { return []; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// THE PERMISSION MODEL EXISTS TWICE, AND UNTIL NOW NOTHING COMPARED THE TWO COPIES.
+//
+// `AREAS` in supabase/functions/_shared/access.ts is what the edge functions and the Team
+// screen resolve against. `area_level_for()` in SQL is what the RESTRICTIVE RLS policies
+// resolve against — migration 154 introduced it, 183 re-issued it. Both files say in
+// capitals that they must change in the same commit.
+//
+// ⚠️ 183's own header AND CLAUDE.md both claim THIS SCRIPT already cross-checked them. It did
+// not — before 2026-09-05 `preflight.mjs` contained no reference to access.ts, AREAS, PRESETS
+// or area_level_for at all. The claim was written as though the guard existed, which is worse
+// than an admitted gap: it is why the drift below shipped twice with nobody looking.
+//   • `change_orders` was added to access.ts on 2026-09-01 and never reached the SQL.
+//   • the sales_rep `orders` preset moved view -> edit on one side only.
+// Both were inert only by luck — no policy happened to key on either — and "inert by luck" is
+// not a property you get to keep.
+//
+// WHAT THIS COVERS: the area KEY SET and each area's LEVEL VOCABULARY, both directions —
+// and, since 2026-09-07, the TITLE KEY SET across all THREE copies of it: `TITLES` in
+// access.ts, `k_presets` in the SQL, and the `when p_title in (...)` CASE inside the same SQL
+// function. Migration 218 took the titles from five to ten and every one of those lists is
+// hand-maintained, so the drift this rule exists for became five times more likely in a
+// single commit.
+//
+// WHY THE THIRD COPY MATTERS AND IS NOT PEDANTRY: the CASE is normTitle's mirror, and a title
+// present in k_presets but missing from it does not error — it falls through to `sales_rep`
+// and resolves that preset instead. A Scheduler would silently read a rep's rows. The two SQL
+// lists sit fifty lines apart in one file and are trivially updated one at a time.
+//
+// WHAT IT STILL DOES NOT COVER: the preset LEVELS (does sales_rep hold orders at view or
+// edit?). `PRESETS.owner` is computed (`Object.fromEntries(AREA_KEYS.map(...))`), so the table
+// cannot be read statically the way the areas can, and a regex that silently skipped the
+// computed row would report a clean diff while covering nine titles out of ten. The second
+// drift above is a preset-LEVEL drift and this rule would still NOT catch it. Closing that
+// needs the TS evaluated, not scanned. What is closed is the failure that actually deletes
+// access: a title one side has never heard of.
+//
+// The SQL side is discovered as "the newest migration that actually DEFINES area_level_for",
+// never the highest-numbered file: the NNN prefix stopped being unique on beta (183 is used
+// twice) and the ledger keys on the timestamp, not the prefix.
+// `inject` exists ONLY for --self-test: it substitutes the text of one side so a fabricated
+// drift can be pushed through the real comparison. A rule nothing ever proves can fire is the
+// failure mode this whole script keeps re-learning, and it is the exact failure that let the
+// two copies drift while 183's header claimed they were checked.
+function checkAreaMirror(files, inject = null) {
+  const errors = [];
+  const TS = "supabase/functions/_shared/access.ts";
+  const ts = (inject && inject.ts) ?? files[TS] ?? readIfExists(TS);
+  if (!ts) {
+    errors.push(`${TS}: missing — the permission model's TypeScript half is gone, or this `
+      + "discovery has gone blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  // ── TS side ──
+  // ⚠️ ANCHORED ON THE COLON, not on the bare name. `ts.indexOf("export const AREAS")` matches
+  // `export const AREAS_RENAMED` too — the name is a PREFIX of anything someone renames it to —
+  // so the blind-detection arm below reported clean on a renamed export, which is the exact
+  // failure this rule exists to make impossible. Caught by the self-test, which is why it is
+  // written; a rule that cannot detect its own subject going missing is not a rule.
+  const areasMatch = /export\s+const\s+AREAS\s*:/.exec(ts);
+  const areasAt = areasMatch ? areasMatch.index : -1;
+  const areasEnd = areasAt < 0 ? -1 : ts.indexOf("\n];", areasAt);
+  if (areasAt < 0 || areasEnd < 0) {
+    errors.push(`${TS}: cannot find the \`export const AREAS\` array — it was renamed or `
+      + "reshaped, so the SQL mirror is now unchecked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const areasSrc = ts.slice(areasAt, areasEnd);
+  // `levels:` is either a named constant (RVE) or an inline array. Resolve named ones from
+  // their own declaration so a change to the constant is seen, not assumed.
+  const namedLevels = {};
+  for (const m of ts.matchAll(/^const\s+([A-Z][A-Z0-9_]*)\s*:\s*Level\[\]\s*=\s*\[([^\]]*)\]/gm)) {
+    namedLevels[m[1]] = [...m[2].matchAll(/"([a-z]+)"/g)].map((x) => x[1]);
+  }
+  const tsAreas = new Map();
+  for (const m of areasSrc.matchAll(/\{\s*key:\s*"([a-z_]+)"[^}]*?levels:\s*(\[[^\]]*\]|[A-Z][A-Z0-9_]*)/g)) {
+    const raw = m[2];
+    const levels = raw.startsWith("[")
+      ? [...raw.matchAll(/"([a-z]+)"/g)].map((x) => x[1])
+      : namedLevels[raw];
+    if (!levels) {
+      errors.push(`${TS}: area "${m[1]}" uses levels constant \`${raw}\` which preflight could `
+        + "not resolve — declare it as `const NAME: Level[] = [...]` or inline the array");
+      continue;
+    }
+    tsAreas.set(m[1], levels.join("|"));
+  }
+  if (!tsAreas.size) {
+    errors.push(`${TS}: parsed ZERO areas out of AREAS — the entry shape changed and this rule `
+      + "is now blind; re-anchor it in scripts/preflight.mjs rather than trusting a clean run");
+    return errors;
+  }
+
+  // ── SQL side: newest file that DEFINES the function, not the highest number ──
+  let best = null;
+  for (const f of listMigrations()) {
+    const src = readIfExists(f);
+    if (src && /create\s+or\s+replace\s+function\s+public\.area_level_for/i.test(src)) {
+      if (!best || f > best.file) best = { file: f, src };
+    }
+  }
+  if (!best) {
+    errors.push("supabase/migrations/: no migration defines `public.area_level_for` — the SQL "
+      + "half of the permission model is gone, or this discovery has gone blind");
+    return errors;
+  }
+  if (inject && inject.sql) best = { file: best.file, src: inject.sql };
+  // ⚠️ ANCHORED ON THE DECLARATION, never the bare word. A migration's own HEADER COMMENT
+  // routinely names k_areas and k_presets while explaining what it changed — 218's does, twice
+  // — and `indexOf("k_presets")` then lands in prose, so the following `$j$` opens the WRONG
+  // literal. That is not a hypothetical: the first cut of the title rule read k_areas as the
+  // preset table and reported all twenty AREAS as unknown job titles. The self-test caught it.
+  const jsonAfter = (decl) => {
+    const at = new RegExp(decl + "\\s+constant\\s+jsonb\\s*:=").exec(best.src);
+    if (!at) return null;
+    const open = best.src.indexOf("$j$", at.index);
+    const close = open < 0 ? -1 : best.src.indexOf("$j$", open + 3);
+    return close < 0 ? null : best.src.slice(open + 3, close);
+  };
+
+  const areasJson = jsonAfter("k_areas");
+  if (areasJson === null) {
+    errors.push(`${best.file}: cannot read the \`k_areas constant jsonb :=\` $j$…$j$ literal — `
+      + "re-anchor checkAreaMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  let sqlAreas;
+  try {
+    const parsed = JSON.parse(areasJson);
+    sqlAreas = new Map(Object.entries(parsed).map(([k, v]) => [k, (v.levels || []).join("|")]));
+  } catch (e) {
+    errors.push(`${best.file}: k_areas is not valid JSON (${e.message}) — the SQL resolver `
+      + "will fail at apply time");
+    return errors;
+  }
+
+  // ── Compare, both directions ──
+  for (const [k, lv] of tsAreas) {
+    if (!sqlAreas.has(k)) {
+      errors.push(`permission model drift: area "${k}" exists in ${TS} but NOT in `
+        + `${best.file}'s k_areas. Any RLS policy keyed on it resolves to NULL. Add it to the `
+        + "SQL mirror in this same commit.");
+    } else if (sqlAreas.get(k) !== lv) {
+      errors.push(`permission model drift: area "${k}" allows [${lv}] in ${TS} but `
+        + `[${sqlAreas.get(k)}] in ${best.file}. The browser and the database disagree about `
+        + "what a level means.");
+    }
+  }
+  for (const k of sqlAreas.keys()) {
+    if (!tsAreas.has(k)) {
+      errors.push(`permission model drift: area "${k}" exists in ${best.file}'s k_areas but `
+        + `NOT in ${TS}. Either it was removed from the app and left in SQL, or the SQL is `
+        + "ahead of the code.");
+    }
+  }
+
+  // ── TITLES: three copies of one list ──────────────────────────────────────────────
+  // Same shape of check as the areas above, and the same both-directions rule. Anchored on
+  // the colon for the same reason AREAS is — a bare-name indexOf matches any rename.
+  const titlesMatch = /export\s+const\s+TITLES\s*:/.exec(ts);
+  const titlesAt = titlesMatch ? titlesMatch.index : -1;
+  const titlesEnd = titlesAt < 0 ? -1 : ts.indexOf("\n];", titlesAt);
+  if (titlesAt < 0 || titlesEnd < 0) {
+    errors.push(`${TS}: cannot find the \`export const TITLES\` array — it was renamed or `
+      + "reshaped, so the job-title mirror is now unchecked; re-anchor it in "
+      + "scripts/preflight.mjs rather than trusting a clean run");
+    return errors;
+  }
+  const tsTitles = new Set(
+    [...ts.slice(titlesAt, titlesEnd).matchAll(/\{\s*key:\s*"([a-z_]+)"/g)].map((m) => m[1]),
+  );
+  if (!tsTitles.size) {
+    errors.push(`${TS}: parsed ZERO titles out of TITLES — the entry shape changed and the `
+      + "job-title mirror is now blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  const presetsJson = jsonAfter("k_presets");
+  if (presetsJson === null) {
+    errors.push(`${best.file}: cannot read the \`k_presets constant jsonb :=\` $j$…$j$ literal `
+      + "— re-anchor checkAreaMirror() in scripts/preflight.mjs");
+    return errors;
+  }
+  let sqlTitles;
+  try {
+    sqlTitles = new Set(Object.keys(JSON.parse(presetsJson)));
+  } catch (e) {
+    errors.push(`${best.file}: k_presets is not valid JSON (${e.message}) — the SQL resolver `
+      + "will fail at apply time");
+    return errors;
+  }
+
+  for (const t of tsTitles) {
+    if (!sqlTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" exists in ${TS} but NOT in `
+        + `${best.file}'s k_presets. area_level_for resolves it to 'none' for EVERY area, so `
+        + "anyone holding that title reads empty lists through RLS while passing every "
+        + "edge-function gate. Add it to the SQL mirror in this same commit.");
+    }
+  }
+  for (const t of sqlTitles) {
+    if (!tsTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" exists in ${best.file}'s `
+        + `k_presets but NOT in ${TS}. Either it was removed from the app and left in SQL, or `
+        + "the SQL is ahead of the code.");
+    }
+  }
+
+  // The THIRD copy: normTitle's mirror. A title missing here does not error — it silently
+  // resolves as `sales_rep`, which is worse than the k_presets case because the person gets
+  // a real preset that is not theirs.
+  // Searched from the function body onward for the same reason as above — a header comment
+  // quoting the CASE would otherwise be read as the CASE.
+  const bodyAt = best.src.search(/create\s+or\s+replace\s+function\s+public\.area_level_for/i);
+  const caseMatch = /when\s+p_title\s+in\s*\(([\s\S]*?)\)/i.exec(best.src.slice(Math.max(bodyAt, 0)));
+  if (!caseMatch) {
+    errors.push(`${best.file}: cannot find area_level_for's \`when p_title in (...)\` CASE — `
+      + "normTitle's SQL mirror is now unchecked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const caseTitles = new Set([...caseMatch[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]));
+  for (const t of tsTitles) {
+    if (!caseTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" is in ${TS} but missing from `
+        + `${best.file}'s \`when p_title in (...)\` CASE. That is normTitle's mirror: the title `
+        + "does not error, it falls through to the sales_rep preset. Add it beside k_presets.");
+    }
+  }
+  for (const t of caseTitles) {
+    if (!tsTitles.has(t)) {
+      errors.push(`permission model drift: job title "${t}" is in ${best.file}'s normTitle `
+        + `CASE but not in ${TS}'s TITLES.`);
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Every contacts:'edit' action must declare how to find the row it touches.
+ *
+ * WHY THIS IS A PUSH-BLOCKING RULE AND NOT A CODE REVIEW NOTE. `contacts:'own'` became a
+ * WRITE scope on 2026-09-07 (access.ts's ownWrites flag), so a person who may only touch
+ * their own customers now PASSES every contacts:'edit' gate. The gate is the floor — "may
+ * you do this kind of thing" — and portal-settings' CONTACT_ROW_SCOPE table is the only
+ * thing that answers "to WHICH row". An action gated contacts:'edit' and absent from that
+ * table is not refused and does not error: it runs, unnarrowed, against the whole tenant's
+ * customer list. That is the entire failure mode of the feature, in one forgotten line.
+ *
+ * It is the same argument the GATES cross-check already makes, one level down, and it is
+ * checked the same way: read both tables out of the source and compare them. The two halves
+ * live ~5000 lines apart in one file, which is exactly the distance at which people stop
+ * updating the second one.
+ *
+ * Deliberately NOT checked here: whether the declared resolver is CORRECT. A rule that
+ * parsed intent would be guessing; this one asserts only that the author was made to think
+ * about the row, which is the step that gets skipped.
+ */
+function checkContactRowScope(files, inject = null) {
+  const errors = [];
+  const F = "supabase/functions/portal-settings/index.ts";
+  const src = (inject && inject.src) ?? files[F] ?? readIfExists(F);
+  if (!src) {
+    errors.push(`${F}: missing — the contacts row-scope check has no subject and is silently `
+      + "inert; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  // GATES entries requiring contacts at 'edit'. Tolerates the `{ any: [...] }` / `{ all: [...] }`
+  // shapes by scanning each entry's whole value for a contacts/edit pair.
+  const gatesAt = src.indexOf(GATES_DECL);
+  if (gatesAt < 0) {
+    errors.push(`${F}: no GATES table found — the contacts row-scope check cannot run; `
+      + "re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gatesEnd = src.indexOf("\n};", gatesAt);
+  if (gatesEnd < 0) {
+    errors.push(`${F}: the GATES table's braces never close — the contacts row-scope check `
+      + "is blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gatesSrc = src.slice(gatesAt, gatesEnd);
+  const needsScope = [];
+  for (const line of gatesSrc.split("\n")) {
+    const m = /^\s*([a-z0-9_]+)\s*:/i.exec(line);
+    if (!m) continue;
+    if (/area:\s*"contacts"\s*,\s*level:\s*"edit"/.test(line)) needsScope.push(m[1]);
+  }
+  if (!needsScope.length) {
+    errors.push(`${F}: parsed ZERO contacts:'edit' actions out of GATES — the entry shape `
+      + "changed and this rule is now blind; re-anchor it rather than trusting a clean run");
+    return errors;
+  }
+
+  const scopeMatch = /const\s+CONTACT_ROW_SCOPE\s*:/.exec(src);
+  if (!scopeMatch) {
+    errors.push(`${F}: cannot find \`const CONTACT_ROW_SCOPE\` — contacts:'own' is a WRITE `
+      + "scope, so without that table every contacts:'edit' action runs unnarrowed against "
+      + "the whole tenant's customer list. Re-anchor this rule, or restore the table.");
+    return errors;
+  }
+  const scopeEnd = src.indexOf("\n  };", scopeMatch.index);
+  const scopeSrc = scopeEnd < 0 ? "" : src.slice(scopeMatch.index, scopeEnd);
+  const declared = new Set(
+    [...scopeSrc.matchAll(/^\s{4}([a-z0-9_]+)\s*:/gim)].map((m) => m[1]),
+  );
+
+  for (const a of needsScope) {
+    if (!declared.has(a)) {
+      errors.push(`${F}: action "${a}" is gated contacts:'edit' but is MISSING from `
+        + "CONTACT_ROW_SCOPE. contacts:'own' writes, so this action currently runs "
+        + "unnarrowed for a dealer — against every customer on the tenant, not just theirs. "
+        + "Declare how to find its contact (contactKeys / codeKeys / rowTable), or mark it "
+        + "tenantWide if it genuinely is not per-contact.");
+    }
+  }
+  for (const a of declared) {
+    if (!needsScope.includes(a)) {
+      errors.push(`${F}: action "${a}" is in CONTACT_ROW_SCOPE but is not gated `
+        + "contacts:'edit' in GATES — either its gate was loosened (and the row scope is now "
+        + "dead code guarding nothing) or the name is a typo, which reads identically.");
+    }
+  }
+  return errors;
+}
+
+function checkGateTable(fn, src) {
+  const errors = [];
+  const file = `${FUNCTIONS_DIR}/${fn}/index.ts`;
+  const decl = src.indexOf(GATES_DECL);
+  if (decl < 0) return errors;   // gatedFunctions() only yields files that have one
+
+  const { end, hits } = walkBlock(src, decl + GATES_DECL.length - 1, GATE_KEY, KEY_AFTER);
+  if (end < 0) {
+    errors.push(`${file}: the GATES table's braces never close — preflight cannot read it, so `
+      + "nothing in this function is cross-checked; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gated = new Set(hits);
+  const body = src.slice(end);
+
+  // The two dispatch shapes, unioned. The Set is what keeps an action written both ways from
+  // counting twice.
+  const used = new Set([...body.matchAll(/action\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
+  const sw = /switch\s*\(\s*action\s*\)\s*\{/.exec(body);
+  if (sw) {
+    const dispatch = walkBlock(body, sw.index + sw[0].length - 1, CASE_LABEL, CASE_AFTER);
+    if (dispatch.end < 0) {
+      errors.push(`${file}: the \`switch (action)\` block's braces never close — its case `
+        + "labels cannot be read, so every gate in this function would report as stale");
+      return errors;
+    }
+    for (const a of dispatch.hits) used.add(a);
+  }
+  // The default action is dispatched too: resolveTenant reads `payload?.action ||
+  // opts.defaultAction`, so a request with no action in its body runs it, and it is gated like
+  // any other. It is the ONLY thing justifying sync-design-status's single entry — that
+  // function compares `action` nowhere at all.
+  const dflt = /defaultAction\s*:\s*"([^"]+)"/.exec(body);
+  if (dflt) used.add(dflt[1]);
+
+  // Vacuity guard. A rule whose anchors stop matching reports clean forever and nobody finds
+  // out — this file's signature failure, and exactly what happened here: sync-design-status sat
+  // in the checked list for months while zero gates and zero actions were parsed out of it.
+  if (!gated.size || !used.size) {
+    errors.push(`${file}: parsed ${gated.size} gate(s) and ${used.size} action(s) — the `
+      + "cross-check can no longer read this function and is silently inert; re-anchor it in "
+      + "scripts/preflight.mjs rather than leaving a gated function unchecked");
+    return errors;
+  }
+
+  for (const a of used) {
+    if (!gated.has(a)) {
+      errors.push(`${file}: action "${a}" has no entry in GATES — `
+        + "add the area and level it requires, or it is refused at runtime");
+    }
+  }
+  for (const a of gated) {
+    if (!used.has(a)) {
+      errors.push(`${file}: GATES lists "${a}" but no branch handles `
+        + "it — remove the stale entry so the table describes what actually exists");
+    }
+  }
+  return errors;
+}
+
 function denoInstalled() {
   // Probed explicitly instead of interpreting a failed `deno check`. Via the shell fallback a
   // missing binary is NOT ENOENT — cmd.exe reports "not recognized" and exits non-zero, which
@@ -806,10 +1670,14 @@ function denoTest() {
 
   const errors = [];
   for (const g of groups) {
-    // --allow-env only: the tests stub globalThis.fetch / inject fake clients, so no network
-    // permission is needed — and withholding it means a test that accidentally reaches the real
-    // internet fails loudly instead of passing slowly.
-    const args = ["test", "--quiet", "--allow-env", "--node-modules-dir=none"];
+    // --allow-env and a repo-scoped --allow-read, nothing else. The tests stub globalThis.fetch
+    // / inject fake clients, so NO network permission is granted — withholding --allow-net means
+    // a test that accidentally reaches the real internet fails loudly instead of passing slowly,
+    // and that property is untouched by the read grant. Read is needed because some tests assert
+    // against the SHIPPED source rather than a copy of it (wallSlab_test lifts the designer's
+    // slab rules; the my-quotes check does the same for that page) — a copied-out copy would keep
+    // passing while the real file drifted. Scoped to the repo so a test still cannot wander.
+    const args = ["test", "--quiet", "--allow-env", `--allow-read=${root}`, "--node-modules-dir=none"];
     if (g.importMap) args.push(`--import-map=${g.importMap}`);
     args.push(...g.files);
     const res = runDeno(args, join(root, FUNCTIONS_DIR));
@@ -885,6 +1753,107 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: unresolved conflict hunks are refused, marker lookalikes are not");
+
+  // ── The twin-drift rule ────────────────────────────────────────────────────
+  // This rule is a NORMALISER wrapped around a compare, which gives it two ways to be useless
+  // and both are silent: normalise too much and it compares nothing, normalise too little and
+  // it fires on a clean tree until someone deletes it. So prove all four directions.
+  //
+  // QUIET on the pristine repo. Asserted explicitly rather than trusted to the overall run,
+  // because this is the direction that decides whether the rule survives its first month.
+  const twinNoise = run(load()).filter((e) => e.includes("twin drift"));
+  if (twinNoise.length) {
+    console.error("self-test FAILED: the pristine twins do not pass the drift check — the three "
+      + "legitimate dialect differences (or the blank-line/comment exemptions) are not being "
+      + "normalised:");
+    for (const e of twinNoise) console.error("  " + e);
+    process.exit(1);
+  }
+  // FIRES on a changed line — the ordinary case: someone edits the .js and forgets the .jsx,
+  // or vice versa. A string literal, because that is a change no lint of either file can see.
+  const twinChanged = load();
+  const twinBanner = 'console.log("[StructureStudio] multi-tenant build: config-loader + RPC data path");';
+  if (!twinChanged[TWIN_COMP].includes(twinBanner)) {
+    console.error("self-test: twin-drift fixture line not found in " + TWIN_COMP + " — update the self-test");
+    process.exit(1);
+  }
+  twinChanged[TWIN_COMP] = twinChanged[TWIN_COMP].replace(twinBanner,
+    'console.log("[StructureStudio] single-tenant build");');
+  {
+    const hits = run(twinChanged).filter((e) => e.includes("twin drift"));
+    if (!hits.length) {
+      console.error("self-test FAILED: a changed line in " + TWIN_COMP + " was not caught — the two "
+        + "twins would ship different code with every lint and every artifact check passing");
+      process.exit(1);
+    }
+    // Naming the region is the rule's whole value: a 14,000-line "these files differ" is a
+    // second job for the reader, not a finding. Both files and both line numbers must be there.
+    if (!hits.some((e) => e.includes(TWIN_JSX + ":") && e.includes(TWIN_COMP + ":")
+        && e.includes("single-tenant build"))) {
+      console.error("self-test FAILED: the twin-drift report does not name both sides of the "
+        + "drifting region with line numbers and an excerpt. It said:");
+      for (const e of hits) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // FIRES on an INSERTION, and reports it as ONE region. A plain index compare would call every
+  // remaining line drifted; the look-ahead resync is what keeps the output readable, so assert
+  // the count rather than merely that something fired.
+  const twinInserted = load();
+  const twinAnchor = "const SUPABASE_URL = \"https://jzeamjbhdrsbygdnphbm.supabase.co\";";
+  if (!twinInserted[TWIN_JSX].includes(twinAnchor)) {
+    console.error("self-test: twin-drift insertion anchor not found in " + TWIN_JSX + " — update the self-test");
+    process.exit(1);
+  }
+  twinInserted[TWIN_JSX] = twinInserted[TWIN_JSX].replace(twinAnchor,
+    "const SS_TWIN_SELFTEST_ONLY = 1;\n" + twinAnchor);
+  {
+    const hits = run(twinInserted).filter((e) => e.includes("twin drift"));
+    if (!hits.length) {
+      console.error("self-test FAILED: a line added to " + TWIN_JSX + " only was not caught");
+      process.exit(1);
+    }
+    if (hits.length !== 1) {
+      console.error(`self-test FAILED: one inserted line produced ${hits.length} drift region(s) — `
+        + "the resync is not working, and a report that flags the rest of the file is a report "
+        + "nobody reads. It said:");
+      for (const e of hits) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // QUIET on each legitimate difference, exercised rather than merely present in the tree.
+  // A rule that flags the module top, the export keyword, a moved comment or a blank line
+  // fails on the first honest mirror edit and gets deleted; these are the shapes CLAUDE.md
+  // explicitly permits.
+  const twinLegit = load();
+  twinLegit[TWIN_JSX] = twinLegit[TWIN_JSX]
+    .replace("import { createPortal } from \"react-dom\";", "import { createPortal, flushSync } from \"react-dom\";")
+    .replace(twinAnchor, "// a fresh comment, on the .jsx side only\n\n\n" + twinAnchor);
+  twinLegit[TWIN_COMP] = twinLegit[TWIN_COMP]
+    .replace("const { createPortal } = ReactDOM;", "const { createPortal, flushSync } = ReactDOM;");
+  if (twinLegit[TWIN_JSX] === load()[TWIN_JSX] || twinLegit[TWIN_COMP] === load()[TWIN_COMP]) {
+    console.error("self-test: the legitimate-difference fixtures did not apply — update the self-test");
+    process.exit(1);
+  }
+  {
+    const noise = run(twinLegit).filter((e) => e.includes("twin drift"));
+    if (noise.length) {
+      console.error("self-test FAILED: a legitimate dialect difference (import vs global destructure) "
+        + "or a comment/blank-line-only edit tripped the twin-drift rule:");
+      for (const e of noise) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  // And the vacuity direction, which is how this rule would fail SILENTLY: a normaliser that
+  // dropped everything would compare two empty lists and pass forever.
+  if (!checkTwinDrift("// only a comment\n", "// only a comment\n")
+      .some((e) => e.includes("stopped seeing most of the file"))) {
+    console.error("self-test FAILED: twinBody() reducing a file to nothing did not trip the vacuity "
+      + "guard — the drift check could compare zero lines and report two identical twins");
+    process.exit(1);
+  }
+  console.log("self-test passed: the twins must not drift — a changed line and a one-sided insertion "
+    + "are both caught and located, while the module top, comments and blank lines stay quiet");
 
   // ── The boot-guard lock ────────────────────────────────────────────────────
   // Two regexes that never match are indistinguishable from three healthy pages, and this rule
@@ -1155,14 +2124,75 @@ if (process.argv.includes("--self-test")) {
   console.log("self-test passed: the three libraries must be vendored, identical, present, and not "
     + "CDN-loaded — while exceljs stays allowed");
 
+  // ── The minifier pin and the artifact shape gate ───────────────────────────
+  // These exist BECAUSE the drift gate cannot see them: a minifier that renamed a window.*
+  // publish, or that stopped putting the boot flag first, would produce the same wrong bytes
+  // on both sides of the byte compare. A gate nobody can prove fires is the shape this file
+  // has been bitten by twice, so each invariant is bent on a copy and asserted to complain.
+  {
+    const { checkArtifactShape, installedTerserVersion, TERSER_VERSION } = await import("./compile.mjs");
+
+    // The pin is only a pin while package.json agrees with it EXACTLY. A caret slipped in
+    // here and the whole argument for pinning — deterministic bytes, so the drift gate means
+    // something — stops holding, silently, on the next person's `npm install`.
+    const pinned = (JSON.parse(read("package.json")).devDependencies || {}).terser;
+    if (pinned !== TERSER_VERSION || !/^\d+\.\d+\.\d+$/.test(String(pinned))) {
+      console.error(`self-test FAILED: package.json pins terser "${pinned}" but scripts/compile.mjs `
+        + `expects exactly "${TERSER_VERSION}" — same version, no range prefix`);
+      process.exit(1);
+    }
+    const installed = installedTerserVersion();
+    if (installed !== TERSER_VERSION) {
+      console.error(`self-test FAILED: terser ${installed === null ? "is not installed" : installed + " is installed"}, `
+        + `but ${TERSER_VERSION} is pinned — run \`npm install\``);
+      process.exit(1);
+    }
+
+    const committed = Object.fromEntries(TARGETS.map((t) => [t.out, read(t.out).replace(/\r\n/g, "\n")]));
+    const quiet = checkArtifactShape(committed);
+    if (quiet.length) {
+      console.error("self-test FAILED: the committed artifacts do not pass the shape gate:");
+      for (const p of quiet) console.error("  " + p);
+      process.exit(1);
+    }
+    const fires = (label, files, needle) => {
+      const hits = checkArtifactShape(files).filter((e) => e.includes(needle));
+      if (!hits.length) {
+        console.error(`self-test FAILED: ${label} did not trip the artifact shape gate`);
+        process.exit(1);
+      }
+    };
+    // 1. The boot flag renamed away — the exact thing a property-mangling misconfiguration
+    //    would do, and the thing that would leave the boot guard unable to neutralise anything.
+    const noGuard = { ...committed };
+    noGuard["portal.app.compiled.js"] = noGuard["portal.app.compiled.js"].replace("__ssBootBlocked", "__ssBootBlockedGone");
+    fires("a renamed __ssBootBlocked flag", noGuard, "first thing the artifact's wrapper does");
+    // 2. A statement smuggled in AFTER the sentinel: the app would report "booted" while code
+    //    that had not run yet still decided whether it really had.
+    const lateSentinel = { ...committed };
+    const sentinel = lateSentinel["admin.app.compiled.js"].match(/window\.__ssAppBooted\s*=\s*(?:true|!0)\s*;?/)[0];
+    lateSentinel["admin.app.compiled.js"] = lateSentinel["admin.app.compiled.js"]
+      .replace(sentinel, sentinel.replace(/;?$/, ";") + "window.__ssAfterTheSentinel=1;");
+    fires("a statement after the __ssAppBooted sentinel", lateSentinel, "last statement of the guarded body");
+    // 3. A window.* publish renamed: two <script> tags that share no lexical scope silently
+    //    stop talking to each other. The replacement must not CONTAIN the original name —
+    //    "window.ssLogErrorX" still passes an includes() check, which is how a fixture ends up
+    //    proving nothing.
+    const lostPublish = { ...committed };
+    lostPublish["admin.app.compiled.js"] = lostPublish["admin.app.compiled.js"].split("window.ssLogError").join("window.ssLostError");
+    fires("a renamed window.ssLogError publish", lostPublish, "missing from the built artifact");
+  }
+  console.log("self-test passed: terser is pinned to one exact version in both places, and the shape "
+    + "gate fires on a renamed boot flag, a late __ssAppBooted sentinel and a lost window.* publish");
+
   // ── The artifact drift gate ────────────────────────────────────────────────
   // Fire direction: a source edited without recompiling must produce different bytes than
   // the committed artifact (proven in memory — the real gate does this same compare on
   // disk). Quiet direction: the pristine repo must check clean. Vacuity direction: the
   // compiler must actually compile JSX, or "no drift" means "the gate is dead".
   {
-    const { checkArtifacts, compileSource } = await import("./compile.mjs");
-    if (!compileSource("const x = <a/>;", "probe.jsx").includes("React.createElement")) {
+    const { checkArtifacts, compileSource, PROBE_SOURCE } = await import("./compile.mjs");
+    if (!compileSource(PROBE_SOURCE, "probe.jsx").includes("React.createElement")) {
       console.error("self-test FAILED: the vendored Babel produced no JSX output — the drift gate is dead");
       process.exit(1);
     }
@@ -1251,6 +2281,31 @@ if (process.argv.includes("--self-test")) {
   // Prove three things — it passes on the real file, it FAILS on a broken breakdown, and it
   // fails when the block has been extracted away to nothing.
   const mqHtml = readFileSync(join(root, "my-quotes.html"), "utf8");
+
+  // ── The standalone-page PARSE step ───────────────────────────────────────
+  // Clean on the real file, and it must fire on the exact failure that shipped: a regex
+  // literal broken across lines. A check whose passing and whose absence look identical
+  // needs this, and this one shipped BECAUSE nobody had written it.
+  if (checkStandalonePagesParse({ "my-quotes.html": mqHtml }).length) {
+    console.error("self-test FAILED: my-quotes.html does not parse — fix the page, not the check");
+    process.exit(1);
+  }
+  const brokenSyntax = mqHtml.replace("var dlines = dtxt.split(String.fromCharCode(10));",
+    "var dlines = dtxt.replace(/\n?Total:[^\n]*$/, \"\");");
+  if (brokenSyntax === mqHtml) {
+    console.error("self-test FAILED: could not find the line to break — the parse check's subject moved");
+    process.exit(1);
+  }
+  if (!checkStandalonePagesParse({ "my-quotes.html": brokenSyntax }).length) {
+    console.error("self-test FAILED: a SyntaxError in my-quotes.html passed the parse check");
+    process.exit(1);
+  }
+  if (!checkStandalonePagesParse({ "my-quotes.html": "<html><body>no script</body></html>" }).length) {
+    console.error("self-test FAILED: a page with no inline script passed the parse check");
+    process.exit(1);
+  }
+  console.log("self-test passed: my-quotes.html parses, and a SyntaxError in it is caught");
+
   if (checkMyQuotesTaxBreakdown(mqHtml).length) {
     console.error("self-test FAILED: the my-quotes tax breakdown does not pass against the real file");
     process.exit(1);
@@ -1272,6 +2327,263 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   console.log("self-test passed: the my-quotes tax breakdown check fails on wrong figures and on a missing block");
+
+  // ── The GATES ⇄ action cross-check ─────────────────────────────────────────
+  // This rule had NO self-test at all until now, in either direction — while quietly running
+  // zero checks on one of the four functions it named. So prove the whole mechanism: that
+  // discovery finds the functions, that BOTH dispatch shapes are read, that the real repo is
+  // quiet, and that the scoping which makes the case scan safe is really in place.
+  const gateFns = gatedFunctions();
+  if (gateFns.length < 5) {
+    console.error(`self-test FAILED: discovery found ${gateFns.length} gated function(s), expected at least 5`);
+    process.exit(1);
+  }
+  // Named explicitly, in the shape of the ["_shared", "_test_stubs"] assertion above: portal-sms
+  // is the function the hand-kept list missed entirely, and sync-design-status is the one it
+  // named while parsing nothing out of it.
+  for (const want of ["portal-sms", "sync-design-status"]) {
+    if (!gateFns.some((g) => g.fn === want)) {
+      console.error(`self-test FAILED: gated function "${want}" was not discovered`);
+      process.exit(1);
+    }
+  }
+  // The case-label half must have a real subject. If no discovered function dispatches with
+  // `switch (action)` any more, every assertion below still passes while that whole code path
+  // sits inert — the failure shape this script keeps re-learning.
+  if (!gateFns.some((g) => /switch\s*\(\s*action\s*\)/.test(g.src))) {
+    console.error("self-test FAILED: no discovered gated function dispatches with `switch (action)` — "
+      + "the case-label half of the cross-check has no subject and is silently inert");
+    process.exit(1);
+  }
+  for (const g of gateFns) {
+    const errs = checkGateTable(g.fn, g.src);
+    if (errs.length) {
+      console.error(`self-test FAILED: ${g.fn} does not pass the GATES cross-check against the real file:`);
+      for (const e of errs) console.error("  " + e);
+      process.exit(1);
+    }
+  }
+  const gateSrcOf = (fn) => gateFns.find((g) => g.fn === fn).src;
+
+  // FIRES on the switch/case form. portal-sms dispatches with `switch (action)`, so under the
+  // old `action === "x"` scan every one of its ten gates would have read as stale — which is
+  // why adding it to the list was never enough on its own.
+  const smsSrc = gateSrcOf("portal-sms");
+  const smsCase = 'case "opt_outs": {';
+  if (!smsSrc.includes(smsCase)) {
+    console.error("self-test: could not find the portal-sms case label to rename — update the self-test");
+    process.exit(1);
+  }
+  const smsErrs = checkGateTable("portal-sms", smsSrc.replace(smsCase, 'case "opt_outs_typo": {'));
+  if (!smsErrs.some((e) => e.includes('action "opt_outs_typo" has no entry in GATES'))) {
+    console.error("self-test FAILED: a `case` label with no GATES entry was not caught — the switch/case "
+      + "half of the cross-check does not fire");
+    process.exit(1);
+  }
+  if (!smsErrs.some((e) => e.includes('GATES lists "opt_outs" but no branch'))) {
+    console.error("self-test FAILED: a GATES entry whose `case` label is gone was not reported as stale");
+    process.exit(1);
+  }
+  // SCOPED. portal-sms holds a second switch (`switch (reg.status)`, in advanceOne) whose ten
+  // labels are states, not actions. An unscoped case scan reports every one of them as ungated.
+  if (smsErrs.some((e) => e.includes("brand_pending"))) {
+    console.error("self-test FAILED: a `switch (reg.status)` label was read as an action — the case scan "
+      + "is no longer scoped to the `switch (action)` dispatch block");
+    process.exit(1);
+  }
+
+  // FIRES on the `action === "x"` form too — the original shape, which had no coverage either.
+  const setSrc = gateSrcOf("portal-settings");
+  const setIf = 'if (action === "save_colors") {';
+  if (!setSrc.includes(setIf)) {
+    console.error("self-test: could not find the portal-settings branch to rename — update the self-test");
+    process.exit(1);
+  }
+  const setErrs = checkGateTable("portal-settings", setSrc.replace(setIf, 'if (action === "save_colors_typo") {'));
+  if (!setErrs.some((e) => e.includes('action "save_colors_typo" has no entry in GATES'))
+      || !setErrs.some((e) => e.includes('GATES lists "save_colors" but no branch'))) {
+    console.error("self-test FAILED: the `action === \"x\"` half of the cross-check no longer fires");
+    process.exit(1);
+  }
+
+  // The ONE-LINE table is really parsed. sync-design-status writes its whole table on a single
+  // line and reaches its only action through `defaultAction`, never `===` — it sat in the
+  // checked list for months with zero gates and zero actions read out of it, passing by saying
+  // nothing about anything.
+  const syncSrc = gateSrcOf("sync-design-status");
+  const syncTable = 'const GATES: GateTable = { sync: { area: "designs", level: "view" } };';
+  if (!syncSrc.includes(syncTable)) {
+    console.error("self-test: could not find sync-design-status's one-line GATES table — update the self-test");
+    process.exit(1);
+  }
+  const syncStale = checkGateTable("sync-design-status",
+    syncSrc.replace(syncTable, syncTable.replace(" } };", ' }, stale_entry: "open" };')));
+  if (!syncStale.some((e) => e.includes('GATES lists "stale_entry"'))) {
+    console.error("self-test FAILED: a second entry added to the one-line GATES table was not read — the "
+      + "table's extent or its keys are being parsed as nothing");
+    process.exit(1);
+  }
+  // Multi-line, the shape any reformat would produce. `area` and `level` are fields of the
+  // value, not gate names: a line-anchored key scan reports two phantom stale entries here.
+  const syncMulti = checkGateTable("sync-design-status", syncSrc.replace(syncTable,
+    'const GATES: GateTable = {\n  sync: {\n    area: "designs",\n    level: "view",\n  },\n};'));
+  if (syncMulti.length) {
+    console.error("self-test FAILED: the same table written across several lines does not pass:");
+    for (const e of syncMulti) console.error("  " + e);
+    process.exit(1);
+  }
+  // And the vacuity guard fires: strip the default action and nothing in that file dispatches
+  // at all, which must read as "this rule has gone blind", never as a clean pass.
+  const syncBlind = checkGateTable("sync-design-status",
+    syncSrc.replace('defaultAction: "sync"', "readActions: new Set()"));
+  if (!syncBlind.some((e) => e.includes("silently inert"))) {
+    console.error("self-test FAILED: a gated function with no discoverable action passed the cross-check — "
+      + "the vacuity guard does not fire, so a rule reading nothing reports clean");
+    process.exit(1);
+  }
+  console.log(`self-test passed: the GATES cross-check reads all ${gateFns.length} discovered function(s), fires on `
+    + "both `action === \"x\"` and `switch/case` dispatch, ignores a non-dispatch switch, and refuses to run blind");
+
+  // ── The access.ts <-> area_level_for() mirror ──
+  // Proves all four directions, because this rule exists precisely BECAUSE a claim that it
+  // existed was believed for days while the two copies drifted.
+  const amFiles = load();
+  const amTs = readIfExists("supabase/functions/_shared/access.ts");
+  let amSql = null;
+  for (const f of listMigrations()) {
+    const s = readIfExists(f);
+    if (s && /create\s+or\s+replace\s+function\s+public\.area_level_for/i.test(s)) amSql = s;
+  }
+  if (!amTs || !amSql) {
+    console.error("self-test FAILED: could not load both halves of the permission model — the "
+      + "area-mirror rule has no subject and is silently inert");
+    process.exit(1);
+  }
+  // (a) CLEAN on the real files. If this ever fails, the two copies have actually drifted.
+  const amClean = checkAreaMirror(amFiles);
+  if (amClean.length) {
+    console.error("self-test FAILED: the real access.ts and area_level_for() do not agree:");
+    for (const e of amClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // (b) FIRES when an area exists in TS but not in SQL — the `change_orders` drift, verbatim.
+  const dropOne = amSql.replace(/^\s*"contacts":\s*\{[^}]*\},?\s*$/m, "");
+  if (dropOne === amSql) {
+    console.error("self-test FAILED: could not remove an area from the SQL mirror — the k_areas "
+      + "shape changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropOne }).some((e) => /"contacts".*but NOT in/.test(e))) {
+    console.error("self-test FAILED: an area missing from the SQL mirror did not fire");
+    process.exit(1);
+  }
+  // (c) FIRES when the LEVEL VOCABULARY disagrees — the half that a key-set diff cannot see.
+  const bendLevels = amSql.replace(/"commissions":(\s*)\{"levels": \["none","own","edit"\]\}/,
+    '"commissions":$1{"levels": ["none","view","edit"]}');
+  if (bendLevels === amSql) {
+    console.error("self-test FAILED: could not alter a level vocabulary in the SQL mirror — "
+      + "the commissions anchor moved and this assertion is inert");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: bendLevels }).some((e) => /allows \[.*\] in .* but/.test(e))) {
+    console.error("self-test FAILED: a level-vocabulary mismatch did not fire");
+    process.exit(1);
+  }
+  // (d) REFUSES TO RUN BLIND. A renamed AREAS export must be an error, never a clean pass —
+  // the whole point is that a rule reporting nothing must not look like a rule reporting OK.
+  if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const AREAS", "export const AREAS_RENAMED") })
+        .some((e) => /cannot find the `export const AREAS` array/.test(e))) {
+    console.error("self-test FAILED: a renamed AREAS export reported clean instead of blind");
+    process.exit(1);
+  }
+  // (e) FIRES when a TITLE exists in TS but not in the SQL presets. This is the drift that
+  //     migration 218 made five times more likely, and it is the one that empties a screen.
+  const dropTitle = amSql.replace(/^\s*"crew_leader":\s*\{[^}]*\},?\s*$/m, "");
+  if (dropTitle === amSql) {
+    console.error("self-test FAILED: could not remove a title from k_presets — the shape "
+      + "changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropTitle })
+        .some((e) => /job title "crew_leader" exists in .* but NOT in/.test(e))) {
+    console.error("self-test FAILED: a title missing from k_presets did not fire");
+    process.exit(1);
+  }
+  // (f) FIRES when a title is in k_presets but missing from normTitle's CASE — the copy that
+  //     resolves someone as a sales_rep instead of erroring.
+  // Scoped to the CASE itself. A bare /'crew_leader'/ replace hits PART 1's CHECK constraint
+  // first (218 lists every title there too) and leaves the CASE untouched, so the assertion
+  // would pass while testing nothing.
+  const dropFromCase = amSql.replace(/(when\s+p_title\s+in\s*\()[\s\S]*?(\))/i,
+    "$1'owner','admin','office_staff','sales_manager','sales_rep','dealer','scheduler',"
+    + "'crew_member','driver'$2");
+  if (dropFromCase === amSql) {
+    console.error("self-test FAILED: could not remove a title from the normTitle CASE — the "
+      + "anchor moved and this assertion is inert");
+    process.exit(1);
+  }
+  if (!checkAreaMirror(amFiles, { sql: dropFromCase })
+        .some((e) => /missing from .*`when p_title in \(\.\.\.\)` CASE/.test(e))) {
+    console.error("self-test FAILED: a title missing from the normTitle CASE did not fire");
+    process.exit(1);
+  }
+  // (g) IS NOT FOOLED BY PROSE. A migration header that merely NAMES k_presets must not
+  //     become the thing parsed — the first cut of this rule read k_areas as the preset table
+  //     and reported every area as an unknown job title.
+  const prosed = "-- this migration rewrites k_presets and k_areas, see below\n" + amSql;
+  const prosedErrors = checkAreaMirror(amFiles, { sql: prosed });
+  if (prosedErrors.length) {
+    console.error("self-test FAILED: a header comment naming k_presets/k_areas broke the "
+      + "parse — the rule is anchoring on prose:");
+    for (const e of prosedErrors) console.error("  " + e);
+    process.exit(1);
+  }
+  // (h) REFUSES TO RUN BLIND on a renamed TITLES export, exactly as (d) does for AREAS.
+  if (!checkAreaMirror(amFiles, { ts: amTs.replace("export const TITLES", "export const TITLES_RENAMED") })
+        .some((e) => /cannot find the `export const TITLES` array/.test(e))) {
+    console.error("self-test FAILED: a renamed TITLES export reported clean instead of blind");
+    process.exit(1);
+  }
+  // ── contacts row scope ──────────────────────────────────────────────────────────────
+  const crsFile = "supabase/functions/portal-settings/index.ts";
+  const crsSrc = readIfExists(crsFile);
+  if (!crsSrc) {
+    console.error("self-test FAILED: portal-settings is missing — the contacts row-scope rule "
+      + "has no subject and is silently inert");
+    process.exit(1);
+  }
+  // (a) CLEAN on the real file. If this fires, a contacts write really is unnarrowed.
+  const crsClean = checkContactRowScope({});
+  if (crsClean.length) {
+    console.error("self-test FAILED: a contacts:'edit' action is not row-scoped today:");
+    for (const e of crsClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // (b) FIRES when an action is dropped from CONTACT_ROW_SCOPE — the whole point of the rule.
+  const dropScope = crsSrc.replace(/^\s{4}crm_save_note:.*$/m, "");
+  if (dropScope === crsSrc) {
+    console.error("self-test FAILED: could not remove an entry from CONTACT_ROW_SCOPE — the "
+      + "table's shape changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkContactRowScope({}, { src: dropScope })
+        .some((e) => /"crm_save_note" is gated contacts:'edit' but is MISSING/.test(e))) {
+    console.error("self-test FAILED: an unnarrowed contacts write did not fire");
+    process.exit(1);
+  }
+  // (c) REFUSES TO RUN BLIND if the table is renamed away, rather than reporting clean.
+  if (!checkContactRowScope({}, { src: crsSrc.replace("const CONTACT_ROW_SCOPE:", "const CONTACT_ROW_SCOPE_OLD:") })
+        .some((e) => /cannot find `const CONTACT_ROW_SCOPE`/.test(e))) {
+    console.error("self-test FAILED: a renamed CONTACT_ROW_SCOPE reported clean instead of blind");
+    process.exit(1);
+  }
+  console.log("self-test passed: every contacts:'edit' action is row-scoped, the rule fires on "
+    + "one that is not, and it refuses to run blind if the table is renamed");
+
+  console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
+    + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
+    + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "
+    + "blind on a renamed AREAS or TITLES export");
 
   process.exit(0);
 }
@@ -1295,7 +2607,11 @@ if (tests.skipped) {
   console.error(`preflight: edge-function unit tests SKIPPED — ${tests.why}.`);
 }
 
+errors.push(...checkStandalonePagesParse({
+  "my-quotes.html": readFileSync(join(root, "my-quotes.html"), "utf8"),
+}));
 errors.push(...checkMyQuotesTaxBreakdown(readFileSync(join(root, "my-quotes.html"), "utf8")));
+errors.push(...checkMyQuotesPayFigures(readFileSync(join(root, "my-quotes.html"), "utf8")));
 
 if (errors.length) {
   console.error(`preflight: ${errors.length} error(s) — push refused\n`);

@@ -30,6 +30,12 @@
 --     record anyone could fabricate from a console is worthless as evidence;
 --   * an acknowledged CO's content is frozen — the only exit is void, with a reason.
 --
+-- WHAT THE TRIGGER DOES NOT DO, and what took until 188 to fix: it decides the SHAPE of a
+-- write, never WHO may make one. It stamps a browser-supplied verbal acknowledgment rather
+-- than authorising it, because in this file the only "who" test is the tenant predicate in
+-- the RLS policies below. The per-area grant (Settings → Team) reaches these writes in
+-- migration 188 — see the note above the policies.
+--
 -- Hand-apply via the SQL editor / MCP and record as version 126 — NEVER `supabase db push`.
 
 create table if not exists public.change_orders (
@@ -180,6 +186,20 @@ drop policy if exists change_orders_owner_select on public.change_orders;
 create policy change_orders_owner_select on public.change_orders
   for select to authenticated using (client_id = public.current_client_id());
 
+-- ⚠️ THE TWO WRITE POLICIES BELOW ARE TENANT-ONLY, AND THAT IS NOT THE WHOLE RULE.
+-- `client_id = public.current_client_id()` is satisfied by ANY client_users row — including
+-- a driver's — so as written these policies let any signed-in team member raise a change
+-- order, stamp a verbal acknowledgment on one, or void one, whatever Settings → Team says.
+-- That contradicts the product rule the card is built on (change_orders is granted per
+-- person; portal/12-shell.jsx clamps the card on `myAccess.change_orders === "edit"`), and a
+-- browser clamp is a courtesy, not a control.
+-- The per-area gate is **migration 188**, which ADDS restrictive insert/update policies
+-- keyed on `public.current_area_level('change_orders') = 'edit'` and ANDs them with these.
+-- The policies below stay exactly as applied — do not read them as the current rule, and do
+-- not add the area predicate here as well: 188 is the one place it lives.
+-- SELECT is deliberately left tenant-only in both files; the Orders list reads pending COs
+-- to paint the invoice-blocked chip for people who do not hold the grant.
+--
 -- A browser may create a pending CO, or a verbal-acknowledged one (the attestation act).
 -- The signature shape is unreachable here (trigger), but the policy narrows it anyway —
 -- defence in depth over a table that records agreements.

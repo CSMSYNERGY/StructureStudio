@@ -17,6 +17,7 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { qboApiBase } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
+import { logEdgeError } from "../_shared/logError.ts";
 
 // Rebrand 2026-08-05: *.structurestudiosuite.com are the live hosts; the two
 // structurestudio.app entries stay until that domain's sunset redirect ships,
@@ -132,13 +133,48 @@ Deno.serve(async (req) => {
         redirect_uri: redirectUri,
       }),
     });
-    if (!res.ok) return land(host, { connected: "0", reason: "exchange" });
+    if (!res.ok) {
+      // Every failure in this function answers 302, so withErrorLog (minStatus 500) can never
+      // see one — the diagnostic has to be written explicitly or it exists only in the runtime
+      // console stream, which is not reliably queryable on this project. Shapes only: Intuit's
+      // status and trace id, never the response body and never a token.
+      await logEdgeError({
+        fn: "qbo-oauth-callback",
+        req,
+        clientId: cid,
+        code: `qbo_exchange_http_${res.status}`,
+        message: `QuickBooks refused the authorization-code exchange with HTTP ${res.status}.`,
+        context: { step: "exchange", status: res.status, intuit_tid: res.headers.get("intuit_tid") },
+      });
+      return land(host, { connected: "0", reason: "exchange" });
+    }
     tok = await res.json();
-  } catch {
+  } catch (e) {
+    await logEdgeError({
+      fn: "qbo-oauth-callback",
+      req,
+      clientId: cid,
+      code: "qbo_exchange_threw",
+      message: `Token exchange threw: ${(e as Error)?.message ?? "unknown error"}`,
+      context: { step: "exchange" },
+    });
     return land(host, { connected: "0", reason: "exchange" });
   }
 
   if (!tok?.access_token || !tok?.refresh_token) {
+    // Booleans, never the values: a 2xx missing half the pair is the whole shape we need.
+    await logEdgeError({
+      fn: "qbo-oauth-callback",
+      req,
+      clientId: cid,
+      code: "qbo_exchange_incomplete",
+      message: "Token exchange returned 2xx without both tokens.",
+      context: {
+        step: "exchange",
+        hasAccess: Boolean(tok?.access_token),
+        hasRefresh: Boolean(tok?.refresh_token),
+      },
+    });
     return land(host, { connected: "0", reason: "exchange" });
   }
 
@@ -150,10 +186,28 @@ Deno.serve(async (req) => {
     const info = await fetch(`${qboApiBase()}/v3/company/${realmId}/companyinfo/${realmId}`, {
       headers: { Authorization: `Bearer ${tok.access_token}`, Accept: "application/json" },
     });
-    if (!info.ok) return land(host, { connected: "0", reason: "verify" });
+    if (!info.ok) {
+      await logEdgeError({
+        fn: "qbo-oauth-callback",
+        req,
+        clientId: cid,
+        code: `qbo_verify_http_${info.status}`,
+        message: `Connect-verify (companyinfo) failed with HTTP ${info.status}.`,
+        context: { step: "verify", status: info.status, intuit_tid: info.headers.get("intuit_tid"), realmId },
+      });
+      return land(host, { connected: "0", reason: "verify" });
+    }
     const body = await info.json();
     companyName = body?.CompanyInfo?.CompanyName ?? null;
-  } catch {
+  } catch (e) {
+    await logEdgeError({
+      fn: "qbo-oauth-callback",
+      req,
+      clientId: cid,
+      code: "qbo_verify_threw",
+      message: `Connect-verify threw: ${(e as Error)?.message ?? "unknown error"}`,
+      context: { step: "verify", realmId },
+    });
     return land(host, { connected: "0", reason: "verify" });
   }
 
@@ -210,6 +264,17 @@ Deno.serve(async (req) => {
     if (!dispErr) {
       displacedFrom = (displaced as string | null) ?? null;
       ({ error: saveErr } = await saveConnection());   // one retry, now that the realm is free
+    } else {
+      // The takeover itself failed. Without this row the user gets "realm_in_use", which reads
+      // exactly like the ordinary refusal below and hides the fact that the RPC is broken.
+      await logEdgeError({
+        fn: "qbo-oauth-callback",
+        req,
+        clientId: cid,
+        code: dispErr.code ?? "qbo_displace_failed",
+        message: `qbo_displace_realm failed: ${dispErr.message}`,
+        context: { step: "displace", realmId, pgCode: dispErr.code ?? null },
+      });
     }
   }
 
@@ -221,6 +286,16 @@ Deno.serve(async (req) => {
     // again. Keeping the branch also means an un-migrated database degrades to the old
     // refusal instead of a raw 500.
     const reason = isRealmConflict(saveErr.message) ? "realm_in_use" : "save";
+    // "save" orphans a freshly issued token pair; "realm_in_use" reached HERE means the takeover
+    // above did not work. Both are invisible otherwise — the browser only ever sees the slug.
+    await logEdgeError({
+      fn: "qbo-oauth-callback",
+      req,
+      clientId: cid,
+      code: saveErr.code ?? reason,
+      message: `Saving the QuickBooks connection failed (${reason}): ${saveErr.message}`,
+      context: { step: "save", reason, realmId, realmChanged, displaced: Boolean(displacedFrom) },
+    });
     // Name the COMPANY on realm_in_use. Without it the banner is a dead end — it says a
     // company is taken but not WHICH, and picking the wrong one in Intuit's company selector
     // is a single mis-click. On 2026-08-03 that cost three identical retries on
@@ -242,7 +317,17 @@ Deno.serve(async (req) => {
     const { error: mapErr } = await admin.from("qbo_item_map").delete().eq("client_id", cid);
     // A failure here leaves stale ids against a live new connection, which is the dangerous
     // direction — surface it rather than letting the first invoice discover it.
-    if (mapErr) return land(host, { connected: "1", reason: "item_map_stale" });
+    if (mapErr) {
+      await logEdgeError({
+        fn: "qbo-oauth-callback",
+        req,
+        clientId: cid,
+        code: mapErr.code ?? "qbo_item_map_wipe_failed",
+        message: `Item-map wipe after a company change failed: ${mapErr.message}`,
+        context: { step: "item_map_wipe", realmId, previousRealm, pgCode: mapErr.code ?? null },
+      });
+      return land(host, { connected: "1", reason: "item_map_stale" });
+    }
   }
 
   await admin.from("admin_audit").insert({

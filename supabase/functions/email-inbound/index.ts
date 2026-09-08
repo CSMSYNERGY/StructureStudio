@@ -35,7 +35,9 @@ import { rsGetReceivedEmail, resendConfigured, ResendApiError } from "../_shared
 // helper's docstring before receiving is switched on: four of the five provider fields it
 // returns are true SMTP-envelope fields, but Resend's `received_for` — the only one that
 // resolves anything on the provider we ship on — is parsed out of Received HEADERS, and
-// whether a sender can plant one has not been tested.
+// whether a sender can plant one has not been tested. That same field is the ONLY thing the
+// enrichment fetch below is permitted to hand Stage A, because the metadata webhook may not
+// carry it; every other fetched field is body, headers or display.
 //
 // ⚠️ THIS FUNCTION MUST NEVER SEND MAIL. It stores a row and returns 200. An auto-reply, a
 // forward or a generated bounce would turn a spam run at a published reply address into US
@@ -88,11 +90,39 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // post a body keeps working untouched and costs no extra request. Enrichment is
   // BEST-EFFORT: if the fetch fails we still store what the webhook gave us, because a
   // reply filed with a missing body beats a reply dropped on the floor.
+  //
+  // ⚠️ ONE RETRY, AND IT IS THE BODY'S ONLY SECOND CHANCE. rsFetch has no retry of its own;
+  // we answer 200 on every authenticated path (see the header — a non-2xx here buys a retry
+  // storm, not a repair); a provider does not redeliver a 2xx; and the
+  // (client_id, message_id) index would reject the second copy if one ever arrived. So a
+  // single 429 / 5xx / dropped connection that this loop fails to absorb blanks a customer's
+  // reply for good, and blanks the headers B2 threads on with it. ResendApiError.permanent
+  // already carries the provider's own verdict on whether an identical request fails
+  // identically, so a permanent refusal is not retried — that is a configuration fault for a
+  // human, not a wobble to ride out.
   const looksMetadataOnly = !m.text && !m.html && !m.body_plain && !m.body_html && !m.plain;
   const receivedId = typeof m.email_id === "string" ? m.email_id : "";
   if (looksMetadataOnly && receivedId && resendConfigured()) {
-    try {
-      const full = await rsGetReceivedEmail(receivedId);
+    let full: Awaited<ReturnType<typeof rsGetReceivedEmail>> | null = null;
+    let failure: unknown = null;
+    let retried = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        full = await rsGetReceivedEmail(receivedId);
+        failure = null;
+        break;
+      } catch (e) {
+        failure = e;
+        if (attempt > 0 || !(e instanceof ResendApiError) || e.permanent) break;
+        retried = true;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+    if (full) {
+      // The webhook's own copy still wins on every field; the fetch only fills a gap.
+      const webhookReceivedFor = Array.isArray(m.received_for)
+        ? (m.received_for.length ? m.received_for : null)
+        : (m.received_for || null);
       m = {
         ...m,
         text: full.text || m.text,
@@ -100,14 +130,30 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
         headers: Object.keys(full.headers).length ? full.headers : m.headers,
         subject: m.subject || full.subject,
         message_id: m.message_id || full.messageId,
+        // ⚠️ THE ONE FETCHED FIELD STAGE A IS ALLOWED TO SEE, and only because it is the
+        // very `received_for` envelopeRecipients already reads: the metadata webhook may
+        // omit it, and on Resend it is the only field that resolves a tenant at all, so
+        // without this every ordinary reply files under the unattributed sentinel where no
+        // screen can reach it. Arriving over a different transport does NOT upgrade its
+        // grade of evidence — the open forgery question in envelopeRecipients' docstring
+        // stands unchanged, and answering it is still owed before receiving goes live.
+        // NOTHING ELSE FROM THE FETCH MAY FEED STAGE A, above all not `full.to`, whose
+        // forgeability is the ⛔ in that same docstring.
+        received_for: webhookReceivedFor ?? full.receivedFor,
       };
-    } catch (e) {
+    } else {
       await logEdgeError({
         fn: "email-inbound", req, clientId: null, code: "inbound_body_fetch_failed",
         message: `could not fetch the received email body: ${
-          e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
+          failure instanceof ResendApiError
+            ? `resend ${failure.status}/${failure.name_ || "unknown"}`
+            : String((failure as Error)?.message ?? failure)
         }`,
-        context: { receivedId },
+        // `retried` separates a blip we could not ride out from a refusal that repeating
+        // would not fix. The row is stored blank either way and nothing in the product ever
+        // fills it in, so this is the repair ticket: `receivedId` is what a human reads the
+        // body back from (GET /emails/receiving/{id}) before updating the row by hand.
+        context: { receivedId, retried },
       });
     }
   }
@@ -156,23 +202,56 @@ Deno.serve(withErrorLog("email-inbound", async (req: Request) => {
   // aim at — the outbound side already gates on this (portal-settings' Reply-To stamping)
   // and the webhook must agree with it.
   const envDomains = envelope.map((e) => e.split("@")[1] ?? "").filter(Boolean);
+  // ⚠️ TAKE TWO, ACCEPT ONE. These reads used to `.limit(1)` with no `order by`, so when the
+  // payload named domains belonging to TWO tenants the winner was whichever row Postgres
+  // handed back first. `inbound_domain` and `email_domain` are each unique per tenant, so a
+  // second row is a second TENANT — that pick was a cross-tenant pick, and a stranger's words
+  // landing on another builder's record is precisely what this file exists to prevent. It is
+  // the same refusal the caller already makes for an ambiguous CONTACT; emailInbound.ts's own
+  // docstring names this as the missing half and says the caller must supply it.
+  //
+  // Refusing costs a message its attribution, never the message: an ambiguous payload falls
+  // through to the UNATTRIBUTED_CLIENT_ID sentinel below with the row still written, which is
+  // the cheap side of the trade this file states everywhere else.
+  //
+  // SAFE TO TIGHTEN NOW, measured 2026-09-06: zero tenants share an inbound_domain, zero
+  // share an email_domain, and receiving is not live for any tenant yet. So this changes
+  // behaviour only in the case that is currently a leak.
+  const ambiguous = async (kind: string, domains: string[]) => {
+    await logEdgeError({
+      fn: "email-inbound", req, clientId: null, code: "inbound_ambiguous_tenant",
+      // Shapes only, no addresses — the logging posture the rest of this function keeps.
+      message: `two tenants match the payload's ${kind}; refusing to choose. Filed unattributed. domains=${domains.length}`,
+    }).catch(() => undefined);
+  };
   if (envDomains.length) {
     const { data: inb } = await admin.from("client_settings")
       .select("client_id, inbound_domain")
-      .in("inbound_domain", envDomains).eq("inbound_status", "active").limit(1);
-    const hit = (inb ?? [])[0] as { client_id: string; inbound_domain: string } | undefined;
-    if (hit) {
+      .in("inbound_domain", envDomains).eq("inbound_status", "active").limit(2);
+    const inbRows = (inb ?? []) as Array<{ client_id: string; inbound_domain: string }>;
+    if (inbRows.length > 1) {
+      await ambiguous("inbound_domain", envDomains);
+    } else if (inbRows.length === 1) {
+      const hit = inbRows[0];
       clientId = hit.client_id;
       matchedRecipient = envelope.find((e) => e.endsWith("@" + hit.inbound_domain)) ?? "";
     }
-    if (!clientId) {
+    // Deliberately still guarded on !clientId ONLY: after an ambiguous inbound_domain we do
+    // not fall through and try email_domain, because the payload has already proved it names
+    // more than one tenant. Trying a second column would just be a second chance to pick
+    // wrong. `inbRows.length > 1` leaves clientId null, and the check below sends it to the
+    // sentinel — but so would a second ambiguous read, so the guard is written to stop here.
+    if (!clientId && inbRows.length <= 1) {
       // The tenant's SENDING domain. Lands an unmatched row on the right account when a
       // stranger writes to a published address rather than to a reply token.
       const { data: snd } = await admin.from("client_settings")
         .select("client_id, email_domain")
-        .in("email_domain", envDomains).limit(1);
-      const s = (snd ?? [])[0] as { client_id: string; email_domain: string } | undefined;
-      if (s) {
+        .in("email_domain", envDomains).limit(2);
+      const sndRows = (snd ?? []) as Array<{ client_id: string; email_domain: string }>;
+      if (sndRows.length > 1) {
+        await ambiguous("email_domain", envDomains);
+      } else if (sndRows.length === 1) {
+        const s = sndRows[0];
         clientId = s.client_id;
         matchedRecipient = envelope.find((e) => e.endsWith("@" + s.email_domain)) ?? "";
       }

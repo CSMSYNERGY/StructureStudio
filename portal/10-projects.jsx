@@ -1,9 +1,16 @@
 // ─── Projects tab — CSM Synergy's internal project management (Monday.com replacement) ───
-// OPERATOR-ONLY: gated exactly like Accounts/Admin (ssClampTab + the isOperator nav group +
-// the content render), and the portal-projects edge function re-checks app_operators on
-// every call regardless. Tenants have no read path to any pm_* table — everything a client
-// may see is COPIED into feedback_submissions/feedback_comments by the server, never read
-// from here.
+// INTERNAL-ONLY — and that is NOT the same as operator-only, which is what this comment
+// said until 2026-09-07. Migration 183 split Projects off from Accounts/Admin: the gate is
+// `canProjects` (the `can_open_projects` RPC → _shared/projectsAccess.ts), which admits a
+// platform operator OR a CSM Synergy team member on the internal tenant holding the
+// `projects` area. No builder can ever reach it — `client_settings.internal_account` is
+// checked BEFORE the area, because every builder's owner resolves projects:'edit' by
+// construction. The edge function re-checks all of that on every call, and keeps the roster
+// and `setup_*` actions hard operator-only. Tenants have no read path to any pm_* table —
+// everything a client may see is COPIED into feedback_submissions/feedback_comments by the
+// server, never read from here.
+// The floating PMQuickAdd button in 12-shell is gated the same way (it was the last thing
+// left on the old isOperator gate until 2026-09-07).
 //
 // Boards, groups and columns are user-defined (Carolyn's "Monday but better"): the table
 // itself is the generic engine in 09-table-engine.jsx; this file owns data loading, the
@@ -291,18 +298,36 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
     <>
     <PMDrawer onClose={onClose} labelledBy="pm-item-title">
       {/* Header — pinned */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
-        {canWrite ? (
-          <input id="pm-item-title" style={{ ...S.input, fontSize: 15.5, fontWeight: 800, flex: 1 }} value={name}
-            onChange={(e) => setName(e.target.value)}
-            onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
-            onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
-        ) : (
-          <div id="pm-item-title" style={{ fontSize: 15.5, fontWeight: 800, flex: 1 }}>{item.name}</div>
-        )}
-        {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
-        <button type="button" onClick={onClose} aria-label="Close"
-          style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>✕</button>
+      <div style={{ padding: "14px 18px", borderBottom: "1px solid #E2E8F0", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {canWrite ? (
+            <input id="pm-item-title" style={{ ...S.input, fontSize: 15.5, fontWeight: 800, flex: 1 }} value={name}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={() => { if (name.trim() && name !== item.name) onRename(item, name.trim()); }}
+              onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }} />
+          ) : (
+            <div id="pm-item-title" style={{ fontSize: 15.5, fontWeight: 800, flex: 1 }}>{item.name}</div>
+          )}
+          {item.feedback_submission_id && tag("#E6F7FA", "#1B7895", "CLIENT")}
+          <button type="button" onClick={onClose} aria-label="Close"
+            style={{ background: "none", border: "none", color: "#94A3B8", fontSize: 20, fontWeight: 700, cursor: "pointer", lineHeight: 1 }}>✕</button>
+        </div>
+        {/* Where this came from and when (Carolyn 2026-09-07). Derived server-side from
+            fields the row already carried, so it is right for every item ever created —
+            nothing was backfilled and nothing can drift. `—` only while get_item loads. */}
+        <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "baseline" }}>
+          {detail && detail.origin ? (
+            <>
+              <span style={{ fontWeight: 700, color: "#475569" }}>
+                Created {detail.origin.createdAt ? pmStamp(detail.origin.createdAt) : "—"}
+              </span>
+              <span style={{ color: "#CBD5E1" }}>·</span>
+              <span>{detail.origin.label}</span>
+            </>
+          ) : (
+            <span style={{ color: "#94A3B8" }}>Loading history…</span>
+          )}
+        </div>
       </div>
 
       {/* Thread — the only scrolling region */}
@@ -310,7 +335,15 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
         {err && <div style={S.err}>{err}</div>}
 
         {canWrite && (
-          <div style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
+          /* Paste attaches (Carolyn 2026-08-29): a screenshot lives in the clipboard, and
+             Chromium also hands over a FILE copied in Explorer (a PDF, say) — both arrive
+             in clipboardData.files. Pasted files APPEND to the staged list; plain text
+             falls through to the textarea untouched. */
+          <div onPaste={(e) => {
+              const pasted = [...(e.clipboardData?.files || [])].filter((f) => f && f.size);
+              if (pasted.length) { e.preventDefault(); setFiles((cur) => [...cur, ...pasted].slice(0, 10)); }
+            }}
+            style={{ border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px 12px", marginBottom: 14 }}>
             <textarea rows={3} placeholder="Add a note or update…" style={{ ...S.input, resize: "vertical", fontWeight: 500 }}
               value={compose} onChange={(e) => setCompose(e.target.value)} />
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
@@ -324,8 +357,11 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
                 style={{ background: "none", border: "none", color: "#64748B", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                 📎 Attach
               </button>
+              <span style={{ fontSize: 11, color: "#94A3B8" }}>or paste</span>
+              {/* Picked files APPEND too, so pasting a screenshot and then browsing for a
+                  PDF keeps both. The old replace-on-pick silently dropped earlier picks. */}
               <input ref={fileRef} type="file" multiple accept="image/*,video/*,.pdf" style={{ display: "none" }}
-                onChange={(e) => { setFiles(Array.from(e.target.files || []).slice(0, 10)); }} />
+                onChange={(e) => { const add = Array.from(e.target.files || []); if (add.length) setFiles((cur) => [...cur, ...add].slice(0, 10)); e.target.value = ""; }} />
               <button type="button" style={{ ...S.btn(ACCENT, "#FFF"), marginLeft: "auto", padding: "6px 16px", fontSize: 12, opacity: busy || !compose.trim() ? 0.6 : 1 }}
                 disabled={busy || !compose.trim()} onClick={post}>{busy ? "Posting…" : "Post"}</button>
             </div>
@@ -443,6 +479,22 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
   const flabel = { fontSize: 10.5, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: 0.5, margin: "14px 0 5px", display: "block" };
   const rowStyle = { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px dashed #EEF1F6", fontSize: 12.8 };
 
+  // ▲/▼ reorder for groups and columns (Carolyn 2026-08-29: "organize columns in the
+  // order I want"). The server has carried reorder_columns/reorder_groups since the
+  // boards shipped — this modal just never exposed them. Same idiom as the setup
+  // template editor: move locally is unnecessary because run() reloads the board.
+  const move = (list, idx, dir, action) => {
+    const to = idx + dir;
+    if (to < 0 || to >= list.length) return;
+    const next = list.slice();
+    next.splice(to, 0, next.splice(idx, 1)[0]);
+    run({ action, boardId: board.id, orderedIds: next.map((x) => x.id) });
+  };
+  const arrow = (label, onClick, dim) => (
+    <button type="button" onClick={onClick} disabled={dim} title={label === "▲" ? "Move up" : "Move down"}
+      style={{ background: "none", border: "none", color: dim ? "#E2E8F0" : "#94A3B8", fontSize: 12, fontWeight: 800, cursor: dim ? "default" : "pointer", padding: "0 2px", fontFamily: "inherit" }}>{label}</button>
+  );
+
   return (
     <AdmOverlay onClose={onClose} maxWidth={640} labelledBy="pm-bs-title">
       <div style={{ padding: "16px 20px", maxHeight: "82vh", overflowY: "auto" }}>
@@ -460,8 +512,10 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         </div>
 
         <span style={flabel}>Groups</span>
-        {groups.map((g) => (
+        {groups.map((g, gi) => (
           <div key={g.id} style={rowStyle}>
+            {arrow("▲", () => move(groups, gi, -1, "reorder_groups"), gi === 0)}
+            {arrow("▼", () => move(groups, gi, 1, "reorder_groups"), gi === groups.length - 1)}
             <input style={{ ...S.input, width: 180, padding: "4px 8px", fontSize: 12.5 }} defaultValue={g.name}
               onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== g.name) run({ action: "update_group", id: g.id, name: v }); }} />
             <PMSwatches value={g.color} onPick={(c) => run({ action: "update_group", id: g.id, color: c })} />
@@ -489,9 +543,11 @@ function PMBoardSettings({ board, columns, groups, onClose, onChanged, onArchive
         </div>
 
         <span style={flabel}>Columns</span>
-        {columns.map((col) => (
+        {columns.map((col, ci) => (
           <div key={col.id}>
             <div style={rowStyle}>
+              {arrow("▲", () => move(columns, ci, -1, "reorder_columns"), ci === 0)}
+              {arrow("▼", () => move(columns, ci, 1, "reorder_columns"), ci === columns.length - 1)}
               <input style={{ ...S.input, width: 160, padding: "4px 8px", fontSize: 12.5 }} defaultValue={col.name}
                 onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== col.name) run({ action: "update_column", id: col.id, name: v }); }} />
               <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700, width: 70 }}>{(PM_COL_TYPES.find(([t]) => t === col.type) || [col.type, col.type])[1]}</span>
@@ -641,14 +697,45 @@ function PMPeopleEditor({ onChanged }) {
           <span style={{ display: "inline-flex", width: 22, height: 22, borderRadius: "50%", background: pmAvatarColor(o.id), color: "#FFF", fontSize: 9.5, fontWeight: 800, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             {pmInitials(o)}
           </span>
-          <input defaultValue={o.name} style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
-            onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.name) run({ action: "save_person", id: o.id, name: v }); }} />
-          <input defaultValue={o.email || ""} placeholder="no login" style={{ ...S.input, width: 170, padding: "3px 7px", fontSize: 12 }}
-            onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.email || "")) run({ action: "save_person", id: o.id, email: v }); }} />
+          {/* ⚠️ THREE ROW SHAPES. A team-managed person's name and email are written from
+              Settings → Team and re-applied on every change there, so an edit here would
+              appear to work and then be quietly reverted by somebody else's unrelated save.
+              The server refuses it (409); this is that refusal made visible, so nobody types
+              into a box that was never going to keep what they typed.
+              A row with NO tenant — the ordinary platform operator, or a login-less
+              subcontractor — stays exactly as editable as it always was. */}
+          {o.teamManaged ? (
+            <>
+              <span style={{ width: 150, fontWeight: 700, color: "#334155" }}>{o.name}</span>
+              <span style={{ width: 170, color: "#64748B", overflow: "hidden", textOverflow: "ellipsis" }}>{o.email || "—"}</span>
+            </>
+          ) : (
+            <>
+              <input defaultValue={o.name} style={{ ...S.input, width: 150, padding: "3px 7px", fontSize: 12 }}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== o.name) run({ action: "save_person", id: o.id, name: v }); }} />
+              <input defaultValue={o.email || ""} placeholder="no login" style={{ ...S.input, width: 170, padding: "3px 7px", fontSize: 12 }}
+                onBlur={(e) => { const v = e.target.value.trim(); if (v !== (o.email || "")) run({ action: "save_person", id: o.id, email: v }); }} />
+            </>
+          )}
+          {o.teamManaged && (
+            <span title={`${o.title || "team member"} · Projects: ${o.projectsLevel || "none"}`}
+              style={{ fontSize: 10.5, fontWeight: 800, color: ACCENT, background: "#EEF2FF", borderRadius: 999, padding: "2px 8px" }}>
+              Settings → Team
+            </span>
+          )}
+          {/* A login on a BUILDER's tenant. The guard added 2026-09-02 refuses to create one,
+              but historic rows exist — and an operator needs to SEE why the toggles refuse
+              rather than conclude the screen is broken. */}
+          {o.foreignTenant && (
+            <span title={`This login belongs to the "${o.foreignTenant}" account. It cannot be given operator access.`}
+              style={{ fontSize: 10.5, fontWeight: 800, color: "#B91C1C", background: "#FEF2F2", borderRadius: 999, padding: "2px 8px" }}>
+              builder login
+            </span>
+          )}
 
           <label style={{ fontSize: 11.5, fontWeight: 600, color: o.user_id ? "#334155" : "#94A3B8", display: "inline-flex", alignItems: "center", gap: 4 }}
-            title={o.user_id ? "Operator access — they can open ANY builder's account." : "Needs a StructureStudio login first."}>
-            <input type="checkbox" checked={!!o.isOperator} disabled={busy || !o.user_id}
+            title={o.foreignTenant ? `This login belongs to the "${o.foreignTenant}" account — it cannot be given operator access.` : o.user_id ? "Operator access — they can open ANY builder's account." : "Needs a StructureStudio login first."}>
+            <input type="checkbox" checked={!!o.isOperator} disabled={busy || !o.user_id || !!o.foreignTenant}
               onChange={(ev) => {
                 if (ev.target.checked) {
                   if (!window.confirm(`Give ${o.name} operator access? They will be able to open ANY builder's account (read-only until you tick "can edit"). This is separate from being assignable.`)) { load(); return; }
@@ -665,9 +752,28 @@ function PMPeopleEditor({ onChanged }) {
               can edit
             </label>
           )}
+          {/* Support mode (migration 176). Carolyn 2026-09-01: "he needs to be able to mirror
+              it ... to where he can see just exactly what they have permission to." Off, this
+              account sees every builder through the operator god view; on, it sees the account
+              the way that builder's OWNER does. Never offered for your own row — the server
+              refuses it too, because it would take this screen away from you. */}
+          {o.isOperator && o.user_id !== me && (
+            <label style={{ fontSize: 11.5, fontWeight: 600, color: o.supportOnly ? "#7C3AED" : "#334155", display: "inline-flex", alignItems: "center", gap: 4 }}
+              title="On: they see each builder's account exactly as that builder's owner sees it — Billing hidden, and no Admin or Projects console. Use this for support.">
+              <input type="checkbox" checked={!!o.supportOnly} disabled={busy}
+                onChange={(ev) => {
+                  if (ev.target.checked && !window.confirm(`Put ${o.name} in support mode? They will see each builder's account exactly as that builder's owner does — Billing hidden — and they will LOSE the Admin and Projects consoles, including this screen.`)) { load(); return; }
+                  run({ action: "set_operator_support", id: o.id, supportOnly: ev.target.checked });
+                }} />
+              support mode
+            </label>
+          )}
 
           {o.user_id === me
             ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}>you</span>
+            : o.teamManaged
+            ? <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8", fontWeight: 700 }}
+                title="Take Projects away on Settings → Team and they leave this list automatically.">Managed in Team</span>
             : (
               <button type="button" disabled={busy}
                 onClick={() => { if (window.confirm(`Remove ${o.name} from the assignable list? Work already assigned to them keeps their name, and this does not change their access to builder accounts.`)) run({ action: "remove_person", id: o.id }); }}
@@ -847,6 +953,17 @@ function PMSetupAdmin({ canWrite }) {
           their account is created — <b>changes here apply to new assignments only</b>, never to a
           list somebody is already partway through.
         </div>
+        {/* The two gates read alike and do opposite things, so they are spelled out once
+            here rather than left to a tooltip. Both are properties of the STEP, which is
+            why they are the exception to the "new assignments only" rule above. */}
+        <div style={{ fontSize: 12, color: "#64748B", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 12px", marginBottom: 12, lineHeight: 1.55 }}>
+          <b>Hide from builders</b> keeps the step in everyone's list but shows it to nobody — use it
+          while that part of the product isn't finished. Show it again and it appears for every
+          builder at once, with nothing to re-assign. <b>Needs an add-on</b> greys the step with a
+          padlock for builders who haven't bought it, links them to Billing, and leaves it out of
+          their "X of Y done". Neither is <b>Disable</b>, which only decides what <i>new</i> builders
+          are given.
+        </div>
         {tpl === null && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>Loading…</div>}
         {tpl && tpl.length === 0 && <div style={{ color: "#94A3B8", fontSize: 12.5 }}>No steps yet.</div>}
         {(tpl || []).map((t, i) => (
@@ -860,6 +977,20 @@ function PMSetupAdmin({ canWrite }) {
             <span style={{ fontSize: 12, fontWeight: 800, color: "#94A3B8", minWidth: 18, paddingTop: 2 }}>{i + 1}.</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1E293B" }}>{t.title}</div>
+              {(t.builder_visible === false || t.requires_feature) && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                  {t.builder_visible === false && (
+                    <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.4, background: "#FEF3C7", color: "#B45309", borderRadius: 4, padding: "2px 6px" }}>
+                      HIDDEN FROM BUILDERS
+                    </span>
+                  )}
+                  {t.requires_feature && (
+                    <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: 0.4, background: "#DBEAFF", color: ACCENT, borderRadius: 4, padding: "2px 6px" }}>
+                      NEEDS {String(ssFeatureLabel(t.requires_feature)).toUpperCase()}
+                    </span>
+                  )}
+                </div>
+              )}
               {t.detail && <div style={{ fontSize: 12.5, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{t.detail}</div>}
               {t.link_page && <div style={{ fontSize: 11.5, color: "#1B7895", fontWeight: 700, marginTop: 3 }}>→ /portal/{t.link_page}</div>}
               {t.image_url && (
@@ -880,13 +1011,30 @@ function PMSetupAdmin({ canWrite }) {
                 )}
                 {arrow("▲", () => move(tpl, i, -1, "setup_template_reorder"), i === 0)}
                 {arrow("▼", () => move(tpl, i, 1, "setup_template_reorder"), i === tpl.length - 1)}
+                {/* ⚠️ Each of these sends ONLY its own flag. setup_template_save reads them
+                    with a `!== undefined` test, so a whole-row save that omits one leaves it
+                    alone — which is what stops the 📷 handler and Disable above from wiping
+                    a gate somebody set. Do not "tidy" these into one payload. */}
+                <select value={t.requires_feature || ""} disabled={busy}
+                  title="Which paid add-on this step needs"
+                  onChange={(e) => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", requiresFeature: e.target.value }, loadTpl)}
+                  style={{ fontSize: 11, fontFamily: "inherit", color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "2px 4px", maxWidth: 150 }}>
+                  <option value="">— no add-on —</option>
+                  {SS_SETUP_FEATURE_CHOICES.map((k) => <option key={k} value={k}>{ssFeatureLabel(k)}</option>)}
+                </select>
+                <button type="button" disabled={busy}
+                  title={t.builder_visible === false ? "Builders cannot see this step" : "Hide while we finish building it"}
+                  onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", builderVisible: t.builder_visible === false }, loadTpl)}
+                  style={{ background: "none", border: "none", color: t.builder_visible === false ? "#B45309" : "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                  {t.builder_visible === false ? "Show to builders" : "Hide from builders"}
+                </button>
                 <button type="button" disabled={busy}
                   onClick={() => run({ action: "setup_template_save", id: t.id, title: t.title, detail: t.detail || "", linkPage: t.link_page || "", section: t.section || "", imageUrl: t.image_url || "", active: t.active === false }, loadTpl)}
                   style={{ background: "none", border: "none", color: "#64748B", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 6px", fontFamily: "inherit" }}>
                   {t.active === false ? "Enable" : "Disable"}
                 </button>
                 <button type="button" disabled={busy}
-                  onClick={() => { if (window.confirm(`Delete "${t.title}" from the template? Builders who already have it keep their copy.`)) run({ action: "setup_template_delete", id: t.id }, loadTpl); }}
+                  onClick={() => { if (window.confirm(`Delete "${t.title}" from the template? Builders who already have it keep their copy — and it would stop being hidden and stop being locked for them. Hide it instead if it is only unfinished.`)) run({ action: "setup_template_delete", id: t.id }, loadTpl); }}
                   style={{ background: "none", border: "none", color: "#DC2626", fontSize: 11.5, fontWeight: 700, cursor: "pointer", padding: "0 4px", fontFamily: "inherit" }}>Delete</button>
               </div>
             )}
@@ -945,6 +1093,24 @@ function PMSetupAdmin({ canWrite }) {
                         <div style={{ fontSize: 13, fontWeight: 700, color: it.completed_at ? "#64748B" : "#1E293B", textDecoration: it.completed_at ? "line-through" : "none" }}>
                           {i + 1}. {it.title}
                         </div>
+                        {/* Why this builder may not be seeing a step. Read from the template
+                            we already hold in state — the gates live there, not on the copy.
+                            "Needs X" is the step's requirement, NOT a verdict on whether THIS
+                            builder has bought it; their own Billing tab is where that lives. */}
+                        {(() => {
+                          const t = (tpl || []).find((x) => x.id === it.template_item_id);
+                          if (!t || (t.builder_visible !== false && !t.requires_feature)) return null;
+                          return (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 3 }}>
+                              {t.builder_visible === false && (
+                                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.4, background: "#FEF3C7", color: "#B45309", borderRadius: 4, padding: "2px 5px" }}>HIDDEN FROM BUILDERS</span>
+                              )}
+                              {t.requires_feature && (
+                                <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: 0.4, background: "#DBEAFF", color: ACCENT, borderRadius: 4, padding: "2px 5px" }}>NEEDS {String(ssFeatureLabel(t.requires_feature)).toUpperCase()}</span>
+                              )}
+                            </div>
+                          );
+                        })()}
                         {it.detail && <div style={{ fontSize: 12, color: "#64748B", marginTop: 2 }}>{it.detail}</div>}
                         {it.image_url && (
                           <img src={it.image_url} alt="" onClick={() => setViewing({ url: it.image_url, title: it.title })}
@@ -1126,6 +1292,12 @@ function ProjectsTab({ sub, onSub }) {
     return hit ? hit.id : null;
   }, [snapshot, savedViews]);
 
+  // Declared HERE, above its first reader (viewDirty, next line). The portal parts are
+  // compiled by Babel with preset-env, which lowers const to var - a declaration placed
+  // after a reader in the same function body is hoisted-undefined rather than a TDZ
+  // error, so the read silently yields undefined on every render instead of throwing.
+  const filtersOn = q.trim() !== "" || Object.values(facets).some((v) => v != null) || whenCond !== "any";
+
   // Anything worth naming: filters OR the way the board is arranged.
   const viewDirty = filtersOn || view.groupBy !== "groups" || view.sortKey !== "name"
     || view.sortDir !== "asc" || (view.hiddenCols || []).length > 0;
@@ -1207,7 +1379,6 @@ function ProjectsTab({ sub, onSub }) {
     });
   }, [data, q, facets, whenCond, whenA, whenB, whenMonth, whenN, whenUnit, whenColId, ctx]);
 
-  const filtersOn = q.trim() !== "" || Object.values(facets).some((v) => v != null) || whenCond !== "any";
   const openItem = openItemId && data ? data.items.find((i) => i.id === openItemId) : null;
 
   const facetCols = data ? data.columns.filter((c) => pmType(c).facet) : [];
@@ -1412,6 +1583,10 @@ function ProjectsTab({ sub, onSub }) {
               canEdit={canWrite}
               onCellCommit={onCellCommit} onDropToGroup={onDropToGroup} onDropOnRow={onDropOnRow}
               onRowOpen={(r) => setOpenItemId(r.id)} onAddItem={onAddItem}
+              onReorderCols={(ids) => callOrReload(
+                { action: "reorder_columns", boardId: data.board.id, orderedIds: ids },
+                () => setData((d) => d && ({ ...d, columns: ids.map((id) => d.columns.find((c) => c.id === id)).filter(Boolean) })),
+              )}
               activeItemId={openItemId} />
           </>
         )}
@@ -1436,6 +1611,92 @@ function ProjectsTab({ sub, onSub }) {
 }
 
 
+// The five cells worth filling in at the moment you file something. Found on the chosen
+// board BY NAME + TYPE, so a board that doesn't carry one (roadmap has no App) simply shows
+// fewer fields and nothing is hard-coded. Everything else on the board — Client, Created —
+// is either derived or set server-side, and stays out of the form.
+const qaCol = (cols, name, type) => (cols || []).find((c) => c.name === name && c.type === type) || null;
+const qaStatusCol = (cols) => (cols || []).find((c) => c.type === "status") || null;
+
+// What a fresh form starts as. Carolyn 2026-09-07: "it did not automatically select the
+// app. This needs to happen." Mirrors the server's own defaults (portal-projects
+// `defaultValues`) so the form shows you exactly what you would get by saying nothing —
+// matched by LABEL, never by option id, because those stay editable in Board settings.
+function qaDefaults(cols) {
+  const out = {};
+  const app = qaCol(cols, "App", "dropdown");
+  if (app) {
+    const o = (app.settings?.options || []).find((x) => x.label === "Structure Studio");
+    if (o) out[app.id] = [o.id];
+  }
+  const st = qaStatusCol(cols);
+  if (st) {
+    const labels = st.settings?.labels || [];
+    const l = labels.find((x) => x.intake === true) || labels[0];
+    if (l) out[st.id] = l.id;
+  }
+  return out;   // Priority, Due and Assignee deliberately start empty.
+}
+
+// The quick-add form's middle band. Each control renders only if the chosen board actually
+// has that column, and writes the shape `sanitizeValues` expects: dropdown → [optionId],
+// status → labelId, date → "YYYY-MM-DD", people → [pm_people.id].
+function PMQuickAddFields({ cols, people, vals, setVal }) {
+  const app = qaCol(cols, "App", "dropdown");
+  const pri = qaCol(cols, "Priority", "dropdown");
+  const st = qaStatusCol(cols);
+  const due = qaCol(cols, "Due", "date");
+  const who = qaCol(cols, "Assignee", "people");
+  if (!app && !pri && !st && !due && !who) return null;
+
+  const sel = { ...S.input, marginBottom: 0, padding: "5px 7px", fontSize: 12.5 };
+  const cell = (label, control) => (
+    <div>
+      <span style={{ ...S.lbl, fontSize: 10.5 }}>{label}</span>
+      {control}
+    </div>
+  );
+  // A dropdown's stored value is an ARRAY even when the column is single-select.
+  const one = (v) => (Array.isArray(v) ? v[0] : v) || "";
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+      {app && cell("App", (
+        <select style={sel} value={one(vals[app.id])} onChange={(e) => setVal(app.id, e.target.value ? [e.target.value] : null)}>
+          {(app.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      ))}
+      {pri && cell("Priority", (
+        <select style={sel} value={one(vals[pri.id])} onChange={(e) => setVal(pri.id, e.target.value ? [e.target.value] : null)}>
+          <option value="">—</option>
+          {(pri.settings?.options || []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      ))}
+      {st && cell("Status", (
+        <select style={sel} value={vals[st.id] || ""} onChange={(e) => setVal(st.id, e.target.value || null)}>
+          {(st.settings?.labels || []).map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+        </select>
+      ))}
+      {due && cell("Due", (
+        <input type="date" style={sel} value={vals[due.id] || ""}
+          onChange={(e) => setVal(due.id, e.target.value || null)} />
+      ))}
+      {who && (
+        <div style={{ gridColumn: "1 / -1" }}>
+          {cell("Assignee", (
+            // One person from the form; the cell on the board takes several. Starts blank
+            // by Carolyn's call — nothing lands on someone who isn't expecting it.
+            <select style={sel} value={one(vals[who.id])} onChange={(e) => setVal(who.id, e.target.value ? [e.target.value] : [])}>
+              <option value="">Unassigned</option>
+              {(people || []).map((p) => <option key={p.id} value={p.id}>{pmPersonName(p)}</option>)}
+            </select>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Quick-add: file a board item from ANYWHERE in the portal ─────────────────
 // Carolyn 2026-08-29: "I need a way to add items to the boards from inside SS."
 // The board's own ＋ Add item only exists on the Projects tab; the moment you actually
@@ -1448,6 +1709,9 @@ function ProjectsTab({ sub, onSub }) {
 function PMQuickAdd({ viewingClientId }) {
   const [open, setOpen] = useState(false);
   const [boards, setBoards] = useState(null);
+  const [cols, setCols] = useState({});     // boardId -> columns[], from list_boards
+  const [people, setPeople] = useState([]); // the pm_people roster, active only
+  const [vals, setVals] = useState({});     // colId -> value, in sanitizeValues' shapes
   const [boardId, setBoardId] = useState("");
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
@@ -1474,13 +1738,26 @@ function PMQuickAdd({ viewingClientId }) {
     setNote("Filed from " + where + (viewingClientId ? " while viewing " + viewingClientId : "") + " — ");
     if (!boards) {
       pmCall({ action: "list_boards" }).then((d) => {
-        setBoards(d.boards || []);
+        const list = d.boards || [];
+        setBoards(list);
+        setCols(d.columns || {});
+        setPeople(d.people || []);
         // Bugs is where a spotted problem goes 9 times in 10 — preselect it.
-        const bugs = (d.boards || []).find((b) => b.slug === "bugs");
-        setBoardId((cur) => cur || (bugs ? bugs.id : ((d.boards || [])[0] || {}).id || ""));
+        const bugs = list.find((b) => b.slug === "bugs");
+        const pick = boardId || (bugs ? bugs.id : (list[0] || {}).id || "");
+        setBoardId(pick);
+        setVals(qaDefaults((d.columns || {})[pick]));
       }).catch((e) => setErr(e.message));
+    } else {
+      // Boards are cached from the first open; the FORM still starts clean each time.
+      // (Within one visit "Add another" keeps your choices — filing three FramedUp bugs
+      // in a row shouldn't reset the App three times.)
+      setVals(qaDefaults(cols[boardId]));
     }
   };
+
+  const pickBoard = (id) => { setBoardId(id); setVals(qaDefaults(cols[id])); };
+  const setVal = (colId, v) => setVals((cur) => ({ ...cur, [colId]: v }));
 
   const file = async () => {
     const name = title.trim();
@@ -1492,6 +1769,10 @@ function PMQuickAdd({ viewingClientId }) {
       // UNLESS files are staged: attachments hang off an update, so one is created
       // anyway, and the where-you-were prefill is worth keeping alongside a screenshot.
       const body = { action: "create_item", boardId, name };
+      // App / Priority / Status / Due / Assignee, keyed by column id. The server
+      // re-validates every one against the board's real columns and fills in anything
+      // left blank that shouldn't be — so sending nothing here is still a valid item.
+      if (Object.keys(vals).length) body.values = vals;
       const n = note.trim();
       if ((n && !/—\s*$/.test(n)) || files.length) body.note = n || "Screenshot attached.";
       const d = await pmCall(body);
@@ -1549,7 +1830,7 @@ function PMQuickAdd({ viewingClientId }) {
         <div>
           {err && <div style={{ ...S.err, marginBottom: 8 }}>{err}</div>}
           <span style={S.lbl}>Board</span>
-          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => setBoardId(e.target.value)}>
+          <select style={{ ...S.input, marginBottom: 8 }} value={boardId} onChange={(e) => pickBoard(e.target.value)}>
             {boards === null && <option value="">Loading boards…</option>}
             {(boards || []).map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
@@ -1558,6 +1839,7 @@ function PMQuickAdd({ viewingClientId }) {
             placeholder="Short title — like a board item name"
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") file(); if (e.key === "Escape") setOpen(false); }} />
+          <PMQuickAddFields cols={cols[boardId]} people={people} vals={vals} setVal={setVal} />
           <span style={S.lbl}>Details (optional — becomes the first note)</span>
           <textarea rows={3} style={{ ...S.input, resize: "vertical", fontWeight: 500, marginBottom: 8 }}
             value={note} onChange={(e) => setNote(e.target.value)} />

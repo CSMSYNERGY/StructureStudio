@@ -2,7 +2,9 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { amountOwed, orderCentsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { phoneKey } from "../_shared/phoneKey.ts";
+import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
@@ -94,23 +96,10 @@ export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: stri
   return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
 }
 
-/**
- * The tax columns for a design_acceptances row, read off the snapshot the customer was looking
- * at (migration 148). Returns {} when the snapshot carries no tax — every GHL-mode design, and
- * every SS design issued before tax shipped — so the columns stay NULL rather than 0, keeping
- * "was not taxed" distinguishable from "was taxed at nothing".
- */
-// deno-lint-ignore no-explicit-any
-function taxFreeze(snap: any): Record<string, unknown> {
-  const t = snap?.tax;
-  if (!t || t.amount == null) return {};
-  return {
-    tax_rate: Number(t.rate) || 0,
-    tax_amount: Number(t.amount) || 0,
-    tax_jurisdiction: t.jurisdiction ?? null,
-    tax_source: t.source === "avalara" || t.source === "fallback" ? t.source : null,
-  };
-}
+// taxFreeze moved to _shared/estimateLines.ts (2026-09-02) — push_to_invoice freezes the same
+// four columns for a rep-attested acceptance, and these are what a disputed change order turns
+// on. Behaviour is unchanged. See that file's duplication ledger: portal-settings and this
+// function must be redeployed together when it changes.
 
 /** The three money columns an SS order carries, written TOGETHER so pretax + tax = total by
  *  construction. Falls back to the plain total for a snapshot with no tax, which is every
@@ -128,16 +117,9 @@ const fmtMoney = (n: number): string => {
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
 
-/** Canonical last-10-digits phone form for the ownership compares. The session identity is
- *  the 10 digits after "+1" (customer-auth), but stored contact phones are formatted
- *  display strings — "+1 (816) 555-0123" strips to 11 digits, which used to never match
- *  and refused a verified customer their own signature (fails closed, but wrongly). Strips
- *  exactly one leading US "1" from an 11-digit string; nothing looser — any other shape
- *  compares as-is. Compare-only: the stored phone_digits evidence stays the raw identity. */
-function phoneKey(value: unknown): string {
-  const digits = String(value ?? "").replace(/\D/g, "");
-  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-}
+// phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
+// three private copies of the check that decides whether a stranger can read, sign or PAY
+// someone else's invoice is how one of them drifts. Behaviour is unchanged.
 
 const MAX_SIGNATURE_BYTES = 300 * 1024;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
@@ -215,7 +197,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       return json({ error: "Invalid change order reference." }, 400);
     }
     const { data: co, error: coErr } = await admin.from("change_orders")
-      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
       .eq("client_id", identity.clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, identity.clientId, "load the change order", coErr);
     const notYoursCo = json({ error: "That change order wasn't found on your account." }, 404);
@@ -223,7 +205,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
     // The signature only attaches to a change on a design this verified phone owns.
     const { data: coDesign, error: coDesignErr } = await admin.from("designs")
-      .select("short_code, contact, ss_quote_number")
+      .select("short_code, contact, ss_quote_number, estimate_lines, accepted_snapshot")
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
     if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
     if (!coDesign) return notYoursCo;
@@ -235,22 +217,92 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
     const coLabel = `CO-${co.co_no}`;
     const quoteNo = String(coDesign.ss_quote_number || co.short_code);
-    const newTotal = co.total_after_cents == null ? null : co.total_after_cents / 100;
-    const coConsent = `I agree that my electronic signature is as binding as a handwritten one, and I approve change order ${coLabel} to quote ${quoteNo}${newTotal == null ? "" : ` for a new total of ${fmtMoney(newTotal)}`}.`;
+
+    // ── WHAT THEY ARE SIGNING FOR (2026-09-07) ─────────────────────────────────────────
+    // Carolyn: "when an order gets opened up after signed, we need to either get another
+    // signature or fill in the details we already have in place for it ... it just needs to
+    // happen with the entire order, not just a change order." So the number in the sentence
+    // is THE WHOLE REVISED ORDER — every acknowledged change and every fee — not this one
+    // change in isolation, which is all `total_after_cents` describes. Computed from the same
+    // helper that writes the order's money below, so the sentence and the ledger cannot
+    // disagree about what was agreed.
+    const { data: ackedNow } = await admin.from("change_orders")
+      .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+      .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("status", "acknowledged");
+    const projected = orderCentsAfterAck(coDesign.estimate_lines, [...(ackedNow ?? []), co]);
+    const newTotal = projected == null
+      ? (co.total_after_cents == null ? null : co.total_after_cents / 100)
+      : projected.totalCents / 100;
+
+    // What this revision REPLACES, and what the document is called. An amendment before any
+    // invoice was issued has neither, and the sentence then simply omits both clauses rather
+    // than naming a document that does not exist.
+    const [{ data: invRow }, { data: priorAcc }] = await Promise.all([
+      admin.from("invoice_sends").select("invoice_number")
+        .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle(),
+      admin.from("design_acceptances").select("accepted_at, revision")
+        .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("subject", "invoice")
+        .order("revision", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    const docName = String(invRow?.invoice_number ?? "").trim() || quoteNo;
+    const priorDate = priorAcc?.accepted_at
+      ? new Date(String(priorAcc.accepted_at)).toISOString().slice(0, 10)
+      : null;
+
+    // The fee, named. A customer must never first meet a charge on a later statement.
+    const feeCents = Number(co.fee_cents) || 0;
+    const feeTaxCents = Number(co.fee_tax_cents) || 0;
+
+    // Refund owed. They should learn this at the moment they sign for it, not from a balance
+    // card weeks afterwards — the one clause in this sentence that is in their favour.
+    let settledCents = 0;
+    {
+      const { data: ordRow } = await admin.from("orders").select("id")
+        .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
+      if (ordRow?.id) {
+        const { data: pays } = await admin.from("payments")
+          .select("amount_cents, funding_state, voided_at")
+          .eq("client_id", identity.clientId).eq("order_id", ordRow.id);
+        for (const pmt of Array.isArray(pays) ? pays : []) {
+          if (pmt.voided_at) continue;
+          if (pmt.funding_state === "pending" || pmt.funding_state === "returned") continue;
+          settledCents += Number(pmt.amount_cents) || 0;
+        }
+      }
+    }
+    const refundCents = projected == null ? 0 : Math.max(0, settledCents - projected.totalCents);
+
+    const coConsent =
+      `I agree that my electronic signature is as binding as a handwritten one, and I accept the revised ` +
+      `${invRow?.invoice_number ? "invoice" : "quote"} ${docName} (revision ${co.co_no})` +
+      (newTotal == null ? "" : ` for ${fmtMoney(newTotal)}`) +
+      `, which includes change order ${coLabel}` +
+      (feeCents > 0 ? ` and a change order fee of ${fmtMoney((feeCents + feeTaxCents) / 100)}` : "") +
+      (priorDate ? `, and replaces the version I signed on ${priorDate}` : "") +
+      (refundCents > 0 ? `. The revised total is below what I have already paid, and ${fmtMoney(refundCents / 100)} is to be refunded to me` : "") +
+      `.`;
+
     const ip = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || null;
     const userAgent = (req.headers.get("user-agent") || "").slice(0, 300) || null;
     const acceptanceId = crypto.randomUUID();
     const ackAtIso = new Date().toISOString();
 
-    // The record + the claim (partial unique: one acknowledgment per change order).
+    // ONE ROW DOES BOTH JOBS (migration 213). The signature is against the whole revised
+    // order, so it is subject='invoice' with revision = co_no — satisfying the widened
+    // invoice-once index — AND change_order_id, satisfying the per-change-order claim that
+    // has always been here. Revision 0 keeps the original signature's own sentence, total and
+    // tax freeze verbatim: this table is append-only and nothing above updates it.
     const { error: insErr } = await admin.from("design_acceptances").insert({
       id: acceptanceId,
       client_id: identity.clientId,
       short_code: co.short_code,
-      subject: "change_order",
+      subject: "invoice",
+      revision: Number(co.co_no) || 0,
       change_order_id: co.id,
       quote_number: quoteNo,
       total: newTotal,
+      // The tax as the AMENDED document carries it — which is what they are signing.
+      ...taxFreeze(coDesign.estimate_lines),
       method,
       signer_name: signerName,
       typed_signature: typedSignature,
@@ -281,14 +333,39 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       return json({ error: "Your signature was recorded but the change didn't finalize — your builder can see it and will finish up." }, 500);
     }
 
-    // The acknowledged total becomes the order's total. total_source='manual' also shields
-    // it from sync-design-status' GHL repricer (its step 8 skips manual rows).
-    if (co.total_after_cents != null) {
-      const { error: totErr } = await admin.from("orders")
-        .update({ total_cents: co.total_after_cents, total_source: "manual", updated_at: ackAtIso })
-        .eq("client_id", identity.clientId).eq("short_code", co.short_code);
-      if (totErr) {
-        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `CO order-total update failed: ${totErr.message}`, context: { coId } }).catch(() => {});
+    // ── THE ORDER'S MONEY (2026-09-07) ─────────────────────────────────────────────────
+    // WAS: `total_cents = co.total_after_cents`, alone. Two things were wrong with that and
+    // both were silent. It left pretax_subtotal_cents and tax_cents behind, and send_invoice
+    // hands the pre-tax figure to amendedInvoiceDocument as what the printed lines are
+    // reconciled against — so the customer's invoice grew an anonymous "Order adjustment"
+    // row. And total_after_cents is computed from the design's LINES, which a fee can never
+    // be part of, so acknowledging a second change silently refunded the first one's fee.
+    //
+    // Re-read AFTER the flip on purpose: change_orders_stamp_agreed (153) has by now moved
+    // accepted_snapshot onto the revision just agreed, and the acknowledged list now includes
+    // this change. total_source='manual' still shields it from sync-design-status' repricer.
+    {
+      const [{ data: freshD }, { data: allAcked }] = await Promise.all([
+        admin.from("designs").select("estimate_lines, accepted_snapshot")
+          .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle(),
+        admin.from("change_orders")
+          .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+          .eq("client_id", identity.clientId).eq("short_code", co.short_code).eq("status", "acknowledged"),
+      ]);
+      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
+      if (money != null) {
+        const { error: totErr } = await admin.from("orders")
+          .update({
+            total_cents: money.totalCents,
+            pretax_subtotal_cents: money.pretaxCents,
+            tax_cents: money.taxCents,
+            total_source: "manual",
+            updated_at: ackAtIso,
+          })
+          .eq("client_id", identity.clientId).eq("short_code", co.short_code);
+        if (totErr) {
+          logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `CO order-total update failed: ${totErr.message}`, context: { coId } }).catch(() => {});
+        }
       }
       // NOTE (deliberate): commission_entries computed from the old total are now stale —
       // the clawback kind (078) exists for exactly this; wiring it is a known follow-up.
@@ -318,7 +395,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       });
     }
 
-    return json({ ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no });
+    return json({ ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no, total: newTotal, refundCents });
   }
 
   // ═══ sign_invoice: the customer signs the INVOICE — the commitment (migration 136) ═══
@@ -331,7 +408,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
     const { data: d, error: dErr } = await admin
       .from("designs")
-      .select("short_code, status, contact, ss_quote_number, estimate_lines, accepted_at")
+      .select("short_code, status, contact, ss_quote_number, estimate_lines, accepted_snapshot, accepted_at")
       .eq("client_id", identity.clientId)
       .eq("short_code", code)
       .maybeSingle();
@@ -355,7 +432,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     // this read happens here rather than being trusted from the request.
     const { data: inv, error: iErr } = await admin
       .from("invoice_sends")
-      .select("invoice_number, invoice_pdf_url, status, issued_by, signed_at, updated_at")
+      .select("invoice_number, invoice_pdf_url, status, issued_by, signed_at, updated_at, document_at")
       .eq("client_id", identity.clientId)
       .eq("short_code", code)
       .maybeSingle();
@@ -382,7 +459,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         return json({ error: "There's a change to approve before you can sign this invoice — check the change order above." }, 409);
       }
     }
-    const invoiceAt = Date.parse(String(inv.updated_at || "")) || 0;
+    // migration 221: the DOCUMENT's freshness, not when an email last succeeded.
+    const invoiceAt = Date.parse(String(inv.document_at || inv.updated_at || "")) || 0;
     const staleCo = (cos ?? []).some(
       (c) => c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt,
     );
@@ -398,8 +476,12 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     const { data: ordRow } = await admin
       .from("orders").select("total_cents")
       .eq("client_id", identity.clientId).eq("short_code", code).maybeSingle();
+    // THE AGREED LINES (2026-09-07). This number goes into a consent sentence the customer
+    // signs; it must come from what they agreed, not from a revision a rep staged while the
+    // invoice was sitting unsigned in their inbox. Identical to estimate_lines whenever no
+    // change is open — the state this always ran in until now.
     const total = amountOwed(
-      d.estimate_lines,
+      agreedBaseline(d).lines,
       (cos ?? []).filter((c) => c.status === "acknowledged"),
       ordRow?.total_cents == null ? null : Number(ordRow.total_cents),
     );
@@ -430,7 +512,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       // because a resubmit OVERWRITES designs.estimate_lines — without its own copy the rate
       // and jurisdiction the customer committed under are destroyed by the next revision.
       // Same reason `total` above is a column and not a join.
-      ...taxFreeze(d.estimate_lines),
+      // The rate and jurisdiction the customer committed under — from the agreed snapshot for
+      // the same reason the total above is.
+      ...taxFreeze(agreedBaseline(d).lines),
       method,
       signer_name: signerName,
       typed_signature: typedSignature,

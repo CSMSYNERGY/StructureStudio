@@ -1,3 +1,271 @@
+// ─── QR: the sign-link, on the customer's own phone ───
+//
+// Carolyn 2026-09-01: "when we are sitting with a customer we want to be able to send them
+// a text message and they click on the link, for them to sign on their phone." SMS is not
+// available yet (no tenant has an active A2P campaign), so the same link is offered as a
+// QR the customer scans off the rep's screen — which for the sitting-across-the-table case
+// needs no carrier, no number and no A2P at all.
+//
+// WHY THIS IS HAND-ROLLED RATHER THAN A LIBRARY. preflight enforces that index.html,
+// portal.html and admin.html reference the SAME three /vendor/ files, so a fourth browser
+// dependency cannot be added without breaking that lock, and a CDN script is the exact
+// blank-page failure mode vendor/README.md exists to document. So it is app code.
+//
+// IT IS NOT TRUSTED BLIND. It was verified bit-for-bit against the `qrcode` npm package
+// (11/11 cases: both real link shapes, a long tenant slug, UTF-8, and lengths spanning
+// versions 1-9). Two bugs were found and fixed that way, and the second is the one worth
+// knowing: the format word is written MSB-FIRST along row 8 — (8,0) carries bit 14, not
+// bit 0 — which is an 8-module error that still LOOKS like a QR code and still fails to
+// scan. Re-verify the same way before changing anything below.
+//
+// Byte mode only, EC level M, versions 1-10 (up to 213 bytes; a sign link is ~90). The
+// reference optimises numeric/alphanumeric segments and we deliberately do not: byte mode
+// is always valid, occasionally one version larger, and a great deal simpler to keep right.
+// Returns boolean[][] (true = dark), or null when the text does not fit.
+function ssQrMatrix(text) {
+  var CAP = [0, 14, 26, 42, 62, 84, 106, 122, 152, 180, 213];
+  var EC = {
+    1: [10, [[1, 16]]], 2: [16, [[1, 28]]], 3: [26, [[1, 44]]], 4: [18, [[2, 32]]],
+    5: [24, [[2, 43]]], 6: [16, [[4, 27]]], 7: [18, [[4, 31]]],
+    8: [22, [[2, 38], [2, 39]]], 9: [22, [[3, 36], [2, 37]]], 10: [26, [[4, 43], [1, 44]]],
+  };
+  var ALIGN = {
+    1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34],
+    7: [6, 22, 38], 8: [6, 24, 42], 9: [6, 26, 46], 10: [6, 28, 50],
+  };
+  var i, j, k, q, r, c;
+
+  var data = [];
+  for (i = 0; i < text.length; i++) {
+    var cp = text.charCodeAt(i);
+    if (cp < 128) data.push(cp);
+    else {
+      var u = unescape(encodeURIComponent(text.charAt(i)));
+      for (j = 0; j < u.length; j++) data.push(u.charCodeAt(j));
+    }
+  }
+  var ver = 0;
+  for (i = 1; i <= 10; i++) if (data.length <= CAP[i]) { ver = i; break; }
+  if (!ver) return null;
+
+  var EXP = new Array(512), LOG = new Array(256), xv = 1;
+  for (i = 0; i < 255; i++) { EXP[i] = xv; LOG[xv] = i; xv <<= 1; if (xv & 256) xv ^= 0x11D; }
+  for (i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  function mul(a, b) { return (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]]; }
+  function gen(n) {
+    var p = [1];
+    for (var g = 0; g < n; g++) {
+      var np = [];
+      for (k = 0; k <= p.length; k++) np.push(0);
+      for (k = 0; k < p.length; k++) { np[k] ^= p[k]; np[k + 1] ^= mul(p[k], EXP[g]); }
+      p = np;
+    }
+    return p;
+  }
+  function ecOf(block, n) {
+    var g = gen(n), res = block.slice();
+    for (k = 0; k < n; k++) res.push(0);
+    for (k = 0; k < block.length; k++) {
+      var f = res[k];
+      if (!f) continue;
+      for (var w = 0; w < g.length; w++) res[k + w] ^= mul(g[w], f);
+    }
+    return res.slice(block.length);
+  }
+
+  var info = EC[ver], ecLen = info[0], groups = info[1], totalData = 0;
+  for (i = 0; i < groups.length; i++) totalData += groups[i][0] * groups[i][1];
+
+  var bits = [];
+  function put(v, n) { for (var w = n - 1; w >= 0; w--) bits.push((v >> w) & 1); }
+  put(4, 4);
+  put(data.length, ver < 10 ? 8 : 16);
+  for (i = 0; i < data.length; i++) put(data[i], 8);
+  for (i = 0; i < 4 && bits.length < totalData * 8; i++) bits.push(0);
+  while (bits.length % 8) bits.push(0);
+  var cw = [];
+  for (i = 0; i < bits.length; i += 8) {
+    var b = 0;
+    for (j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    cw.push(b);
+  }
+  var padv = [0xEC, 0x11], pi = 0;
+  while (cw.length < totalData) cw.push(padv[pi++ % 2]);
+
+  var blocks = [], eccs = [], off = 0;
+  for (i = 0; i < groups.length; i++) {
+    for (j = 0; j < groups[i][0]; j++) {
+      var blk = cw.slice(off, off + groups[i][1]);
+      off += groups[i][1];
+      blocks.push(blk);
+      eccs.push(ecOf(blk, ecLen));
+    }
+  }
+  var maxD = 0;
+  for (i = 0; i < blocks.length; i++) if (blocks[i].length > maxD) maxD = blocks[i].length;
+  var out = [];
+  for (i = 0; i < maxD; i++) for (j = 0; j < blocks.length; j++) if (i < blocks[j].length) out.push(blocks[j][i]);
+  for (i = 0; i < ecLen; i++) for (j = 0; j < eccs.length; j++) out.push(eccs[j][i]);
+
+  var size = 17 + ver * 4;
+  var m = [], rz = [];
+  for (i = 0; i < size; i++) {
+    var ra = [], rb = [];
+    for (j = 0; j < size; j++) { ra.push(0); rb.push(0); }
+    m.push(ra); rz.push(rb);
+  }
+  function setF(rr, cc, v) {
+    if (rr < 0 || cc < 0 || rr >= size || cc >= size) return;
+    m[rr][cc] = v; rz[rr][cc] = 1;
+  }
+  function finder(r0, c0) {
+    for (var dr = -1; dr <= 7; dr++) for (var dc = -1; dc <= 7; dc++) {
+      var on = (dr >= 0 && dr <= 6 && (dc === 0 || dc === 6)) ||
+        (dc >= 0 && dc <= 6 && (dr === 0 || dr === 6)) ||
+        (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4);
+      setF(r0 + dr, c0 + dc, on ? 1 : 0);
+    }
+  }
+  finder(0, 0); finder(0, size - 7); finder(size - 7, 0);
+  for (i = 8; i < size - 8; i++) {
+    setF(6, i, i % 2 === 0 ? 1 : 0);
+    setF(i, 6, i % 2 === 0 ? 1 : 0);
+  }
+  var ap = ALIGN[ver];
+  for (i = 0; i < ap.length; i++) for (j = 0; j < ap.length; j++) {
+    r = ap[i]; c = ap[j];
+    if ((r <= 8 && c <= 8) || (r <= 8 && c >= size - 9) || (r >= size - 9 && c <= 8)) continue;
+    for (var dr2 = -2; dr2 <= 2; dr2++) for (var dc2 = -2; dc2 <= 2; dc2++) {
+      setF(r + dr2, c + dc2, (Math.abs(dr2) === 2 || Math.abs(dc2) === 2 || (dr2 === 0 && dc2 === 0)) ? 1 : 0);
+    }
+  }
+  for (i = 0; i <= 8; i++) { if (i !== 6) { rz[8][i] = 1; rz[i][8] = 1; } }
+  for (i = 0; i < 8; i++) { rz[8][size - 1 - i] = 1; rz[size - 1 - i][8] = 1; }
+  setF(size - 8, 8, 1);
+  if (ver >= 7) {
+    for (i = 0; i < 6; i++) for (j = 0; j < 3; j++) {
+      rz[i][size - 11 + j] = 1;
+      rz[size - 11 + j][i] = 1;
+    }
+  }
+
+  var bi = 0, up = true;
+  for (var col = size - 1; col > 0; col -= 2) {
+    if (col === 6) col--;
+    for (var n = 0; n < size; n++) {
+      var row = up ? size - 1 - n : n;
+      for (k = 0; k < 2; k++) {
+        var cc2 = col - k;
+        if (rz[row][cc2]) continue;
+        var bit = 0;
+        if ((bi >> 3) < out.length) bit = (out[bi >> 3] >> (7 - (bi & 7))) & 1;
+        bi++;
+        m[row][cc2] = bit;
+      }
+    }
+    up = !up;
+  }
+
+  function maskAt(kk, rr, cc) {
+    switch (kk) {
+      case 0: return (rr + cc) % 2 === 0;
+      case 1: return rr % 2 === 0;
+      case 2: return cc % 3 === 0;
+      case 3: return (rr + cc) % 3 === 0;
+      case 4: return (Math.floor(rr / 2) + Math.floor(cc / 3)) % 2 === 0;
+      case 5: return ((rr * cc) % 2) + ((rr * cc) % 3) === 0;
+      case 6: return (((rr * cc) % 2) + ((rr * cc) % 3)) % 2 === 0;
+      default: return (((rr + cc) % 2) + ((rr * cc) % 3)) % 2 === 0;
+    }
+  }
+  function stampFormat(g, mask) {
+    var d = (0 << 3) | mask, rem = d << 10;
+    for (q = 14; q >= 10; q--) if (rem & (1 << q)) rem ^= 0x537 << (q - 10);
+    var fmt = (((d << 10) | rem) ^ 0x5412) & 0x7FFF;
+    function fb(w) { return (fmt >> w) & 1; }
+    // The format word is written MSB-FIRST along row 8: (8,0) carries bit 14, not bit 0.
+    for (q = 0; q <= 5; q++) g[8][q] = fb(14 - q);
+    g[8][7] = fb(8); g[8][8] = fb(7); g[7][8] = fb(6);
+    for (q = 9; q <= 14; q++) g[14 - q][8] = fb(14 - q);
+    for (q = 0; q <= 6; q++) g[size - 1 - q][8] = fb(14 - q);
+    for (q = 7; q <= 14; q++) g[8][size - 15 + q] = fb(14 - q);
+    g[size - 8][8] = 1;
+    if (ver >= 7) {
+      var vrem = ver << 12;
+      for (q = 17; q >= 12; q--) if (vrem & (1 << q)) vrem ^= 0x1F25 << (q - 12);
+      var vi = ((ver << 12) | vrem) & 0x3FFFF;
+      for (q = 0; q < 18; q++) {
+        var vb = (vi >> q) & 1;
+        g[Math.floor(q / 3)][size - 11 + (q % 3)] = vb;
+        g[size - 11 + (q % 3)][Math.floor(q / 3)] = vb;
+      }
+    }
+  }
+  function penalty(g) {
+    var p = 0, run, prev, a, b2;
+    for (a = 0; a < size; a++) {
+      run = 1; prev = g[a][0];
+      for (b2 = 1; b2 < size; b2++) {
+        if (g[a][b2] === prev) run++;
+        else { if (run >= 5) p += 3 + (run - 5); run = 1; prev = g[a][b2]; }
+      }
+      if (run >= 5) p += 3 + (run - 5);
+    }
+    for (b2 = 0; b2 < size; b2++) {
+      run = 1; prev = g[0][b2];
+      for (a = 1; a < size; a++) {
+        if (g[a][b2] === prev) run++;
+        else { if (run >= 5) p += 3 + (run - 5); run = 1; prev = g[a][b2]; }
+      }
+      if (run >= 5) p += 3 + (run - 5);
+    }
+    for (a = 0; a < size - 1; a++) for (b2 = 0; b2 < size - 1; b2++) {
+      var s = g[a][b2] + g[a][b2 + 1] + g[a + 1][b2] + g[a + 1][b2 + 1];
+      if (s === 0 || s === 4) p += 3;
+    }
+    var P1 = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0], P2 = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+    function scan(arr) {
+      var hits = 0;
+      for (var w = 0; w + 11 <= arr.length; w++) {
+        var ok1 = true, ok2 = true;
+        for (var z = 0; z < 11; z++) {
+          if (arr[w + z] !== P1[z]) ok1 = false;
+          if (arr[w + z] !== P2[z]) ok2 = false;
+        }
+        if (ok1 || ok2) hits++;
+      }
+      return hits;
+    }
+    for (a = 0; a < size; a++) p += 40 * scan(g[a]);
+    for (b2 = 0; b2 < size; b2++) {
+      var colA = [];
+      for (a = 0; a < size; a++) colA.push(g[a][b2]);
+      p += 40 * scan(colA);
+    }
+    var dark = 0;
+    for (a = 0; a < size; a++) for (b2 = 0; b2 < size; b2++) dark += g[a][b2];
+    p += 10 * Math.floor(Math.abs(dark * 100 / (size * size) - 50) / 5);
+    return p;
+  }
+
+  var best = null, bestP = Infinity;
+  for (var mk = 0; mk < 8; mk++) {
+    var g4 = [];
+    for (i = 0; i < size; i++) g4.push(m[i].slice());
+    for (i = 0; i < size; i++) for (j = 0; j < size; j++) if (!rz[i][j] && maskAt(mk, i, j)) g4[i][j] ^= 1;
+    stampFormat(g4, mk);
+    var sc = penalty(g4);
+    if (sc < bestP) { bestP = sc; best = g4; }
+  }
+  var res = [];
+  for (i = 0; i < size; i++) {
+    var rowo = [];
+    for (j = 0; j < size; j++) rowo.push(!!best[i][j]);
+    res.push(rowo);
+  }
+  return res;
+}
+
 // ─── Feedback: bug reports + feature requests ───
 // Submissions are filed into Monday (Bugs Queue / Feature Requests (Intake)) by the
 // `portal-feedback` edge function, which ALSO records them in `feedback_submissions`
@@ -206,7 +474,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
               </button>
             ))}
             <div style={{ fontSize: 12, color: "#94A3B8", lineHeight: 1.5, marginTop: 2 }}>
-              Everything you send shows up under <b>What's New → My Requests</b>, so you can track where it got to.
+              Everything you send shows up under <b>Support → My Requests</b>, so you can track where it got to.
             </div>
           </div>
         )}
@@ -219,7 +487,7 @@ function FeedbackWidget({ clientId, onSubmitted }) {
         {view === "done" && (
           <div style={{ padding: 20, fontSize: 13.5, color: "#334155", lineHeight: 1.6 }}>
             Your request is logged and on our board. You can follow it under{" "}
-            <b>What's New → My Requests</b> — the status updates there as we work on it,
+            <b>Support → My Requests</b> — the status updates there as we work on it,
             and any reply we post shows up alongside it.
             {!pushed && (
               <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>
@@ -481,59 +749,63 @@ function MySubmissions({ refreshKey }) {
 // it, assigned from the template operators keep in Projects. Reads are RLS-scoped direct
 // (tenant_setup_items is readable to its own tenant); the tick goes through portal-setup
 // so that WHO completed it — the builder, or us on a call — is decided server-side.
-function SetupChecklist({ onNavigate, onCount }) {
-  const [items, setItems] = useState(null);
+// The builder's setup checklist.
+//
+// ⚠️ IT NO LONGER READS tenant_setup_items DIRECTLY, and must not go back to it. That read
+// was RLS-scoped to current_client_id() — the SIGNED-IN person's tenant — so an operator in
+// view-as was shown THEIR OWN tenant's checklist under a banner naming somebody else (both
+// operator accounts carry a client_users row for structure-studio, which has its own
+// 19-step list). portal-setup is in SS_TENANT_SCOPED_FNS, so it answers for the VIEWED
+// tenant; it is also where the gating verdict is computed, because entitlement is a
+// server-side question and featureOn() in the browser is never true for an operator.
+//
+// `items` and `counts` are owned by ReleasesView above (one fetch feeds both the tab badge
+// and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
+// not bought: shown, padlocked, and left out of the count — Carolyn 2026-09-04, it doubles
+// as the upsell. A step we have not finished building never arrives here at all.
+function SetupChecklist({ items, counts, onPatch, onReload, onNavigate, canAdmin }) {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);      // id being toggled
   const [viewing, setViewing] = useState(null); // { url, title } — screenshot popup
 
-  const load = useCallback(async () => {
-    const { data, error: err } = await sb
-      .from("tenant_setup_items")
-      .select("id, title, detail, link_page, section, image_url, position, completed_at, completed_by_kind, completed_by_name")
-      .order("position", { ascending: true });
-    if (err) { setError(err.message); setItems([]); return; }
-    setItems(data || []);
-    // Hand the tally back up so the tab badge above cannot sit stale at the number it
-    // had on page load while the list underneath it says something else.
-    if (onCount) onCount({ total: (data || []).length, open: (data || []).filter((r) => !r.completed_at).length });
-  }, [onCount]);
-  useEffect(() => { load(); }, [load]);
-
   const toggle = async (it) => {
+    if (it.locked) return;
     const done = !it.completed_at;
     setBusy(it.id); setError(null);
     // Optimistic: ticking a box that then sits there doing nothing feels broken.
-    setItems((cur) => cur.map((x) => x.id === it.id
-      ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
-      : x));
+    if (onPatch) onPatch(it.id, done);
     try {
       const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "toggle", id: it.id, done } });
       if (err) throw new Error(err.message || "Could not save that.");
       if (data && data.error) throw new Error(data.error);
-      load();                       // re-read so the real name/time replace the guess
+      if (onReload) onReload();     // re-read so the real name/time replace the guess
     } catch (e) {
       setError(e.message || "Could not save that.");
-      load();                       // and never leave a tick the server did not accept
+      if (onReload) onReload();     // and never leave a tick the server did not accept
     }
     setBusy(null);
   };
 
-  if (items === null) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
+  if (items === null || items === undefined) return <div style={{ ...S.card, color: "#64748B" }}>Loading your setup steps…</div>;
   if (!items.length) return null;   // nothing assigned — the tab is hidden anyway
 
-  const done = items.filter((i) => i.completed_at).length;
-  const allDone = done === items.length;
+  // Counted over what they can actually DO. A padlocked step is not homework, so it is
+  // neither in the tally nor in the numbering below — a bar reading "3 of 15" above rows
+  // numbered to 19 looks broken.
+  const total = counts ? counts.total : items.filter((i) => !i.locked).length;
+  const done = counts ? counts.done : items.filter((i) => !i.locked && i.completed_at).length;
+  const allDone = total > 0 && done === total;
+  let stepNo = 0;
 
   return (
     <div style={S.card}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <span style={{ ...S.h2, marginBottom: 0 }}>Getting set up</span>
         <span style={{ fontSize: 12, fontWeight: 700, color: allDone ? "#0E9F6E" : "#64748B" }}>
-          {done} of {items.length} done
+          {done} of {total} done
         </span>
         <div style={{ flex: "1 1 120px", minWidth: 80, height: 6, borderRadius: 999, background: "#EEF2F7", overflow: "hidden" }}>
-          <div style={{ width: `${Math.round((done / items.length) * 100)}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
+          <div style={{ width: `${total ? Math.round((done / total) * 100) : 0}%`, height: "100%", background: allDone ? "#0E9F6E" : ACCENT, transition: "width .2s ease-out" }} />
         </div>
       </div>
       <div style={{ fontSize: 13, color: "#64748B", marginBottom: 12 }}>
@@ -546,6 +818,9 @@ function SetupChecklist({ onNavigate, onCount }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {items.map((it, i) => {
           const isDone = !!it.completed_at;
+          const locked = !!it.locked;
+          const feat = it.requiresFeature;
+          if (!locked) stepNo++;   // only doable steps carry a number — see the tally above
           return (
             <React.Fragment key={it.id}>
             {/* Section header whenever it changes walking the list in order — the copy
@@ -556,16 +831,25 @@ function SetupChecklist({ onNavigate, onCount }) {
             )}
             <div style={{
               display: "flex", gap: 11, alignItems: "flex-start",
-              border: "1px solid " + (isDone ? "#DCFCE7" : "#E2E8F0"),
-              background: isDone ? "#F7FEF9" : "#FFF",
+              border: "1px solid " + (locked ? "#E2E8F0" : isDone ? "#DCFCE7" : "#E2E8F0"),
+              background: locked ? "#F8FAFC" : isDone ? "#F7FEF9" : "#FFF",
               borderRadius: 10, padding: "10px 13px",
             }}>
-              <input type="checkbox" checked={isDone} disabled={busy === it.id}
-                onChange={() => toggle(it)} aria-label={it.title}
-                style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              {/* A padlock where the checkbox would be. A greyed-out checkbox invites a
+                  click that does nothing; the lock says why before they reach for it. */}
+              {locked ? (
+                <span style={{ marginTop: 3, width: 16, display: "flex", justifyContent: "center", flexShrink: 0 }}>
+                  <SsLock title={`Needs ${ssFeatureLabel(feat)}`} />
+                </span>
+              ) : (
+                <input type="checkbox" checked={isDone} disabled={busy === it.id}
+                  onChange={() => toggle(it)} aria-label={it.title}
+                  style={{ marginTop: 3, width: 16, height: 16, flexShrink: 0, cursor: "pointer" }} />
+              )}
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: isDone ? "#64748B" : "#1E293B", textDecoration: isDone ? "line-through" : "none" }}>
-                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{i + 1}.</span>
+                {/* No line-through on a locked row — that reads as "done". */}
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: locked ? "#94A3B8" : isDone ? "#64748B" : "#1E293B", textDecoration: !locked && isDone ? "line-through" : "none" }}>
+                  <span style={{ color: "#94A3B8", fontWeight: 800, marginRight: 6 }}>{locked ? "—" : `${stepNo}.`}</span>
                   {it.title}
                 </div>
                 {it.detail && <div style={{ fontSize: 12.5, color: "#64748B", lineHeight: 1.5, marginTop: 3 }}>{it.detail}</div>}
@@ -580,7 +864,25 @@ function SetupChecklist({ onNavigate, onCount }) {
                   </div>
                 )}
               </div>
-              {it.link_page && !isDone && (
+              {/* Locked: the upsell replaces "Take me there". The button is owner/admin
+                  only — a sales rep cannot open Settings → Billing, so for them it would
+                  be a dead end (the QuickBooksLocked rule, below). And the deep link goes
+                  to the BILLING sub-tab specifically: navigate("settings") alone lands on
+                  the Structures catalog editor with nothing about payment on screen.
+                  A grant-only feature (view_3d) has nothing to buy, so it never gets a
+                  button whoever is looking. */}
+              {locked ? (
+                canAdmin && (SS_FEATURE_LABELS[feat] || {}).buyable ? (
+                  <button type="button" onClick={() => onNavigate && onNavigate("settings", "billing")}
+                    style={{ ...S.btn("#EEF2FF", ACCENT), padding: "6px 12px", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>
+                    Add {ssFeatureLabel(feat)} — see Billing
+                  </button>
+                ) : (
+                  <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0, marginTop: 4 }}>
+                    Needs {ssFeatureLabel(feat)}
+                  </span>
+                )
+              ) : it.link_page && !isDone && (
                 <button type="button" onClick={() => {
                   const [page, sub] = String(it.link_page).split("/");
                   if (onNavigate) onNavigate(page, sub || null);
@@ -602,11 +904,16 @@ function SetupChecklist({ onNavigate, onCount }) {
   );
 }
 
-// ─── What's New: global product changelog (read-only; team-populated) ───
-function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
+// ─── Support: setup checklist, the tenant's own submissions, and the global product
+// changelog (read-only; team-populated). Renamed from "What's New" 2026-08-30 — the
+// changelog is now one view inside it, not the whole page. ───
+// `canAdmin` reaches SetupChecklist for one reason: only an owner/admin can open
+// Settings → Billing, so only they get the "add this add-on" button on a padlocked step.
+function ReleasesView({ submissionsKey, sub, onSub, onNavigate, canAdmin }) {
   const [rows, setRows] = useState(null); // null = loading
   const [error, setError] = useState(null);
-  // The sub-tab lives in the URL (/portal/releases/setup), so a "Take me there" link or a
+  // The sub-tab lives in the URL (/portal/support/setup — /portal/releases/setup still
+  // resolves via SS_TAB_ALIASES), so a "Take me there" link or a
   // bookmark lands on the right one. `null` = the visitor has not chosen; see the default
   // below, which only then decides for them.
   const subtab = sub || null;
@@ -625,22 +932,55 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
     })();
   }, []);
 
-  // How many setup steps are still open. Drives both the badge and whether the tab
-  // exists at all: a builder who was never assigned a list should see no change here.
-  const [setupOpen, setSetupOpen] = useState(null);   // null = not loaded yet
+  // The setup checklist, fetched ONCE here and handed to SetupChecklist below — the badge
+  // and the list read the same object, so they cannot disagree about the tally. It used to
+  // be two independent reads of tenant_setup_items straight from the browser; both were
+  // RLS-scoped to the SIGNED-IN person's tenant, which meant an operator in view-as saw
+  // their own checklist under another builder's name. portal-setup answers for the VIEWED
+  // tenant and is also where the padlocks are decided. See SetupChecklist's header.
+  const [setupData, setSetupData] = useState(null);   // null = not loaded yet
+  const loadSetup = useCallback(async () => {
+    try {
+      const { data, error: err } = await sb.functions.invoke("portal-setup", { body: { action: "list" } });
+      if (err) throw new Error(err.message);
+      if (!data || data.error) throw new Error((data && data.error) || "no data");
+      const items = data.items || [];
+      // Derived here when absent so the edge function and this bundle can land in either
+      // order without the checklist going blank in between.
+      const counts = data.counts || (() => {
+        const c = items.filter((i) => !i.locked);
+        return { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length };
+      })();
+      const next = { items, counts };
+      setSetupData(next);
+      return next;
+    } catch (_e) {
+      // A builder who was never assigned a list looks the same as a failure here, and both
+      // should simply leave the tab out rather than showing an error in a changelog.
+      setSetupData({ items: [], counts: { total: 0, done: 0, open: 0 } });
+      return null;
+    }
+  }, []);
   // Which tab leads the strip and gets landed on. LATCHED on the first read and never
   // recomputed: ticking the last setup step would otherwise reorder the tabs and switch
   // the page out from under the person who just ticked it. They graduate to My Requests
   // leading on their next visit, which is the right moment for the strip to change.
   const [lead, setLead] = useState(null);
   useEffect(() => {
-    (async () => {
-      const { data } = await sb.from("tenant_setup_items").select("id, completed_at");
-      if (!data) { setLead("mine"); return; }
-      const open = data.filter((r) => !r.completed_at).length;
-      setSetupOpen({ total: data.length, open });
-      setLead(open > 0 ? "setup" : "mine");
-    })();
+    loadSetup().then((d) => setLead(d && d.counts.open > 0 ? "setup" : "mine"));
+  }, [loadSetup]);
+  const setupOpen = setupData ? { total: setupData.items.length, open: setupData.counts.open } : null;
+  // Optimistic tick, applied to the one copy of the data. Recomputed rather than patched
+  // so the badge, the bar and the row can never drift apart by a rounding of the truth.
+  const patchSetup = useCallback((id, done) => {
+    setSetupData((cur) => {
+      if (!cur) return cur;
+      const items = cur.items.map((x) => x.id === id
+        ? { ...x, completed_at: done ? new Date().toISOString() : null, completed_by_kind: done ? "client" : null, completed_by_name: done ? "You" : null }
+        : x);
+      const c = items.filter((i) => !i.locked);
+      return { items, counts: { total: c.length, done: c.filter((i) => i.completed_at).length, open: c.filter((i) => !i.completed_at).length } };
+    });
   }, []);
 
   // Count only — the list itself is fetched by MySubmissions when that tab opens.
@@ -722,7 +1062,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   // "mine" is the odd one out: it renders <MySubmissions /> rather than release_notes
   // entries, so it carries its own count instead of a `list`. It LEADS the strip
   // (Carolyn 2026-08-28) — a builder's own open requests matter more to them than our
-  // changelog does. Its id stays "mine" so /portal/releases/mine keeps working.
+  // changelog does. Its id stays "mine" so /portal/support/mine — and the older
+  // /portal/releases/mine, via the alias — both keep working.
   const TABS = [
     { id: "mine",     label: "My Requests",  dot: "#7E22CE", count: mineCount },
     { id: "features", label: "New Features", dot: "#10B981", list: features, empty: "No new features yet — check back soon." },
@@ -737,7 +1078,7 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
     TABS.splice(lead === "setup" ? 0 : 1, 0,
       { id: "setup", label: "Getting set up", dot: "#0EA5E9", count: setupOpen.open });
   }
-  // An explicit choice — a click, or a /portal/releases/<sub> link — always wins; with
+  // An explicit choice — a click, or a /portal/support/<sub> link — always wins; with
   // none, the page lands on whichever tab leads.
   const effTab = subtab || lead || "mine";
   const active = TABS.find((t) => t.id === effTab) || TABS[0];
@@ -746,8 +1087,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
   return (
     <div>
       <div style={{ ...S.card, background: "linear-gradient(135deg,#3D3672 0%,#1B7895 100%)", color: "#FFF", border: "none", marginBottom: 12 }}>
-        <div style={{ fontSize: 18, fontWeight: 800 }}>What's New</div>
-        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Updates as they ship to your portal — try them out and send us feedback.</div>
+        <div style={{ fontSize: 18, fontWeight: 800 }}>Support</div>
+        <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>Get set up, track anything you've sent us, and see what's shipped — try the new things out and tell us how they land.</div>
       </div>
 
       {/* Sub-tab nav: New Features · Bug Fixes · Roadmap */}
@@ -770,7 +1111,8 @@ function ReleasesView({ submissionsKey, sub, onSub, onNavigate }) {
         })}
       </div>
 
-      {effTab === "setup" ? <SetupChecklist onNavigate={onNavigate} onCount={setSetupOpen} />
+      {effTab === "setup" ? <SetupChecklist items={setupData && setupData.items} counts={setupData && setupData.counts}
+        onPatch={patchSetup} onReload={loadSetup} onNavigate={onNavigate} canAdmin={canAdmin} />
         : effTab === "mine" ? <MySubmissions refreshKey={submissionsKey} />
         : error ? <div style={S.err}>Couldn't load updates: {error}</div>
         : rows === null ? <div style={{ ...S.card, color: "#64748B" }}>Loading updates…</div>
@@ -992,7 +1334,18 @@ const PAY_METHODS = [["cash", "Cash"], ["check", "Check"], ["card", "Card"], ["a
 //   * a custom build (its own design)      -> Build Schedule, then delivery via the pool
 //   * a lot building (an inventory sale)   -> straight to Delivery; it is already built
 // Both are gated on the design being INVOICED, which is what "sold" means here.
-function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
+//
+// ⚠️ `ordersOn` is the orders:edit half of the same grant model `coOn` already carries. The
+// Orders TAB is readable at orders='view' — that is what shipped to crew leaders and drivers
+// on 2026-09-01 — but recording a payment, voiding one and typing an order total are writes,
+// and until this prop existed the detail screen offered all three to every viewer. Migration
+// 188 is the control (restrictive area policies on orders/payments); this is the courtesy
+// half, so a viewer sees a read-only order instead of a button that returns a raw RLS
+// refusal. It DEFAULTS TO TRUE: 12-shell.jsx has computed `ordersCanEdit` since 2026-09-01
+// but does not yet pass it, and defaulting to false would take Record-a-payment away from
+// owners and admins. The default is the no-op, `ordersOn={ordersCanEdit}` at the call site
+// is the fix — see the note returned with this change.
+function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false, coApproveOn = false, ordersOn = true, onScheduleDelivery = null, onOpenDesign = null, urlOpenId = null, onOpenChange = null }) {
   // Seeded from the tab cache so a revisit shows the order rows at once instead of a
   // skeleton. Caching rows that carry `paid` is safe here precisely because `moneyReady`
   // below starts false on every mount: every figure renders as pending until this load's
@@ -1088,13 +1441,43 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const paysP = fetchAllPayments().then((r) => r, (e) => ({ error: e }));
     // Pending change orders (migration 126): the row wears an amber chip, and the server
     // 409s an invoice while one is open — the chip is the courtesy half of that rule.
+    //
+    // ⚠️ NO `.in("short_code", codes)`. PostgREST reads filters from the QUERY STRING, so that
+    // list travelled as one `short_code=in.(...)` parameter carrying every order code in the
+    // tenant. Around 500 orders it crosses the URL length ceiling and the whole Orders tab
+    // dies on a read that is pure decoration — and it fails at the SIZE a real tenant grows
+    // into, not in testing. The filter also bought nothing: `client_id` + RLS already scope
+    // this to the tenant, `status = pending_ack` is a handful of rows on any tenant, and
+    // `pendingCo` below is only ever probed per rendered order, so codes that belong to no
+    // shown order are inert. The read stays a fixed-size URL whatever the tenant's volume.
+    // 'draft' JOINS 'pending_ack' (2026-09-07): a change a rep opened and walked away from
+    // is exactly the thing this list has to surface, and it is invisible everywhere else.
+    // The two states mean different things on the row, so the STATUS comes back with the
+    // code rather than being flattened into one boolean.
     const coP = (codes.length
-      ? sb.from("change_orders").select("short_code").eq("client_id", clientId).eq("status", "pending_ack").in("short_code", codes)
+      ? sb.from("change_orders").select("short_code, co_no, status").eq("client_id", clientId).in("status", ["draft", "pending_ack"])
       : Promise.resolve({ data: [] })
     ).then((r) => r, (e) => ({ error: e }));
 
+    // Orders somebody has asked to unlock, and orders an approver has unlocked but nobody
+    // has used yet. Both are waiting on a PERSON, and neither shows anywhere else in the
+    // product — an approver would otherwise have to open every order to find the one request
+    // sitting on their desk. Same fixed-size URL discipline as the change-order read above:
+    // no `.in("short_code", ...)`, because the open set is tiny on any tenant.
+    // SOFT: a decoration read must never take the tab down (its own `.then` swallow, and no
+    // error branch below), unlike the two reads whose failure would understate money.
+    const unlockP = (codes.length
+      ? sb.from("order_unlocks").select("short_code, decision")
+          .eq("client_id", clientId).is("consumed_at", null).is("released_at", null)
+      : Promise.resolve({ data: [] })
+    ).then((r) => r, () => ({ data: [] }));
+
+    // Through the server (portal-settings orders_designs), NOT direct RLS: the designs
+    // policy answers "may you read DESIGNS", and since this tab shipped to tenants its
+    // viewers include titles that hold Orders and not Designs. See that action's header.
     const dsnRes = codes.length
-      ? await sb.from("designs").select("short_code, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at").in("short_code", codes).limit(2000)
+      ? await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: codes } })
+          .then((r) => r.error ? { error: r.error } : { data: (r.data && r.data.designs) || [] })
       : { data: [] };
     // A failed designs read must not read as "no designs": byCode would come up empty,
     // the SS-only filter below would drop EVERY order, and the tab would show
@@ -1110,7 +1493,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const ssOrders = list.filter((o) => !o.short_code || (byCode[o.short_code] && byCode[o.short_code].ss_quote_number));
     // PAINT NOW: the right rows, with the money still marked pending. `paid: 0` is never
     // read while moneyReady is false — every consumer of it is gated below.
-    setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false })));
+    setRows(ssOrders.map((o) => ({ o, d: byCode[o.short_code] || null, pays: [], paid: 0, coPending: false, coDraft: false, coNo: null, unlockState: null })));
 
     // Both were started before the designs read above; by now they are usually already in.
     const [paysRes, coRes] = await Promise.all([paysP, coP]);
@@ -1122,13 +1505,33 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     // the server's invoice 409 still stands — the courtesy half of the rule goes dark.
     if (coRes.error) { setError(coRes.error.message); return; }
     const payByOrder = {}; (paysRes.data || []).forEach((p) => { (payByOrder[p.order_id] = payByOrder[p.order_id] || []).push(p); });
-    const pendingCo = new Set(((coRes && coRes.data) || []).map((c) => c.short_code));
+    const coByCode = {};
+    for (const c of ((coRes && coRes.data) || [])) coByCode[c.short_code] = c;
+    const unlockRes = await unlockP;
+    const unlockByCode = {};
+    for (const u of ((unlockRes && unlockRes.data) || [])) {
+      // A DECLINED request is not an open one, and the row should stop shouting about it.
+      if (u.decision === "declined") continue;
+      unlockByCode[u.short_code] = u.decision === "granted" ? "granted" : "asked";
+    }
     const settled = ssOrders.map((o) => {
       const ps = payByOrder[o.id] || [];
       return {
         o, d: byCode[o.short_code] || null, pays: ps,
-        paid: ps.reduce((s, p) => s + (p.voided_at ? 0 : (p.amount_cents || 0)), 0),
-        coPending: pendingCo.has(o.short_code),
+        // ⚠️ SETTLED MONEY ONLY (migration 174). A bank payment is not money until it
+        // funds — it can come back Rejected up to three days later, and a builder who
+        // scheduled a build against it has a real problem. `pending` counts toward
+        // NOTHING here, and that is why this split lives at this one source: balOf, every
+        // status chip, the tiles and the detail card all inherit the honesty from it
+        // rather than each re-deciding.
+        paid: ps.reduce((s, p) => s + (p.voided_at || p.funding_state === "pending" || p.funding_state === "returned" ? 0 : (p.amount_cents || 0)), 0),
+        pending: ps.reduce((s, p) => s + (!p.voided_at && p.funding_state === "pending" ? (p.amount_cents || 0) : 0), 0),
+        // `coPending` keeps its old meaning EXACTLY — awaiting the customer — because the
+        // invoice gate downstream is pending_ack-only and this chip explains that gate.
+        coPending: (coByCode[o.short_code] || {}).status === "pending_ack",
+        coDraft: (coByCode[o.short_code] || {}).status === "draft",
+        coNo: (coByCode[o.short_code] || {}).co_no || null,
+        unlockState: unlockByCode[o.short_code] || null,   // 'asked' | 'granted' | null
       };
     });
     setRows(settled);
@@ -1198,9 +1601,23 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     const links = schedLinks || {};
     const sale = (links.saleDesigns || {})[r.o.short_code];   // set = this order sold a LOT building
     const job = (links.byDesign || {})[r.o.short_code];       // set = already on the build board
-    // SOLD = INVOICED. Before that there is nothing to schedule, and the server refuses too.
+    // SOLD = the customer SIGNED the bill. Since migration 136 `status: 'invoiced'` means
+    // exactly that — sign_invoice is its only writer and send_invoice stopped flipping it —
+    // so the gate below is right. Only the old label was wrong: it said "Invoice first" at
+    // a builder who had already sent the invoice and was waiting on the customer, pointing
+    // them at a job that was done. Same split, and the same words, as stateOf's chip.
     const sold = r.d && (normStatus(r.d.status) === "invoiced" || normStatus(r.d.status) === "delivered");
-    if (!sold) return <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}>Invoice first</span>;
+    if (!sold) {
+      const waiting = r.d && r.d.ss_invoice_sent_at;
+      return (
+        <span style={{ fontSize: 11.5, color: "#94A3B8", fontWeight: 600 }}
+          title={waiting
+            ? "The invoice is out — this can be scheduled once the customer signs it."
+            : "Send the invoice; scheduling unlocks when the customer signs it."}>
+          {waiting ? "Awaiting signature" : "Invoice first"}
+        </span>
+      );
+    }
 
     if (sale) {
       // Already built and sitting on a lot — it never touches the build board, it just
@@ -1230,10 +1647,27 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     if (!moneyReady) return { key: "pending", label: "…", bg: "#F1F5F9", fg: "#94A3B8" };
     const bal = balOf(r);
     if (bal == null) return { key: "nototal", label: "Needs total", bg: "#F1F5F9", fg: "#475569" };
-    // Collected more than the total — say so plainly instead of "Paid in full",
-    // which would hide that a refund/credit is owed back to the customer.
-    if (bal < 0) return { key: "over", label: "Overpaid", bg: "#FFEDD5", fg: "#9A3412" };
+    // Collected more than the total — say so plainly instead of "Paid in full", which
+    // would hide that money is owed BACK to the customer.
+    //
+    // "Refund owed", not "Overpaid" (Carolyn 2026-09-06). Until a rep could take money OFF a
+    // signed order this only ever happened by accident — someone paid twice — and "Overpaid"
+    // described the accident. An amendment makes it a normal, deliberate outcome: the
+    // customer dropped the loft on a job they had already paid for, and the builder owes them
+    // the difference. That is an obligation with an action attached, and the word has to say
+    // so. Reversing a real card charge is Refund on the payment itself; nothing here does it
+    // automatically, and nothing here ever touches a payment.
+    if (bal < 0) return { key: "over", label: "Refund owed", bg: "#FFEDD5", fg: "#9A3412" };
+    // "Paid in full" uses SETTLED money only — a pending bank payment can never produce it.
     if (bal === 0) return { key: "paid", label: "Paid in full", bg: "#DCFCE7", fg: "#166534" };
+    // Clearing OUTRANKS "Partially paid", and the order matters: "partially paid" is a
+    // claim about money we hold, and clearing money is money we do not hold yet.
+    if ((r.pending || 0) > 0) return { key: "clearing", label: "Bank payment clearing", bg: "#FEF3C7", fg: "#92400E" };
+    // NOTE: no "Deposit paid" chip at LIST level, deliberately. The deposit lives on
+    // invoice_sends, which has RLS with zero policies and is not browser-readable — the
+    // same reason designs.ss_invoice_sent_at had to exist. Deriving it here would need
+    // either a mirrored column or a per-row edge call on every list load. The deposit IS
+    // shown on the order itself, where pay_options already carries it.
     if (r.paid > 0) return { key: "partial", label: "Partially paid", bg: "#DBEAFE", fg: "#1E40AF" };
     // Nothing collected yet — and these are now THREE different jobs, each waiting on a
     // different person. A quote the customer accepted but nobody has billed is the OWNER's
@@ -1280,6 +1714,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
   // Summary tiles — only orders with a known total can contribute to money figures.
   const withTotal = all.filter((r) => r.o.total_cents != null);
   const openBalance = withTotal.reduce((s, r) => s + Math.max(0, balOf(r)), 0);
+  // ⚠️ `openBalance` CLAMPS AT ZERO — deliberately, since a credit on one order does not pay
+  // for another. But that clamp also means money owed BACK to customers appears in no figure
+  // on this page at all, and an amendment can now create it on purpose. Counted separately,
+  // and shown only when there is some: a permanent "$0.00 refunds owed" tile is noise.
+  const refundsOwed = withTotal.reduce((s, r) => s + Math.max(0, -(balOf(r) || 0)), 0);
+  const refundCount = withTotal.filter((r) => (balOf(r) || 0) < 0).length;
   const collected = all.reduce((s, r) => s + r.paid, 0);
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
@@ -1317,7 +1757,12 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
     );
   }
 
-  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} />;
+  // moneyReady travels WITH the row: `row.paid` is 0 and `balOf(row)` is the full total until
+  // the payments read lands, and the detail screen states both as fact — "$0.00 of $84,000
+  // collected", "Nothing recorded yet", and a Record-a-payment button prefilled with a
+  // balance that is about to change. The list has always known better (its chip reads "…");
+  // this is the same honesty one component further in.
+  if (openRow) return <OrderDetail row={openRow} clientId={clientId} onBack={() => setOpenId(null)} onChanged={load} stateOf={stateOf} nameOf={nameOf} bldgOf={bldgOf} balOf={balOf} onOpenDesign={onOpenDesign} coOn={coOn} coApproveOn={coApproveOn} ordersOn={ordersOn} moneyReady={moneyReady} />;
 
   const tile = (label, value, note, accent) => (
     <div style={{ ...S.card, marginBottom: 0, padding: "13px 15px", borderLeft: accent ? `3px solid ${accent}` : S.card.border }}>
@@ -1343,6 +1788,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         {moneyReady ? (
           <>
             {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
+            {refundsOwed > 0 && tile("Refunds owed", money(refundsOwed), `${refundCount} order${refundCount === 1 ? "" : "s"} paid above the total`, "#9A3412")}
             {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
             {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
             {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
@@ -1372,7 +1818,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
             {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
             {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
             {needsTotal > 0 && chip("nototal", "Needs total")}
-            {all.some((r) => stateOf(r).key === "over") && chip("over", "Overpaid")}
+            {all.some((r) => stateOf(r).key === "over") && chip("over", "Refund owed")}
           </>)}
           <div style={{ marginLeft: "auto", minWidth: 240, flex: "0 1 300px" }}>
             <SearchInput value={query} onChange={setQuery} placeholder="Search orders — name, building, order #…" />
@@ -1382,7 +1828,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
         {all.length > 0 && (
           <FilterBar hasFilters={hasFacets} onClear={clearFacets} shown={shown.length} total={all.length} noun="order">
             <DateRange label="Ordered" from={fFrom} to={fTo} onFrom={setFFrom} onTo={setFTo} />
-            <div style={FCTRL}><span style={S.lbl}>Amount ($)</span>
+            <div style={FCTRL}><span style={FLBL}>Amount ($)</span>
               <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
                 <input type="number" min="0" step="any" value={fMin} onChange={(e) => setFMin(e.target.value)} placeholder="Min" style={{ ...S.input, padding: "6px 8px", width: 90 }} />
                 <span style={{ color: "#94A3B8", fontSize: 12 }}>–</span>
@@ -1431,13 +1877,32 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, onScheduleDe
                           bars — the one cell shape that says "not yet" rather than "zero". */}
                       <td style={numCell}>{!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : r.paid ? money(r.paid) : <span style={{ color: "#94A3B8" }}>—</span>}</td>
                       <td style={{ ...numCell, fontWeight: bal ? 800 : 600, color: bal === 0 ? "#94A3B8" : bal < 0 ? "#9A3412" : "#1E293B" }}>
-                        {!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+                        {!moneyReady ? <SkelBar w={54} style={{ display: "inline-block" }} /> : bal == null ? "—" : bal < 0 ? `${money(-bal)} back` : money(bal)}
                       </td>
                       <td style={S.td}>
                         <span style={{ background: st.bg, color: st.fg, borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{st.label}</span>
                         {r.coPending && (
                           <span title="A change order is awaiting the customer's acknowledgment — invoicing is blocked until they sign or a verbal confirmation is recorded"
                             style={{ background: "#FEF3C7", color: "#B45309", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>CO pending</span>
+                        )}
+                        {/* A change somebody OPENED and has not finished. Nobody has been
+                            asked for anything, so it does not block invoicing — but it is
+                            holding the order open and it is invisible everywhere else. */}
+                        {r.coDraft && (
+                          <span title="A change was opened on this order and hasn't been finished — open the order to pick it up or discard it"
+                            style={{ background: "#FFEDD5", color: "#9A3412", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>
+                            Change open{r.coNo ? ` · CO-${r.coNo}` : ""}
+                          </span>
+                        )}
+                        {/* Waiting on a PERSON. The "asked" half is the only place an
+                            approver can see there is a decision sitting on their desk. */}
+                        {r.unlockState === "asked" && (
+                          <span title="Someone has asked for this signed order to be unlocked so it can be changed"
+                            style={{ background: "#FEE2E2", color: "#991B1B", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>Unlock asked</span>
+                        )}
+                        {r.unlockState === "granted" && (
+                          <span title="This order has been unlocked and the change hasn't been started yet — the unlock expires on its own"
+                            style={{ background: "#DCFCE7", color: "#166534", borderRadius: 20, padding: "4px 11px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", marginLeft: 6 }}>Unlocked</span>
                         )}
                       </td>
                       {(schedOn || deliverOn) && (
@@ -1596,14 +2061,36 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       : { err: `Email not sent${data && data.reason ? ` (${data.reason})` : ""} — the customer can still sign from their quote page.` });
   };
 
+  // ⚠️ THROUGH void_change_order, NOT a direct update. Voiding is not one column: when the CO
+  // carries `snapshot_before` — every CO staged from the order document, and every one the
+  // document adopted — the server RESTORES the design the customer signed, writes the
+  // reverting design_version and regenerates the quote PDF (portal-settings). A direct
+  // `status = 'void'` writes the change order's own row and nothing else, so the design keeps
+  // the revision nobody ever signed while the record says the change was discarded, and the
+  // next quote or invoice PDF prints from it. The Discard button on the document above has
+  // always called this action; the card's Void is the same act and had to be the same call.
+  //
+  // Pending-only is the server's rule (it 400s an acknowledged or already-void CO) and the
+  // card only offers Void on pending_ack, so behaviour is unchanged — but the body is
+  // surfaced rather than swallowed, because that 400 is also what a second tab racing this
+  // one produces. The area gate is the same one that renders the card (change_orders/edit).
   const voidCo = async (co) => {
     const reason = window.prompt(`Void CO-${co.co_no}? Give a reason (kept in the record):`);
     if (reason == null) return;
     if (!reason.trim()) { setMsg({ err: "Voiding needs a reason." }); return; }
-    const { error } = await sb.from("change_orders")
-      .update({ status: "void", void_reason: reason.trim() })
-      .eq("id", co.id);
-    if (error) { setMsg({ err: error.message }); return; }
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "void_change_order", changeOrderId: co.id, reason: reason.trim() },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) {
+      setMsg({ err: (data && data.error) || await fnError(error) });
+      // Reload either way: a refusal usually means this card is holding a stale copy of the
+      // change order (signed or voided in another tab), and the list should say so.
+      load();
+      return;
+    }
+    setMsg({ ok: `CO-${co.co_no} voided${data && data.reverted ? " — the design is back to what the customer signed" : ""}.` });
     load(); onChanged();
   };
 
@@ -1668,7 +2155,7 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
       {cos === null && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Loading…</p>}
       {cos && cos.length === 0 && !formOpen && (
         <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>
-          None. If this order changes after the customer signed, record it here — they
+          None. If this order changes after the customer accepted, record it here — they
           acknowledge it with a signature, or you record their verbal OK.
         </p>
       )}
@@ -1705,8 +2192,8 @@ function ChangeOrdersCard({ clientId, shortCode, orderId, currentTotalCents, rel
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Email to customer</button>
                 <button type="button" onClick={() => { setVerbalFor(verbalFor === co.id ? null : co.id); setVConfirm(false); }}
                   style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: ACCENT, fontWeight: 700, fontSize: 12.5 }}>Record verbal confirmation</button>
-                <button type="button" onClick={() => voidCo(co)}
-                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12.5 }}>Void</button>
+                <button type="button" onClick={() => voidCo(co)} disabled={busy}
+                  style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: "#94A3B8", fontWeight: 700, fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>Void</button>
               </div>
               {verbalFor === co.id && (
                 <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 10, padding: 12, marginTop: 8 }}>
@@ -1754,15 +2241,88 @@ const ssDeHtml = (s) => String(s || "")
   .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
   .trim();
 const ssRound2 = (n) => Math.round(n * 100) / 100;
+// One pool of the line items — MUST match _shared/estimateLines.ts `poolOf`.
+const ssPoolOf = (lines, wantTaxable) => {
+  let sum = 0;
+  for (const li of lines) {
+    if (!!(li && li.nonTaxable) === wantTaxable) continue; // nonTaxable true => not the taxable pool
+    sum += ssRound2((Number(li && li.qty) || 0) * (Number(li && li.amount) || 0));
+  }
+  return ssRound2(sum);
+};
 // Totals over the snapshot — MUST match _shared/estimateLines.ts `totalFromSnapshot`.
+//
+// TAX IS PART OF THE TOTAL, and this used to implement the pre-tax branch ONLY. Since 158b
+// put `tax_cents` inside orders.total_cents, that omission made every figure here short by
+// exactly the tax on a taxed order, with two consequences that both read as something else:
+// `designPricedCents` came out below a tax-inclusive `o.total_cents`, so baselineDriftCents
+// was non-zero on EVERY taxed accepted order and the drift banner blamed a discarded
+// revision for arithmetic; and the totals block printed a pre-tax total beside a PDF the
+// customer had signed at the taxed one. Only bit tenants with invoice_in_ghl = false and a
+// non-zero ss_tax_rate, which is why it survived — that was one tenant on 2026-09-02.
+//
+// The two shapes match _shared/estimatePdf.ts, so screen and paper cannot disagree:
+//   untaxed -> `subtotal` is GROSS and the caller renders Subtotal / Discount / Total.
+//   taxed   -> `subtotal` is NET of discounts (the PDF's own "Subtotal" row on a taxed
+//              document) and the caller renders Subtotal / <tax label> / Total. `discount`
+//              is still reported for reference but MUST NOT be subtracted again — it is
+//              already inside `subtotal`, exactly as the paper has it.
 const ssSnapTotals = (snap) => {
   const lines = (snap && Array.isArray(snap.lines)) ? snap.lines : [];
-  let subtotal = 0;
-  for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
-  subtotal = ssRound2(subtotal);
-  const discount = Number(snap && snap.discount) || 0;
-  const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
-  return { subtotal, discount, total };
+  const rawTax = (snap && snap.tax && snap.tax.amount != null) ? Number(snap.tax.amount) : null;
+  const tax = (rawTax != null && isFinite(rawTax)) ? Math.max(0, ssRound2(rawTax)) : null;
+
+  if (tax == null) {
+    let subtotal = 0;
+    for (const li of lines) subtotal += ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
+    subtotal = ssRound2(subtotal);
+    const discount = Number(snap && snap.discount) || 0;
+    // Clamped at >= 0 like estimatePdf.ts' Total row (audit 2026-08-20).
+    const total = Math.max(0, discount > 0 ? ssRound2(subtotal - discount) : subtotal);
+    return { subtotal, discount, tax: null, taxLabel: null, total };
+  }
+
+  // Discounts split by pool, as subtotalsFromSnapshot does: a non-taxable discount row must
+  // not shrink the base the tax was charged on, or the customer cannot check the tax against
+  // the figure printed above it.
+  const taxable = ssPoolOf(lines, true);
+  const nonTaxable = ssPoolOf(lines, false);
+  let taxableDiscount, nonTaxableDiscount;
+  const rows = snap.discounts && snap.discounts.rows;
+  if (Array.isArray(rows)) {
+    let t = 0, n = 0;
+    for (const r of rows) {
+      const amt = ssRound2(Math.abs(Number(r && r.amount) || 0));
+      if (amt <= 0) continue;
+      // Absent `taxable` reads as taxable — the designer's default for a new row, and the
+      // reading that never quietly removes something from the tax base.
+      if (r && r.taxable === false) n += amt; else t += amt;
+    }
+    taxableDiscount = ssRound2(t); nonTaxableDiscount = ssRound2(n);
+  } else {
+    taxableDiscount = ssRound2(Math.max(0, Number(snap.discount) || 0));
+    nonTaxableDiscount = 0;
+  }
+  const taxableBase = Math.max(0, ssRound2(taxable - taxableDiscount));
+  const nonTaxableNet = Math.max(0, ssRound2(nonTaxable - nonTaxableDiscount));
+  const subtotal = ssRound2(taxableBase + nonTaxableNet);
+
+  // "Sales tax (7.25% · Bibb County, GA)" — the rate and jurisdiction are a LABEL. The
+  // amount beside them is the stored figure the customer signed for, never rate x base
+  // recomputed here. Same construction as estimatePdf.ts.
+  const rate = Number(snap.tax.rate);
+  const pct = (isFinite(rate) && rate > 0) ? `${String(ssRound2(rate * 100)).replace(/\.0+$/, "")}%` : "";
+  const juris = String((snap.tax.jurisdiction || "")).trim();
+  const paren = [pct, juris].filter(Boolean).join(" · ");
+  const base = String(snap.tax.label || "").trim() || "Sales tax";
+
+  return {
+    subtotal,
+    discount: ssRound2(taxableDiscount + nonTaxableDiscount),
+    tax,
+    taxLabel: paren ? `${base} (${paren})` : base,
+    total: Math.max(0, ssRound2(subtotal + tax)),
+  };
 };
 const ssUsd = (n) => {
   if (n == null || !isFinite(Number(n))) return "—";
@@ -1770,16 +2330,314 @@ const ssUsd = (n) => {
   const [int, frac] = Math.abs(v).toFixed(2).split(".");
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
-// The offered cladding set — mirrors the designer's D3_CLADDING_CHOICES (batten is a
-// legacy render-only value; it shows as its label if a row carries it, but isn't offered).
-const SS_CLADDING = [["", "Builder's standard"], ["lap", "Lap Siding"], ["panel", "Panel Siding"], ["agpanel", "Metal"]];
-const ssCladdingLabel = (id) => (SS_CLADDING.find((c) => c[0] === String(id || "")) || [["", ""], `${id}`])[1] || String(id);
+// The built-in cladding names — the FALLBACK, not the authority. Since 207 the offered set and
+// the customer-facing name are per tenant, per style (style_cladding), and order_paperwork
+// carries this design's own list; this is what an account with no rows yet falls back to.
+//
+// ⚠️ `batten` was MISSING from this list, and it was not cosmetic. stage_order_attribute_change
+// validated against the matching server list and `next.cladding` defaults to the design's
+// CURRENT value — so a design saved as Board & Batten made every attribute change on its order
+// fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
+const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "Metal" };
+const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
+// `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
+// null. An empty/absent list means "this tenant has not configured cladding", which reads as
+// all four under our own names — the behaviour before 207.
+const ssCladdingOpts = (offered, current) => {
+  const rows = (Array.isArray(offered) && offered.length)
+    ? offered.map((o) => [String(o.id), (o.label && String(o.label).trim()) || SS_CLADDING_NAMES[String(o.id)] || String(o.id)])
+    : SS_CLADDING_ORDER.map((id) => [id, SS_CLADDING_NAMES[id]]);
+  const out = [["", "Builder's standard"], ...rows];
+  // A design carrying a cladding this style no longer offers keeps it listed, so opening the
+  // document does not silently restage it as something else — the same reason colorOpts
+  // unshifts the current value.
+  const cur = String(current || "");
+  if (cur && !out.some((c) => c[0] === cur)) out.push([cur, SS_CLADDING_NAMES[cur] || cur]);
+  return out;
+};
+const ssCladdingLabel = (id, offered) => {
+  const cur = String(id || "");
+  const hit = (Array.isArray(offered) ? offered : []).find((o) => String(o.id) === cur);
+  if (hit && hit.label && String(hit.label).trim()) return String(hit.label).trim();
+  if (!cur) return "Builder's standard";
+  return SS_CLADDING_NAMES[cur] || cur;
+};
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null }) {
+
+/* ─── Changing a signed order (migrations 209-216) ──────────────────────────────────────
+   Carolyn 2026-09-06: "When we click the change order button, that should open the
+   invoice/design/entire order and allow the sales rep to edit/add/remove/change anything in
+   the order, without losing the payment that has already been applied."
+
+   So this is not a form. It is the ONE control that decides what a rep can do to a signed
+   order right now, and every branch of it is answered by the server: `amendment_status`
+   returns the gate (is it open, under what authority, what does it cost), the live change if
+   there is one, the outstanding unlock if there is one, and the tenant's policy. Nothing here
+   decides eligibility on its own — the same gate function refuses at the database, so what
+   this panel offers and what the server allows can never disagree.
+
+   ⚠️ THE FEE IS DISCLOSED BEFORE THE REP STARTS, never afterwards on the invoice. That is
+   what `preflight` is: a sheet they must dismiss, rendered from the server's own numbers. */
+function AmendmentPanel({ clientId, shortCode, orderId, amend, coOn, coApproveOn, onOpenDesign, onMsg, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [preflight, setPreflight] = useState(false);   // the fee sheet
+  const [askOpen, setAskOpen] = useState(false);       // the "why does this need changing?" box
+  const [reason, setReason] = useState("");
+
+  // A failed read leaves `amend` null. Offer nothing rather than guessing — the design's
+  // own "Open design" button below is unaffected, so nobody is stranded.
+  if (!amend || !amend.gate) return null;
+  const gate = amend.gate;
+  const live = amend.amendment || null;          // a draft or pending_ack change, if any
+  const unlock = amend.unlock || null;           // an outstanding request or grant, if any
+  const policy = amend.policy || null;
+
+  // Nothing to re-open: the customer has not committed to anything yet, so editing the
+  // design is just editing the design.
+  if (gate.signed !== true) return null;
+
+  const feeCents = Number(gate.fee_cents) || 0;
+  const feeLabel = (policy && policy.feeLabel) || "Change order fee";
+  const usd = (c) => ssUsd(c / 100);
+
+  const call = async (action, body) => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action, shortCode, ...(body || {}) } });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return null; }
+    return data;
+  };
+
+  // Open (or re-open) the change and hand the rep the designer. open_amendment is
+  // idempotent — a second call returns the row that already exists — so "Continue the
+  // change" and "Change this order" are the same call and a double click is harmless.
+  const startChange = async () => {
+    setPreflight(false);
+    const data = await call("open_amendment");
+    if (!data) return;
+    const co = data.changeOrder || {};
+    onChanged();
+    onOpenDesign(shortCode, null, {
+      amendment: {
+        changeOrderId: co.id, coNo: co.co_no, orderId,
+        feeCents: Number(co.fee_cents) || 0,
+        feeTaxCents: Number(co.fee_tax_cents) || 0,
+        feeLabel,
+        raisedUnder: co.raised_under || null,
+      },
+    });
+  };
+
+  const bar = (bg, border, fg, children) => (
+    <div style={{ background: bg, border: `1px solid ${border}`, color: fg, borderRadius: 9, padding: "10px 13px", marginTop: 12, fontSize: 12.5, lineHeight: 1.55 }}>
+      {children}
+    </div>
+  );
+  const btn = (label, onClick, primary) => (
+    <button type="button" onClick={onClick} disabled={busy}
+      style={{ ...S.btn(primary ? "#B45309" : "#FFF", primary ? "#FFF" : "#92400E"), border: `1px solid ${primary ? "#B45309" : "#FCD34D"}`, padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+      {label}
+    </button>
+  );
+
+  // ── A CHANGE IS ALREADY UNDERWAY ────────────────────────────────────────────────────
+  // Ahead of every other branch, because it is what the gate itself now answers first
+  // (migration 215): whatever authorised this change has already been checked and spent.
+  if (live) {
+    const isDraft = String(live.status) === "draft";
+    return bar("#FFFBEB", "#FDE68A", "#92400E", (
+      <>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>
+          {isDraft ? `Change CO-${live.co_no} is open and not finished` : `Change CO-${live.co_no} is with the customer`}
+        </div>
+        <div>
+          {isDraft
+            ? <>Nobody has been asked to approve anything yet. Pick it back up in the designer, or discard it and the order goes back exactly as it was signed.</>
+            : <>The customer has been sent this change to sign. Their answer decides it — you can still discard it if it was raised by mistake.</>}
+          {Number(live.fee_cents) > 0 && <> A {feeLabel.toLowerCase()} of {usd(Number(live.fee_cents) + (Number(live.fee_tax_cents) || 0))} goes on this change.</>}
+        </div>
+        {coOn && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 9 }}>
+            {isDraft && btn(`Continue the change (CO-${live.co_no})`, startChange, true)}
+            {btn("Discard this change", async () => {
+              if (!window.confirm(`Discard CO-${live.co_no}? The order goes back to exactly what the customer signed.`)) return;
+              const d = await call("void_change_order", { changeOrderId: live.id, reason: "Discarded from the order screen" });
+              if (d) { onMsg({ ok: `CO-${live.co_no} discarded — the order is back to what the customer signed.` }); onChanged(); }
+            })}
+          </div>
+        )}
+      </>
+    ));
+  }
+
+  // ── THE ORDER IS OPEN FOR CHANGE ────────────────────────────────────────────────────
+  if (gate.open === true) {
+    if (!coOn) {
+      return bar("#F8FAFC", "#E2E8F0", "#64748B", (
+        <>This order can be changed, but changing it raises a change order — and that is not part of your access. Ask an owner or admin to turn on <b>Change Orders</b> for you in Settings → Team.</>
+      ));
+    }
+    const authority = String(gate.authority || "");
+    return (
+      <>
+        {bar("#F0FDF4", "#BBF7D0", "#166534", (
+          <>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>This order can be changed</div>
+            <div>
+              {authority === "unlock"
+                ? <>Unlocked by {(unlock && unlock.decided_by_name) || "an approver"}{unlock && unlock.expires_at ? ` until ${fmtDate(unlock.expires_at)}` : ""}. Everything is editable — the drawing included — and the customer signs the revised order when you are done.</>
+                : authority === "free_window"
+                  ? <>Everything is editable — the drawing, the options, the price. The customer signs the revised order when you are done, and any payment already taken stays exactly where it is.</>
+                  : <>Everything is editable, and the customer signs the revised order when you are done.</>}
+              {feeCents > 0 && <> <b>A {feeLabel.toLowerCase()} of {usd(feeCents)} applies.</b></>}
+            </div>
+            <div style={{ marginTop: 9 }}>
+              {btn("Change this order", () => (feeCents > 0 ? setPreflight(true) : startChange()), true)}
+            </div>
+          </>
+        ))}
+        {preflight && (
+          <PreflightSheet feeCents={feeCents} feeTaxCents={0} feeLabel={feeLabel}
+            taxable={!!(policy && policy.feeTaxable)}
+            onCancel={() => setPreflight(false)} onGo={startChange} busy={busy} />
+        )}
+      </>
+    );
+  }
+
+  // ── LOCKED ───────────────────────────────────────────────────────────────────────────
+  // Someone has to unlock it. Two different people see two different things here, and the
+  // split is the whole point of the two permission switches: holding Approve does not
+  // imply holding Change Orders, and vice versa.
+  const waiting = unlock && !unlock.decision;
+  const declined = unlock && unlock.decision === "declined";
+  return bar("#FEF2F2", "#FECACA", "#991B1B", (
+    <>
+      <div style={{ fontWeight: 700, marginBottom: 4 }}>This order is signed and locked</div>
+      <div>{String(gate.reason || "An admin or crew leader has to unlock it before it can be changed.")}
+        {feeCents > 0 && <> Once unlocked, a {feeLabel.toLowerCase()} of {usd(feeCents)} goes on the change.</>}
+      </div>
+
+      {waiting && (
+        <div style={{ marginTop: 8, fontWeight: 600 }}>
+          {(unlock.requested_by_name || "Someone")} asked for this on {fmtDate(unlock.requested_at)} — “{unlock.reason}”
+        </div>
+      )}
+      {declined && (
+        <div style={{ marginTop: 8, fontWeight: 600 }}>
+          {/* The period lives BEFORE the quoted note, not after it — an approver's note
+              almost always ends with one of its own, and “…build on this one.”. is the
+              tell of a sentence assembled without reading it. */}
+          Declined by {unlock.decided_by_name || "an approver"}{unlock.decision_note ? <> — “{unlock.decision_note}”</> : "."}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 9 }}>
+        {/* THE APPROVER'S HALF. `decide_order_unlock` is the only action on the
+            change_order_approve area — this button IS that switch. An approver may unlock an
+            order nobody has asked about: the builder often decides the change is happening
+            before the rep has typed anything. */}
+        {coApproveOn && (
+          <button type="button" disabled={busy}
+            onClick={async () => {
+              const note = window.prompt(waiting ? "Anything to tell them? (optional)" : "Why are you unlocking this order?", waiting ? "" : "");
+              if (note === null) return;
+              const d = await call("decide_order_unlock", { decision: "granted", note });
+              if (d) { onMsg({ ok: "Unlocked — this order can be changed now." }); onChanged(); }
+            }}
+            style={{ ...S.btn("#B45309", "#FFF"), padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {waiting ? "Unlock it" : "Unlock this order"}
+          </button>
+        )}
+        {coApproveOn && waiting && (
+          <button type="button" disabled={busy}
+            onClick={async () => {
+              const note = window.prompt("Why not? They will see this.");
+              if (note === null) return;
+              const d = await call("decide_order_unlock", { decision: "declined", note });
+              if (d) { onMsg({ ok: "Declined — they have been told." }); onChanged(); }
+            }}
+            style={{ ...S.btn("#FFF", "#991B1B"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            Decline
+          </button>
+        )}
+
+        {/* THE REP'S HALF. The reason is not paperwork — it is what the approver reads
+            before deciding, and it lands permanently on the order's amendment trail. */}
+        {coOn && !waiting && !askOpen && (
+          <button type="button" disabled={busy} onClick={() => setAskOpen(true)}
+            style={{ ...S.btn("#FFF", "#991B1B"), border: "1px solid #FECACA", padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            Ask for it to be unlocked
+          </button>
+        )}
+      </div>
+
+      {coOn && askOpen && !waiting && (
+        <div style={{ marginTop: 10 }}>
+          <span style={S.lbl}>What needs changing?</span>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={500}
+            placeholder="Whoever unlocks it reads this — e.g. “Customer wants the door moved to the gable end.”"
+            style={{ ...S.input, resize: "vertical", fontFamily: "inherit" }} />
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <button type="button" disabled={busy || !reason.trim()}
+              onClick={async () => {
+                const d = await call("request_order_unlock", { reason });
+                if (!d) return;
+                setAskOpen(false); setReason("");
+                onMsg({ ok: d.already ? (d.message || "Someone has already asked.") : "Asked — whoever approves changes will see it." });
+                onChanged();
+              }}
+              style={{ ...S.btn("#B45309", "#FFF"), padding: "6px 12px", fontSize: 12.5, cursor: "pointer", opacity: busy || !reason.trim() ? 0.6 : 1 }}>
+              Send the request
+            </button>
+            <button type="button" onClick={() => { setAskOpen(false); setReason(""); }}
+              style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", padding: "6px 12px", fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </>
+  ));
+}
+
+/* The pre-flight sheet. It exists for ONE reason: a rep must never meet the fee for the
+   first time on the customer's invoice, and neither must the customer. Rendered from the
+   server's own numbers (order_amendment_gate stamped them; the trigger will stamp the same
+   ones onto the row), so what this sheet promises is what gets charged. */
+function PreflightSheet({ feeCents, feeLabel, taxable, onCancel, onGo, busy }) {
+  return (
+    <div onClick={onCancel}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ background: "#FFF", borderRadius: 12, maxWidth: 460, width: "100%", padding: 20, boxShadow: "0 18px 50px rgba(15,23,42,0.28)" }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>This change carries a fee</div>
+        <p style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, marginTop: 10 }}>
+          Changing this order after it was signed adds <b>{ssUsd(feeCents / 100)}</b> to it, as its
+          own line reading “{feeLabel}” on the customer's invoice{taxable ? ", plus sales tax at the rate on their agreement" : ""}.
+        </p>
+        <p style={{ fontSize: 13, color: "#334155", lineHeight: 1.6 }}>
+          The customer signs the revised order before any of it counts, and <b>every payment they have
+          already made stays exactly where it is</b>. If you discard the change, the fee goes with it.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
+          <button type="button" onClick={onCancel}
+            style={{ ...S.btn("#FFF", "#334155"), border: "1px solid #E2E8F0", padding: "8px 14px", fontSize: 13, cursor: "pointer" }}>Not now</button>
+          <button type="button" onClick={onGo} disabled={busy}
+            style={{ ...S.btn("#B45309", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+            {busy ? "Opening…" : "Start the change"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [phoneOpen, setPhoneOpen] = useState(false);   // the "sign on their phone" sheet
+  const [smsMsg, setSmsMsg] = useState(null);
   const debounceRef = useRef(null);
 
   // A sub-read failed: say so, in place of the WHOLE body. Rendering off partial data
@@ -1804,21 +2662,68 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const { design, acceptances, cos, paperwork } = doc;
   const biz = (paperwork && paperwork.business) || {};
   const colors = (paperwork && paperwork.colors) || [];
+  // What this design's STYLE offers, from order_paperwork (207). Empty means the tenant has
+  // configured none, which reads as all four under our built-in names — the behaviour this
+  // screen had before cladding was configurable.
+  const cladOffered = (paperwork && paperwork.cladding) || [];
   const invoice = (paperwork && paperwork.invoice) || null;
   const snap = design.estimate_lines || { lines: [], discount: 0 };
   const lines = Array.isArray(snap.lines) ? snap.lines : [];
   const sel = design.selections || {};
   const pc = design.paint_colors || {};
   const locked = ["invoiced", "delivered"].includes(String(design.status || ""));
+  const amend = (doc && doc.amend) || null;
+  const amendGate = amend && amend.gate ? amend.gate : null;
+  // The roof/cladding/paint dropdowns specifically. Editing one on a signed order RAISES a
+  // change order (stage_order_attribute_change), which moved onto its own permission area
+  // on 2026-09-01 — so they freeze to text without the grant. Deliberately NOT folded into
+  // `locked`: that flag also gates the invoicing panel below, and a rep holds orders:edit
+  // precisely so they CAN invoice, take payment and collect the signature. Two flags,
+  // because there are genuinely two questions.
+  //
+  // ⚠️ `locked` NO LONGER FREEZES THESE (2026-09-07). It used to, and that single term is
+  // what made Carolyn's requirement false: "a change order can happen anytime throughout the
+  // process up until after delivery and final payment." An invoiced order is exactly when a
+  // change is most likely and most consequential. The question is no longer WHICH STATUS the
+  // order is in but whether the builder's own rules leave it open — the free window, or an
+  // unlock somebody granted — and that is `order_amendment_gate`, the same function the
+  // server asks before it writes, so the dropdowns and the database always agree.
+  //
+  // The fallback keeps the OLD behaviour when the gate read failed: a missing answer must
+  // not read as permission. `amendment_status` is soft on purpose (see its loader), so this
+  // is a real state, not a theoretical one.
+  const attrsLocked = !coOn || (amendGate ? amendGate.open !== true : locked);
   const acceptance = (acceptances || []).find((a) => a.subject === "quote") || null;
   const ackedCos = (cos || []).filter((c) => c.status === "acknowledged")
     .sort((a, b) => String(a.acknowledged_at || "").localeCompare(String(b.acknowledged_at || "")));
-  const pendingCo = (cos || []).find((c) => c.status === "pending_ack" && c.source === "design_edit") || null;
+  // 'draft' JOINS 'pending_ack' HERE (2026-09-07). open_amendment creates a DRAFT and that
+  // is now the ordinary way a change on a signed order begins, so a draft is every bit as
+  // "live" as a sent one for the three jobs this variable does: it feeds discardStaged, the
+  // amendment trail, and the `!pendingCo` drift exception below — and a draft has already
+  // revised the design, which is precisely what that exception is about.
+  const pendingCo = (cos || []).find((c) => (c.status === "pending_ack" || c.status === "draft") && c.source === "design_edit") || null;
+  // Two questions, deliberately not one. The DOCUMENT's staging logic means the design_edit
+  // CO specifically - it feeds discardStaged, the amendment trail and the `!pendingCo` drift
+  // exception, and void_change_order restores from snapshot_before, which a manual CO never
+  // writes. The INVOICE gate does not: send_invoice refuses on ANY pending_ack CO
+  // (portal-settings :7068, source-blind), as does the list-level 'CO pending' chip. So a
+  // manual CO raised from Change orders used to leave a live green 'Create & send invoice'
+  // that only ever bought a 409 after the confirm dialog - and an info row in app_errors
+  // every time. Source-blind HERE and nowhere else.
+  //
+  // ⚠️ AND THIS ONE STAYS 'pending_ack'-ONLY — the opposite decision to `pendingCo` above,
+  // deliberately. This flag gates INVOICING, and send_invoice's own 409 is pending_ack-only.
+  // Widening it to drafts would let a rep who opened a change and wandered off brick
+  // invoicing on that order forever, with nothing on screen explaining why.
+  const anyPendingCo = (cos || []).find((c) => c.status === "pending_ack") || null;
   // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
   // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
   // the operator has to be told the remedy is "regenerate", not "wait" (migration 136).
+  // `document_at` since migration 221 — the DOCUMENT's freshness, not when an email last
+  // succeeded. Reading `updated_at` here meant a builder whose customer email bounces saw
+  // this banner forever, because the only thing that moved that column was a successful send.
   const ackedAfterInvoice = !!invoice && !invoice.signed_at && ackedCos.some((c) =>
-    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.updated_at || "")));
+    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.document_at || invoice.updated_at || "")));
 
   const cur = {
     roofType: String(sel.roofType || "").trim(),
@@ -1966,21 +2871,50 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
   const anyBusy = busy || busyExt;
 
-  // The amendment trail: signed total + acknowledged CO snapshots — never re-summed line
+  // The amendment trail: accepted total + acknowledged CO snapshots — never re-summed line
   // items, so double-counting is structurally impossible.
+  //
+  // The base row says ACCEPTED, not "Signed". `acceptance` is the row with subject 'quote',
+  // and since migration 136 a quote is accepted with a CLICK — the binding signature is on
+  // the INVOICE and lives in a different row entirely. "Signed" here asserted a signature
+  // that does not exist for every quote accepted under the current ladder. "Accepted" is
+  // true of both shapes: a legacy drawn/typed quote row was also, necessarily, accepted.
   const trail = [];
   if (acceptance && acceptance.total != null) {
     let running = Number(acceptance.total);
-    trail.push({ label: `Signed ${fmtDate(acceptance.accepted_at)}`, amountText: ssUsd(running), tone: "base" });
+    trail.push({
+      label: acceptance.method === "rep"
+        ? `Authorised by ${acceptance.recorded_by_name || "your team"} · ${fmtDate(acceptance.accepted_at)}`
+        : `Accepted ${fmtDate(acceptance.accepted_at)}`,
+      amountText: ssUsd(running), tone: "base",
+    });
+    // ⚠️ EACH CHANGE'S OWN DELTA, NOT A CHAIN THROUGH `total_after_cents` (2026-09-07).
+    // That column is "the whole order after this change" as computed FROM THE DESIGN'S LINES
+    // — and a manual change order never touches those lines, nor does a fee. So chaining
+    // through it made a design edit look like it reversed every manual change above it: on
+    // the beta order this was found on, a no-cost roof change read "CO-5 · −$650.00 →
+    // $3,400.00" immediately above "Current total $4,200.00". Nothing was wrong with the
+    // money; the trail was describing it with the wrong arithmetic, and saying so directly
+    // above the right answer.
+    //
+    // The same reasoning the server settled on in orderCentsAfterAck: take what each change
+    // itself moved (its own before → after) plus the fee it carried, and accumulate that.
+    // The running total then lands on orders.total_cents by construction rather than by
+    // coincidence, which is the property that makes the last two rows agree.
     for (const c of ackedCos) {
-      if (c.total_after_cents == null) {
-        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: "no price change", tone: "base" });
-      } else {
-        const after = c.total_after_cents / 100;
-        const delta = ssRound2(after - running);
-        running = after;
-        trail.push({ label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`, amountText: `${delta >= 0 ? "+" : "-"}${ssUsd(Math.abs(delta))} → ${ssUsd(after)}`, tone: "base" });
-      }
+      const delta = (c.total_after_cents == null || c.total_before_cents == null)
+        ? 0 : ssRound2((c.total_after_cents - c.total_before_cents) / 100);
+      const feeAll = ssRound2(((Number(c.fee_cents) || 0) + (Number(c.fee_tax_cents) || 0)) / 100);
+      const moved = ssRound2(delta + feeAll);
+      running = ssRound2(running + moved);
+      const feeNote = feeAll > 0 ? ` (incl. ${ssUsd(feeAll)} fee)` : "";
+      trail.push({
+        label: `CO-${c.co_no} · ${fmtDate(c.acknowledged_at)}`,
+        amountText: moved === 0
+          ? "no price change"
+          : `${moved >= 0 ? "+" : "-"}${ssUsd(Math.abs(moved))}${feeNote} → ${ssUsd(running)}`,
+        tone: "base",
+      });
     }
     trail.push({ label: "Current total", amountText: o.total_cents == null ? "—" : money(o.total_cents), tone: "final" });
     if (pendingCo && pendingCo.total_after_cents != null) {
@@ -2034,10 +2968,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
       {pendingCo && (
         <div style={{ background: "#FEF3C7", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#B45309", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <b>CO-{pendingCo.co_no} is awaiting the customer's sign-off</b> — the values below include it; invoicing is blocked until they sign or you record their verbal OK.
-          <button type="button" onClick={discardStaged} disabled={anyBusy}
+          {/* The NOTICE stays for everyone: a rep whose invoicing is blocked has to be told
+              why. Discarding is the change-order power, so only the grant gets the button —
+              void_change_order refuses without it anyway, and offering a 403 is not an offer. */}
+          {coOn && <button type="button" onClick={discardStaged} disabled={anyBusy}
             style={{ marginLeft: "auto", background: "none", border: "none", padding: 0, cursor: "pointer", color: "#B45309", fontWeight: 700, fontSize: 12, textDecoration: "underline", fontFamily: "inherit" }}>
             Discard staged change
-          </button>
+          </button>}
         </div>
       )}
 
@@ -2049,7 +2986,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             const kind = String(li.kind || "");
             const lineTotal = ssRound2((Number(li.qty) || 0) * (Number(li.amount) || 0));
             let descCell = null;
-            if (!locked && kind === "paint") {
+            if (!attrsLocked && kind === "paint") {
               descCell = (
                 <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select style={selStyle} value={eff.paintStatus} onChange={(e) => change("paintStatus", e.target.value)}>
@@ -2069,7 +3006,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                   )}
                 </div>
               );
-            } else if (!locked && kind === "roof") {
+            } else if (!attrsLocked && kind === "roof") {
               descCell = (
                 <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select style={selStyle} value={eff.roofType} onChange={(e) => change("roofType", e.target.value)}>
@@ -2095,11 +3032,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                   <td style={{ ...td, textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{ssUsd(lineTotal)}</td>
                 </tr>
                 {kind === "building" && optionRows("Cladding",
-                  locked
-                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding)}</span>
+                  attrsLocked
+                    ? <span style={{ fontSize: 12, color: "#64748B" }}>{ssCladdingLabel(cur.cladding, cladOffered)}</span>
                     : (
                       <select style={selStyle} value={eff.cladding} onChange={(e) => change("cladding", e.target.value)}>
-                        {SS_CLADDING.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                        {ssCladdingOpts(cladOffered, cur.cladding).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
                       </select>
                     ))}
               </React.Fragment>
@@ -2149,9 +3086,17 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
           <span>Subtotal</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.subtotal)}</span>
         </div>
-        {totals.discount > 0 && (
+        {/* On a taxed document the discounts are already netted into Subtotal, exactly as
+            estimatePdf.ts prints it — showing a Discount row here too would read as a second
+            deduction the Total does not make. Untaxed keeps the collapsed row it always had. */}
+        {totals.tax == null && totals.discount > 0 && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
             <span>Discount</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>-{ssUsd(totals.discount)}</span>
+          </div>
+        )}
+        {totals.tax != null && (
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
+            <span>{totals.taxLabel}</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>
@@ -2188,7 +3133,7 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#FEFCE8", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#713F12" }}>
               <b>Invoice {invoice.invoice_number || ""} sent{design.ss_invoice_sent_at ? ` ${fmtDate(design.ss_invoice_sent_at)}` : ""} — awaiting the customer's signature.</b>
               <div style={{ marginTop: 4, color: "#854D0E" }}>
-                They sign it from their quote page. The build schedule unlocks once they do.
+                Send the link to their phone, or they sign it from their quote page. The build schedule unlocks once they do.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
                 {/* One offer, never both: a plain resend rebuilds nothing, but it still bumps
@@ -2196,6 +3141,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                     the acknowledged CO. That single click clears this warning, the stale badge
                     on the customer's quote page and customer-accept's refusal at once, and the
                     customer can then sign a PDF showing the old amount. */}
+                {/* Carolyn 2026-09-01: the customer is often sitting right there, and
+                    "they sign it from their quote page" is not a thing you can say out
+                    loud to someone across a desk. This puts the link on THEIR phone. */}
+                <button type="button" onClick={() => { setSmsMsg(null); setPhoneOpen(true); }}
+                  style={{ ...S.btn("#3D3672", "#FFF"), padding: "8px 14px", fontSize: 12.5 }}>
+                  Sign on their phone
+                </button>
                 {(ackedAfterInvoice ? [["Regenerate & resend", true]] : [["Resend invoice", false]]).map(([label, regen]) => (
                   <button key={label} type="button" disabled={anyBusy}
                     onClick={async () => {
@@ -2203,12 +3155,26 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                         ? `Rebuild invoice ${invoice.invoice_number || ""} from the current totals and email it again?\n\nSame invoice number — the customer can't sign the outdated one.`
                         : `Email invoice ${invoice.invoice_number || ""} to the customer again?`)) return;
                       setBusy(true); onMsg(null);
-                      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code, ...(regen ? { regenerate: true } : {}) } });
+                      // ⚠️ REGENERATE GOES TO `reissue_invoice`, NOT send_invoice (2026-09-08).
+                      // send_invoice's already-invoiced branch is an EMAIL RETRY: it re-sends
+                      // the stored PDF without rebuilding it, and moves the staleness
+                      // timestamp only if the email lands. So this button said "Regenerate"
+                      // and regenerated nothing — and on a customer whose address bounces it
+                      // could never clear the banner, leaving the order unpayable by anyone.
+                      // reissue_invoice rebuilds the document and stamps document_at whether
+                      // or not anything is delivered; the email rides along as a courtesy.
+                      const { data, error } = regen
+                        ? await sb.functions.invoke("portal-settings", { body: { action: "reissue_invoice", shortCode: o.short_code } })
+                        : await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
                       setBusy(false);
                       if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
                       onMsg(data && data.sent === false
-                        ? { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
-                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent again — still awaiting their signature.` });
+                        ? (regen
+                          // The document IS rebuilt — say so, or a builder reads a send
+                          // failure as "nothing happened" and clicks again forever.
+                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.` }
+                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.` })
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.` });
                       onChanged();
                     }}
                     style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>
@@ -2222,9 +3188,9 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 </div>
               )}
             </div>
-          : pendingCo
+          : anyPendingCo
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
-              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{pendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
+              <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
             </div>
           : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
               <button type="button" disabled={anyBusy}
@@ -2247,6 +3213,14 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
             </div>
       )}
 
+      {/* Changing a signed order — the one control that decides what can happen to this
+          order right now. Above the action row because it outranks everything in it. */}
+      {onOpenDesign && (
+        <AmendmentPanel clientId={clientId} shortCode={o.short_code} orderId={o.id} amend={amend}
+          coOn={coOn} coApproveOn={coApproveOn} onOpenDesign={onOpenDesign}
+          onMsg={onMsg} onChanged={onChanged} />
+      )}
+
       {/* Action row. The documents open IN A POPUP (Carolyn 2026-08-25), not a tab —
           the viewer's own toolbar carries print/download. */}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", borderTop: "1px solid #F1F5F9", marginTop: 12, paddingTop: 12 }}>
@@ -2267,9 +3241,14 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         })()}
         {/* IN-PORTAL designer, never the public ?id= page — staff browsing there fires
             capture-lead/draft saves and corrupts the tenant's Contacts activity. */}
+        {/* "View design" once the order is signed and this person cannot raise a change —
+            the button still opens the real designer, but calling it "Open design" beside a
+            locked order invites an edit that the save will refuse. */}
         {o.short_code && onOpenDesign && (
           <button type="button" onClick={() => onOpenDesign(o.short_code)}
-            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>Open design</button>
+            style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer" }}>
+            {amendGate && amendGate.signed === true && attrsLocked ? "View design" : "Open design"}
+          </button>
         )}
         <button type="button"
           onClick={(e) => {
@@ -2292,16 +3271,136 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           }}
           style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", cursor: "pointer", opacity: anyBusy ? 0.6 : 1 }}>Resend quote email</button>
       </div>
-      {locked && (
+      {attrsLocked && (
         <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8 }}>
-          This order is invoiced — its options are frozen. Changes go through a manual change order below.
+          {!coOn
+            ? "Changing these raises a change order, which needs the customer's sign-off. Ask an owner or admin to turn on Change Orders for you in Settings → Team."
+            : "These are frozen while the order is locked — see above."}
         </div>
+      )}
+
+      {phoneOpen && (
+        <SignOnPhoneModal
+          clientId={clientId} shortCode={o.short_code} design={design} invoice={invoice}
+          msg={smsMsg} setMsg={setSmsMsg} onClose={() => setPhoneOpen(false)} />
       )}
     </div>
   );
 }
 
-function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null }) {
+/**
+ * "Sign on their phone" — the same signing link, three ways to hand it over.
+ *
+ * The link is built HERE, in the browser, from the origin the operator is already on:
+ * a link generated on beta must stay on beta, and that is exactly what window.origin
+ * gives without a round trip. `?q=` is the deep link my-quotes.html reads — it points at
+ * one invoice, and grants nothing on its own: the customer still signs in with their
+ * texted code, and customer-quotes only ever returns designs matching that verified
+ * phone. Opening someone else's link on your own number shows you your own quotes.
+ */
+function SignOnPhoneModal({ clientId, shortCode, design, invoice, msg, setMsg, onClose }) {
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}&q=${encodeURIComponent(shortCode)}`;
+  const phone = (design && design.contact && design.contact.phone) || "";
+
+  // The matrix is derived once per link, not per render — it is ~200 lines of bit work.
+  const qr = useMemo(() => { try { return ssQrMatrix(link); } catch (e) { return null; } }, [link]);
+
+  const copy = () => {
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2000); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
+    else { window.prompt("Copy the signing link:", link); done(); }
+  };
+
+  const textIt = async () => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", {
+      body: { action: "text_sign_link", shortCode },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) { setMsg({ err: (data && data.error) || error.message }); return; }
+    setMsg(data && data.sent
+      ? { ok: `Texted to ${data.to || "the customer"} — they can sign from the link now.` }
+      : { err: `Not texted${data && data.reason ? ` — ${data.reason}` : ""}. Show them the QR code instead.` });
+  };
+
+  return (
+    <div onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, zIndex: 1200 }}>
+      <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 400, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+        <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ fontSize: 15.5, fontWeight: 800 }}>Sign on their phone</div>
+          <button type="button" onClick={onClose}
+            style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: "17px 18px" }}>
+          <div style={{ fontSize: 12.5, color: "#475569", lineHeight: 1.5 }}>
+            Have them scan this with their phone camera. It opens invoice{" "}
+            <b>{(invoice && invoice.invoice_number) || ""}</b> ready to sign — they still enter
+            the code we text them, so only they can sign it.
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", margin: "15px 0 4px" }}>
+            {qr
+              ? <QrSvg matrix={qr} size={212} />
+              : <div style={{ fontSize: 12, color: "#B45309", textAlign: "center", padding: "18px 8px" }}>
+                  This link is too long to show as a QR code — copy it instead.
+                </div>}
+          </div>
+
+          <div style={{ fontSize: 10.5, color: "#94A3B8", textAlign: "center", wordBreak: "break-all", marginBottom: 13 }}>{link}</div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={copy}
+              style={{ ...S.btn("#F1F5F9", "#334155"), flex: 1, border: "1px solid #E2E8F0" }}>
+              {copied ? "Copied ✓" : "Copy link"}
+            </button>
+            <button type="button" onClick={textIt} disabled={busy || !phone}
+              title={phone ? `Text it to ${phone}` : "This customer has no phone number on their design"}
+              style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !phone ? 0.55 : 1 }}>
+              {busy ? "Texting…" : "Text it to them"}
+            </button>
+          </div>
+
+          {msg && (
+            <div style={{ marginTop: 11, fontSize: 12, lineHeight: 1.45, color: msg.err ? "#9F1239" : "#047857" }}>
+              {msg.err || msg.ok}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The matrix as an SVG. One <rect> per dark module — a sign link is at most 53x53, so
+ *  this stays small, and an SVG prints and scales without a canvas or a data URI. */
+function QrSvg({ matrix, size = 200 }) {
+  const n = matrix.length;
+  const quiet = 4;                       // the spec's quiet zone; scanners need it
+  const span = n + quiet * 2;
+  const rects = [];
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (matrix[r][c]) rects.push(<rect key={`${r}-${c}`} x={c + quiet} y={r + quiet} width={1} height={1} fill="#0F172A" />);
+    }
+  }
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${span} ${span}`} shapeRendering="crispEdges"
+      style={{ display: "block", borderRadius: 8 }} role="img" aria-label="Signing link QR code">
+      <rect x={0} y={0} width={span} height={span} fill="#FFF" />
+      {rects}
+    </svg>
+  );
+}
+
+// `ordersOn` = may this person WRITE money on this order (orders:edit). It defaults to true
+// for the reason spelled out on OrdersView: the shell does not pass it yet, and a false
+// default would take Record-a-payment away from owners. `moneyReady` = has the payments read
+// landed; while it is false `row.paid` is 0 and `balOf(row)` is the whole total, so every
+// figure derived from them is a number this screen does not know yet.
+function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf, balOf, onOpenDesign = null, coOn = false, coApproveOn = false, ordersOn = true, moneyReady = true }) {
   const { o, d } = row;
   const [payOpen, setPayOpen] = useState(false);
   const [amount, setAmount] = useState("");
@@ -2314,6 +3413,154 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const [editTotal, setEditTotal] = useState(o.total_cents == null);
   const bal = balOf(row); const st = stateOf(row);
 
+  // ── Taking the payment, rather than recording one already taken (migration 174) ──────
+  // This lives INSIDE the Record-a-payment modal on purpose. The method chips already say
+  // cash / check / card / ach; picking a card or a bank account and then choosing "charge
+  // it now" is the same sentence a builder says out loud. What it must never do is blur
+  // the two: recording cannot fail in a way that costs money, and charging can, so the
+  // choice is explicit and the confirmation text differs.
+  const [collect, setCollect] = useState("recorded");   // "recorded" | "charge"
+  const [entry, setEntry] = useState("keyed");          // "keyed" | "swipe"
+  const [payOpts, setPayOpts] = useState(null);
+  const [payToken, setPayToken] = useState(null);
+  const [payExpiry, setPayExpiry] = useState(null);
+  const [tokenErr, setTokenErr] = useState("");
+  const [surcharge, setSurcharge] = useState(null);
+  const [armed, setArmed] = useState(false);
+  const frameRef = useRef(null);
+  const modalRef = useRef(null);
+  const chargeable = method === "card" || method === "ach";
+
+  // What CAN be charged is decided by the server, never here: the deposit-vs-balance rule,
+  // the pending-ACH block and the signature gate all live in portal-payments. The browser
+  // renders the answer and echoes the figure back.
+  useEffect(() => {
+    if (!payOpen) return;
+    let alive = true;
+    (async () => {
+      const { data } = await sb.functions.invoke("portal-payments", {
+        body: { action: "pay_options", orderId: o.id },
+      });
+      if (alive && data) setPayOpts(data);
+    })();
+    return () => { alive = false; };
+  }, [payOpen, o.id]);
+
+  // The tokenizer hands the card back through postMessage. ⚠️ The origin test is the whole
+  // security of this listener — without it any page that opens this one could post a forged
+  // token. The origin comes from the SERVER (pay_options), so it can never be
+  // attacker-chosen, and this repo is public so it could not be hardcoded anyway.
+  useEffect(() => {
+    if (!payOpen || collect !== "charge") return;
+    const origin = payOpts && payOpts.tokenizer ? payOpts.tokenizer.origin : "";
+    if (!origin) return;
+    const onMsg = (e) => {
+      if (e.origin !== origin) return;
+      if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
+      let m = null;
+      try { m = JSON.parse(e.data); } catch (_e) { return; }
+      if (m && m.validationError) { setPayToken(null); setTokenErr(m.validationError); return; }
+      // enhancedresponse: errorCode "0" means the token is real. Without this a failure is
+      // indistinguishable from a strange token and the button would arm on nothing.
+      if (m && m.errorCode && String(m.errorCode) !== "0") {
+        setPayToken(null);
+        setTokenErr(m.errorMessage || "That card wasn't accepted — check the number.");
+        return;
+      }
+      const tok = m && (m.token || m.message);
+      if (!tok) return;
+      setTokenErr(""); setPayExpiry(m.expiry || null); setPayToken(String(tok)); setArmed(false);
+    };
+    window.addEventListener("message", onMsg, false);
+    return () => window.removeEventListener("message", onMsg, false);
+  }, [payOpen, collect, payOpts]);
+
+  // Whether a surcharge applies cannot be known until the CARD is known — the card brands
+  // forbid it on debit, so the same order is one price on one card and another on the next.
+  // Probe once a token exists, and never let a failed probe block a payment.
+  useEffect(() => {
+    if (!payToken || method !== "card") { setSurcharge(null); return; }
+    let alive = true;
+    (async () => {
+      const { data } = await sb.functions.invoke("portal-payments", {
+        body: { action: "surcharge_probe", payToken },
+      });
+      if (alive && data) setSurcharge(data);
+    })();
+    return () => { alive = false; };
+  }, [payToken, method]);
+
+  // ⚠️ THE FOCUS TRAP. The VP3350 reader is a USB KEYBOARD: it types an encrypted blob into
+  // whatever element has focus, fast, ending in Enter. This modal's amount box carries
+  // autoFocus, so an un-trapped swipe would type track data into it. While armed, every
+  // keystroke that reaches this document is one that did NOT reach the iframe — swallow it
+  // and say so. Never echo, never buffer, never log those characters: they are card data.
+  useEffect(() => {
+    if (!armed) return;
+    const el = frameRef.current;
+    if (el) { try { el.focus(); } catch (_e) {} }
+    const swallow = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      setTokenErr("That swipe didn't land in the card box. Press Ready, then swipe again.");
+    };
+    const refocus = () => { try { if (frameRef.current) frameRef.current.focus(); } catch (_e) {} };
+    document.addEventListener("keydown", swallow, true);
+    document.addEventListener("focusin", refocus, true);
+    // An indefinitely armed page is one where the next thing anyone types disappears.
+    const t = setTimeout(() => setArmed(false), 60000);
+    return () => {
+      document.removeEventListener("keydown", swallow, true);
+      document.removeEventListener("focusin", refocus, true);
+      clearTimeout(t);
+    };
+  }, [armed]);
+
+  const askCents = payOpts && payOpts.canCharge ? payOpts.askCents : 0;
+  const feeCents = surcharge && surcharge.applies && surcharge.percent
+    ? Math.round(askCents * (surcharge.percent / 100)) : 0;
+
+  const closePay = () => {
+    setPayOpen(false); setCollect("recorded"); setPayToken(null); setPayExpiry(null);
+    setTokenErr(""); setSurcharge(null); setArmed(false); setEntry("keyed");
+  };
+
+  const chargeCard = async () => {
+    if (!payToken) { setMsg({ err: "Enter the card details first." }); return; }
+    if (!askCents) { setMsg({ err: "There's nothing to charge on this order." }); return; }
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-payments", {
+      body: {
+        action: "charge",
+        orderId: o.id,
+        rail: method === "ach" ? "ach" : "card",
+        payToken,
+        expiry: payExpiry || undefined,
+        entry,
+        // The echo that keeps three numbers provably identical: what is on screen, what the
+        // token was minted against, and what is charged.
+        confirmChargeCents: askCents,
+      },
+    });
+    setBusy(false);
+    if (error) {
+      // A non-2xx from an edge function surfaces as a generic message; the real sentence —
+      // the decline reason, or "do NOT try again" — is in the body.
+      let m = "That payment didn't go through.";
+      try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+      setMsg({ err: m });
+      setPayToken(null);
+      return;
+    }
+    if (data && data.error) { setMsg({ err: data.error }); setPayToken(null); return; }
+    closePay();
+    setMsg({
+      ok: data && data.pending
+        ? `Bank payment submitted for ${money(data.amountCents)} — it clears in 2-3 business days.`
+        : `Charged ${money(data.amountCents)}${data && data.last4 ? ` to the card ending ${data.last4}` : ""}.`,
+    });
+    onChanged();
+  };
+
   // SS-mode orders (the design carries an SS quote) render the invoice-style order
   // document (migration 127), which needs the FULL design row (the list query stays
   // narrow), the signatures, the change orders, and the order_paperwork projection
@@ -2325,17 +3572,23 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     if (!ssMode || !o.short_code) return;
     let alive = true;
     (async () => {
-      const [dRes, aRes, cRes, pRes] = await Promise.all([
-        sb.from("designs")
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact")
-          .eq("client_id", clientId).eq("short_code", o.short_code).maybeSingle(),
+      const [dRes, aRes, cRes, pRes, amRes] = await Promise.all([
+        sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [o.short_code], detail: true } })
+          .then((r) => r.error ? { error: r.error, data: null } : { error: null, data: ((r.data && r.data.designs) || [])[0] || null }),
+        // `revision` since migration 213: an amended order is signed AGAIN, so there is now
+        // more than one subject='invoice' row and the highest revision is the one that
+        // governs. Without the column the reader below picks whichever row came back first.
         sb.from("design_acceptances")
-          .select("subject, signer_name, accepted_at, total")
+          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.from("change_orders")
-          .select("id, co_no, source, status, total_after_cents, acknowledged_at")
+          .select("id, co_no, source, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, raised_under, acknowledged_at")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.functions.invoke("portal-settings", { body: { action: "order_paperwork", shortCode: o.short_code } }),
+        // Is this order open for change, under what authority, and what will it cost --
+        // everything the Change Order button needs BEFORE it does anything. A read, gated at
+        // change_orders:'view', so a rep who may not raise one is still shown why.
+        sb.functions.invoke("portal-settings", { body: { action: "amendment_status", shortCode: o.short_code } }),
       ]);
       if (!alive) return;
       // A failed sub-read must NOT be coerced to "no data" — each coercion told its own
@@ -2359,6 +3612,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         acceptances: aRes.data || [],
         cos: cRes.data || [],
         paperwork: (pRes.data && !pRes.data.error) ? pRes.data : null,
+        // Deliberately NOT folded into loadError. This read decides which BUTTON renders;
+        // losing it should cost the amendment controls, not the whole order screen.
+        amend: (amRes.data && !amRes.data.error) ? amRes.data : null,
       });
     })();
     return () => { alive = false; };
@@ -2372,7 +3628,17 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
   const ssAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "quote");
   // Migration 136: the invoice carries its own acceptance row, and it is the signature
   // that closes the sale. The quote row above may be a click with no signature at all.
-  const ssInvoiceAcceptance = ssDoc && (ssDoc.acceptances || []).find((a) => a.subject === "invoice");
+  //
+  // THE HIGHEST REVISION GOVERNS (migration 213). An amended order is signed again — same
+  // subject, revision = the change order's number — so `.find()` was returning whichever row
+  // PostgREST happened to hand back first, which on a re-signed order is a coin toss between
+  // the original signature and the current one. The table stays append-only; this is only
+  // about which row is "the agreement" for display.
+  const ssInvoiceAcceptance = ssDoc
+    ? (ssDoc.acceptances || []).filter((a) => a.subject === "invoice")
+        .sort((a, b) => (Number(b.revision) || 0) - (Number(a.revision) || 0)
+          || String(b.accepted_at || "").localeCompare(String(a.accepted_at || "")))[0] || null
+    : null;
   const ssInvoiceSigner = (ssInvoiceAcceptance && ssInvoiceAcceptance.signer_name) || "";
   const ssInvoice = ssDoc && ssDoc.paperwork && ssDoc.paperwork.invoice;
 
@@ -2419,6 +3685,39 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
     onChanged();
   };
 
+  // A CardPointe payment cannot be voided from the browser — RLS refuses any update to a
+  // row with a gateway, and rightly: the money is at the card network, and a local void
+  // would leave the books saying one thing and the merchant account another. So this asks
+  // the server to reverse it, and the row only changes if the gateway agrees.
+  const voidGatewayPayment = async (p) => {
+    const settledAlready = p.funding_state === "settled" && Date.parse(p.received_at) < Date.now() - 12 * 3600 * 1000;
+    if (!window.confirm(
+      `${settledAlready ? "Refund" : "Cancel"} this ${money(p.amount_cents)} payment at the card network?\n\n` +
+      "The customer gets the money back. This can't be undone from here.",
+    )) return;
+    setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-payments", {
+      body: { action: settledAlready ? "refund_payment" : "void_payment", paymentId: p.id },
+    });
+    if (error) {
+      let m = "That couldn't be reversed.";
+      let settled = false;
+      try { const ctx = await error.context.json(); if (ctx) { if (ctx.error) m = ctx.error; settled = !!ctx.settled; } } catch (_e) {}
+      // "Already settled" is not a failure, it is the next step — a refund rather than a void.
+      if (settled) {
+        const { data: rd, error: re } = await sb.functions.invoke("portal-payments", {
+          body: { action: "refund_payment", paymentId: p.id },
+        });
+        if (!re && rd && !rd.error) { setMsg({ ok: `Refunded ${money(rd.refunded)}.` }); onChanged(); return; }
+      }
+      setMsg({ err: m });
+      return;
+    }
+    if (data && data.error) { setMsg({ err: data.error }); return; }
+    setMsg({ ok: data && data.refunded ? `Refunded ${money(data.refunded)}.` : "Payment cancelled at the card network." });
+    onChanged();
+  };
+
   const unvoidPayment = async (p) => {
     const { error } = await sb.from("payments")
       .update({ voided_at: null, void_reason: null }).eq("id", p.id);
@@ -2445,7 +3744,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             /* The invoice-style order document (migration 127) — letterhead, the priced
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
-            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc}
+            <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn} coApproveOn={coApproveOn}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
               onPreview={(url, title) => setPdfView({ url, title })}
               onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />
@@ -2494,15 +3793,42 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
           )}
 
           {/* SS-mode orders (the design carries an SS quote) get change orders. CRM-mode
-              orders don't — the decision was SS-only (Carolyn 2026-08-23). */}
-          {ssMode && o.short_code && (
+              orders don't — the decision was SS-only (Carolyn 2026-08-23).
+              coOn = the change_orders grant (2026-09-01): reps hold orders:edit so they can
+              finalize the sale, but amending a signed agreement is handed out separately in
+              Team settings.
+
+              ⚠️ WHERE THE GATE ACTUALLY IS. This comment used to say "portal-settings refuses
+              the three change-order actions on the same grant, so this is not the gate", and
+              that was false for the three the card does itself: raising a CO, attesting a
+              verbal acknowledgment and (until this change) voiding one all wrote
+              `change_orders` straight over PostgREST and never reached an edge function at
+              all. The real server gate is migration 188's restrictive change_orders_area_*
+              policies, which put `change_orders = 'edit'` on INSERT and UPDATE where a
+              browser tab cannot edit it out. Hiding the card stays the courtesy half. */}
+          {ssMode && coOn && o.short_code && (
             <ChangeOrdersCard clientId={clientId} shortCode={o.short_code} orderId={o.id}
               currentTotalCents={o.total_cents} reloadKey={ssReload} onChanged={changedAll} />
           )}
 
           <div style={S.card}>
             <div style={{ ...S.h2, marginBottom: 8 }}>Payments</div>
-            {row.pays.length === 0 && <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Nothing recorded yet.</p>}
+            {/* "Nothing recorded yet." is a CLAIM, and `row.pays` is [] on every mount until
+                the paged payments read lands — so a settled order announced that nobody had
+                ever paid for it, then filled in. The skeleton says the same thing the header
+                chip's "…" says. */}
+            {!moneyReady ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0" }}>
+                <SkelBar w={26} h={26} style={{ borderRadius: "50%", flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <SkelBar w="38%" h={12} />
+                  <SkelBar w="54%" h={9} style={{ marginTop: 6 }} />
+                </div>
+                <SkelBar w={68} h={12} style={{ flexShrink: 0 }} />
+              </div>
+            ) : row.pays.length === 0 ? (
+              <p style={{ fontSize: 13, color: "#64748B", padding: "6px 0" }}>Nothing recorded yet.</p>
+            ) : null}
             {row.pays.map((p) => {
               const dead = !!p.voided_at;
               return (
@@ -2515,13 +3841,36 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   <div>
                     <b style={{ textDecoration: dead ? "line-through" : "none" }}>{(PAY_METHODS.find((m) => m[0] === p.method) || [, p.method])[1]}</b>
                     {p.gateway === "ghl" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#EDE9FE", color: "#5B21B6", borderRadius: 5, padding: "2px 6px" }}>Synergy/GHL</span>}
+                    {p.gateway === "cardpointe" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#DCFCE7", color: "#166534", borderRadius: 5, padding: "2px 6px" }}>Taken here</span>}
+                    {p.funding_state === "pending" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FEF3C7", color: "#92400E", borderRadius: 5, padding: "2px 6px" }}>Clearing</span>}
+                    {p.funding_state === "returned" && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#FFE4E6", color: "#9F1239", borderRadius: 5, padding: "2px 6px" }}>Returned</span>}
                     {dead && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.5, background: "#F1F5F9", color: "#64748B", borderRadius: 5, padding: "2px 6px" }}>Voided</span>}
-                    <div style={{ fontSize: 11, color: "#94A3B8" }}>{fmtDate(p.received_at)}{p.reference ? ` · ${p.reference}` : ""}{dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}</div>
+                    <div style={{ fontSize: 11, color: "#94A3B8" }}>
+                      {fmtDate(p.received_at)}
+                      {p.instrument_last4 ? ` · ••${p.instrument_last4}` : (p.reference ? ` · ${p.reference}` : "")}
+                      {p.funding_state === "pending" ? " · clears in 2-3 business days" : ""}
+                      {dead ? ` · voided ${fmtDate(p.voided_at)}` : ""}
+                    </div>
                   </div>
-                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
-                  {/* Imported payments are read-only here — GHL owns them, and a local
-                      void would silently come back (or diverge) on the next sync. */}
-                  {p.gateway
+                  <div style={{ marginLeft: "auto", fontWeight: 800, fontVariantNumeric: "tabular-nums", textDecoration: dead ? "line-through" : "none", color: dead || p.funding_state === "pending" ? "#94A3B8" : "#1E293B" }}>{money(p.amount_cents)}</div>
+                  {/* GHL-imported payments stay read-only — GHL owns them, and a local void
+                      would silently come back (or diverge) on the next sync. A CardPointe
+                      payment is different: the money is at the card network, so voiding it
+                      HAS to go through the edge function, which only marks the row voided
+                      if the gateway agrees. (RLS enforces the same thing from below — the
+                      browser cannot update a row where gateway IS NOT NULL.)
+
+                      Void/Restore is a direct payments UPDATE, so it needs orders:edit —
+                      without it the click returns the RLS refusal migration 188 installs,
+                      rendered as a red banner. A viewer sees the payment and no control. */}
+                  {!ordersOn
+                    ? <span title="You have view-only access to Orders" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                    : p.gateway === "cardpointe"
+                    ? (dead
+                      ? <span title="Already reversed at the card network" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
+                      : <button type="button" onClick={() => voidGatewayPayment(p)} title="Cancel or refund this at the card network"
+                          style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>Refund</button>)
+                    : p.gateway
                     ? <span title="Recorded in Synergy/GHL — manage it there" style={{ color: "#CBD5E1", fontSize: 12, fontWeight: 700 }}>—</span>
                     : <button type="button" onClick={() => (dead ? unvoidPayment(p) : voidPayment(p))} title={dead ? "Restore this payment" : "Void this payment"}
                         style={{ background: "none", border: "none", color: "#94A3B8", cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>{dead ? "Restore" : "Void"}</button>}
@@ -2533,39 +3882,67 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
 
         <div>
           <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 12, padding: "16px 18px", marginBottom: 14 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{bal != null && bal < 0 ? "Credit owed back" : "Balance due"}</div>
+            {/* ⏳ EVERY FIGURE IN THIS BLOCK IS PAID-DERIVED except the total. `row.paid` is 0
+                and `bal` is therefore the whole total until the payments read lands, so a
+                settled order painted "Balance due $84,000" and "$0.00 of $84,000 collected"
+                for the length of that read and then corrected itself. The first number is the
+                one someone reads out loud — the pale block is the honest one. */}
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6, color: "#CFE0EC" }}>{moneyReady && bal != null && bal < 0 ? "Refund owed" : "Balance due"}</div>
             <div style={{ fontSize: 29, fontWeight: 800, margin: "4px 0 2px", fontVariantNumeric: "tabular-nums", letterSpacing: -0.7 }}>
-              {bal == null ? "—" : bal < 0 ? `${money(-bal)} credit` : money(bal)}
+              {!moneyReady
+                ? <SkelBar w={148} h={25} style={{ background: "rgba(255,255,255,0.26)", margin: "4px 0" }} />
+                : bal == null ? "—" : bal < 0 ? money(-bal) : money(bal)}
             </div>
             <div style={{ fontSize: 11.5, color: "#D6E4F0" }}>
               {o.total_cents == null
                 ? (ssMode ? "The total arrives when the customer signs the quote" : "Set this order's total to track a balance")
-                : `${money(row.paid)} of ${money(o.total_cents)} collected`}
+                : !moneyReady
+                  ? <SkelBar w={168} h={10} style={{ background: "rgba(255,255,255,0.22)", margin: "2px 0" }} />
+                  : `${money(row.paid)} of ${money(o.total_cents)} collected`}
             </div>
             {ssMode && o.total_cents != null && (
               <div style={{ borderTop: "1px solid rgba(255,255,255,0.22)", marginTop: 10, paddingTop: 6 }}>
-                {[["Total", money(o.total_cents)], ["Paid", money(row.paid)], ["Balance", bal == null ? "—" : money(bal)]].map(([k, v]) => (
+                {[
+                  ["Total", money(o.total_cents)],
+                  ["Paid", moneyReady ? money(row.paid) : <SkelBar w={72} h={10} style={{ background: "rgba(255,255,255,0.26)", display: "inline-block", verticalAlign: "middle" }} />],
+                  ["Balance", !moneyReady ? <SkelBar w={72} h={10} style={{ background: "rgba(255,255,255,0.26)", display: "inline-block", verticalAlign: "middle" }} /> : bal == null ? "—" : money(bal)],
+                ].map(([k, v]) => (
                   <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "3px 0", color: "#D6E4F0" }}>
                     <span>{k}</span><span style={{ fontWeight: 700, color: "#FFF", fontVariantNumeric: "tabular-nums" }}>{v}</span>
                   </div>
                 ))}
                 <div style={{ fontSize: 10.5, color: "#B9CFE0", marginTop: 4, lineHeight: 1.45 }}>
-                  Set by the signed quote and acknowledged change orders — no hand editing.
+                  Set by the accepted quote and acknowledged change orders — no hand editing.
                 </div>
               </div>
             )}
-            {o.total_cents != null && (
-              <button type="button" onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
-                style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13 }}>Record a payment</button>
+            {/* Two conditions, and neither is cosmetic.
+                ordersOn — recording a payment INSERTs into `payments`, which fires
+                  inventory_claim_on_payment and marks the linked unit sold. Migration 188
+                  refuses that below orders:edit; this is the button not being there.
+                moneyReady — DISABLED, not merely un-prefilled. The Balance beside it is
+                  wrong until the payments read lands, so an empty amount box would still
+                  invite someone to type a figure against a number that is about to change. */}
+            {o.total_cents != null && ordersOn && (
+              <button type="button" disabled={!moneyReady}
+                title={moneyReady ? undefined : "Reading this order's payments…"}
+                onClick={() => { setPayOpen(true); setAmount(bal > 0 ? (bal / 100).toFixed(2) : ""); }}
+                style={{ ...S.btn("#75E6DA", "#22345B"), marginTop: 13, opacity: moneyReady ? 1 : 0.55, cursor: moneyReady ? "pointer" : "not-allowed" }}>Record a payment</button>
             )}
           </div>
 
           {/* SS orders derive their total (accept → CO acks → invoice); the hand-typed
-              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24). */}
+              editor stays ONLY for design-less manual orders (Carolyn 2026-08-24).
+
+              `ordersOn` decides whether the EDITOR appears, never whether the card does: the
+              figures are the point of the Orders tab and a viewer keeps them. Typing a total
+              is an orders UPDATE, which migration 188 puts behind orders:edit — and note that
+              `editTotal` starts TRUE on an order with no total, so without this test a driver
+              opening a manual order would land straight in an input box that cannot save. */}
           {!ssMode && (
             <div style={S.card}>
               <div style={{ ...S.h2, marginBottom: 8 }}>Order total</div>
-              {editTotal ? (
+              {editTotal && ordersOn ? (
                 <>
                   <span style={S.lbl}>Total (from your estimate)</span>
                   <input style={S.input} value={totalDraft} onChange={(e) => setTotalDraft(e.target.value)} placeholder="9575.00" />
@@ -2580,11 +3957,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               ) : (
                 <>
                   {kv("Total", money(o.total_cents))}
-                  {kv("Paid", money(row.paid))}
-                  {kv("Balance", bal == null ? "—" : money(bal))}
+                  {kv("Paid", moneyReady ? money(row.paid) : <SkelBar w={72} h={10} style={{ display: "inline-block", verticalAlign: "middle" }} />)}
+                  {kv("Balance", !moneyReady ? <SkelBar w={72} h={10} style={{ display: "inline-block", verticalAlign: "middle" }} /> : bal == null ? "—" : money(bal))}
                   <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
                     {o.total_source === "ghl" ? "From the accepted estimate" : o.total_source === "manual" ? "Entered by you" : "Not set yet"}
-                    {" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button>
+                    {ordersOn && <>{" · "}<button type="button" onClick={() => setEditTotal(true)} style={{ background: "none", border: "none", color: ACCENT, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 11, padding: 0 }}>Edit</button></>}
                   </div>
                 </>
               )}
@@ -2660,7 +4037,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                   {kv("Address", addr || "—")}
                   {ssInvoiceAcceptance
                     ? kv("Signed", `${fmtDate(ssInvoiceAcceptance.accepted_at)} · ${ssInvoiceAcceptance.signer_name || ""}`)
-                    : ssAcceptance && kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`)}
+                    : ssAcceptance && (ssAcceptance.method === "rep"
+                        ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
+                        : kv("Accepted", `${fmtDate(ssAcceptance.accepted_at)} · ${ssAcceptance.signer_name || ""}`))}
                   {addr && (
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
                       style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", textDecoration: "none", display: "block", textAlign: "center", marginTop: 8, fontSize: 12 }}>
@@ -2676,7 +4055,9 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
             <div style={S.card}>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#94A3B8", letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>Paper trail</div>
               {kv("Quote", `${ssDesign.ss_quote_number}${ssDesign.ss_quote_sent_at ? ` · sent ${fmtDate(ssDesign.ss_quote_sent_at)}` : " · not emailed"}`)}
-              {kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {ssAcceptance && ssAcceptance.method === "rep"
+                ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
+                : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
               {kv("Change orders", (() => {
                 const cs = (ssDoc && ssDoc.cos) || [];
                 const acked = cs.filter((c) => c.status === "acknowledged").length;
@@ -2696,36 +4077,44 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         </div>
       </div>
 
-      {pdfView && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setPdfView(null); }}
-          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 1200 }}>
-          <div style={{ background: "#FFF", borderRadius: 14, width: "min(900px, 96vw)", height: "min(88vh, 1100px)", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            <div style={{ background: ACCENT, color: "#FFF", padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-              <div style={{ fontSize: 14.5, fontWeight: 800 }}>{pdfView.title}</div>
-              <a href={pdfView.url} target="_blank" rel="noopener"
-                style={{ marginLeft: "auto", color: "#CFE0EC", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>Open in tab ↗</a>
-              <button type="button" onClick={() => setPdfView(null)}
-                style={{ background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
-            </div>
-            {/* The browser's own viewer: its toolbar carries print + download. */}
-            <iframe src={pdfView.url} title={pdfView.title} style={{ flex: 1, width: "100%", border: "none", background: "#525659" }} />
-          </div>
-        </div>
-      )}
+      {/* ⚠️ PdfModal (01-core), NOT a private copy of it. This screen frames four URLs and one
+          of them — designs.image_url — is written VERBATIM by the anon-granted save_design
+          RPC (104), so a hostile caller can stash any address against a tenant's design and
+          this modal framed it inside the authenticated portal, behind a button the owner has
+          every reason to trust. 01-core's component runs both the iframe src and the "open in
+          a new tab" href through ssSafeUrl (https on our own origin or our own Supabase
+          storage host) and renders a refusal instead of a viewer when the URL is neither —
+          the guard 02-sales and the designer already had, which this local copy predated and
+          never received. Behaviour otherwise matches: same pop-up-never-a-tab rule, same
+          escape hatch, plus Escape-to-close and the counted body scroll lock. Both server
+          PDFs (ss_quote_pdf_url, invoice_pdf_url) live on the Supabase storage host, which
+          ssSafeUrl admits. */}
+      {pdfView && <PdfModal url={pdfView.url} title={pdfView.title} onClose={() => setPdfView(null)} />}
 
-      {payOpen && (
-        <div onClick={(e) => { if (e.target === e.currentTarget) setPayOpen(false); }}
+      {payOpen && ordersOn && (
+        <div onClick={(e) => { if (armed) return; if (e.target === e.currentTarget) closePay(); }}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1200 }}>
-          <div style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
+          <div ref={modalRef} style={{ background: "#FFF", borderRadius: 14, maxWidth: 430, width: "100%", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}>
             <div style={{ background: ACCENT, color: "#FFF", padding: "15px 18px", display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ fontSize: 15.5, fontWeight: 800 }}>Record a payment</div>
-              <button type="button" onClick={() => setPayOpen(false)}
-                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1 }}>×</button>
+              <div style={{ fontSize: 15.5, fontWeight: 800 }}>{collect === "charge" ? "Take a payment" : "Record a payment"}</div>
+              <button type="button" onClick={closePay} disabled={armed}
+                style={{ marginLeft: "auto", background: "rgba(255,255,255,0.16)", border: "none", color: "#FFF", width: 26, height: 26, borderRadius: 7, cursor: armed ? "not-allowed" : "pointer", fontSize: 15, fontFamily: "inherit", lineHeight: 1, opacity: armed ? 0.4 : 1 }}>×</button>
             </div>
             <div style={{ padding: "17px 18px" }}>
               <span style={S.lbl}>Amount</span>
-              <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
-              {bal > 0 && (
+              {collect === "charge" ? (
+                // The amount is the SERVER's, not the operator's: the deposit-vs-balance
+                // rule lives in portal-payments and the figure here is echoed back to it.
+                <div style={{ ...S.input, fontSize: 20, fontWeight: 800, background: "#F8FAFC", color: "#0F172A" }}>
+                  {money(askCents)}
+                  {payOpts && payOpts.askKind === "deposit" && (
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#0E7490", marginLeft: 8 }}>deposit</span>
+                  )}
+                </div>
+              ) : (
+                <input style={{ ...S.input, fontSize: 20, fontWeight: 800 }} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" autoFocus />
+              )}
+              {collect === "recorded" && bal > 0 && (
                 <div style={{ display: "flex", gap: 6, marginTop: 7 }}>
                   <button type="button" onClick={() => setAmount((bal / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Full balance</button>
                   <button type="button" onClick={() => setAmount((Math.round(bal / 2) / 100).toFixed(2))} style={{ ...S.btn("#F1F5F9", "#334155"), padding: "4px 10px", fontSize: 11, border: "1px solid #E2E8F0" }}>Half</button>
@@ -2734,22 +4123,136 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               <div style={{ marginTop: 13 }}><span style={S.lbl}>Method</span>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {PAY_METHODS.map(([id, label]) => (
-                    <button key={id} type="button" onClick={() => setMethod(id)}
+                    <button key={id} type="button" onClick={() => {
+                      setMethod(id);
+                      // Choosing Card or Bank INSIDE a payment modal almost always means
+                      // "take it now". Landing on Already collected made every card sale a
+                      // two-click job and delayed the tokenizer load to the worst moment.
+                      // This moves the TOGGLE only — nothing is charged until details are
+                      // entered and Charge is pressed, and Already collected is one click away.
+                      setCollect(id === "card" || id === "ach" ? "charge" : "recorded");
+                      setPayToken(null); setTokenErr(""); setArmed(false);
+                    }}
                       style={{ flex: "1 1 auto", background: method === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${method === id ? ACCENT : "#E2E8F0"}`, color: method === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
                   ))}
                 </div>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
+              {/* The fork, and it only appears where it can mean anything. Cash and a
+                  cheque can only ever be recorded; a card or a bank account can be either
+                  already collected elsewhere (a terminal, a phone call) or taken right
+                  here. Making it an explicit choice is what keeps the two apart — one
+                  cannot fail in a way that costs money and the other can. */}
+              {chargeable && payOpts && payOpts.canCharge && (
+                <div style={{ marginTop: 13 }}>
+                  <span style={S.lbl}>{method === "ach" ? "Bank payment" : "Card"}</span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["recorded", "Already collected"], ["charge", method === "ach" ? "Take it now" : "Charge it now"]].map(([id, label]) => (
+                      <button key={id} type="button" onClick={() => { setCollect(id); setPayToken(null); setTokenErr(""); setArmed(false); }}
+                        style={{ flex: 1, background: collect === id ? "#ECFDF5" : "#F8FAFC", border: `1.5px solid ${collect === id ? "#059669" : "#E2E8F0"}`, color: collect === id ? "#047857" : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "9px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {chargeable && payOpts && !payOpts.canCharge && payOpts.message && (
+                <div style={{ marginTop: 10, fontSize: 11.5, color: "#92400E", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "8px 11px" }}>
+                  {payOpts.message} You can still record a payment taken elsewhere.
+                </div>
+              )}
+
+              {/* BOTH branches render; the inactive one is hidden rather than unmounted.
+                  That keeps the tokenizer iframe MOUNTED AND LOADING while the operator is
+                  still reading the modal — unmounting it meant the cross-origin round trip
+                  to CardPointe only began when "Charge it now" was pressed, which is the one
+                  moment somebody is actually waiting on it. */}
+              <div style={{ marginTop: 13, display: collect === "charge" ? "block" : "none" }}>
+                  {method === "card" && (
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                      {[["keyed", "Key it in"], ["swipe", "Swipe"]].map(([id, label]) => (
+                        <button key={id} type="button" onClick={() => { setEntry(id); setPayToken(null); setArmed(false); }}
+                          style={{ flex: 1, background: entry === id ? "#EDE9FE" : "#F8FAFC", border: `1.5px solid ${entry === id ? ACCENT : "#E2E8F0"}`, color: entry === id ? ACCENT : "#475569", fontSize: 12, fontWeight: 700, borderRadius: 8, padding: "8px 6px", cursor: "pointer", fontFamily: "inherit" }}>{label}</button>
+                      ))}
+                    </div>
+                  )}
+                  <span style={S.lbl}>{method === "ach" ? "Routing / account number" : entry === "swipe" ? "Card reader" : "Card details"}</span>
+                  {/* The tokenizer URL is composed SERVER-SIDE and never appears in this
+                      file: the repo is public, and it puts the test/production switch in a
+                      secret rather than in code a customer can download. */}
+                  {payOpts && payOpts.tokenizer && (
+                    <iframe
+                      ref={frameRef}
+                      title="Payment details"
+                      src={method === "ach" ? payOpts.tokenizer.achUrl : entry === "swipe" ? payOpts.tokenizer.swipeUrl : payOpts.tokenizer.cardUrl}
+                      // Height is SERVED (cpTokenizerHeight) so this modal and my-quotes.html
+                      // cannot drift. Too short is a dead form, not a cosmetic issue: at the
+                      // original 128px the CVV sat below the fold of a non-scrolling frame.
+                      style={{ width: "100%", display: "block", height: (method === "ach" ? (payOpts.tokenizer.achHeight || 130) : (payOpts.tokenizer.cardHeight || 265)), border: "1px solid #E2E8F0", borderRadius: 8, background: "#FFF" }}
+                      frameBorder="0" scrolling="no"
+                    />
+                  )}
+                  {method === "ach" && (
+                    <div style={{ fontSize: 11, color: "#64748B", marginTop: 6, lineHeight: 1.45 }}>
+                      Routing number, then a slash, then the account number. Bank payments take 2-3 business days to clear.
+                    </div>
+                  )}
+                  {method === "card" && entry === "swipe" && (
+                    <div style={{ marginTop: 8 }}>
+                      {/* ⚠️ The reader is a USB KEYBOARD. Arming is what stops a swipe from
+                          typing card data into the amount box, and nothing is armed while
+                          the modal is merely open. */}
+                      <button type="button" onClick={() => { setArmed(true); setTokenErr(""); }} disabled={armed}
+                        style={{ ...S.btn(armed ? "#DCFCE7" : "#F1F5F9", armed ? "#166534" : "#334155"), border: "1px solid #E2E8F0", fontSize: 12, width: "100%" }}>
+                        {armed ? "Ready — swipe the card now" : payToken ? "Card read ✓ — swipe again" : "Ready to swipe"}
+                      </button>
+                      {armed && (
+                        <div style={{ fontSize: 11, color: "#166534", marginTop: 6 }}>
+                          Don't type anything until it reads. This clears itself after a minute.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {tokenErr && <div style={{ fontSize: 11.5, color: "#B91C1C", marginTop: 7 }}>{tokenErr}</div>}
+                  {payToken && !tokenErr && (
+                    <div style={{ fontSize: 11.5, color: "#047857", marginTop: 7, fontWeight: 700 }}>
+                      {method === "ach" ? "Bank details captured ✓" : "Card captured ✓"}
+                    </div>
+                  )}
+                  {/* Fiserv adds the surcharge itself and reports it back, so this is a
+                      display of THEIR answer, never our arithmetic. It cannot be known
+                      before the card is: the brands forbid surcharging debit. */}
+                  {surcharge && surcharge.applies === true && feeCents > 0 && (
+                    <div style={{ marginTop: 10, fontSize: 12, background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "9px 11px", color: "#92400E" }}>
+                      A {surcharge.percent}% card fee applies to this card — the customer will be charged{" "}
+                      <strong>{money(askCents + feeCents)}</strong>. {money(askCents)} goes to the balance.
+                    </div>
+                  )}
+                  {surcharge && surcharge.applies === false && (
+                    <div style={{ marginTop: 10, fontSize: 11.5, color: "#475569" }}>No card fee on this card.</div>
+                  )}
+              </div>
+              <div style={{ display: collect === "charge" ? "none" : "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 13 }}>
                 <div><span style={S.lbl}>Received on</span><input type="date" style={S.input} value={when} onChange={(e) => setWhen(e.target.value)} /></div>
                 <div><span style={S.lbl}>Reference</span><input style={S.input} value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Check # / note" /></div>
               </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: "#475569", lineHeight: 1.45, marginTop: 12 }}>
-                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="#64748B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>
-                <div>You're recording money you already collected — no card is charged here. Taking cards in the portal is coming next.</div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: collect === "charge" ? "#ECFDF5" : "#F8FAFC", border: `1px solid ${collect === "charge" ? "#A7F3D0" : "#E2E8F0"}`, borderRadius: 8, padding: "9px 11px", fontSize: 11.5, color: collect === "charge" ? "#065F46" : "#475569", lineHeight: 1.45, marginTop: 12 }}>
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke={collect === "charge" ? "#059669" : "#64748B"} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}><circle cx="12" cy="12" r="9"/><path d="M12 8v5l3 2"/></svg>
+                <div>
+                  {collect === "charge"
+                    ? (method === "ach"
+                      ? "This debits the customer's bank account now. It won't count toward the balance until it clears."
+                      : "This charges the customer's card now, for real.")
+                    : "You're recording money you already collected — no card is charged here. To take a card now, choose Card or ACH above."}
+                </div>
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 15 }}>
-                <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
-                <button onClick={() => setPayOpen(false)} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0" }}>Cancel</button>
+                {collect === "charge" ? (
+                  <button onClick={chargeCard} disabled={busy || !payToken} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy || !payToken ? 0.55 : 1 }}>
+                    {busy ? "Charging…" : `Charge ${money(askCents + feeCents)}`}
+                  </button>
+                ) : (
+                  <button onClick={recordPayment} disabled={busy} style={{ ...S.btn("#059669", "#FFF"), flex: 1, opacity: busy ? 0.6 : 1 }}>{busy ? "Saving…" : "Record payment"}</button>
+                )}
+                <button onClick={closePay} disabled={armed} style={{ ...S.btn("#F1F5F9", "#334155"), border: "1px solid #E2E8F0", opacity: armed ? 0.5 : 1 }}>Cancel</button>
               </div>
             </div>
           </div>

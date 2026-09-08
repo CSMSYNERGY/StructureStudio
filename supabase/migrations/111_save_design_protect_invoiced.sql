@@ -15,6 +15,13 @@
 -- taught us the repo's file for a wholesale-replaced function is never proof of what is
 -- live. Before applying, re-dump the live body and diff against this file minus the new
 -- guard block; any other difference means regenerate, not apply.
+--
+-- ⚠️ SUPERSEDED IN PART BY 197 (2026-09-06). The list below stops at invoiced/delivered, so
+-- 'accepted' -- the rung the customer's own agreement lands on, alongside designs.accepted_at
+-- (122) and the design_acceptances record (124) -- stayed anon-writable: the change order the
+-- app raises for any post-acceptance revision (126) sat on top of content the short code could
+-- still rewrite. 197 splices 'accepted' plus an accepted_at test into the LIVE body, and
+-- widens the refusal message with it. Read 197 before treating this file as the guard.
 
 CREATE OR REPLACE FUNCTION public.save_design(p_code text, p_client_id text, p_contact jsonb, p_selections jsonb, p_paint_colors jsonb, p_items jsonb, p_custom_options jsonb, p_ro_dimensions jsonb, p_bldg_w integer, p_bldg_h integer, p_image_url text, p_status text DEFAULT NULL::text)
  RETURNS designs

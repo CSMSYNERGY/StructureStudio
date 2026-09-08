@@ -26,7 +26,19 @@ function ssLogError(source, message, code, context) {
         p_message: String(message == null ? "" : (message.message || message)).slice(0, 4000),
         p_code: code == null ? null : String(code).slice(0, 100),
         p_client_id: window.__SS_CLIENT_ID__ || params.get("client") || null,
-        p_url: location.href.slice(0, 600),
+        // Origin + path + query, never location.href: Supabase delivers auth-email outcomes
+        // in the FRAGMENT, and whenever a link's redirect_to is not allow-listed Supabase
+        // falls back to Site URL, so `#access_token=<JWT>&refresh_token=…` lands on THIS page
+        // before the module forwards it to /portal. Logging the href wrote a live session into
+        // app_errors, which an anon caller can never redact. The query stays — triage reads
+        // ?client= / ?id= off it — and the 600-char cap stays.
+        // ⚠️ split("#"), NOT origin+pathname+search. `location.origin` serializes to the
+        // literal string "null" for an OPAQUE origin, and this is the one page built to be
+        // iframed cross-origin by a builder's own site (see the postMessage embed API
+        // below) — so in a sandboxed frame the rebuilt URL would read "null/path?client=x"
+        // and lose the host, which is the single most useful part for triage. Dropping the
+        // fragment achieves the identical goal and is the strictly smaller change.
+        p_url: location.href.split("#")[0].slice(0, 600),
         p_context: context || null,
       }),
     }).catch(() => {});

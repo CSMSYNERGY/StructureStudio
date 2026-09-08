@@ -12,9 +12,41 @@
 // THE RULE THAT MATTERS: the UI hiding a tab is a courtesy, not a control. Every action
 // in every function must call requireAccess() before it reads or writes, because anyone
 // can call these endpoints directly with a valid session.
+//
+// ── ONE LEVEL IS ABOUT ROWS, NOT TABS (2026-09-05) ──────────────────────────────────────
+// `contacts: 'own'` narrows WHICH ROWS a person sees, not which pages. Everything above
+// still applies to it, and it needs a third enforcement point the rest of this module does
+// not: the level says "narrow", and the narrowing itself lives in
+//   1. RLS       — migration 193's restrictive policies, for the lists the browser reads
+//                  straight from PostgREST (designs / crm_contacts / captured_leads);
+//   2. the edge  — every function runs service-role and therefore BYPASSRLS, so RLS
+//                  contributes NOTHING there and the filter is added by hand at the read;
+//   3. the browser — portal/01-core.jsx's row-scope registry, a courtesy like the nav.
+// Change the meaning of 'own' and all three move together. See ownContactsOnly() below.
+//
+// ── AND SINCE 2026-09-07 IT IS A WRITE SCOPE TOO, WHICH ADDS A FOURTH ───────────────────
+// Carolyn: "Yes, let dealers edit their own contacts." 'own' shipped read-only two days
+// earlier — this module said in as many words that making it write "would mean per-row
+// ownership checks on eleven write actions", and that is exactly what it now means. The
+// `ownWrites` flag on the area says the level writes; canEdit reads it, so contacts:'own'
+// satisfies the eleven contacts:'edit' gates that used to refuse it.
+//
+// ⛔ THE FLAG ALONE IS A BLANKET EDIT. Passing a gate says the person may write SOMETHING;
+// nothing in this module can say which rows, because nothing here has a row in its hands.
+// The narrowing is the fourth enforcement point:
+//   4. portal-settings' CONTACT_ROW_SCOPE — every contacts:'edit' action declares how to
+//      find the contact it touches, and an own-scoped caller is refused when that contact
+//      is not theirs. It is a TABLE for the same reason GATES is: a check-per-branch is a
+//      check somebody eventually forgets, and preflight refuses a push where a
+//      contacts:'edit' action is missing from it.
+// A new contacts write action is therefore a TWO-file change, and forgetting the second is
+// the one mistake here that hands a dealer the whole customer list. The gate fails closed;
+// so does the row scope.
 
 export type Level = "none" | "view" | "edit" | "own";
-export type Title = "owner" | "admin" | "sales_rep" | "crew_leader" | "driver";
+export type Title =
+  | "owner" | "admin" | "office_staff" | "sales_manager" | "sales_rep"
+  | "dealer" | "scheduler" | "crew_leader" | "crew_member" | "driver";
 
 /** One switch on the Team screen. `levels` is the vocabulary for THAT row — commissions
  *  is deliberately different from the rest, so the grid is data-driven rather than
@@ -49,6 +81,41 @@ export interface Area {
    * and the server agrees instead of trusting the screen.
    */
   byTitleOnly?: boolean;
+  /**
+   * Does this area's 'own' level WRITE, or only read?
+   *
+   * 'own' means "your rows only" and says nothing by itself about what you may do to them,
+   * so each area that offers the level has to answer this. They answer differently and both
+   * answers are deliberate:
+   *   contacts    — ownWrites. Your customers are yours to work: edit the record, add notes
+   *                 and activities, send SMS and email, attach files. Somebody else's
+   *                 customers are not in your list at all.
+   *   commissions — NOT ownWrites. 'own' there means "see your own payout"; a rep editing
+   *                 their own commission is the thing the whole feature exists to prevent.
+   *
+   * Read by canEdit() and by mayGrant(). It is NOT the row filter — that is ownContactsOnly()
+   * and the three enforcement points it names. This flag only answers "may they write at
+   * all"; "to which rows" is a separate question with a separate mechanism, and an area that
+   * sets this flag without wiring the row filter has granted a blanket edit.
+   */
+  ownWrites?: boolean;
+  /**
+   * Belongs to CSM Synergy's OWN tenants and must never appear on a builder's Team screen.
+   *
+   * The Projects board is one global internal system — no `pm_*` table has a `client_id` —
+   * so the switch is meaningless to a builder and, rendered on their screen, is worse than
+   * meaningless: it advertises an internal tool they can never reach and invites a support
+   * question about a permission that does nothing. accessMetadata() ships AREAS to every
+   * tenant's browser, so the filter has to live there rather than in the UI, and it defaults
+   * to EXCLUDING these — the safe direction for a caller that does not know whose screen it
+   * is building.
+   *
+   * It is NOT a security boundary on its own and must not be treated as one. The real gate
+   * is portal-projects checking `client_settings.internal_account` before it consults the
+   * area at all; this flag only decides who is offered the switch. Omission from every
+   * preset is what makes the area itself deny by default.
+   */
+  internalOnly?: boolean;
 }
 
 const RVE: Level[] = ["none", "view", "edit"];
@@ -57,9 +124,84 @@ export const AREAS: Area[] = [
   // ── Workspace ────────────────────────────────────────────────────────────
   { key: "designer",          label: "Designer",           group: "workspace", hint: "Build designs and quotes",            levels: RVE },
   { key: "designs",           label: "Designs",            group: "workspace", hint: "Customer designs and quotes",         levels: RVE },
-  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired",           levels: RVE },
+  // 'own' = see only the customers you are ASSIGNED TO or FOLLOWING — and, because a quote
+  // belongs to a customer and not to a rep, only those customers' designs and browsing leads.
+  //
+  // WHY (Carolyn, 2026-09-04, 1:02:16–1:04:27, describing a builder she is onboarding whose
+  // salespeople are independent dealers): "he also doesn't want them to see each other's
+  // quotes either … they would only see the list, the pipelines or the quotes that they have
+  // created themselves. Only the owner would see 'okay, this customer went through employee
+  // B and C' … Now, if the owner wants the employees to see, then they just toggle the
+  // button in the settings and they will be able to see." THIS SWITCH IS THAT BUTTON.
+  //
+  // ⚠️ THE CONTACTS LEVEL SCOPES THE DESIGNS LIST, NOT THE `designs` LEVEL — and that is her
+  // model rather than a shortcut (same call, 1:09:30): "we do not ever assign deals. We only
+  // assign contacts and followers … if they are not assigned to or following that customer,
+  // they can't see anything of it." A design has no assignee and is not getting one; it is
+  // visible because its CUSTOMER is. So `designs` keeps none/view/edit and answers "may you
+  // open the Pipeline at all", while this row answers "whose rows are in it".
+  //
+  // ⚠️ 'own' HERE IS A READ *AND WRITE* SCOPE — unlike commissions, where it reads only.
+  // This paragraph used to record the opposite and to name the reason: Carolyn had asked
+  // about SEEING, four times in three sentences, and a write scope "would mean per-row
+  // ownership checks on eleven write actions". It called that "a second decision, and it is
+  // hers". She made it on 2026-09-07 — "Yes, let dealers edit their own contacts" — and the
+  // eleven checks are the CONTACT_ROW_SCOPE table in portal-settings.
+  //
+  // So 'own' now means: the contact editor, notes, activities, SMS, email and customer
+  // files, ON YOUR OWN CUSTOMERS, and nobody else's rows are in your list to begin with.
+  // The `ownWrites` flag above is what makes canEdit() true; the row scoping is separate and
+  // is NOT optional — see the module header's fourth enforcement point.
+  //
+  // ⚠️ ONE SWITCH, NOT TWO, AND THAT WAS THE CHOICE. Offered a fifth level so read-only-own
+  // could survive alongside a writing one, Carolyn picked redefining this one: "your
+  // customers are yours to work". Nobody held a contacts override at the time (checked), so
+  // nothing silently widened. Reinstating a read-only-own means a NEW level, never quietly
+  // narrowing this one back — every dealer would lose their notes and SMS on the next page
+  // load, with nothing anywhere to notice.
+  //
+  // ADDED to the vocabulary rather than replacing 'view'. effectiveAccess DISCARDS a stored
+  // override whose level is not in the area's list, so dropping 'view' would silently drop
+  // every stored {"contacts":"view"} back to the title preset — 'none' for a crew leader —
+  // on the next page load, with nothing anywhere to notice.
+  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired — 'Own only' means they work their own customers and see nobody else's",
+    levels: ["none", "own", "view", "edit"], ownWrites: true },
   { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
   { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
+  // Amending a SIGNED order. Split out of `orders` (Carolyn, 2026-09-01: "Change Orders is
+  // the only feature they shouldn't have unless given permission in the team settings") when
+  // reps gained orders:edit so they could finalize an order, take payment and collect the
+  // signature. A change order re-opens an agreement the customer already committed to and
+  // asks them to commit again — a different kind of act from completing the order in front
+  // of you, and the one where a mistake costs the builder the customer's confidence.
+  //
+  // Omitted from every non-owner preset, so it is DENIED by default (see PRESETS' header) and
+  // an owner or admin hands it out per person. Deliberately NOT ownerGranted: an admin runs
+  // the business day to day and may legitimately grant this, unlike Billing.
+  { key: "change_orders",     label: "Change Orders",      group: "workspace", hint: "Amend a signed order — the customer signs off again", levels: RVE },
+  // UNLOCKING a signed order so it can be amended. A SEPARATE AREA, not a third level on
+  // change_orders, and that is Carolyn's decision (2026-09-07): "there should be both the
+  // option to give approval for a change order, but they can also make the change order if
+  // they are given permission" — approving must not imply raising, and one person may hold
+  // either, both or neither.
+  //
+  // A level ABOVE `edit` on change_orders was the obvious alternative and is a trap. Two of
+  // them: effectiveAccess short-circuits an owner to the literal "edit" for every area, so an
+  // owner could not approve an unlock in their own business; and migration 188's restrictive
+  // policies test `current_area_level('change_orders') = 'edit'` literally, so an approver
+  // would be refused every change-order write at PostgREST — with no gate table, lint or
+  // preflight check standing behind either. Two areas keeps `edit` the top level of both and
+  // neither trap exists.
+  //
+  // Two levels, like commissions proves is supported. There is nothing to "view" here: the
+  // unlock request and its history render off the order screen under change_orders/orders.
+  //
+  // Omitted from sales_rep, crew_leader and driver, so it is DENIED by default and nobody —
+  // including every existing crew leader — gains it on the day it ships. Admins hold it by
+  // preset, which is the answer Carolyn picked ("everyone starts at None except owners and
+  // admins; you tick Approve for the specific crew leaders you trust").
+  { key: "change_order_approve", label: "Approve Changes",  group: "workspace",
+    hint: "Unlock a signed order so it can be changed", levels: ["none", "edit"] },
   { key: "build_schedule",    label: "Build Schedule",     group: "workspace", hint: "Crews, build dates, the board",       levels: RVE },
   { key: "delivery_schedule", label: "Delivery Schedule",  group: "workspace", hint: "Loads, routes, drivers",              levels: RVE },
   { key: "repairs",           label: "Repairs",            group: "workspace", hint: "Service jobs and history",            levels: RVE },
@@ -68,6 +210,25 @@ export const AREAS: Area[] = [
   { key: "commissions",       label: "Commissions",        group: "workspace", hint: "Payouts — 'Own only' hides everyone else's",
     levels: ["none", "own", "edit"] },
   { key: "reports",           label: "Reports",            group: "workspace", hint: "Sales, leads, revenue",               levels: RVE },
+  // CSM SYNERGY'S OWN BOARDS — bugs, feature requests, roadmap, client setup. Internal only.
+  //
+  // Carolyn, 2026-09-02, with Settings → Team open beside the Projects people list: "I feel
+  // like THIS should be where we add them. And here we say ... we give them access to
+  // projects." Until now the two lists were not connected in any way — no trigger, no shared
+  // column, nothing — and the only way onto the board was the Projects-side roster, which
+  // also happens to be where operator access to every builder's account is handed out.
+  //
+  // An AREA rather than a per-person boolean, and the reason is that there is nowhere honest
+  // to put a boolean: sanitizeAccess drops unknown keys, so it cannot ride in
+  // client_users.access; a new client_users column is tenancy-backbone surgery for a value
+  // meaningful to one tenant; and storing it on pm_people puts the grant back in Projects,
+  // which is exactly what she is asking us to stop. An area also gives view/edit for free,
+  // and that split maps ONTO the one portal-projects already has (READ_ACTIONS vs
+  // can_write), so nothing new has to be invented to express "can look, cannot change".
+  //
+  // Omitted from every preset below, so it resolves to 'none' for every non-owner on every
+  // tenant. internalOnly keeps it off builders' Team screens entirely.
+  { key: "projects",          label: "Projects",           group: "workspace", hint: "CSM Synergy's internal boards — bugs, features, roadmap", levels: RVE, internalOnly: true },
 
   // ── Settings ─────────────────────────────────────────────────────────────
   { key: "settings_structures", label: "Structures",           group: "settings", hint: "Styles, sizes, base prices",          levels: RVE },
@@ -85,12 +246,38 @@ export const AREAS: Area[] = [
 export const AREA_KEYS: string[] = AREAS.map((a) => a.key);
 const AREA_BY_KEY = new Map(AREAS.map((a) => [a.key, a]));
 
+/**
+ * The job titles a builder picks from, in DESCENDING order of authority — the Team screen
+ * renders the pills in this order, so it is the reading order of the whole model.
+ *
+ * Ten of them since 2026-09-07 (Carolyn: "Owner, Office Staff, Sales Manager, Sales Rep,
+ * Dealer, Crew Leader, Crew Member, Scheduler, Driver"). Her nine did not include ADMIN, and
+ * her decision was to KEEP it rather than fold it into Office Staff: admin is not just a
+ * label here — it is the only title that may hold a granted Billing switch (see ownerGranted)
+ * and roleForTitle maps it to the coarse role='admin' that older RLS policies read. Retitling
+ * every existing admin would have moved real people's access on a rename.
+ *
+ * ⚠️ ADDING A TITLE IS A THREE-PLACE CHANGE and two of them fail SILENTLY:
+ *   1. here + PRESETS below;
+ *   2. `k_presets` inside area_level_for() — the SQL twin the RESTRICTIVE RLS policies read.
+ *      A title missing there resolves to 'none' for EVERY area, so the person passes every
+ *      edge-function gate and then reads empty lists with error === null;
+ *   3. client_users_title_check — a hardcoded CHECK constraint (100_user_access.sql:53,
+ *      re-issued by 207). A title missing there cannot be SAVED at all.
+ * scripts/preflight.mjs now compares this list against k_presets in both directions, which
+ * covers (2); (3) has no guard, so read 207's header before adding the eleventh.
+ */
 export const TITLES: { key: Title; label: string; blurb: string }[] = [
-  { key: "owner",       label: "Owner",       blurb: "Everything, always — cannot be reduced" },
-  { key: "admin",       label: "Admin",       blurb: "Runs the business day to day; an owner can grant Billing" },
-  { key: "sales_rep",   label: "Sales Rep",   blurb: "Sells: designs, quotes, contacts, own commission" },
-  { key: "crew_leader", label: "Crew Leader", blurb: "Runs builds and repairs" },
-  { key: "driver",      label: "Driver",      blurb: "Runs deliveries" },
+  { key: "owner",         label: "Owner",         blurb: "Everything, always — cannot be reduced" },
+  { key: "admin",         label: "Admin",         blurb: "Runs the business day to day; an owner can grant Billing" },
+  { key: "office_staff",  label: "Office Staff",  blurb: "Quotes, orders and paperwork; keeps business details current" },
+  { key: "sales_manager", label: "Sales Manager", blurb: "Runs the sales team and sees everyone's numbers" },
+  { key: "sales_rep",     label: "Sales Rep",     blurb: "Sells: designs, quotes, contacts, own commission" },
+  { key: "dealer",        label: "Dealer",        blurb: "Sells their own customers only — sees nobody else's" },
+  { key: "scheduler",     label: "Scheduler",     blurb: "Plans builds, deliveries and repairs" },
+  { key: "crew_leader",   label: "Crew Leader",   blurb: "Runs builds and repairs" },
+  { key: "crew_member",   label: "Crew Member",   blurb: "Sees their build board and repairs, changes nothing" },
+  { key: "driver",        label: "Driver",        blurb: "Runs deliveries" },
 ];
 
 /** A title's default switches. Anything a preset omits is "none" — new areas are therefore
@@ -100,19 +287,96 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   owner: Object.fromEntries(AREA_KEYS.map((k) => [k, k === "commissions" ? "edit" : "edit"])),
   admin: {
     designer: "edit", designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    change_orders: "edit", change_order_approve: "edit",
     build_schedule: "edit", delivery_schedule: "edit", repairs: "edit", commissions: "edit", reports: "edit",
     settings_structures: "edit", settings_options: "edit", settings_branding: "edit",
     settings_crm: "edit", settings_quickbooks: "edit", settings_email: "edit",
     settings_team: "edit",
     settings_billing: "none",
   },
+  // The five titles below arrived together on 2026-09-07. Each one's shape is Carolyn's
+  // answer to "what should this person get the moment you pick the title", and the switches
+  // stay editable per person afterwards — a preset is a starting point, never a ceiling.
+  //
+  // Office staff run the paperwork: they process quotes, orders and change orders, keep the
+  // inventory list straight, and can SEE what is scheduled without moving anything. The two
+  // settings cards are the ones a business's paperwork actually depends on — the details that
+  // print on an estimate, and the accounting mappings. Team, Billing, Structures, Options,
+  // CRM and Email are all omitted, so they cannot reshape the product or the money.
+  //
+  // `designer` shipped ABSENT here for a few hours on 2026-09-07 and Carolyn corrected it the
+  // same day — "Give Office Staff the designer too". The reasoning it replaced was that this
+  // title manages quote RECORDS rather than building them, with the designer switched on per
+  // person for whoever takes phone orders. That had the ratio backwards: in a shed business
+  // the person answering the phone IS the one who builds the quote, so the exception was the
+  // rule and every office staffer would have needed the same click.
+  //
+  // Note they could already SUBMIT one — submit-estimate accepts designer:'edit' OR
+  // designs:'edit' — so the absence only ever hid the tab, which is the confusing half of a
+  // half-granted permission rather than a safe one.
+  office_staff: {
+    designer: "edit",
+    designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
+    change_orders: "edit",
+    build_schedule: "view", delivery_schedule: "view", repairs: "view", reports: "view",
+    settings_branding: "edit", settings_quickbooks: "edit",
+  },
+  // A sales rep plus the two things that make someone a MANAGER of reps: everyone's payout
+  // figures (commissions:'edit' is what seesAllPayouts() reads) and change orders, because
+  // re-opening a signed agreement is the call a manager gets pulled into. Reports:'edit'
+  // rather than 'view' — running the numbers is the job.
+  //
+  // NOTE this is the ONE new preset that hands out pay information by default, and it was
+  // asked for explicitly (Carolyn, 2026-09-07: "Everyone's payouts"). It runs against the
+  // grain of the commissions confidentiality rule, which otherwise assumes nothing about pay
+  // is visible unless an owner grants it per person — so if that rule ever tightens, this
+  // line is the one to revisit.
+  sales_manager: {
+    designer: "edit", designs: "edit", contacts: "edit", inventory: "view",
+    orders: "edit", change_orders: "edit", commissions: "edit", reports: "edit",
+  },
   sales_rep: {
     designer: "edit", designs: "edit", contacts: "edit",
-    inventory: "view", orders: "view", commissions: "own",
+    // orders:'edit' since 2026-09-01 (Carolyn): a rep should be able to edit, complete and
+    // finalize an order, take the payment and get the signature — the whole sale, from the
+    // designer's Push to Invoice through to money in. change_orders is deliberately ABSENT
+    // rather than 'none': omission is how a preset denies, and spelling it out would suggest
+    // the list is exhaustive when new areas must keep defaulting closed.
+    inventory: "view", orders: "edit", commissions: "own",
+  },
+  // The independent salesperson the contacts:'own' scope was built for (see the AREAS comment
+  // on `contacts`, quoting Carolyn on a builder whose reps are dealers: "he also doesn't want
+  // them to see each other's quotes either"). Identical to a sales rep except that the
+  // customer list — and therefore the designs and leads hanging off it — is narrowed to the
+  // customers they are assigned to or following.
+  //
+  // ⚠️ CONSEQUENCE, NOT AN OVERSIGHT: 'own' is a READ scope. RANK scores it level with 'view',
+  // so canEdit(contacts) is FALSE and a dealer cannot edit a contact, add a note, log an
+  // activity, or send SMS/email — on their own customers included. That is the documented
+  // behaviour of the level (see ownContactsOnly), and making it a write scope is a separate
+  // decision that belongs to Carolyn, not a bug to patch here. An owner who wants a
+  // particular dealer to work their records switches that one person to contacts:'edit'.
+  dealer: {
+    designer: "edit", designs: "edit", contacts: "own",
+    inventory: "view", orders: "edit", commissions: "own",
+  },
+  // Owns all three boards. Everything else is 'view' because a scheduler has to see WHAT they
+  // are scheduling and WHO it is for — the building on the order, the customer to call about
+  // a delivery window — without being able to change the sale.
+  scheduler: {
+    build_schedule: "edit", delivery_schedule: "edit", repairs: "edit",
+    designs: "view", contacts: "view", inventory: "view", orders: "view",
   },
   crew_leader: {
     build_schedule: "edit", repairs: "edit",
     designs: "view", inventory: "view", orders: "view",
+  },
+  // Read-only on the two boards their leader runs: they see their jobs and what is coming,
+  // and cannot move a date, reassign a crew or close a job. Nothing else — the build card
+  // already carries the building spec (build_jobs snapshots style, size, roof and colours),
+  // so seeing the board does not require the design or the order behind it.
+  crew_member: {
+    build_schedule: "view", repairs: "view",
   },
   driver: {
     delivery_schedule: "edit",
@@ -155,12 +419,46 @@ export function effectiveAccess(
 export function canRead(access: Record<string, Level>, area: string): boolean {
   return RANK[access[area] ?? "none"] >= 1;
 }
+/**
+ * May they CHANGE things in this area? 'own' counts wherever the area says it writes — see
+ * the ownWrites flag — which is how contacts:'own' passes the eleven contacts:'edit' gates
+ * while commissions:'own' still does not pass anything.
+ *
+ * ⚠️ THIS ANSWERS "MAY THEY WRITE", NEVER "TO WHICH ROWS". A caller on 'own' who reaches a
+ * write must still be narrowed to the rows they own, and this function cannot do that for
+ * you — it has no row in its hands. portal-settings' CONTACT_ROW_SCOPE table is where that
+ * happens, and preflight refuses a push where a contacts:'edit' action is missing from it.
+ */
 export function canEdit(access: Record<string, Level>, area: string): boolean {
-  return (access[area] ?? "none") === "edit";
+  const lvl = access[area] ?? "none";
+  if (lvl === "edit") return true;
+  return lvl === "own" && !!AREA_BY_KEY.get(area)?.ownWrites;
 }
 /** Commissions only: may they see OTHER people's payouts, or just their own? */
 export function seesAllPayouts(access: Record<string, Level>): boolean {
   return access.commissions === "edit";
+}
+
+/**
+ * Contacts only: is this caller limited to the customers they OWN or FOLLOW?
+ *
+ * The one place the literal 'own' is compared for this area, so the three enforcement points
+ * (RLS, the edge filters, the browser registry) cannot come to mean different things. It
+ * answers a narrower question than canRead/canEdit and deliberately does not overlap them.
+ * Since contacts gained `ownWrites` (2026-09-07) BOTH of those are true for 'own' — it reads
+ * and it writes — so this is the only thing left that says "…but only some of the rows", and
+ * it is doing more work than it used to. A write path that checks canEdit and not this one
+ * has granted a dealer the entire customer list.
+ *
+ * OWNERS CANNOT REACH IT and that is structural, not a check here: effectiveAccess()
+ * short-circuits `role === "owner"` to 'edit' on every area before a stored map is ever
+ * consulted, so an owner's contacts level is never the string 'own' no matter what is in
+ * client_users.access. The SQL twin (area_level_for) short-circuits the same way, and both
+ * the RLS resolver and the edge filters are built on top of that rather than re-testing the
+ * role — a filter that forgets owners are absolute empties the owner's own dashboard.
+ */
+export function ownContactsOnly(access: Record<string, Level>): boolean {
+  return access.contacts === "own";
 }
 
 /**
@@ -173,6 +471,13 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
  *   2. NOBODY GRANTS ABOVE THEMSELVES — an admin without QuickBooks cannot give QuickBooks
  *      to anyone, including themselves. Without this the whole model is decorative: any
  *      admin could self-promote to everything in two clicks and nothing would record it.
+ *   3. AN 'own' HOLDER PASSES ON 'own', NEVER 'view'. Rule 2 alone does not cover this:
+ *      RANK deliberately scores 'own' and 'view' the SAME (both are "may read"), so
+ *      `RANK[view] <= RANK[own]` is true and an admin an owner had deliberately narrowed to
+ *      contacts:'own' could hand a rep the whole customer list — widening past their own
+ *      scope, which is exactly what rule 2 exists to forbid. It never surfaced before
+ *      because commissions is the only other 'own' area and its vocabulary has no 'view' to
+ *      pass on. Row scope is not a rank, so it needs its own line.
  */
 export function mayGrant(
   granterRole: string | null | undefined,
@@ -185,7 +490,17 @@ export function mayGrant(
   if (!a.levels.includes(level)) return false;
   if (granterRole === "owner") return true;
   if (a.ownerGranted) return false;
-  return RANK[level] <= RANK[granterAccess[area] ?? "none"];
+  const held = granterAccess[area] ?? "none";
+  if (held === "own" && level !== "own" && level !== "none") return false;
+  // 4. NOBODY GRANTS A WRITE THEY DO NOT HOLD. RANK scores 'own' and 'view' the same,
+  //    because it was written when 'own' was purely a read scope. Since contacts gained
+  //    ownWrites that tie is a hole in rule 2: a granter narrowed to contacts:'view' —
+  //    genuinely read-only — would pass `RANK[own] <= RANK[view]` and be able to hand
+  //    somebody the ability to edit customer records, notes and SMS. Comparing the WRITE
+  //    property directly closes it without disturbing what RANK means for row breadth.
+  const writes = (lv: Level) => lv === "edit" || (lv === "own" && !!a.ownWrites);
+  if (writes(level) && !writes(held)) return false;
+  return RANK[level] <= RANK[held];
 }
 
 /**
@@ -252,8 +567,18 @@ export function mayGrantMap(
 }
 
 /** Metadata the Team screen renders from, so the browser never hard-codes an area list. */
-export function accessMetadata() {
-  return { areas: AREAS, titles: TITLES, presets: PRESETS };
+/**
+ * The grid the Team screen renders itself from — areas, titles and presets, so the browser
+ * never hard-codes an area.
+ *
+ * ⚠️ DEFAULTS TO HIDING internalOnly AREAS, and the default is the point: this reaches every
+ * tenant's browser, and a caller that has not thought about whose screen it is building
+ * should get the answer that cannot leak. Pass `{ internal: true }` only once you have
+ * established that the tenant IS ours — `isInternalTenant`, not a slug comparison.
+ */
+export function accessMetadata(opts?: { internal?: boolean }) {
+  const areas = opts && opts.internal ? AREAS : AREAS.filter((a) => !a.internalOnly);
+  return { areas, titles: TITLES, presets: PRESETS };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

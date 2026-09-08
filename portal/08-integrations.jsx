@@ -1395,6 +1395,7 @@ function CommissionStructure({ clientId }) {
       </button>
       <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12, lineHeight: 1.5 }}>
         This sets the rules that per-person rates (Settings → Team) and the Commissions report run on. Every period is still reviewed and approved by you before it's payable.
+        {" "}Commissions cover the sales you invoice from Structure Studio; an invoice raised in your CRM isn't included.
       </div>
     </div>
   );
@@ -1436,8 +1437,19 @@ const LEVEL_RANK = { none: 0, own: 1, view: 1, edit: 2 };
 // Commissions speaks a different language from the rest: its three settings are about WHOSE
 // payouts you see, not how much you can change. "Everyone's" is the honest word for the top
 // of that row — calling it "Edit" invites an owner to grant it thinking it means edit rights.
+// ⚠️ EVERY AREA THAT ADDS A NON-STANDARD LEVEL NEEDS A LINE HERE. The fallback is `|| lv`,
+// which renders the raw slug — so a new level does not throw, it just puts a switch reading
+// "own" in front of a builder. `contacts` gained one on 2026-09-05 and did exactly that until
+// this line landed.
 function ssLevelLabel(areaKey, lv) {
   if (areaKey === "commissions") return ({ none: "No access", own: "Own only", edit: "Everyone's" })[lv] || lv;
+  // Contacts reads all four: 'own' narrows which CUSTOMERS a person sees, and unlike
+  // commissions it sits alongside a real 'view' rather than replacing it — dropping 'view'
+  // would have silently demoted everyone already stored on it.
+  if (areaKey === "contacts") return ({ none: "No access", own: "Own only", view: "View", edit: "Edit" })[lv] || lv;
+  // Approving unlocks is a yes/no, and "Edit" is the wrong word for it — nothing is being
+  // edited. Two levels, so this row renders two buttons rather than three.
+  if (areaKey === "change_order_approve") return ({ none: "No", edit: "Can approve" })[lv] || lv;
   return ({ none: "No access", view: "View", edit: "Edit" })[lv] || lv;
 }
 
@@ -1460,12 +1472,23 @@ function ssSwitchLock(area, isOwner, title) {
   return null;
 }
 
+// One colour per job title, grouped so the Team table reads at a glance: purple/blue for the
+// two that run the business, green for everyone who sells, amber for everyone who builds,
+// indigo for everyone who moves buildings. Ten of them since 2026-09-07 — a title with no
+// entry here falls back to grey, which is legible but says nothing, so keep this in step with
+// TITLES in _shared/access.ts. (The server ships TITLES; this is presentation only, and a
+// missing colour is the one drift here that is genuinely harmless.)
 const TITLE_CHIP = {
-  owner:       ["#EDE9FE", "#5B21B6"],
-  admin:       ["#DBEAFE", "#1E40AF"],
-  sales_rep:   ["#DCFCE7", "#166534"],
-  crew_leader: ["#FEF3C7", "#92400E"],
-  driver:      ["#E0E7FF", "#3730A3"],
+  owner:         ["#EDE9FE", "#5B21B6"],
+  admin:         ["#DBEAFE", "#1E40AF"],
+  office_staff:  ["#E0F2FE", "#075985"],
+  sales_manager: ["#D1FAE5", "#065F46"],
+  sales_rep:     ["#DCFCE7", "#166534"],
+  dealer:        ["#ECFCCB", "#3F6212"],
+  scheduler:     ["#FAE8FF", "#86198F"],
+  crew_leader:   ["#FEF3C7", "#92400E"],
+  crew_member:   ["#FFEDD5", "#9A3412"],
+  driver:        ["#E0E7FF", "#3730A3"],
 };
 
 function ssInitials(name, email) {
@@ -1510,6 +1533,21 @@ function ssAccessSummary(m, meta) {
   if (m.title === "admin" && lvl("settings_billing") !== "none" &&
       areas.every((a) => a.key === "settings_billing" || lvl(a.key) === (adminPreset[a.key] || "none"))) {
     return "All tabs · Settings incl. Billing";
+  }
+  // ...and the same courtesy for the other eight titles, generically. Before 2026-09-07 only
+  // Admin had a shorthand and everyone else got the itemised list, which was tolerable at
+  // five titles and is not at ten: an untouched Office Staff itemises eleven area names into
+  // a table cell. Anyone sitting exactly on their preset is described by the preset.
+  //
+  // ⚠️ IT MUST FALL THROUGH THE MOMENT ANYTHING DEVIATES. This column is what an owner scans
+  // to answer "what can Dana actually do?", so a person carrying a single override has to
+  // look different from one who does not — "Standard Dealer" on someone who has been handed
+  // Structures would be the exact lie the column exists to prevent. Compared against the
+  // RESOLVED map, so an override that merely restates the preset correctly reads as standard.
+  const ownPreset = presets[m.title];
+  if (ownPreset && areas.every((a) => lvl(a.key) === (ownPreset[a.key] || "none"))) {
+    const label = ((meta && meta.titles) || []).find((t) => t.key === m.title);
+    if (label) return "Standard " + label.label;
   }
   const names = (level) => areas.filter((a) => lvl(a.key) === level).map((a) => a.label);
   const parts = [];
@@ -1779,7 +1817,10 @@ function CommissionTeamInner() {
   // migration 100 and has no title yet, so an older account never renders a blank cell.
   const titleChip = (m, titles) => {
     const t = (titles || []).find((x) => x.key === m.title);
-    const c = { owner: ["#EDE9FE", "#5B21B6"], admin: ["#DBEAFE", "#1E40AF"] }[m.title] || ["#F1F5F9", "#475569"];
+    // Reads TITLE_CHIP rather than its own two-entry copy. That copy predated the other
+    // eight titles and would have rendered every one of them the same grey, in the column
+    // whose whole job is telling them apart.
+    const c = TITLE_CHIP[m.title] || ["#F1F5F9", "#475569"];
     return <span style={{ background: c[0], color: c[1], borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{t ? t.label : (m.role || "user")}</span>;
   };
   const sw = (on) => <span style={{ display: "inline-block", width: 34, height: 20, borderRadius: 20, background: on ? ACCENT : "#CBD5E1", position: "relative", verticalAlign: "middle", transition: "background .12s" }}><span style={{ position: "absolute", top: 2, [on ? "right" : "left"]: 2, width: 16, height: 16, borderRadius: "50%", background: "#FFF" }} /></span>;
@@ -2098,12 +2139,23 @@ function CommissionsReport({ clientId }) {
       setErr(null);
       setReconciling(true);
       // 1. Paint the ledger as it stands. This is the leg that used to wait behind compute.
-      try { await refreshEntries(); }
+      let painted = null;
+      try { painted = await refreshEntries(); }
       catch (e) { setErr(e.message); setData({ entries: [] }); }
-      // 2. Reconcile from GHL behind the paint, then repaint. A rep's compute 403s and is
-      //    ignored — they only ever read their own rows.
-      try { await call({ action: "compute" }); await refreshEntries(); }
-      catch (_e) { /* non-owner or transient — the painted rows stand */ }
+      // 2. Reconcile from GHL behind the paint, then repaint — but ONLY for someone the
+      //    server says may run it. compute is gated on canSeeRates (portal-commissions), so
+      //    a rep's call was a guaranteed 403 on every single mount, and the invoke wrapper
+      //    files every 4xx as severity='info'. A refusal that fires by construction for the
+      //    whole team is precisely what the `having count(*) > 20` triage query is meant to
+      //    catch, so this one drowned that signal instead of reporting anything.
+      //    ⚠️ Keyed off the response we JUST received, never off `data` — that is seeded
+      //    from ssCacheGet and can be another session's copy. And it still runs whenever
+      //    that response is missing (a failed read): an owner's reconcile is the money path
+      //    and must never be skipped just because we could not vouch for the caller.
+      if (!painted || painted.canSeeRates) {
+        try { await call({ action: "compute" }); await refreshEntries(); }
+        catch (_e) { /* transient, or a caller we could not vouch for — the painted rows stand */ }
+      }
       setReconciling(false);
     })().finally(() => { inflight.current = null; });
     inflight.current = run;
@@ -2353,7 +2405,7 @@ function CommissionsReport({ clientId }) {
         )}
       </div>
 
-            {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as orders come in." : "You have no commissions yet."}</div>}
+            {entries.length === 0 && <div style={{ ...S.card, color: "#64748B", fontSize: 13 }}>{seesAll ? "No commissions yet — they appear here as you invoice sales from Structure Studio." : "You have no commissions yet."}</div>}
 
       {entries.length > 0 && (
         <div style={{ ...S.card, marginBottom: 14, padding: "12px 14px" }}>
@@ -2566,7 +2618,7 @@ function CommissionsReport({ clientId }) {
   );
 }
 
-// ── MY VIEW — the one settings card that configures the PERSON, not the business ────
+// ── MY VIEW — the settings that configure the PERSON, not the business ───────────
 // Carolyn, 2026-08-28 @42:00: "I'm trying to think which I want to have the default. I want
 // them to be able to decide if they want the default. I don't want it to always be list.
 // They can decide to set their default to be pipeline or list, whichever one that they want."
@@ -2579,39 +2631,190 @@ function CommissionsReport({ clientId }) {
 // big scope is allowing them to organize their cards in the way that they want them to be."
 // The column is jsonb and save_prefs already accepts a cardOrder key, so the storage is
 // waiting; the UI is not built because she scoped it out.
+//
+// ⚠️ THE REPLY-TO CARD BELOW DOES NOT WORK YET, and it says so on screen when it doesn't.
+// save_prefs rebuilds prefs from a WHITELIST and writes the result over the whole column, so
+// `replyToEmail` is accepted and discarded until the server edit in
+// .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
+// deliberately shipped first so the two can land independently.
 function MyViewSettings({ prefs, onSaved }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
+  // ── The reply-to card's own state ───────────────────────────────────────────────
+  // Seeded from prefs but NOT re-synced to it, deliberately: a save that the server refuses
+  // to persist (see commit) must leave what the person typed on screen next to the message
+  // explaining what happened, rather than silently reverting to the stored value and looking
+  // like nothing was ever entered.
+  const [addr, setAddr] = useState(((prefs && prefs.replyToEmail) || ""));
+  const [addrBusy, setAddrBusy] = useState(false);
+  const [addrMsg, setAddrMsg] = useState(null);
+  const savedAddr = (prefs && prefs.replyToEmail) || "";
+
+  // One writer for both cards. save_prefs takes the WHOLE prefs map and replaces the stored
+  // blob with it, so every save has to carry the keys it is not changing -- hence the spread.
+  const commit = async (patch) => {
+    const body = { action: "save_prefs", prefs: { ...(prefs || {}), ...patch } };
+    const { data, error } = await sb.functions.invoke("portal-settings", { body });
+    if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+    // Hand the saved map back so the shell stops serving the stale one -- otherwise the
+    // setting only takes effect on the next full reload, which reads as not having saved.
+    if (onSaved) onSaved(data && data.prefs);
+    return (data && data.prefs) || null;
+  };
+
   const save = async (next) => {
     setVal(next); setBusy(true); setMsg(null);
-    try {
-      const body = { action: "save_prefs", prefs: { ...(prefs || {}), designsView: next } };
-      const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
-      // Hand the saved map back so the shell stops serving the stale one -- otherwise the
-      // setting only takes effect on the next full reload, which reads as not having saved.
-      if (onSaved) onSaved(data && data.prefs);
-      setMsg({ ok: "Saved." });
-    } catch (e) { setMsg({ err: e.message }); }
+    try { await commit({ designsView: next }); setMsg({ ok: "Saved." }); }
+    catch (e) { setMsg({ err: e.message }); }
     setBusy(false);
   };
+
+  // Same shape the server applies to a recipient address in crm_send_email. Checked here so
+  // a typo is caught while the person is still looking at the field -- server-side it is
+  // dropped silently, which would read as the setting refusing to save for no reason.
+  const looksLikeEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+
+  const saveAddr = async () => {
+    const next = addr.trim();
+    if (next && !looksLikeEmail(next)) { setAddrMsg({ err: "That doesn't look like an email address." }); return; }
+    setAddrBusy(true); setAddrMsg(null);
+    try {
+      const back = await commit({ replyToEmail: next });
+      const kept = (back && back.replyToEmail) || "";
+      // ⚠️ THE WHITELIST CHECK, and it is not defensive padding -- it is the one signal that
+      // separates "saved" from "accepted and thrown away". save_prefs rebuilds the prefs blob
+      // from a fixed list of keys and writes the result over the whole column, so a key it
+      // does not know is dropped with an { ok: true } response and no error anywhere. Until
+      // the server edit in .temp/HANDOFF-reply-to-prefs.md lands, EVERY save of this field
+      // takes that path. Reporting it plainly costs four lines; not reporting it costs
+      // somebody an afternoon on a setting that says "Saved." and does nothing.
+      if (next && kept !== next) {
+        setAddrMsg({ err: "Saved, but this server build didn't keep the address — replies will keep going to your login email for now. Tell CSM Synergy." });
+      } else {
+        setAddrMsg({ ok: next ? "Saved." : "Cleared — replies go to your login email." });
+      }
+    } catch (e) { setAddrMsg({ err: e.message }); }
+    setAddrBusy(false);
+  };
+
   return (
-    <div style={S.card}>
-      <div style={S.h2}>How the Pipeline tab opens</div>
-      <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
-        Your own default, not the business's — everyone on your team picks their own. Opening a
-        direct link to a list or a board still shows whichever the link names.
-      </p>
-      <div style={{ display: "flex", gap: 8 }}>
-        {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
-          <button key={k} disabled={busy} onClick={() => save(k)}
-            style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
-            {label}
-          </button>
-        ))}
+    <div>
+      <div style={S.card}>
+        <div style={S.h2}>How the Pipeline tab opens</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          Your own default, not the business's — everyone on your team picks their own. Opening a
+          direct link to a list or a board still shows whichever the link names.
+        </p>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[["list", "List"], ["pipeline", "Pipeline board"]].map(([k, label]) => (
+            <button key={k} disabled={busy} onClick={() => save(k)}
+              style={{ ...S.btn(val === k ? ACCENT : "#F1F5F9", val === k ? "#FFF" : "#334155"), opacity: busy ? 0.6 : 1 }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
       </div>
-      {msg && <div style={{ marginTop: 10, fontSize: 12, color: msg.err ? "#DC2626" : "#15803D" }}>{msg.err || msg.ok}</div>}
+
+      {/* ── WHERE REPLIES GO — Carolyn 2026-09-04 @35:06 ────────────────────────────
+          "the company has to set up their domain to work. And then every user should be able
+          to go in and say, when somebody replies to an email, send it here. But that should
+          be in their profile."
+
+          Her word was "profile", and this card is in My View rather than the profile dialog.
+          Both are per-person and both save through a "self"-gated action; My View is the
+          screen that already exists for "settings that configure the person, not the
+          business", which is what this is. Worth revisiting with her -- noted in
+          .temp/HANDOFF-reply-to-prefs.md rather than decided here.
+
+          ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
+          address: the customer's reply reaches this address AND the customer's record in
+          StructureStudio. Wording it as "send replies here" would describe GoHighLevel's
+          behaviour, which is what she was comparing us to, and the first person to notice a
+          reply still landing in the app would reasonably call it a bug. */}
+      <div style={S.card}>
+        <div style={S.h2}>Where replies to your emails go</div>
+        <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
+          When you email a customer from StructureStudio and they hit Reply, their reply lands on
+          the customer's record here — and, if you fill this in, in your own inbox at the same
+          time. Leave it blank to use the email address you sign in with.
+        </p>
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <input
+            type="email"
+            value={addr}
+            disabled={addrBusy}
+            onChange={(e) => { setAddr(e.target.value); setAddrMsg(null); }}
+            onKeyDown={(e) => { if (e.key === "Enter") saveAddr(); }}
+            placeholder="you@yourcompany.com"
+            style={{ ...S.input, flex: 1, minWidth: 220, opacity: addrBusy ? 0.6 : 1 }}
+          />
+          <button
+            onClick={saveAddr}
+            disabled={addrBusy || addr.trim() === savedAddr}
+            style={{ ...S.btn(ACCENT, "#FFF"), opacity: (addrBusy || addr.trim() === savedAddr) ? 0.5 : 1 }}>
+            Save
+          </button>
+        </div>
+        {addrMsg && <div style={{ marginTop: 10, fontSize: 12, color: addrMsg.err ? "#DC2626" : "#15803D" }}>{addrMsg.err || addrMsg.ok}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ─── Options tab section headers (Carolyn 2026-09-04 @27:32) ───
+// She drew these on the shared screen: "right here is a header that this says exterior.
+// Stuff that goes on the exterior of the building ... that is doors, that is windows, that
+// is vents ... I've kind of done on all of this other, the insulation, the electrical ...
+// so I think we need to separate exterior, interior."
+//
+// ⚠️ THIS IS THE HALF SHE COULD NOT DO HERSELF. She took "the options page" as her task,
+// but the Options tab was a flat stack of seven components with no grouping layer, so the
+// headers are code and only the CONTENT inside each card was ever hers to reorganise.
+//
+// THREE groups, not the two she named, and the third is not padding: Wall Heights is
+// structural, which is neither an inside nor an outside thing.
+//
+// ⚠️ THIS PARAGRAPH USED TO ARGUE THE OPPOSITE of what the code now does, so read the reason
+// before moving anything back. It said Layout Pricing had to stay in BUILDING because its rows
+// spanned both sides — lofts and workbenches inside, shutters and flower boxes outside. That
+// was true when it was written and is not true now: doors, windows, vents, ramps and the three
+// electrical devices have each since left for their own card, and what remains is loft,
+// workbench, the two shelves and rough opening. So it moved to Interior and was renamed
+// "Interior items" (Carolyn 2026-09-07).
+//
+// Rough opening is the one row that does not fit — it is a hole in an exterior wall. It stays
+// anyway, by her explicit call: "I plan to change things on it later." Do not split it out on
+// tidiness grounds; she is going to change what that row IS.
+//
+// Presentation only. No data moves, no saved design changes, no price changes.
+
+// One tone per group, so a builder can see which section they are scrolling through. Every hex
+// here is ALREADY in the portal — INV_SALE_COLORS and two rows of INV_GROUP_COLORS in
+// 01-core.jsx — so the Options tab reads as the same system as the inventory chips rather than
+// introducing a fourth palette. ⛔ Not SYNERGY_TEAL: its own comment reserves it.
+const OPTIONS_GROUP_TONES = {
+  Building: { bg: "#EEF2FF", fg: "#3D3672", hint: "#6B6595" },  // brand purple — structural
+  Exterior: { bg: "#ECFEFF", fg: "#0E7490", hint: "#3F8A9E" },  // cyan  — the outside
+  Interior: { bg: "#F0FDF4", fg: "#15803D", hint: "#3F8A5C" },  // green — the inside
+};
+const OPTIONS_GROUP_FALLBACK = { bg: "#F1F5F9", fg: "#334155", hint: "#94A3B8" };
+
+function OptionsGroup({ title, hint, children }) {
+  const tone = OPTIONS_GROUP_TONES[title] || OPTIONS_GROUP_FALLBACK;
+  return (
+    // The bar runs the FULL HEIGHT of the group, not just the header — that is what makes the
+    // boundary readable while scrolling past several cards. borderRadius stays 0 on the barred
+    // edge: a rounded corner on a single-sided border detaches the bar from the band above it.
+    <div style={{ marginTop: 18, marginBottom: 6, borderLeft: `4px solid ${tone.fg}`, borderRadius: 0, paddingLeft: 12 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, background: tone.bg, borderRadius: "0 8px 8px 0", padding: "7px 12px", marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: tone.fg, whiteSpace: "nowrap" }}>{title}</div>
+        {/* Kept truncating rather than wrapping: the band is one line tall by design, and a
+            narrow window should shorten the hint, not push the cards down. */}
+        <div style={{ fontSize: 12, color: tone.hint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{hint}</div>
+      </div>
+      {children}
     </div>
   );
 }
@@ -2624,7 +2827,12 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
     ["options", "Options", "Add-on items and rates"],
     ["colors", "Colors", "Paint, shingle, and metal palettes"],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape"],
-    ["branding", "Branding", "Your customer link's look & feel, business details, and estimate settings"],
+    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
+    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
+    // client: "we need to have everything about the company ... the EIN, all that stuff needs
+    // to be in here. Their terms and conditions, company, branding, company information").
+    // Her structure is Branding / Company / Team, and Team already exists below.
+    ["company", "Company", "Your legal business details, address, and the terms printed on estimates"],
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
     ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
@@ -2702,12 +2910,35 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
-      {sub === "options" && (<><LayoutPricing viewingLabel={viewingLabel} clientId={clientId} /><DoorsView viewingLabel={viewingLabel} clientId={clientId} /><RampsView viewingLabel={viewingLabel} clientId={clientId} /><WindowsView viewingLabel={viewingLabel} clientId={clientId} /></>)}
+      {sub === "options" && (<>
+        <OptionsGroup title="Building" hint="Structural upgrades to the building itself">
+          <WallHeights viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+        <OptionsGroup title="Exterior" hint="Anything that goes on the outside of the building">
+          <DoorsView viewingLabel={viewingLabel} clientId={clientId} />
+          <WindowsView viewingLabel={viewingLabel} clientId={clientId} />
+          <VentsView viewingLabel={viewingLabel} clientId={clientId} />
+          <RampsView viewingLabel={viewingLabel} clientId={clientId} />
+          {/* Cladding is the outside of the building by definition, so it belongs to this
+              group's own hint. It sits last because it is the one card here that is not a
+              catalog of things a customer places on the plan. */}
+          <CladdingView viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+        <OptionsGroup title="Interior" hint="Anything that goes on the inside">
+          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
+          <Electrical viewingLabel={viewingLabel} clientId={clientId} />
+          <Insulation viewingLabel={viewingLabel} clientId={clientId} />
+        </OptionsGroup>
+      </>)}
       {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
+      {/* Same component, different section. SettingsView's form state covers every field
+          whichever section renders and its save is global, so the two tabs cannot save
+          half a form between them — see the note at the top of SettingsView. */}
+      {sub === "company" && <SettingsView section="company" />}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}

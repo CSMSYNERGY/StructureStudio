@@ -1,23 +1,63 @@
 // The merged Contacts & Designs era (2026-08-24 → 08-26, commit 4a54dad) published two
 // sub-view URLs: /portal/designs/people and /portal/designs/deals. The 08-26 split makes
 // each of those views a whole tab again, so the two legacy subs rewrite themselves —
-// "people" is now /portal/leads, "deals" is now plain /portal/designs.
+// "people" is now /portal/contacts, "deals" is now plain /portal/designs.
 //
 // `replace` so an alias never sits in history and traps the back button on itself.
 //
 // ⚠️ RECORD SUBS (c-…/d-…) ARE DELIBERATELY NOT TOUCHED HERE. The record dispatch below
 // accepts them under either tab, and rewriting one across tabs would be actively harmful:
 // the URL-normalising effect nulls a refused tab's sub, so sending a designs-only user's
-// /portal/designs/c-<id> over to `leads` would bounce off the clamp and lose the record
+// /portal/designs/c-<id> over to `contacts` would bounce off the clamp and lose the record
 // they were looking at. A legacy record URL renders the record; only the two list views
 // need correcting, because only they stopped existing.
 function DesignsLegacySub({ sub, navigate }) {
   useEffect(() => {
-    if (sub === "people") navigate("leads", null, true);
+    if (sub === "people") navigate("contacts", null, true);
     else if (sub === "deals") navigate("designs", null, true);
   }, [sub]);
   return null;
 }
+
+// ── Nav rail glyphs ───────────────────────────────────────────────────────────
+// MODULE SCOPE, not a Dashboard local. These are ~22 static SVG trees with nothing
+// from the component in them, and building them inside the body rebuilt every one of
+// them on every render of the shell — a tab switch, a token refresh, a picker toggle.
+// Built once at load instead; React elements are immutable, so sharing them is exactly
+// what they are for. Keyed by tab id: navItem/soonItem look the glyph up by the same id
+// the router uses, so a tab without an entry renders its label with no icon rather than
+// throwing.
+const ICONS = {
+  admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
+  designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
+  quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
+  accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
+  // Kanban columns of descending height — the section is named Pipeline now, and the old
+  // staggered grid read as "a dashboard of things" rather than a board of stages.
+  designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
+  // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
+  // took that glyph in the same week, and two column icons in one rail read as one thing.
+  projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
+  contacts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
+  pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
+  "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
+  colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
+  settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  billing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+  "on-demand-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>,
+  "build-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>,
+  "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+  "inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>,
+  "repairs": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
+  // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
+  // "orders", so the two read as different things in the rail.
+  "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
+  "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
+  "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
+  "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
+  "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
+};
 
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
@@ -29,6 +69,17 @@ function Dashboard({ session }) {
   });
   // The Settings / Admin sub-page, lifted out of those shells so it can live in the URL.
   const [sub, setSub] = useState(() => ssParsePath().sub || null);
+  // Which DEAL a customer record should open on, when the reader arrived by clicking that
+  // deal in the Pipeline. Carolyn 2026-09-02: a contact record opens with nothing selected
+  // and "it's Greek, you have no idea" — but arriving from a pipeline row means the deal is
+  // already known, so there is nothing to guess.
+  //
+  // SELF-INVALIDATING BY SHAPE, which is why it stores the contact id alongside the deal
+  // rather than the deal alone: it is honoured only while `sub` still names that same
+  // contact, so walking to another record, or back and in again by hand, silently stops
+  // matching instead of preselecting a deal that belongs to somebody else. No cleanup
+  // effect, and nothing to forget on a new route.
+  const [recordDeal, setRecordDeal] = useState(null);   // { contactId, deal } | null
   // What the URL ASKED for, held until the role/operator gates have resolved. Without this
   // the clamp below runs on the first render — when isOperator is still false because
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
@@ -99,8 +150,7 @@ function Dashboard({ session }) {
     let cancelled = false;
     // ⚠️ A FAILED rpc IS NOT AN ANSWER OF `false`. supabase-js RESOLVES `{data, error}`
     // rather than rejecting, so the old `({ data })` destructure read a 403 or a 5xx as a
-    // plain "not an operator" — and since this effect re-runs on every auth event (see the
-    // entitlement comment below: onAuthStateChange mints a new session object each time),
+    // plain "not an operator" — and since this effect re-runs whenever a new token lands,
     // one bad answer mid-session unmounted AdminShell at the render below and binned the
     // staged work the keep-mounted comment there exists to protect, then remounted it blank
     // on its default sub with nothing recorded anywhere. The 403 is reachable: 051 revoked
@@ -110,7 +160,14 @@ function Dashboard({ session }) {
     // the entitlement fetch. Still fails CLOSED on a cold load, where false is the initial.
     sb.rpc("is_operator").then(({ data, error }) => { if (!cancelled && !error) setIsOperator(!!data); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [session]);
+    // ⏱ KEYED ON THE TOKEN, NOT THE SESSION OBJECT — the same reason spelled out on the
+    // entitlement effect below. onAuthStateChange mints a NEW session object on every auth
+    // event (INITIAL_SESSION, then SIGNED_IN, then each refresh) and PortalApp stores it, so
+    // `[session]` re-ran this rpc — and its two siblings, and the profile read — several
+    // times over during a single cold boot for one unchanged answer. The token is a string:
+    // equal tokens compare equal, a real rotation still re-asks, and the non-answer posture
+    // above is untouched.
+  }, [session.access_token]);
   // viewing = { clientId, companyName } while an operator has another tenant's portal
   // open. Designs/Contacts then read through operator-portal:get_portal (service-role,
   // audit-logged); statuses shown are the CACHED values (sync-design-status is
@@ -139,6 +196,95 @@ function Dashboard({ session }) {
     return () => { cancelled = true; };
   }, [session.access_token, viewing]);
 
+  // ── SUPPORT OPERATOR (migration 176) ─────────────────────────────────────────
+  // A support operator stands in the builder's shoes: the server resolves the VIEWED
+  // tenant's owner map instead of the operator god view. The browser has to agree, or the
+  // nav offers tabs whose every action 403s — the "disabled UI fails silently" shape, one
+  // level up.
+  //
+  // A SECOND rpc rather than a richer `is_operator`: that one is called by a live page and
+  // would break the moment its boolean became a record, and a schema change and a static
+  // asset cannot be deployed atomically. Same non-answer posture as its sibling above — a
+  // failed call keeps the last known value rather than reading as `false`, because false
+  // here means "full operator rights", which is the wrong way to fail.
+  const [isSupportOp, setIsSupportOp] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("is_support_operator").then(({ data, error }) => { if (!cancelled && !error) setIsSupportOp(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+    // Token-keyed, exactly as is_operator above — see the note there.
+  }, [session.access_token]);
+
+  // THE SECOND DOOR INTO PROJECTS (migration 183). True for an operator, and ALSO for a CSM
+  // Synergy team member granted the `projects` area on Settings → Team — someone who has no
+  // access to any builder's account and should not need one to file a bug.
+  //
+  // A THIRD rpc, for the same reason there is a second: is_operator is called by a live page
+  // and cannot grow a field, because a schema change and a static asset do not deploy
+  // atomically. can_open_projects answers both doors server-side so the browser never has to
+  // reconstruct the rule — and portal-projects re-checks it regardless, since a nav item is
+  // a courtesy and not a control.
+  //
+  // ⚠️ THREE STATES, NOT TWO: null = still asking, and it is not the same as "no".
+  //
+  // A plain false start would be safe for RENDERING (no tab is the right way to be wrong) and
+  // wrong for ROUTING: the URL-normalising effect below runs before this call returns, would
+  // read false as a refusal, and would replaceState a typed /portal/projects away to
+  // /portal/designs while the page itself rendered Projects correctly a moment later. That is
+  // the precise silent failure the placement comment on that effect was written about, and it
+  // only ever showed up on the operator-gated tabs. So `gatesResolved` waits for a real
+  // answer, exactly as it already does for `entitlement`.
+  //
+  // Truthiness still governs display, so null renders nothing. A failed call keeps the last
+  // value rather than answering false — same non-answer posture as its two siblings above.
+  const [canProjects, setCanProjects] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    sb.rpc("can_open_projects").then(({ data, error }) => { if (!cancelled && !error) setCanProjects(!!data); }).catch(() => {});
+    return () => { cancelled = true; };
+    // Token-keyed, exactly as its two siblings above — see the note on is_operator. The
+    // three-state null start is unaffected: nothing here answers sooner or later than it
+    // did, it simply stops being asked four more times for the same token.
+  }, [session.access_token]);
+
+  // Only ever true INSIDE a tenant. On the operator's own portal a support account is just
+  // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
+  // their own account.
+  const supportView = !!viewing && isSupportOp;
+
+  // ⚠️ A SEPARATE STATE, NOT `tenant` / `entitlement` — and that separation IS the fix from
+  // audit 2026-08-20. Both of those hold the OPERATOR'S OWN values and both effects above
+  // skip while viewing, precisely because the invoke wrapper injects targetClientId and a
+  // TOKEN_REFRESHED re-render would otherwise overwrite them with the viewed tenant's and
+  // lock the operator's own portal after Exit. Writing the viewed values into a third place
+  // gets the support view what it needs without reintroducing that bug.
+  //
+  // Null means NOT LOADED, never "nothing" — the readers below fall back to the operator's
+  // own values while it is null, so a slow call shows the old behaviour for a moment rather
+  // than flashing an empty portal at Jonathan mid-call.
+  const [viewedCtx, setViewedCtx] = useState(null);
+  useEffect(() => {
+    if (!supportView) { setViewedCtx(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        // Both are in SS_TENANT_SCOPED_FNS, so the wrapper injects targetClientId and these
+        // answer for the VIEWED tenant — which is exactly what is wanted here and exactly
+        // what the two effects above must avoid.
+        const [st, bl] = await Promise.all([
+          sb.functions.invoke("portal-settings", { body: { action: "status" } }),
+          sb.functions.invoke("portal-billing", { body: { action: "status" } }),
+        ]);
+        if (cancelled) return;
+        setViewedCtx({
+          access: (st.data && st.data.access) || null,
+          entitlement: (bl.data && bl.data.entitlement) || null,
+        });
+      } catch (_e) { /* leave null — the fallbacks below keep the portal usable */ }
+    })();
+    return () => { cancelled = true; };
+  }, [supportView, viewing && viewing.clientId, session.access_token]);
+
   // Keep the address bar honest about where you actually are.
   //
   // Placement is doubly constrained, and BOTH constraints bit once.
@@ -160,13 +306,19 @@ function Dashboard({ session }) {
   //
   // `wanted` holds the URL's request until the gates have actually resolved, so an operator
   // whose app_operators row is still in flight is not mistaken for a refusal.
-  const canAdminForUrl = viewing ? isOperator : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // A support operator is NOT an admin of the tenant they are viewing — the clamp has to
+  // apply to them so the access map governs which tabs resolve. Platform operators keep the
+  // blanket, which is what stops a subscription lapse locking us out of fixing an account.
+  const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
+  // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
+  // under a team member while the page itself renders correctly — the exact silent,
+  // operator-tabs-only failure the placement comment above this block was written about.
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
-    (tenant && tenant !== "none") ? tenant.access : null);
+    (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
   useEffect(() => {
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
-    const gatesResolved = isOperator || canAdminForUrl || entitlement !== null;
+    const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
     if (wanted.current && wanted.current !== resolvedTab && !gatesResolved) return;
     if (wanted.current) wanted.current = null;
     // If the clamp REFUSED the tab, the sub segment belonged to the refused page and must
@@ -180,7 +332,12 @@ function Dashboard({ session }) {
     if (resolvedTab !== tab && sub !== null) { setSub(null); return; }
     if (p.page === resolvedTab && (p.sub || null) === (sub || null)) return;
     try { window.history.replaceState({ page: resolvedTab, sub }, "", ssPagePath(resolvedTab, sub)); } catch (_e) {}
-  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant]);
+    // `canProjects` is in this list because `gatesResolved` above READS it. Left out, a
+    // refused deep link whose CLAMP RESULT does not move when can_open_projects answers —
+    // a non-admin on /portal/admin, where projects is not what is being refused — never
+    // re-runs this effect: `wanted.current` stays set, the replaceState never happens, and
+    // the address bar keeps a path that bounces again on every reload.
+  }, [resolvedTab, tab, sub, isOperator, canAdminForUrl, entitlement, tenant, canProjects]);
   const viewingFetch = useCallback(async () => {
     const { data, error } = await sb.functions.invoke("operator-portal", { body: { action: "get_portal", clientId: viewing.clientId } });
     if (error) {
@@ -331,6 +488,31 @@ function Dashboard({ session }) {
     // tenant null — "Loading your business…" forever. The run must complete; only the
     // injectable status call carries the poisoning risk, so it alone is guarded below.
     if (viewing) return;
+    // ⏱ THE BOOTSTRAP `status` CALL IS ISSUED HERE, IN THE EFFECT'S FIRST SYNCHRONOUS TICK,
+    // BESIDE the client_users read below rather than two awaits behind it. It never needed
+    // that mapping: resolveTenant maps user → tenant server-side from the JWT alone. Stacked
+    // sequentially they made boot a strict waterfall — client_users, then client_configs,
+    // then status — with nothing on screen but "Loading your business…" until the last hop
+    // landed, which is the floor under every "the portal is slow" report.
+    //
+    // ⚠️ THIS SATISFIES, RATHER THAN DROPS, WHAT THE OLD PLACEMENT WAS GUARDING. The worry
+    // was that view-as can arm mid-flight and the wrapper would then inject targetClientId,
+    // scoping this call to the VIEWED tenant and poisoning tenant.access with its map (audit
+    // 2026-08-20). The wrapper reads ssTargetClientId SYNCHRONOUSLY, before its first await
+    // (01-core.jsx says so in as many words), so a call issued in this tick with nothing
+    // armed can never be injected by an arming that happens later — the answer is provably
+    // the caller's own tenant no matter when it lands. `armedAtIssue` records that in the
+    // same tick and is what the branch below tests, instead of re-reading a global whose
+    // value at await-time no longer describes this call. Nothing is issued at all when
+    // view-as is ALREADY armed, exactly as before.
+    const armedAtIssue = ssTargetClientId;
+    // `.then(ok, fail)` rather than a bare promise: this is issued before anything awaits it,
+    // and an invoke that rejects in the gap would be an unhandled rejection. A failure
+    // resolves to the same `{data:null}` shape the wrapper's own no-session guard returns,
+    // so the retry branch below reads it identically.
+    const bootStatus = armedAtIssue ? null
+      : sb.functions.invoke("portal-settings", { body: { action: "status" } })
+        .then((r) => r, () => ({ data: null }));
     (async () => {
       // limit(1)+array instead of maybeSingle(): maybeSingle() ERRORS when >1 row
       // matches (a duplicate/multi-tenant client_users row), which would lock the
@@ -355,16 +537,24 @@ function Dashboard({ session }) {
         // emptiness proves nothing. Ask again now that a token demonstrably exists, and
         // believe only this second answer.
         const retry = await sb.from("client_users").select("client_id, role").limit(1);
+        // ⚠️ A FAILED read is not an answer of "no tenant" either, and reading only `.data`
+        // erased that distinction. postgrest-js RESOLVES `{data: null, error}` on a dropped
+        // connection or a 5xx rather than rejecting, and getSession() answers from local
+        // storage with no network at all — so one connectivity blip spanning both reads used
+        // to land a real owner on the terminal card above, telling them exactly the falsehood
+        // the comment there refuses to tell, with nothing under it but Sign Out. Only a CLEAN
+        // read of zero rows may become "none". On a failed one, stay on "Loading your
+        // business…": this effect is keyed on session.access_token, so the next token re-runs
+        // it. One extra read is the whole budget here — do not add a retry loop.
+        if (retry.error) return;
         mapping = retry.data && retry.data[0];
         if (!mapping) { setTenant("none"); return; }
       }
-      let businessName = mapping.client_id;
-      // client_configs is now column-structured (no monolithic `config` blob);
-      // read the dedicated company_name column for the dashboard heading.
-      const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
-      if (cfg && cfg.company_name) {
-        businessName = cfg.company_name;
-      }
+      // Null until something names the business; `mapping.client_id` is the last-resort
+      // heading, applied at setTenant. Kept as an explicit null rather than seeded with the
+      // slug so "nobody answered" and "this tenant is literally called that" stay distinct —
+      // the fallback read below keys off it.
+      let businessName = null;
       // Per-area access (migration 100) comes from the SERVER's resolved map, not from
       // client_users.access — that column holds only the deviations from the title preset,
       // and resolving it here would mean a second copy of PRESETS in the browser that
@@ -419,17 +609,33 @@ function Dashboard({ session }) {
       let access = null;
       let prefs = null;
       try {
-        // The status invoke sits two awaited reads deep, so view-as opened mid-flight can
-        // have armed the injection by now — and this call scoped to the viewed tenant is
-        // exactly the poisoning above. Skip it instead: access stays null (the generous
-        // fallback), and the `viewing` dep refetches the real map on exit.
-        if (!ssTargetClientId) {
-          const { data: st } = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
+        // Issued at the top of the effect, not here — see the note there for why that is
+        // safe against a view-as arming mid-flight. `bootStatus` is null exactly when
+        // view-as was ALREADY armed at issue time, which is the case the old
+        // `if (!ssTargetClientId)` guard covered: nothing is asked, access stays null (the
+        // generous fallback), and the `viewing` dep refetches the real map on exit.
+        if (bootStatus) {
+          const { data: st } = await bootStatus;
           if (st && st.access) access = st.access;
           // Rides the same bootstrap call as `access` on purpose: a default view that lands
           // a round trip late renders the wrong tab and then jumps, which reads worse than
           // having no setting at all.
           if (st && st.prefs) prefs = st.prefs;
+          // …and so does the heading. `status` already reads client_configs server-side and
+          // hands back branding.companyName, so the separate client_configs SELECT that used
+          // to sit above was a third sequential round trip for a column this response was
+          // carrying all along.
+          //
+          // Guarded on the echoed clientId because the two answers can legitimately name
+          // different tenants: limit(1) above takes the FIRST client_users row (audit #F6,
+          // duplicate/multi-tenant rows are real), while resolveTenant picks its own. Naming
+          // the other business in the topbar would be worse than the slug, so an echo that
+          // disagrees falls through to the direct read below. An older backend that echoes no
+          // clientId at all still passes — this contract only ever grew.
+          if (st && st.branding && st.branding.companyName
+              && (!st.clientId || st.clientId === mapping.client_id)) {
+            businessName = st.branding.companyName;
+          }
           // No map back is a FAILED call, never "this tenant has none": `status` is the open
           // bootstrap action and resolveTenant fills every area for every title. The invoke
           // wrapper RETURNS `{data:null}` rather than throwing — the no-session guard does so
@@ -445,11 +651,31 @@ function Dashboard({ session }) {
               const again = await sb.functions.invoke("portal-settings", { body: { action: "status" } });
               if (again.data && again.data.access) access = again.data.access;
               if (again.data && again.data.prefs) prefs = again.data.prefs;
+              if (again.data && again.data.branding && again.data.branding.companyName
+                  && (!again.data.clientId || again.data.clientId === mapping.client_id)) {
+                businessName = again.data.branding.companyName;
+              }
             }
           }
         }
       } catch (_e) { /* keep the fallback */ }
-      setTenant({ clientId: mapping.client_id, businessName, role: mapping.role || "user", access, prefs });
+      // FALLBACK ONLY. Reached when `status` was skipped (view-as already armed), failed
+      // both times, or came back for a different tenant than the mapping above named — never
+      // on the happy path, where the branding rode the bootstrap call. client_configs is
+      // column-structured (no monolithic `config` blob), so this is the dedicated
+      // company_name column for the dashboard heading, exactly as before.
+      if (!businessName) {
+        try {
+          const { data: cfg } = await sb.from("client_configs").select("company_name").eq("client_id", mapping.client_id).maybeSingle();
+          if (cfg && cfg.company_name) businessName = cfg.company_name;
+        } catch (_e) { /* the slug below is a perfectly good heading */ }
+      }
+      // The boot is over at this line: everything past it renders. Marked so the waterfall
+      // this effect used to be stays measurable from a real page rather than from a stopwatch
+      // (performance.mark is wrapped because a hardened browser can make it throw, and a
+      // measurement must never be the thing that blanks the portal).
+      try { performance.mark("ss:tenant-ready"); } catch (_e) {}
+      setTenant({ clientId: mapping.client_id, businessName: businessName || mapping.client_id, role: mapping.role || "user", access, prefs });
     })();
   }, [session.access_token, viewing]);
 
@@ -459,16 +685,34 @@ function Dashboard({ session }) {
   // Deno isolate costs ~2.5 SECONDS before the function runs its first query — measured
   // against this project, and the largest single component of "the schedule tab is slow".
   //
-  // Fire-and-forget, and deliberately behind a delay: the boot chain (client_users →
-  // client_configs → status, plus billing and the profile read below) owns the first moment
-  // of the page, and a warm-up that competes with it would trade a fast first tab for a slow
+  // Fire-and-forget, and deliberately behind a delay: the boot calls (client_users and
+  // status in parallel, plus billing and the profile read below) own the first moment of the
+  // page, and a warm-up that competes with them would trade a fast first tab for a slow
   // first paint. A module-level flag keeps it to once per page rather than once per
   // Dashboard mount (view-as remounts this component).
+  // TEN MORE FUNCTIONS GAINED THE ENDPOINT (2026-09-06) and are warmed here in two waves.
+  // Measured on beta the day they shipped: a cold isolate answers in 2.1-2.5 s, a warm one in
+  // 0.30-0.59 s, and isolates recycle within minutes — so this is not a boot-only concern, it
+  // is what every first click into a tab costs. The waves are ordered by how soon a person
+  // can reach the thing: settings/billing back the screens the shell itself opens, the second
+  // wave backs a deliberate click. Anything not listed either has no warm endpoint or is not
+  // reachable from a signed-in portal (customer-*, the webhooks).
   useEffect(() => {
     if (window.__ssWarmed) return undefined;
     window.__ssWarmed = true;
-    const t = setTimeout(() => { ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions"); }, 1500);
-    return () => clearTimeout(t);
+    const first = setTimeout(() => {
+      ssWarmFn("portal-schedule"); ssWarmFn("portal-commissions");
+      ssWarmFn("portal-settings"); ssWarmFn("portal-billing");
+    }, 1500);
+    const second = setTimeout(() => {
+      ssWarmFn("portal-payments"); ssWarmFn("portal-setup");
+      ssWarmFn("portal-feedback"); ssWarmFn("sync-design-status");
+    }, 3000);
+    return () => { clearTimeout(first); clearTimeout(second); };
+    // Deps stay EMPTY on purpose. Adding one (isOperator, to warm the operator-only functions)
+    // would re-run the effect the moment that flag resolves; React runs the previous cleanup
+    // first, so the pending timers would be cleared and the re-run would bail on the
+    // __ssWarmed guard — warming nothing at all. Two operators are not worth that risk.
   }, []);
 
   // ── Who the signed-in person is, and the operator's user editor ────────────────
@@ -490,7 +734,10 @@ function Dashboard({ session }) {
       } catch (_e) { /* a missing profile must never block the portal */ }
     })();
     return () => { cancelled = true; };
-  }, [session]);
+    // Token-keyed, same reason as the three rpcs above (see is_operator). This one was the
+    // loudest of the four in a boot trace, because it is a portal-settings INVOKE: every
+    // repeat woke the same isolate the tenant effect was already waiting on.
+  }, [session.access_token]);
 
   const signOut = () => sb.auth.signOut();
 
@@ -500,14 +747,16 @@ function Dashboard({ session }) {
   // Null-safe on purpose: the loading/no-tenant early returns sit BELOW setup3d (the
   // last hook), so this line also runs while tenant is still null / "none".
   const isAdmin = !!tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin");
-  // Non-admins are confined to the Designs + Leads lists, the read-only "What's New" tab
+  // Non-admins are confined to the Designs + Leads lists, the Support tab
   // (product news), and the coming-soon teaser tabs (previews, no data). Everything else is admin-only.
 
   // While VIEWING another tenant, operator status is the admin grant. isAdmin above
   // describes the operator's role in their OWN client_users row — routinely "user", or
   // absent entirely — so using it here would leave Settings dead in the viewed account,
   // which is exactly the "only two tabs" symptom Carolyn reported.
-  const canAdmin = viewing ? isOperator : isAdmin;
+  // THE LINE THAT UNCLAMPS EVERY TAB. For a support operator it must be false, or
+  // ssClampTab returns every tab unmodified and the narrowed access map governs nothing.
+  const canAdmin = viewing ? (isOperator && !supportView) : isAdmin;
 
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
@@ -529,9 +778,14 @@ function Dashboard({ session }) {
   //
   // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
   // featureOn, or the blanket returns with it.
-  const view3dUnlocked = isOperator
-    || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
-        && entitlement.granted.indexOf("view_3d") !== -1);
+  // Support reads the VIEWED tenant's grant, not the operator blanket — otherwise a
+  // support account is shown a 3D tab on a builder who was never granted it.
+  const view3dUnlocked = supportView
+    ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
+        && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
+    : (isOperator
+      || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
+          && entitlement.granted.indexOf("view_3d") !== -1));
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -576,7 +830,23 @@ function Dashboard({ session }) {
     // base64 inside a 256MB / 2s worker), so the browser writes straight into the PRIVATE
     // `models` bucket with the builder's own session — the same route portal.html already uses
     // for feedback attachments, and the RLS policy in 094 confines it to their own folder.
-    onUploadModel: async (file, styleValue) => {
+    //
+    // NULL WHILE VIEWING ANOTHER TENANT, which hides the scan card entirely — the designer
+    // gates the whole card on this callback. This is the one capability here that does NOT
+    // go through portal-settings: it is a DIRECT write into the private bucket with the
+    // caller's own session, and 094's insert policy confines that write to the folder named
+    // by the CALLER's own client_users row — storage RLS never sees targetClientId, and
+    // sb.storage is not in SS_TENANT_SCOPED_FNS. An operator's row names the operator's own
+    // tenant, so the path built from the viewed tenant could never match and storage refused
+    // every one of these uploads with a raw "new row violates row-level security policy" —
+    // a control that cannot work, failing in a language nobody can act on. 151 names this
+    // exact trap ("would appear to work in every test done as an owner") and explicitly
+    // refuses the tempting cure, a bypass policy on the bucket; the real fix is a signed
+    // upload URL minted by portal-settings, where resolveTenant — not the caller's own row —
+    // decides the prefix. Until then, offer the control only where it works. The AI calibration and
+    // walk-around-video paths beside it all run through portal-settings and are gated on
+    // their own callbacks, so they keep working in view-as.
+    onUploadModel: viewing ? null : async (file, styleValue) => {
       // supabase-js IGNORES the contentType option when the body is a Blob (it builds a
       // FormData and reads Blob.type), and a .glb usually arrives as application/octet-stream
       // or "". Re-tag it with a zero-copy slice so the stored mime matches the bucket's
@@ -616,6 +886,25 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Drafting failed");
       return data.d3;
     },
+    /* EVERYTHING THE BUILDER HAS, IN ONE CHARGED GENERATION (2026-09-07). Ahsan: "I want the
+       users to upload the video and images both after that we generate the 3D model."
+
+       A SEPARATE capability rather than a flag on the two above, for the reason their own
+       comment gives: this one returns the whole envelope (`frames` and `dropped` prove what
+       was actually read; `observed` carries what the model saw about doors and vents) and the
+       photo caller wants a bare spec. One function returning two shapes is how the wrong one
+       gets read.
+
+       It takes the VIDEO prompt server-side, because a combined set still contains the
+       walk-around and that prompt is the one that knows the roof was only ever seen from the
+       ground — the single most important fact about this input. Cap is 12, Carolyn's own
+       "three from each side". */
+    onDraftFromCombined: async (photoUrls, styleValue) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined" } });
+      if (error) throw new Error(error.message || "Generating failed");
+      if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
+      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
+    },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
     // raises the frame cap from four to eight.
@@ -650,7 +939,9 @@ function Dashboard({ session }) {
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;
     },
-  }), [canAdmin, view3dUnlocked, effClientId]);
+    // `viewing` is listed because onUploadModel now reads it. effClientId moves with it in
+    // practice, but leaning on that would make a stale upload handler a one-line edit away.
+  }), [canAdmin, view3dUnlocked, effClientId, viewing]);
 
   if (tenant === null) {
     return <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>Loading your business…</div>;
@@ -674,7 +965,23 @@ function Dashboard({ session }) {
   // The caller's resolved per-area map, straight from the status call (migration 100).
   // Operators viewing a tenant have none — their rights come from app_operators — and
   // canAdmin short-circuits every check below for them.
-  const myAccess = (tenant && tenant !== "none") ? tenant.access : null;
+  // Support reads the VIEWED tenant's resolved map. While it is still loading, fall back to
+  // the operator's own rather than to null: null clamps to a fallback tab, so the generous
+  // direction for a fraction of a second beats bouncing Jonathan off the page he opened.
+  const myAccess = supportView
+    ? ((viewedCtx && viewedCtx.access) || ((tenant && tenant !== "none") ? tenant.access : null))
+    : ((tenant && tenant !== "none") ? tenant.access : null);
+  // The tab cache has to know WHICH ROWS this map allows, not just who is asking. `contacts`
+  // gained an 'own' level on 2026-09-05 that narrows the rows every contact-and-design read
+  // returns, so the same person on the same tenant gets a different payload before and after
+  // an owner flips their switch — and a payload cached under the old scope would keep serving
+  // the full list for up to the cache's 10-minute max age.
+  //
+  // Render-time on purpose, and safe for the same reason ssTargetClientId's assignment is: it
+  // mutates a module variable and clears a Map, touches no React state, and no-ops unless the
+  // value actually changed. It cannot live with the ssSetCurrentUser calls in PortalApp —
+  // those run when AUTH resolves, and this map does not exist until the status call returns.
+  ssSetRowScope(myAccess ? myAccess.contacts : null);
   // Designs/Contacts "Open" → load the design INSIDE the portal designer and switch to
   // that tab. Never a link to the public page: it silently captures leads and saves
   // drafts (capture-lead / saveDraftSilently), so staff opening a customer's design
@@ -691,7 +998,7 @@ function Dashboard({ session }) {
     // rather than a hand-rolled check so the two can never disagree; a null map still
     // passes (NONADMIN_TABS holds "designer"), so nothing changes for owners, admins,
     // operators or a tenant predating migration 100.
-    if (ssClampTab("designer", isOperator, canAdmin, myAccess) !== "designer") {
+    if (ssClampTab("designer", isOperator, canAdmin, myAccess, supportView) !== "designer") {
       window.alert("Opening a design in the Designer isn't part of your access. Ask an owner or admin to turn it on under Settings → Team.");
       return;
     }
@@ -709,7 +1016,7 @@ function Dashboard({ session }) {
   // the role clamp; everything else keeps it. Note "admin" must NOT go in NONADMIN_TABS —
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
-  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess);
+  const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -729,37 +1036,6 @@ function Dashboard({ session }) {
   const shownBusiness = viewing ? (viewing.companyName || viewing.clientId) : tenant.businessName;
   const tenantInitials = String(shownBusiness || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
-  const ICONS = {
-    admin: (<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>),
-    designer: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>,
-    quickbooks: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12a3 3 0 0 1 3-3h1v9"/><path d="M16 12a3 3 0 0 1-3 3h-1V6"/></svg>,
-    accounts: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="7" width="9" height="14" rx="1"/><rect x="13" y="3" width="9" height="18" rx="1"/><path d="M6 11h1M6 15h1M17 7h1M17 11h1M17 15h1"/></svg>,
-    // Kanban columns of descending height — the section is named Pipeline now, and the old
-    // staggered grid read as "a dashboard of things" rather than a board of stages.
-    designs: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="12" rx="1"/><rect x="17" y="3" width="5" height="7" rx="1"/></svg>,
-    // Clipboard with a check — the internal boards. NOT kanban columns: "designs" (Pipeline)
-    // took that glyph in the same week, and two column icons in one rail read as one thing.
-    projects: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>,
-    leads: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
-    orders: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96 12 12.01l8.73-5.05M12 22.08V12"/></svg>,
-    pricing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18"/><path d="M5 21V8l7-5 7 5v13"/><path d="M10 21v-5h4v5"/><path d="M9 9h.01M15 9h.01"/></svg>,
-    "layout-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/><path d="M7 3v3M12 3v3M17 3v3"/></svg>,
-    colors: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="8" cy="9.5" r="1.3"/><circle cx="15.5" cy="9.5" r="1.3"/><circle cx="16.5" cy="14" r="1.3"/><path d="M12 21a3 3 0 0 1 0-6 2 2 0 0 0 0-4"/></svg>,
-    settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
-    billing: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
-    "on-demand-pricing": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>,
-    "build-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>,
-    "delivery-schedule": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 17h4V5H2v12h3"/><path d="M20 17h2v-3.34a4 4 0 0 0-1.17-2.83L19 9h-5v8h1"/><circle cx="7.5" cy="17.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
-    "inventory": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>,
-    "repairs": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>,
-    // Faceted wireframe cube — deliberately NOT the rounded package glyph used by
-    // "orders", so the two read as different things in the rail.
-    "view-3d": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="m3 7 9 5 9-5"/><path d="M12 12v10"/></svg>,
-    "rent-to-own-contracts": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>,
-    "self-serve-display-units": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
-    "commissions": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="6.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="17.5" r="2.5"/></svg>,
-    "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
-  };
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it
@@ -780,7 +1056,24 @@ function Dashboard({ session }) {
   //   * entitlement === null means "still loading" and must NOT read as off, or every page
   //     load would flash an upgrade card at a paying customer (same reason gateLocked
   //     tolerates null).
-  const featureOn = (key) => isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]));
+  //
+  // ⚠️ THE TENANT BRANCH SAYS THE OPPOSITE OF THAT SENTENCE, and it must keep saying it until
+  // the server can answer for these keys. Audit 2026-09-06 (F052) proposed making null read as
+  // ON, which is the right shape for a gate that is only presentation — but it is NOT the shape
+  // for `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
+  // ANYWHERE: portal-billing's PAID_ONLY_FEATURES set decides who may subscribe, and nothing
+  // re-checks those two on the actions themselves. Null-reads-on would hand every tenant the
+  // paid scheduler and QuickBooks for the whole load window, and permanently after one failed
+  // status call, because the fetch stores only a SUCCESSFUL answer and is keyed on the access
+  // token. Fail-closed on a paid feature beats fail-open; the real repair is a third state
+  // (loading, which shows neither the feature nor its upsell) plus a server-side check for
+  // those two keys, and that is a bigger change than a boolean.
+  // Support resolves the VIEWED tenant's subscription — the whole point of the flag. A null
+  // viewedCtx is STILL LOADING, never "off", the same rule the operator branch already uses:
+  // flashing an upgrade card at a paying builder mid support call is the worse failure.
+  const featureOn = (key) => (supportView
+    ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
+    : (isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]))));
   const schedUnlocked = featureOn("schedule_builds");
   // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
   // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
@@ -807,6 +1100,18 @@ function Dashboard({ session }) {
   // Inventory offer their schedule entry points.
   const schedCanEdit = canAdmin || !!(myAccess && myAccess.build_schedule === "edit");
   const deliverCanEdit = canAdmin || !!(myAccess && myAccess.delivery_schedule === "edit");
+  // Mirrors portal-settings' own gate for send_invoice/push_to_invoice exactly. Presentation
+  // only — the server re-checks {area:'orders', level:'edit'} whatever the browser believes.
+  const ordersCanEdit = canAdmin || !!(myAccess && myAccess.orders === "edit");
+  // Amending a SIGNED order is granted separately from running one (access.ts, 2026-09-01).
+  const coCanEdit = canAdmin || !!(myAccess && myAccess.change_orders === "edit");
+  // And APPROVING one is a SECOND, independent switch (migration 212). Carolyn 2026-09-06:
+  // "there should be both the option to give approval for a change order, but they can also
+  // make the change order if they are given person per their permissions." So this is
+  // deliberately not derived from coCanEdit in either direction — a person may hold either,
+  // both or neither, and an approver who cannot raise a change is a normal, intended state.
+  // `change_order_approve` has two levels only (none/edit), like `commissions`.
+  const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
   const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
   const graceDaysLeft = gateGrace && entitlement.graceEndsAt
     ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
@@ -877,7 +1182,7 @@ function Dashboard({ session }) {
               rather have more tabs and one specific name on it." Contacts first — a person,
               then what they are quoting. The List | Pipeline board toggle stays INSIDE
               Pipeline (02-sales); it is the section, not a third nav item. */}
-          {navItem("leads", "Contacts")}
+          {navItem("contacts", "Contacts")}
           {navItem("designs", "Pipeline")}
           {navItem("inventory", "Inventory")}
           {navItem("orders", "Orders")}
@@ -919,12 +1224,20 @@ function Dashboard({ session }) {
         </nav>
         </>)}
 
-        {isOperator && (<>
-        <div className="ss-navlabel">Operator</div>
+        {(isOperator || canProjects) && (<>
+        {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
+            else is not an "Operator", and calling the group that would tell them they hold
+            access to every builder's account, which they do not. */}
+        <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
         <nav className="ss-nav">
-          {navItem("accounts", "Accounts")}
-          {navItem("admin", "Admin")}
-          {navItem("projects", "Projects")}
+          {/* Accounts is the switcher and support needs it — it is how they reach the next
+              builder. Admin and Projects are OUR consoles (delete_client lives in one, our
+              internal bug board is the other) and a support account standing in a builder's
+              shoes has no business in either. ssClampTab refuses the routes too, so a typed
+              URL lands on a real page rather than a hidden-but-reachable one. */}
+          {isOperator && navItem("accounts", "Accounts")}
+          {isOperator && !supportView && navItem("admin", "Admin")}
+          {canProjects && !supportView && navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -991,9 +1304,11 @@ function Dashboard({ session }) {
               )}
             </div>
           )}
-          <button type="button" className="ss-newlink" onClick={() => navigate("releases")} title="New features / Bug fixes">
+          {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
+              OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
+          <button type="button" className="ss-newlink" onClick={() => navigate("support")} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
-            <span>New features / Bug fixes</span>
+            <span>Support</span>
           </button>
           {/* Hovering (or focusing/tapping) the identity row reveals a small
               flyout menu above it with Sign Out — no standalone button. */}
@@ -1080,7 +1395,14 @@ function Dashboard({ session }) {
                   thing the designer used it for, and it now lives in Settings -> Designer -> 3D,
                   so passing it would put the yellow bar back over every design people open. */}
               <DesignerTab key={"d-" + effClientId} clientId={effClientId} view3d={view3dUnlocked} onSaved={() => setDesignsRefreshKey((k) => k + 1)}
-                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null} />
+                openDesign={openDesign && openDesign.clientId === effClientId ? openDesign : null}
+                canPushInvoice={ordersCanEdit}
+                /* navigate(), not location.assign: the designer host above is kept MOUNTED
+                   across tab switches, and a real navigation would throw away whatever is
+                   on the canvas. ssClampTab first, same as the record page's Orders link —
+                   sending someone to a tab they cannot open is its own dead end. */
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
+                  ? (id) => navigate("orders", "o-" + id) : null} />
             </div>
           )}
           <div className="ss-inner">
@@ -1149,7 +1471,7 @@ function Dashboard({ session }) {
                 an opportunity and the view of being in a person are different, but they're
                 the same."
 
-                Routed on the `sub` segment: /portal/leads/c-<uuid> for a contact and
+                Routed on the `sub` segment: /portal/contacts/c-<uuid> for a contact and
                 /portal/designs/d-<code> for a design. The prefix (c-/d-) is what tells the
                 two record kinds apart, so ONE shell serves both.
 
@@ -1171,7 +1493,7 @@ function Dashboard({ session }) {
                 is not — it is what opens from the free Pipeline list, and its server branch
                 reads `designs` only. Same split the portal-settings gate makes, and the two
                 must agree or one of them produces a 403 the other never predicted. */}
-            {!gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^c-/.test(sub) && !crmUnlocked ? (
+            {!gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^c-/.test(sub) && !crmUnlocked ? (
               <ComingSoon
                 title="Contacts"
                 icon={<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>}
@@ -1184,16 +1506,28 @@ function Dashboard({ session }) {
                 cta={canAdmin ? { label: "Add the CRM — see Billing", onClick: () => navigate("settings", "billing") } : null}
                 available
               />
-            ) : !gateLocked && (activeTab === "designs" || activeTab === "leads") && sub && /^[cd]-/.test(sub) ? (
+            ) : !gateLocked && (activeTab === "designs" || activeTab === "contacts") && sub && /^[cd]-/.test(sub) ? (
               <CrmRecord
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
                 isAdmin={canAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
+                /* The DESIGN record reaches this line without a subscription — the branch
+                   above turns a CONTACT record away, but a design record is what the free
+                   Pipeline list opens and it has to keep working. Its READ is exempt from the
+                   server's crm_ gate on purpose; every WRITE on the page is not, so the
+                   record used to render with a live Notes box that 403'd on Save. Passing the
+                   entitlement lets CrmRecord grey what it cannot save instead. */
+                crmUnlocked={crmUnlocked}
+                /* Only when `sub` still names the contact the deal was captured for — see
+                   recordDeal's declaration. `key={sub}` remounts the record on every route,
+                   so this is read fresh as initial state and never fights a later hand-pick. */
+                initialDeal={recordDeal && sub === "c-" + recordDeal.contactId ? recordDeal.deal : null}
+                onSeeBilling={canAdmin ? () => navigate("settings", "billing") : null}
                 /* Back goes to the list this record belongs to, which after the split is a
                    whole tab rather than a sub-view. */
-                onBack={() => navigate(sub.charAt(0) === "c" ? "leads" : "designs")}
+                onBack={() => navigate(sub.charAt(0) === "c" ? "contacts" : "designs")}
                 /* Cross-record hops (the Person card's "›", an entry under OPEN DEALS). The
                    record shell above serves EITHER kind under EITHER tab, so the tab here is
                    cosmetic — which nav item highlights — and switching to one the clamp
@@ -1206,8 +1540,8 @@ function Dashboard({ session }) {
                    `any: [contacts view, designs view]`). Asked through ssClampTab so this
                    can never drift from what the router will actually do. */
                 onNavigate={(k, id) => {
-                  const kindTab = k === "contact" ? "leads" : "designs";
-                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess) === kindTab ? kindTab : activeTab;
+                  const kindTab = k === "contact" ? "contacts" : "designs";
+                  const dest = ssClampTab(kindTab, isOperator, canAdmin, myAccess, supportView) === kindTab ? kindTab : activeTab;
                   navigate(dest, (k === "contact" ? "c-" : "d-") + id);
                 }}
                 onOpenDesign={(code) => openInDesigner(code)}
@@ -1215,7 +1549,7 @@ function Dashboard({ session }) {
                    ssClampTab first, because a crew leader may hold the record and not
                    Orders -- and dumping them on a list they cannot read is the same trap
                    the onNavigate comment above documents. */
-                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess) === "orders"
+                onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
               />
             ) : null}
@@ -1234,7 +1568,25 @@ function Dashboard({ session }) {
                 isAdmin={canAdmin} crmUnlocked={crmUnlocked}
                 onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                onOpenRecord={(code) => navigate("designs", "d-" + code)}
+                /* PIPELINE OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19,
+                   after watching it: "this pipeline click is going to take you into the
+                   customer view where you can see everything about that customer ... I don't
+                   want the two different views." The deal she clicked rides along so the
+                   record opens ON it rather than on the "pick one" hint.
+
+                   TWO fallbacks to the design record, and both are load-bearing:
+                   • no contact_id — crm_ensure_contact returns NULL for a design carrying
+                     neither phone nor email, so there is no customer to open.
+                   • no CRM subscription — a contact record is paywalled and a design record
+                     is not (see the record mount's own comment above). Routing a free-tier
+                     tenant's Pipeline click at the upsell would take away the page they have
+                     today, which is a regression dressed as a feature. */
+                onOpenRecord={(code, contactId) => {
+                  if (contactId && crmUnlocked) {
+                    setRecordDeal({ contactId, deal: code });
+                    navigate("contacts", "c-" + contactId);
+                  } else navigate("designs", "d-" + code);
+                }}
                 /* /portal/designs/list and /portal/designs/pipeline. A BARE /portal/designs
                    deliberately carries no view of its own so the saved preference can fill
                    it -- pinning it to "list" here would quietly outrank the setting. */
@@ -1243,14 +1595,14 @@ function Dashboard({ session }) {
                 onViewChange={(v) => navigate("designs", v)}
                 onOpenDesign={openInDesigner} />
             )}
-            {/* CONTACTS — its own tab again, at its own pre-merge URL /portal/leads.
+            {/* CONTACTS — its own tab again, at /portal/contacts (was /portal/leads; aliased).
                 Behind the built-in CRM subscription since migration 160; the nav item stays
                 visible (like Build Schedule) so the locked card can do the selling. */}
-            {!gateLocked && activeTab === "leads" && !(sub && /^[cd]-/.test(sub)) && (
+            {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               crmUnlocked ? (
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
                   fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
-                  onOpenRecord={(contactId) => navigate("leads", "c-" + contactId)}
+                  onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
                   onOpenDesign={openInDesigner} />
               ) : (
                 <ComingSoon
@@ -1274,15 +1626,30 @@ function Dashboard({ session }) {
                 usersRefreshKey={usersRefreshKey} />
             )}
             {!gateLocked && activeTab === "orders" && (
-              /* Operators get the REAL, interactive Orders on their OWN portal so they can
-                 build and test the feature end to end (orders/payments RLS is scoped to
-                 current_client_id(), so direct reads/writes only work for one's own tenant —
-                 hence !viewing: while viewing ANOTHER tenant the direct-read path would show
-                 nothing, so keep the locked preview there). Everyone else sees the locked
-                 example-data preview. */
-              (isOperator && !viewing)
+              /* SHIPPED TO TENANTS 2026-09-01. Until then this was operators-only on their
+                 OWN portal and everyone else saw the locked example-data preview below.
+                 What had to be true first, named in advance by 154_area_access_rls.sql:84-95:
+                 OrdersView read designs through RLS, and its viewers now include titles that
+                 hold Orders and NOT Designs — a crew leader, a driver. Both of those reads
+                 moved behind portal-settings orders_designs (gated orders:view) in this same
+                 change. The designs RLS policy was NOT widened; that shortcut is refused at
+                 length in the migration and again in the action header, because
+                 designs_ensure_order mints a row for every accepted design and so it would
+                 resolve to "every design ever sold".
+                 !viewing survives: orders/payments RLS is scoped to current_client_id(), so
+                 an operator reading ANOTHER tenant's rows directly still gets nothing — the
+                 locked preview stays the honest answer there. */
+              (canAdmin || ssCanSeeTab("orders", myAccess) || isOperator) && !viewing
                 ? <OrdersView clientId={tenant.clientId}
                     schedOn={schedUnlocked && schedCanEdit} deliverOn={schedUnlocked && deliverCanEdit}
+                    coOn={coCanEdit}
+                    coApproveOn={coApproveCanEdit}
+                    /* The courtesy half of migration 188. The database refuses the write
+                       either way; this is what stops a view-only rep being offered
+                       Record-a-payment, Void and the order-total editor and then handed a
+                       raw RLS refusal for using them. Orders is READABLE at orders='view'
+                       (crew leaders and drivers, 2026-09-01), so the tab still opens. */
+                    ordersOn={ordersCanEdit}
                     /* A sold lot building is already waiting in the Delivery Schedule's
                        "to be loaded" pool (the pool is a query over sold units without a
                        sale stop), so this just takes the dispatcher there — no focus/
@@ -1309,7 +1676,7 @@ function Dashboard({ session }) {
                 all local, and unmount-on-tab-switch would silently bin it.
                 Deliberately NOT behind `!gateLocked`: an operator whose OWN tenant is
                 billing-locked must still be able to run the console. */}
-            {adminOpened && isOperator && (
+            {adminOpened && isOperator && !supportView && (
               <div style={{ display: activeTab === "admin" ? "block" : "none" }}>
                 <AdminShell onOpenAccount={openAccount}
                   sub={activeTab === "admin" ? sub : null} onSub={(x) => navigate("admin", x)} />
@@ -1319,13 +1686,13 @@ function Dashboard({ session }) {
                 accounts/admin; ssClampTab bounces everyone else. Deliberately NOT behind
                 `!gateLocked` — like the Admin console, an operator whose OWN tenant is
                 billing-locked must still reach the internal boards. */}
-            {activeTab === "projects" && isOperator && (
+            {activeTab === "projects" && canProjects && !supportView && (
               <ProjectsTab sub={sub} onSub={(x) => navigate("projects", x)} />
             )}
-            {!gateLocked && activeTab === "releases" && (
+            {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}
-                sub={activeTab === "releases" ? sub : null} onSub={(x) => navigate("releases", x)}
-                onNavigate={navigate} />
+                sub={activeTab === "support" ? sub : null} onSub={(x) => navigate("support", x)}
+                onNavigate={navigate} canAdmin={canAdmin} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
@@ -1544,11 +1911,19 @@ function Dashboard({ session }) {
         />
       )}
 
-      {/* Operator quick-add: file an item onto a Projects board from anywhere in the
-          portal (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a
-          bug while inside a builder's account is exactly when you want it, and unlike
-          the Feedback bubble above there is no tenant attribution to get wrong. */}
-      {isOperator && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
+      {/* Quick-add: file an item onto a Projects board from anywhere in the portal
+          (Carolyn 2026-08-29). Deliberately visible in view-as too — spotting a bug while
+          inside a builder's account is exactly when you want it, and unlike the Feedback
+          bubble above there is no tenant attribution to get wrong.
+          Gated on `canProjects`, the SAME gate as the Projects tab and its own ＋ Add item
+          row (Carolyn 2026-09-07). It was `isOperator` until then, which is the pre-183
+          gate: a CSM team member granted the Projects area could add items ON the board but
+          not from anywhere else, for no reason anyone chose. This widens nothing — that add
+          row was already open to them, and portal-projects re-checks canWrite on every call.
+          `canProjects` is THREE-STATE (null while can_open_projects is in flight), so this
+          renders nothing for a moment on load rather than flashing a button at someone who
+          cannot use it — the same reason `featureOn` treats a null entitlement as loading. */}
+      {canProjects && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
 
       {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
           verified session's user id — the browser never says whose row to update. */}

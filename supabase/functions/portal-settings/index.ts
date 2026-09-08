@@ -6,6 +6,7 @@ import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logErr
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
+import { chargeTaxCalculation, taxInvoiceIdem, taxLookupIdem } from "../_shared/taxMeter.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
@@ -18,7 +19,10 @@ import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
-import { amendedInvoiceDocument, amountOwed, deHtml, orderCentsFromSnapshot, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
+import { amendedInvoiceDocument, amountOwed, deHtml, designTotalCents, orderCentsAfterAck, orderCentsFromSnapshot, subtotalsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
+// push_to_invoice's phone precondition must use the SAME comparison sign_invoice will use to
+// decide whether the customer owns the invoice — see that module's duplication ledger.
+import { phoneKey } from "../_shared/phoneKey.ts";
 // The change-order baseline, shared with submit-estimate so the two design_edit writers
 // cannot disagree about it (migration 153). changeOrderDescription comes with it: the money
 // line spans the whole baseline-to-now gap, so the words have to as well. Second importer of
@@ -41,7 +45,10 @@ import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 
-import type { GateTable } from "../_shared/access.ts";
+// ownContactsOnly is the ONE place the literal 'own' is compared for the contacts area. The
+// filters it drives are below, in the handler — RLS cannot do this job here, because every
+// client this function builds is the SERVICE ROLE and the service role is BYPASSRLS.
+import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -114,6 +121,11 @@ const GATES: GateTable = {
   save_colors:                    { area: "settings_options", level: "edit" },
   save_window_colors:             { area: "settings_options", level: "edit" },
   save_layout_pricing:            { area: "settings_options", level: "edit" },
+  save_wall_heights:              { area: "settings_options", level: "edit" },
+  save_cladding:                  { area: "settings_options", level: "edit" },
+  save_insulation:                { area: "settings_options", level: "edit" },
+  save_electrical:                { area: "settings_options", level: "edit" },
+  save_electrical_items:          { area: "settings_options", level: "edit" },
   upload_layout_image:            { area: "settings_options", level: "edit" },
   upload_fixture_image:           { area: "settings_options", level: "edit" },
   save_fixture:                   { area: "settings_options", level: "edit" },
@@ -152,6 +164,11 @@ const GATES: GateTable = {
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
 
   // ── QuickBooks ───────────────────────────────────────────────────────────
+  // Same two-question split as Real-Time Pricing above: these gates answer "may this person
+  // touch the QuickBooks settings", and a server-side entitlement check (quickbooks_sync,
+  // PAY-ONLY) answers "did this tenant buy it" — see the QBO_ACTIONS block below.
+  // `disconnect_qbo` is deliberately outside that entitlement check: revoking our access to
+  // someone's books must never depend on their subscription being current.
   qbo_status:      { area: "settings_quickbooks", level: "view" },
   qbo_pending:     { area: "settings_quickbooks", level: "view" },
   list_item_map:   { area: "settings_quickbooks", level: "view" },
@@ -187,6 +204,15 @@ const GATES: GateTable = {
   // ── CRM record page (the merged Contacts + Designs view) ─────────────────
   // `any:` because one page serves both a contact and a design, and a rep who can see
   // designs but not contacts should still reach a design record. Mirrors `catalog`'s shape.
+  //
+  // ⚠️ `any:` IS NOT THE WHOLE ANSWER FOR THESE TWO, and it cannot be. One action serves two
+  // scopes with different owners: the DESIGN half belongs to `designs`, the CONTACT half
+  // (the person's record, their notes, their email and text threads, the files they sent)
+  // belongs to `contacts`. A table entry can only ask one question per action, and `any`
+  // asks the looser one — so a designs-only title (the Crew Leader preset) satisfied it and
+  // then received the contact half as well. The per-scope check therefore lives in the
+  // branch, right where the contact rows are read: search CONTACT SCOPE below. The gate
+  // stays `any` so the design record still opens for exactly the people it always did.
   crm_record:            { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
   crm_feed:              { any: [{ area: "contacts", level: "view" }, { area: "designs", level: "view" }] },
   crm_send_email:        { area: "contacts", level: "edit" },
@@ -204,12 +230,27 @@ const GATES: GateTable = {
   crm_file_sign:         { area: "contacts", level: "edit" },
   crm_file_attach:       { area: "contacts", level: "edit" },
   crm_file_delete:       { area: "contacts", level: "edit" },
+  // ⚠️ THE AREA IS THE FLOOR HERE, NOT THE WHOLE RULE — role is, and this is the one action
+  // in this table where that is true, so it is said out loud rather than left to be
+  // discovered. Deleting a design destroys the customer's version history and the estimate
+  // in the tenant's CRM with it, and it has been owner/admin ever since it shipped: the
+  // browser hides the menu item on `isAdmin`, and under the pre-migration-100 model the
+  // resolver refused every non-owner/admin mutation, so the server agreed. Expressing it as
+  // `designs:edit` alone widened it — that level is a Sales Rep's preset — while the screen
+  // went on saying owner/admin only. Restated as a role check inside the branch (search
+  // OWNER/ADMIN ONLY) rather than as a second area, because no area names "may destroy a
+  // customer record" and `delete_inventory`'s trick (a second area only owners/admins hold)
+  // would be a coincidence of today's presets rather than the rule itself.
   delete_design:    { area: "designs", level: "edit" },
   // NOT inventory:edit. A sales rep's preset is inventory:'view', and this only tags a
   // design they just created with the unit it was quoted from — gating it on inventory:edit
   // recreates the 2026-08-02 bug exactly (estimate sent, link 403s, the building never
   // shows the estimate and never flips to Sold).
   link_design_to_unit: { area: "designs", level: "edit" },
+  // The pipeline board's expected close date (migration 206). designs:edit — the same area
+  // that gates every other write to a design, and one a Sales Rep holds, because setting a
+  // close date on your own quote is the whole point of the field.
+  set_expected_close: { area: "designs", level: "edit" },
   list_inventory:   { area: "inventory", level: "view" },
   save_inventory:   { area: "inventory", level: "edit" },
   update_inventory: { area: "inventory", level: "edit" },
@@ -227,22 +268,65 @@ const GATES: GateTable = {
   delete_inventory: { all: [{ area: "inventory", level: "edit" }, { area: "designs", level: "edit" }] },
   // Emails a real customer and moves the design to invoiced — irreversible, so Orders:edit.
   send_invoice:     { area: "orders", level: "edit" },
+  // Push to Invoice from the designer (Carolyn 2026-09-01): the same irreversible send as
+  // send_invoice, and additionally it ATTESTS the acceptance on the customer's behalf. It
+  // can only ever be more consequential than send_invoice, never less, so it sits at the
+  // same gate — deliberately its own row rather than a flag on send_invoice, so this
+  // altitude is stated once per action and cannot be reached by a body parameter.
+  push_to_invoice:  { area: "orders", level: "edit" },
   // Re-sends the SS quote email (migration 122) — the rep who can edit designs can re-send
   // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
   // email to the design's own customer.
   resend_quote_email: { area: "designs", level: "edit" },
-  // Emails a pending change order to the customer for signature (migration 126). Same
-  // altitude as raising one from the order card: Orders edit.
-  send_change_order: { area: "orders", level: "edit" },
+  // Texts the customer the deep link to sign their invoice. Sends no money and creates no
+  // paperwork — it re-delivers a document they already have — but it does spend the
+  // tenant's A2P campaign, so it sits at the same altitude as sending the invoice itself.
+  // A rep who may raise a change may also hand the customer the phone to sign it. Widened
+  // 2026-09-07: a signature on an AMENDED order goes through this same link, and gating it on
+  // orders:'edit' alone would have let someone open a change they could not then get signed.
+  text_sign_link:   { any: [{ area: "orders", level: "edit" }, { area: "change_orders", level: "edit" }] },
+  // Rebuild the invoice DOCUMENT from the current amended figures (migration 221). Issuing
+  // paperwork is `orders`, the same area send_invoice sits on -- this reissues a document,
+  // it does not decide whether a change may happen.
+  reissue_invoice:  { area: "orders", level: "edit" },
+  // Emails a pending change order to the customer for signature (migration 126).
+  // Moved off `orders` onto `change_orders` (2026-09-01) when reps gained orders:edit —
+  // amending a signed agreement is the one order power that is granted separately.
+  send_change_order: { area: "change_orders", level: "edit" },
   // The invoice-style order document (migration 127): letterhead + color options + the
   // service-role-only invoice_sends fields. A read.
   order_paperwork: { area: "orders", level: "view" },
+  // The designs behind the orders on screen. Exists because the Orders tab shipped to
+  // TENANTS (2026-09-01) and its designs read had been direct-RLS — see the action below.
+  orders_designs: { area: "orders", level: "view" },
   // Changing roof/cladding/paint on an order — reprices from the catalog and raises the
-  // change order. Same altitude as raising one by hand.
-  stage_order_attribute_change: { area: "orders", level: "edit" },
+  // change order. It reads like ordinary editing and is not: on a signed order these
+  // dropdowns ARE how a change order gets raised, so it sits with the others.
+  stage_order_attribute_change: { area: "change_orders", level: "edit" },
   // Discards a staged-but-unsigned change order, restoring the design as the customer
   // signed it (snapshot_before). Void with a reason, like the browser void.
-  void_change_order: { area: "orders", level: "edit" },
+  void_change_order: { area: "change_orders", level: "edit" },
+
+  // AMENDING A SIGNED ORDER (migrations 209-213).
+  // What the Change Order button has to know BEFORE it does anything: is this order open
+  // for change, under what authority, and what will it cost. A read, so it sits at `view`
+  // -- a rep who cannot raise one may still be shown why. This is the first consumer of
+  // change_orders:'view'; before it, the area had no read surface at all.
+  amendment_status: { area: "change_orders", level: "view" },
+  // The rep asks. Raising the request is part of raising the change.
+  request_order_unlock: { area: "change_orders", level: "edit" },
+  // The approver answers. THE ONLY ACTION ON THE NEW AREA -- this is the whole of what
+  // "Approve Changes" grants, which is why it is a separate switch from raising one.
+  decide_order_unlock: { area: "change_order_approve", level: "edit" },
+  // Spends the unlock and opens the draft the rep then edits.
+  open_amendment: { area: "change_orders", level: "edit" },
+  // Prices the finished edit, writes the words from the line diff, and sends it. The rep is
+  // still the one raising the change -- the customer's answer is what comes next.
+  finalize_amendment: { area: "change_orders", level: "edit" },
+  // The rep records that the customer said yes, in the rep's own name. Deliberately NOT on
+  // the approve area: attesting is part of raising a change, not part of allowing one, and
+  // Carolyn asked for those to be separate switches.
+  attest_change_order: { area: "change_orders", level: "edit" },
 };
 
 // Owner-facing settings endpoint for the portal (portal.html).
@@ -668,6 +752,19 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -689,6 +786,254 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
 
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
+
+  // WHO SKIPS THE PAID-FEATURE CHECKS. A platform operator does, and must: they are CSM
+  // Synergy staff configuring, demoing and repairing an account, and a subscription lapse
+  // cannot be allowed to lock us out of fixing it.
+  //
+  // A SUPPORT operator does NOT, and that is the entire point of the flag. They exist to see
+  // what the builder sees; an exemption here would show them Real-Time Pricing and the CRM on
+  // a tenant that never bought either, which is the opposite of mirroring — and it is the
+  // shape of bug that gets support to confidently talk a customer through a screen the
+  // customer does not have.
+  const entitlementExempt = Boolean(operator && !operator.supportOnly);
+
+  // ══ ROW SCOPE — contacts:'own' (migration 193) ═══════════════════════════════════════
+  //
+  // Carolyn, 2026-09-04 @1:02:16, on a builder whose salespeople are independent dealers:
+  // "he also doesn't want them to see each other's quotes either … they would only see the
+  // list, the pipelines or the quotes that they have created themselves." And @1:09:30, the
+  // model she settled on: "we do not ever assign deals. We only assign contacts and
+  // followers … if they are not assigned to or following that customer, they can't see
+  // anything of it." So a design is visible because its CUSTOMER is, and there is exactly
+  // one predicate — public.crm_contact_visible_to — for the whole feature.
+  //
+  // ⚠️ THE RLS POLICIES IN 193 DO NOTHING IN THIS FILE. `admin` is built from
+  // SUPABASE_SERVICE_ROLE_KEY and the service role is BYPASSRLS: every restrictive policy
+  // 193 installs is skipped for every query below. Those policies exist for the lists the
+  // BROWSER reads straight from PostgREST (portal/02-sales.jsx's Pipeline, Contacts and
+  // browsing-leads reads). Anything that reaches a customer's rows through THIS function is
+  // filtered here, by hand, or it is not filtered at all.
+  //
+  // ⚠️ OWNERS ARE ABSOLUTE AND THAT IS WHY THERE IS NO ROLE CHECK HERE. effectiveAccess()
+  // short-circuits role === 'owner' to 'edit' on every area before a stored map is consulted,
+  // so `access.contacts` is never the string 'own' for an owner, whatever is in their row.
+  // The same holds for an operator in view-as (a full map) and for a support operator (the
+  // viewed owner's map). Re-testing the role here would be a second copy of that rule, and
+  // the version of this filter that forgets it empties the owner's own dashboard.
+  const ownContacts = ownContactsOnly(access);
+
+  /**
+   * Which of these contact ids may this caller see? Returns null when the check itself
+   * failed — callers must dbFail on null and MUST NOT fall back to "show everything",
+   * which would turn a transient database error into a silent widening.
+   *
+   * Answers through public.crm_visible_contact_ids so the edge filter and the RLS policies
+   * run the SAME predicate rather than two transcriptions of it. One round trip whatever the
+   * list length, and over POST, so there is no URL-length ceiling on a 2000-row Orders tab.
+   */
+  const visibleContactIds = async (
+    ids: (string | null | undefined)[],
+  ): Promise<Set<string> | null> => {
+    const want = [...new Set(ids.filter((v): v is string => !!v))];
+    // Not narrowed: every id asked about is visible. Returned without a round trip, because
+    // this is every caller on every tenant until an owner sets the switch on one person.
+    if (!ownContacts) return new Set(want);
+    if (!want.length) return new Set();
+    const { data, error } = await admin.rpc("crm_visible_contact_ids", {
+      p_client_id: clientId,
+      p_user_id: userId,
+      p_ids: want,
+    });
+    if (error) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: error.code ?? "contact_scope_failed",
+        message: `crm_visible_contact_ids failed: ${error.message ?? "unknown"}`,
+        context: { action, ids: want.length },
+      }).catch(() => {});
+      return null;
+    }
+    return new Set((data as string[] | null) ?? []);
+  };
+
+  /**
+   * Keep only the design/lead rows whose customer this caller may see. The rows must already
+   * carry `contact_id` — add it to the projection rather than doing a second read.
+   *
+   * A NULL contact_id is DROPPED, and that is edge case 2 of migration 193 rather than an
+   * accident of the Set lookup: crm_ensure_contact returns NULL for a submission carrying
+   * neither a phone nor an email, so the row has no customer to be assigned to and no
+   * follower to inherit. Nothing to own means nobody but the people who are never narrowed.
+   */
+  const visibleDesignRows = async <T extends { contact_id?: string | null }>(
+    rows: T[],
+  ): Promise<T[] | null> => {
+    if (!ownContacts) return rows;
+    const ids = await visibleContactIds(rows.map((d) => d.contact_id));
+    if (!ids) return null;
+    return rows.filter((d) => !!d.contact_id && ids.has(d.contact_id));
+  };
+
+  /**
+   * The same narrowing for a caller that holds SHORT CODES and no rows — it resolves each
+   * code to its design's contact_id first. Codes that name no design on this tenant fall out
+   * here too, which is the right answer for a list the browser supplied.
+   */
+  const visibleShortCodes = async (codes: string[]): Promise<string[] | null> => {
+    if (!ownContacts) return codes;
+    if (!codes.length) return [];
+    const { data, error } = await admin.from("designs")
+      .select("short_code, contact_id").eq("client_id", clientId).in("short_code", codes);
+    if (error) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: error.code ?? "contact_scope_failed",
+        message: `short-code scope read failed: ${error.message ?? "unknown"}`,
+        context: { action, codes: codes.length },
+      }).catch(() => {});
+      return null;
+    }
+    const kept = await visibleDesignRows((data ?? []) as { short_code: string; contact_id: string | null }[]);
+    if (!kept) return null;
+    return kept.map((d) => d.short_code);
+  };
+
+  /**
+   * Refuse a WRITE against a design this caller may not see. Returns a Response to return, or
+   * null to carry on.
+   *
+   * ⚠️ 193 scoped the READS and left the writes, which is a real gap and not a theoretical
+   * one: `designs:edit` and `orders:edit` are both Sales Rep presets, and every action below
+   * takes a short_code straight from the browser. A rep on contacts:'own' could not SEE a
+   * colleague's deal in any list, and could still delete-adjacent it — resend the customer's
+   * quote email, raise their invoice, text them a signing link, or attach their design to an
+   * inventory unit — by posting a code they guessed or kept from before they were narrowed.
+   *
+   * Not folded into the GATES table: that answers "may you do this kind of thing at all",
+   * which is still the floor here. This answers "to THIS row", which a per-action table
+   * cannot express.
+   *
+   * 404, not 403, matching crm_record's choice — a distinct refusal confirms the design
+   * exists, which is the leak in a different shape.
+   *
+   * A failed check REFUSES rather than allowing. It is the inverse of the read helpers'
+   * posture on purpose: a transient error that hides a row is an annoyance, and one that
+   * lets a write through is the thing this exists to stop.
+   */
+  const refuseUnlessDesignVisible = async (code: string): Promise<Response | null> => {
+    if (!ownContacts) return null;
+    if (!code) return null;                 // the action's own validation reports a blank
+    const ok = await visibleShortCodes([code]);
+    if (!ok) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    if (!ok.includes(code)) return json({ error: "That design is not one of yours." }, 404);
+    return null;
+  };
+
+  /**
+   * ── CONTACT_ROW_SCOPE ── which contact does each contacts:'edit' action touch?
+   *
+   * Since 2026-09-07 `contacts:'own'` WRITES (access.ts's ownWrites flag — Carolyn: "Yes, let
+   * dealers edit their own contacts"), so every one of these actions is now reachable by
+   * someone who may only touch their own customers. Passing the gate says they may write
+   * something; this table is what says WHICH ROW, and without it the level is a blanket edit
+   * on the whole tenant's customer list.
+   *
+   * A TABLE, for the same reason GATES is one and stated in the same words: these actions are
+   * a long if-chain, so a branch with a forgotten check does not fail, it RUNS. Eleven checks
+   * written by hand today is eleven checks that survive exactly as long as everyone remembers.
+   * scripts/preflight.mjs refuses a push where a contacts:'edit' action in GATES is missing
+   * from here, so forgetting fails at the push instead of in a builder's account.
+   *
+   * How a row is found, in order:
+   *   `rowTable`     payload.id names an existing row — read ITS contact. This is the case
+   *                  that reads like it needs no check and needs it most: crm_save_note with
+   *                  an id updates a note by primary key and never mentions a contact, so
+   *                  without this a dealer edits any note on the tenant by guessing an id.
+   *   `contactKeys`  payload keys holding a contact id directly.
+   *   `codeKeys`     payload keys holding a design short code — resolved to its contact.
+   *
+   * DENY BY DEFAULT: an own-scoped call that names no contact this caller can see is refused,
+   * including when it names nothing at all. That covers migration 193's edge case 2 — a
+   * design whose submission carried neither phone nor email has a NULL contact_id, so it has
+   * no owner and no follower, and it is invisible to a narrowed reader. A write to it is
+   * refused for the same reason rather than falling through to "allowed".
+   */
+  const CONTACT_ROW_SCOPE: Record<string, {
+    rowTable?: string;
+    contactKeys?: string[];
+    codeKeys?: string[];
+    /** Not per-contact at all — refuse a narrowed caller outright. See set_opt_out's twin. */
+    tenantWide?: boolean;
+  }> = {
+    crm_save_contact:      { contactKeys: ["id"] },
+    crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_delete_note:       { rowTable: "crm_notes" },
+    crm_save_activity:     { rowTable: "crm_activities", contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_complete_activity: { rowTable: "crm_activities" },
+    crm_send_email:        { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_send_sms:          { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_record_consent:    { contactKeys: ["contactId"] },
+    crm_file_sign:         { contactKeys: ["contactId"] },
+    crm_file_attach:       { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_file_delete:       { rowTable: "crm_files" },
+  };
+
+  /**
+   * The one call that enforces the table. Runs before dispatch for EVERY action and returns
+   * null instantly for anyone who is not narrowed, which is every caller on every tenant
+   * until an owner sets somebody to 'Own only'.
+   *
+   * 404 rather than 403, matching refuseUnlessDesignVisible and crm_record: a distinct
+   * refusal would confirm the row exists, which is the same leak wearing a different status
+   * code. A failed CHECK refuses too — a transient error that blocks a write is an
+   * annoyance, one that lets it through is what this exists to stop.
+   */
+  const refuseUnlessOwnContactRow = async (): Promise<Response | null> => {
+    if (!ownContacts) return null;
+    const rule = CONTACT_ROW_SCOPE[action];
+    if (!rule) return null;
+    if (rule.tenantWide) {
+      return json({ error: "That list covers the whole business, and you only have access to your own customers." }, 403);
+    }
+
+    const ids: string[] = [];
+    const codes: string[] = [];
+    const rowId = rule.rowTable && payload.id ? String(payload.id).slice(0, 64) : "";
+
+    if (rowId) {
+      const { data, error } = await admin.from(rule.rowTable!)
+        .select("contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      if (error) return dbFail(req, clientId, "check who this customer is assigned to", error);
+      // Gone, or another tenant's: the same answer a narrowed caller gets for a row that is
+      // simply not theirs, so the refusal never distinguishes the two.
+      if (!data) return json({ error: "That is not one of yours." }, 404);
+      if (data.contact_id) ids.push(String(data.contact_id));
+      else if (data.short_code) codes.push(String(data.short_code));
+    } else {
+      for (const k of rule.contactKeys ?? []) {
+        if (payload[k]) ids.push(String(payload[k]).slice(0, 64));
+      }
+      for (const k of rule.codeKeys ?? []) {
+        if (payload[k]) codes.push(String(payload[k]).slice(0, 32));
+      }
+    }
+
+    if (!ids.length && !codes.length) {
+      return json({ error: "That is not one of yours." }, 404);
+    }
+    if (ids.length) {
+      const seen = await visibleContactIds(ids);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (ids.some((id) => !seen.has(id))) return json({ error: "That customer is not one of yours." }, 404);
+    }
+    if (codes.length) {
+      const ok = await visibleShortCodes(codes);
+      if (!ok) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (codes.some((c) => !ok.includes(c))) return json({ error: "That design is not one of yours." }, 404);
+    }
+    return null;
+  };
+
+  { const bad = await refuseUnlessOwnContactRow(); if (bad) return bad; }
 
   // ── Record that a building has been sold ────────────────────────────────────────
   // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
@@ -812,7 +1157,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     const { data, error } = await admin
       .from("client_settings")
-      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, email_provider, email_domain_status, updated_at")
+      .select("ghl_location_id, ghl_api_key, ghl_pipeline_id, ghl_stage_send_quote_id, ghl_stage_accepted_id, ghl_stage_invoiced_id, ghl_stage_delivered_id, business_name, business_phone, business_website, business_address, business_logo_url, quote_terms, beta_mode, beta_email, show_pricing, invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_quote_prefix, ss_invoice_next, ss_invoice_prefix, ss_tax_rate, ss_tax_label, ss_tax_delivery, co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label, co_unlock_hours, email_provider, email_domain_status, updated_at")
       .eq("client_id", clientId)
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
@@ -845,6 +1190,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // row that predates the column — or a tenant with no client_settings row at all —
         // reads as "invoice through the CRM", i.e. today's behaviour.
         invoiceInGhl: data?.invoice_in_ghl !== false,
+        // MAY they invoice through the CRM at all (migration 217)? Carolyn 2026-09-07:
+        // "The feature for payments to go through GHL should only show in Junior Barns as he
+        // is an active user. All other builders will only have the option to invoice through
+        // SS." Default false, so a row predating the column reads as NOT allowed — the safe
+        // direction, since the worst case is a builder asking why the checkbox went away
+        // rather than one quietly keeping a route we are retiring.
+        //
+        // This is only what the CARD RENDERS. The control is in `save` below; a hidden
+        // checkbox is a courtesy.
+        ghlInvoicingAllowed: data?.ghl_invoicing_allowed === true,
         ssQuoteNext: data?.ss_quote_next ?? null,
         ssQuotePrefix: data?.ss_quote_prefix ?? "",
         ssInvoiceNext: data?.ss_invoice_next ?? null,
@@ -854,6 +1209,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // a tenant ends up quoting at 0.07%.
         ssTaxRate: data?.ss_tax_rate == null ? null : Math.round(Number(data.ss_tax_rate) * 1000000) / 10000,
         ssTaxLabel: data?.ss_tax_label ?? "Sales tax",
+        // Changing a signed order (migrations 209-216). The fee is surfaced in DOLLARS —
+        // the card asks for dollars, and a card that reads cents back into a dollar box is
+        // how a $150 fee becomes $15,000 on the first re-save.
+        coUnlockRequired: data?.co_unlock_required === true,
+        coFreeDays: Number(data?.co_free_days ?? 0),
+        coFee: data?.co_fee_cents == null ? 0 : Math.round(Number(data.co_fee_cents)) / 100,
+        coFeeTaxable: data?.co_fee_taxable !== false,
+        coFeeLabel: data?.co_fee_label ?? "Change order fee",
+        coUnlockHours: Number(data?.co_unlock_hours ?? 72),
         ssTaxDelivery: data?.ss_tax_delivery === true,
         // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
         // in SS mode there is no GHL fallback, so a tenant without live sending can't
@@ -921,6 +1285,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? payload.prefs as Record<string, any> : {};
     const clean: Record<string, unknown> = {};
     if (raw.designsView === "list" || raw.designsView === "pipeline") clean.designsView = raw.designsView;
+    // A person's own reply-to address (Carolyn 2026-09-04 @35:06: "every user should be able to
+    // go in and say, when somebody replies to an email, send it here. But that should be in
+    // their profile"). It is ADVERTISED TO CUSTOMERS — sendTenantEmail puts it in Reply-To
+    // alongside the CRM routing address — so it is validated rather than merely trimmed, and an
+    // unusable value is DROPPED rather than stored: a malformed address in a header is a send
+    // Resend may 422 outright, and a 422 is a permanent verdict, so the whole email is lost
+    // rather than retried.
+    //
+    // ⚠️ THE WHITELIST IS THE ONLY REGISTER OF WHAT SURVIVES. `clean` is rebuilt from scratch
+    // and the update below REPLACES the whole jsonb blob, so a key that is not listed here does
+    // not merely fail to save — it is DESTROYED by the next save from any screen, including
+    // someone changing their Pipeline default on the same card. Every future per-user pref has
+    // to be added here or it silently evaporates.
+    //
+    // 320 is the RFC 5321 maximum address length and matches the beta_email cap. An empty
+    // string is how the UI clears it, and correctly arrives here as "drop the key".
+    if (typeof raw.replyToEmail === "string") {
+      const addr = raw.replyToEmail.trim().slice(0, 320);
+      if (addr && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(addr)) clean.replyToEmail = addr;
+    }
     // Card order is a list of section keys. Unknown keys are kept rather than dropped here
     // and filtered at RENDER time instead -- the server would otherwise silently delete a
     // card belonging to a newer frontend than itself, and the user would watch their layout
@@ -968,6 +1352,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if ("betaEmail" in payload) updates.beta_email = trimOrNull(payload.betaEmail, 320);
     if ("betaMode" in payload) updates.beta_mode = Boolean(payload.betaMode);
     if ("showPricing" in payload) updates.show_pricing = Boolean(payload.showPricing);
+    // Tentative — the capability check below can force this to false. See migration 217.
     if ("invoiceInGhl" in payload) updates.invoice_in_ghl = Boolean(payload.invoiceInGhl);
     // The quote-number START. Blank clears it back to "not set"; anything else must be a
     // whole positive number, because it is allocated with +1 and printed on a customer's
@@ -1030,6 +1415,85 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
 
+    // ── CHANGING A SIGNED ORDER (migrations 209-216) ────────────────────────────────────
+    // Carolyn 2026-09-06: "add a feature in the settings that allow admin/builder to set how
+    // many days after an order is written that a sales rep can do a change order without
+    // their approval ... and the admin should be able to set a $ amount as a change order
+    // fee (if they want) and it automatically gets applied (after said amount of days)".
+    //
+    // Every bound below is the SAME one the database holds, restated so the builder is
+    // stopped at the control they just touched with a sentence rather than at a constraint.
+    if ("coUnlockRequired" in payload) updates.co_unlock_required = Boolean(payload.coUnlockRequired);
+
+    if ("coFreeDays" in payload) {
+      const raw = String(payload.coFreeDays ?? "").trim();
+      const n = raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || n > 365) {
+        return json({ error: "The free-change window has to be a whole number of days between 0 and 365. Enter 0 for no free window." }, 400);
+      }
+      updates.co_free_days = n;
+    }
+
+    if ("coFee" in payload) {
+      // Entered in DOLLARS, stored in CENTS. The ceiling is deliberate and low: this is a
+      // fee for paperwork, and a fat-fingered 15000 would otherwise land on a customer's
+      // invoice as $15,000 with a real signature request attached to it.
+      const raw = String(payload.coFee ?? "").trim();
+      const d = raw === "" ? 0 : Number(raw);
+      if (!Number.isFinite(d) || d < 0 || d > 5000) {
+        return json({ error: "The change order fee has to be an amount between $0 and $5,000. Enter 0 for no fee." }, 400);
+      }
+      updates.co_fee_cents = Math.round(d * 100);
+    }
+
+    if ("coFeeTaxable" in payload) updates.co_fee_taxable = Boolean(payload.coFeeTaxable);
+
+    if ("coFeeLabel" in payload) {
+      // Printed on the customer's invoice, so bounded exactly like the tax label beside it.
+      const l = String(payload.coFeeLabel ?? "").trim().slice(0, 40);
+      updates.co_fee_label = l || "Change order fee";
+    }
+
+    if ("coUnlockHours" in payload) {
+      const raw = String(payload.coUnlockHours ?? "").trim();
+      const n = raw === "" ? 72 : Number(raw);
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1 || n > 720) {
+        return json({ error: "An unlock has to last between 1 and 720 hours (30 days)." }, 400);
+      }
+      updates.co_unlock_hours = n;
+    }
+
+    // ── THE MERGED-STATE REFUSALS: a number that is stored, invisible, and doing nothing ──
+    // Both of these are settings that LOOK set and have no effect, which is the worst kind
+    // of setting — a builder believes they are charging for late changes and are not.
+    // Checked against the merged state because the controls can arrive in separate saves.
+    if ("coFee" in payload || "coUnlockRequired" in payload || "invoiceInGhl" in payload) {
+      const { data: curCo } = await admin.from("client_settings")
+        .select("co_unlock_required, co_fee_cents, invoice_in_ghl").eq("client_id", clientId).maybeSingle();
+      const nextFee = "coFee" in payload ? Number(updates.co_fee_cents) : Number(curCo?.co_fee_cents ?? 0);
+      const nextRequired = "coUnlockRequired" in payload
+        ? Boolean(updates.co_unlock_required)
+        : curCo?.co_unlock_required === true;
+      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curCo?.invoice_in_ghl !== false;
+
+      // 1. In CRM mode GoHighLevel owns the documents. There is nothing of ours to print a
+      //    fee line on, so the money would simply never be charged.
+      if (nextFee > 0 && nextInGhl) {
+        return json({
+          error: "A change order fee can only be charged on paperwork StructureStudio issues. Your quotes and invoices are created in your CRM right now, so there is nothing here for the fee to appear on — switch that off above first, or leave the fee at 0.",
+        }, 400);
+      }
+      // 2. THE FEE RIDES THE UNLOCK. order_amendment_gate only quotes a fee on the 'unlock'
+      //    authority — inside the free window a change is free by definition, and with the
+      //    approval requirement off the whole regime is dormant and every change is free.
+      //    So a fee set without it is a number nobody will ever be charged.
+      if (nextFee > 0 && !nextRequired) {
+        return json({
+          error: "A change order fee is charged when an admin or crew leader unlocks a signed order — so it only applies once you require approval for changes. Switch that on, or leave the fee at 0.",
+        }, 400);
+      }
+    }
+
     if ("ssInvoicePrefix" in payload) {
       const p = String(payload.ssInvoicePrefix ?? "").trim().slice(0, 12);
       if (p && !/^[A-Za-z0-9-]+$/.test(p)) {
@@ -1045,8 +1509,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // separate saves), the same way the beta pair below is.
     if ("invoiceInGhl" in payload || "ssQuoteNext" in payload || "ssInvoiceNext" in payload || "ssTaxRate" in payload) {
       const { data: curInv } = await admin
-        .from("client_settings").select("invoice_in_ghl, ss_quote_next, ss_invoice_next, ss_tax_rate").eq("client_id", clientId).maybeSingle();
-      const nextInGhl = "invoiceInGhl" in payload ? Boolean(payload.invoiceInGhl) : curInv?.invoice_in_ghl !== false;
+        .from("client_settings").select("invoice_in_ghl, ghl_invoicing_allowed, ss_quote_next, ss_invoice_next, ss_tax_rate, ss_quote_prefix, ss_invoice_prefix").eq("client_id", clientId).maybeSingle();
+      // ── CRM INVOICING IS A CAPABILITY NOW (migration 217, Carolyn 2026-09-07) ───────────
+      // "All other builders will only have the option to invoice through SS." A tenant
+      // without the flag can write only FALSE here, whatever the body says — the browser
+      // hides the checkbox, and this is what makes hiding it mean something.
+      //
+      // Forced only when the key is PRESENT. A non-allowed tenant still on the CRM path who
+      // saves a neighbouring field (a tax label, a prefix) must not be silently flipped into
+      // paperwork they have set no numbering for; the flip belongs to the save that comes
+      // from the Quotes & Invoices card, which always posts this key.
+      const mayInvoiceInGhl = curInv?.ghl_invoicing_allowed === true;
+      if ("invoiceInGhl" in payload && !mayInvoiceInGhl) updates.invoice_in_ghl = false;
+      const nextInGhl = "invoiceInGhl" in payload
+        ? (mayInvoiceInGhl && Boolean(payload.invoiceInGhl))
+        : curInv?.invoice_in_ghl !== false;
       const nextQuoteStart = "ssQuoteNext" in payload ? updates.ss_quote_next : (curInv?.ss_quote_next ?? null);
       const nextInvoiceStart = "ssInvoiceNext" in payload ? updates.ss_invoice_next : (curInv?.ss_invoice_next ?? null);
       const nextTaxRate = "ssTaxRate" in payload ? updates.ss_tax_rate : (curInv?.ss_tax_rate ?? null);
@@ -1069,6 +1546,73 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({
           error: "StructureStudio needs a sales tax rate before it can issue your invoices — set one so quotes can still be taxed if the delivery address can't be looked up. Enter 0% if you don't collect sales tax.",
         }, 400);
+      }
+
+      // ── THE COUNTER HAS A FLOOR: WHAT HAS ALREADY BEEN ISSUED ────────────────────────
+      // Both allocators (123 / 125) pre-increment and hand back what they took, so a number
+      // is spent the moment a document carries it. Nothing stopped this field being set back
+      // BELOW that: the next quote or invoice then reuses a number a customer is already
+      // holding paperwork for. Invoices fail the loudest — migration 125's partial unique
+      // index refuses the second ledger row — but that refusal lands mid-send, after the
+      // number is spent and the PDF is written, which is far too late to be the control.
+      //
+      // Compared WITHIN THE CURRENT PREFIX, never across every row. Switching prefixes
+      // legitimately restarts the series (INV-1 and 2026-1 are different books), so the
+      // comparison uses the prefix this save is leaving in place, and a genuinely new prefix
+      // simply has no issued numbers to clear.
+      //
+      // Gaps stay fine (123/125's own property): the rule is only "not at or below one you
+      // have already used", never "exactly one more than the last".
+      const numericTail = (value: unknown, prefix: string): number | null => {
+        const s = String(value ?? "");
+        if (prefix && !s.startsWith(prefix)) return null;
+        const tail = s.slice(prefix.length);
+        return /^\d+$/.test(tail) ? Number(tail) : null;
+      };
+      // Newest rows first and capped: numbers are handed out in increasing order, so the
+      // most recent documents carry the highest ones — the cap bounds the read on a tenant
+      // with years of history without changing the answer.
+      const highestIssued = async (
+        table: string, column: string, orderBy: string, prefix: string,
+        // Restricts invoice_sends to OUR series: a GHL-converted row carries that CRM's
+        // invoice number, which is a different book entirely.
+        issuedBy?: string,
+      ): Promise<number | null> => {
+        let q = admin.from(table).select(column)
+          .eq("client_id", clientId).not(column, "is", null);
+        if (issuedBy) q = q.eq("issued_by", issuedBy);
+        const { data, error } = await q.order(orderBy, { ascending: false }).limit(1000);
+        if (error) throw error;
+        let max: number | null = null;
+        // deno-lint-ignore no-explicit-any
+        for (const r of ((data ?? []) as any[])) {
+          const n = numericTail(r?.[column], prefix);
+          if (n != null && (max == null || n > max)) max = n;
+        }
+        return max;
+      };
+
+      if ("ssInvoiceNext" in payload && typeof updates.ss_invoice_next === "number") {
+        const prefix = String(("ssInvoicePrefix" in payload ? updates.ss_invoice_prefix : curInv?.ss_invoice_prefix) ?? "");
+        let issued: number | null = null;
+        try { issued = await highestIssued("invoice_sends", "invoice_number", "created_at", prefix, "structurestudio"); }
+        catch (e) { return dbFail(req, clientId, "check your invoice numbering", e); }
+        if (issued != null && (updates.ss_invoice_next as number) <= issued) {
+          return json({
+            error: `You have already issued invoice ${prefix}${issued}. The next invoice number has to be higher than that, or two invoices would carry the same number — try ${prefix}${issued + 1}.`,
+          }, 409);
+        }
+      }
+      if ("ssQuoteNext" in payload && typeof updates.ss_quote_next === "number") {
+        const prefix = String(("ssQuotePrefix" in payload ? updates.ss_quote_prefix : curInv?.ss_quote_prefix) ?? "");
+        let issued: number | null = null;
+        try { issued = await highestIssued("designs", "ss_quote_number", "created_at", prefix); }
+        catch (e) { return dbFail(req, clientId, "check your quote numbering", e); }
+        if (issued != null && (updates.ss_quote_next as number) <= issued) {
+          return json({
+            error: `You have already issued quote ${prefix}${issued}. The next quote number has to be higher than that, or two quotes would carry the same number — try ${prefix}${issued + 1}.`,
+          }, 409);
+        }
       }
     }
 
@@ -1218,35 +1762,58 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
-      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable").eq("client_id", clientId).order("sort_order"),
-      admin.from("layout_item_types").select("item_key, label"),
+      admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable, depth_in, height_off_floor_in").eq("client_id", clientId).order("sort_order"),
+      // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
+      // Height off floor for wall-mounted items, and shows the master default where the tenant
+      // has not overridden it.
+      admin.from("layout_item_types").select("item_key, label, wall_snap, depth_in, height_off_floor_in"),
       admin.from("building_size_inclusions").select("size_id, item_key, included, qty").eq("client_id", clientId),
       // Default (style_id IS NULL) layout-item prices for the Layout Pricing tab.
       admin.from("layout_item_pricing").select("item_key, pricing_method, rate, image_url").eq("client_id", clientId).is("style_id", null),
       // Color palette for the Colors tab (paint = siding/trim; roof = shingle/metal).
       admin.from("colors").select("id, label, code, siding, trim, shingle, metal, door, door_rate, allow_custom, is_default, rate, pricing_method, hex, image_url, sort_order, active, taxable").eq("client_id", clientId).order("sort_order"),
       // Fixtures catalog (Options tab → Doors section; windows/ramps later via `category`).
-      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
+      admin.from("fixture_items").select("id, category, name, plan_label, width_in, height_in, price, swing_in, swing_out, swing_default, op_right, op_left, op_double, op_slideup, op_default, color_mode, has_trim_color, fixed_color_id, window_color_ids, sill_in, sill_mode, door_style, image_url, show_image_on_estimate, sort_order, active, archived, internal_only, taxable").eq("client_id", clientId).order("sort_order"),
       // Ramp mode + simple-ramp config (client_settings, service-role only).
-      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.from("client_settings").select("ramp_mode, ramp_price, ramp_price_method, ramp_image_url, ramp_show_image, ramp_enabled, insulation_enabled").eq("client_id", clientId).maybeSingle(),
       // Window colors (116): the small per-client list every window fixture offers.
       admin.from("window_colors").select("id, label, hex, rate, is_default, sort_order, active").eq("client_id", clientId).order("sort_order"),
+      // Wall-height upgrades (172), for the Options tab card. Per style, ordered by increase.
+      admin.from("style_wall_heights").select("id, style_id, delta_in, rate_per_lf, taxable, active, sort_order, widths_ft, internal_only, build_on_site, bos_fee_basis, bos_fee_rate").eq("client_id", clientId).order("delta_in"),
+      // Cladding offered per style (207). The card renders a FIXED four rows per style, so a
+      // style with no rows is not "broken" — it is a style offering builder's standard only.
+      admin.from("style_cladding").select("id, style_id, cladding_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
+      // Insulation rates (177) for the Options tab matrix.
+      admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
+      admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
+      admin.from("electrical_items").select("*").eq("client_id", clientId).order("sort_order").order("name"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
-    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; });
+    const typeByKey: Record<string, any> = {};
+    (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
     const itemList = (items.data ?? []).filter((i: any) => i.active || i.archived)
-      .map((i: any) => ({ key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key, archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false }));
+      .map((i: any) => {
+        const t = typeByKey[i.item_key] || {};
+        // Tenant override wins, master default fills in. null (not 0) means "not set", which is
+        // what lets the grid show a blank rather than claiming a 0-inch shelf.
+        const depth = i.depth_in != null ? i.depth_in : t.depth_in;
+        const off = i.height_off_floor_in != null ? i.height_off_floor_in : t.height_off_floor_in;
+        return { key: i.item_key, label: i.label_override || labelByKey[i.item_key] || i.item_key,
+          archived: !!i.archived, internalOnly: !!i.internal_only, taxable: i.taxable !== false,
+          wallSnap: !!t.wall_snap, depthIn: depth != null ? Number(depth) : null,
+          heightOffFloorIn: off != null ? Number(off) : null };
+      });
     const rs = csRamp.data;
     const rampSettings = { mode: (rs?.ramp_mode || "simple"), price: rs?.ramp_price ?? null, method: (rs?.ramp_price_method || "each"), imageUrl: rs?.ramp_image_url ?? null, showImage: rs?.ramp_show_image !== false, enabled: rs?.ramp_enabled !== false };
     // aiReady lets the editor DISABLE "Draft from photos" with a reason rather than letting a
@@ -1272,7 +1839,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       };
     } catch (_) { wallet = null; }
 
-    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
+    return json({ ok: true, clientId, styles: styles.data, sizes: sizes.data, items: itemList, inclusions: incl.data, layoutPricing: lpRows.data ?? [], colors: colorsRes.data ?? [], fixtures: fixturesRes.data ?? [], windowColors: windowColorsRes.data ?? [], wallHeights: wallHeightsRes.data ?? [], cladding: claddingRes.data ?? [], insulation: insulationRes.data ?? [],
+      // Null for a tenant who has never opened the card — the portal falls back to the same
+      // defaults the table declares, so the form is never blank.
+      electrical: electricalRes.data ?? null,
+      electricalItems: elecItemsRes.data ?? [],
+      insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
   // CSV pricing + inclusion import (client self-serve). clientId is JWT-resolved,
@@ -1299,7 +1871,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // up FOR tenants (the same isOperator bypass featureOn() has). Errors reading billing
   // fail CLOSED — a paid gate that fails open is no gate (the wallet's posture).
   const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
-  if (RTP_ACTIONS.has(action) && !operator) {
+  if (RTP_ACTIONS.has(action) && !entitlementExempt) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
     catch (e) { return dbFail(req, clientId, "check your Real-Time Pricing subscription", e); }
@@ -1331,18 +1903,91 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // ⚠️ NOR is `crm_record` when kind === "design", and that exception is load-bearing. The
   // crm_ prefix is a lie about that one action: CrmRecord serves BOTH a contact record and a
   // DESIGN record, and the design record is what opens when someone clicks a row in the free
-  // Pipeline list (11-shell.jsx routes it to d-<code>). Its branch reads `designs` only —
-  // no crm_contacts, no notes, no threads — so it is the design data a Simple Layout
+  // Pipeline list (11-shell.jsx routes it to d-<code>). It is the design data a Simple Layout
   // subscriber already pays for, wearing a CRM-shaped action name. Gating it would have
   // locked the free list's own rows behind the CRM, which is neither what was sold nor what
   // Carolyn asked for ("they only get the list view" — the list still has to WORK).
+  //
+  // ⚠️⚠️ THE EXEMPTION IS FOR THE DESIGN, NOT FOR THE DOOR. That paragraph used to say the
+  // branch "reads `designs` only — no crm_contacts, no notes, no threads", and that was
+  // simply not true of the code: the design branch reads the linked crm_contacts row and
+  // builds the CONTACT-scoped feed (notes, email and text threads, uploaded files) beside
+  // it. So the one action deliberately let through without the subscription was handing over
+  // the subscription's data. `crmPaid` below is therefore RESOLVED for the exempt action too
+  // and carried into the branch, which serves the design half and withholds the contact half
+  // — same shape as the per-area CONTACT SCOPE check that sits next to it.
   const crmGated = action.startsWith("crm_") &&
     !(action === "crm_record" && payload?.kind === "design");
-  if (crmGated && !operator) {
-    let paid = false;
-    try { paid = await hasPaidFeature(admin, clientId, "crm"); }
+  // Default true so an operator (entitlementExempt) and every non-CRM action keep today's
+  // behaviour without paying for a billing read they do not need.
+  let crmPaid = true;
+  if (!entitlementExempt && (crmGated || action === "crm_record")) {
+    try { crmPaid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
-    if (!paid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+    if (crmGated && !crmPaid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
+  }
+
+  // ENTITLEMENT, server-side, for QuickBooks sync. Third instance of the RTP posture above
+  // and the last of the pay-only features to get one: quickbooks_sync is PAY-ONLY
+  // (portal-billing PAID_ONLY_FEATURES) and the Suite confers it, the browser hides the tab
+  // and the Settings card, and until now NOTHING on the server asked — so connecting a
+  // company, mapping items, testing and retrying all worked for a tenant who never bought it
+  // or whose subscription lapsed. A hidden tab is presentation; this is the enforcement.
+  //
+  // A HAND-KEPT SET, not the crm_ name-prefix trick, because the action names here do not
+  // share one: `list_item_map` and `list_qbo_items` carry no qbo_ prefix. preflight's
+  // gate cross-check catches an action missing from GATES, not one missing from here — so
+  // the list and the GATES block above are kept adjacent on purpose.
+  //
+  // ⛔ disconnect_qbo IS DELIBERATELY ABSENT. Revoking our access to a builder's books is
+  // the one QuickBooks verb that must work when the subscription does not: a lapsed tenant
+  // has to be able to cut us off, and refusing that would leave live Intuit tokens they
+  // cannot revoke from our side of the connection.
+  const QBO_ACTIONS = new Set(["qbo_status", "qbo_pending", "list_item_map", "list_qbo_items", "save_item_map", "qbo_test", "retry_qbo_push"]);
+  // Resolved at most once per request and shared with the invoice-push call sites further
+  // down, which are reached through send_invoice rather than through a qbo_* action.
+  let qboPaidCache: boolean | null = null;
+  const qboEntitled = async (): Promise<boolean> => {
+    if (entitlementExempt) return true;
+    if (qboPaidCache === null) qboPaidCache = await hasPaidFeature(admin, clientId, "quickbooks_sync");
+    return qboPaidCache;
+  };
+  // The invoice PUSH is reached through send_invoice rather than a qbo_* action, so it asks
+  // the same question at its own two call sites. This one never throws: by the time those run
+  // the invoice is issued and the customer has been emailed, so a billing-read hiccup must
+  // skip the bookkeeping push — which Settings → QuickBooks → Retry can re-run — rather than
+  // fail a send that has already happened. Skipping is still the fail-CLOSED direction.
+  const qboPushAllowed = async (): Promise<boolean> => {
+    try {
+      return await qboEntitled();
+    } catch (e) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "qbo_entitlement_unreadable",
+        message: `QuickBooks entitlement check failed; invoice push skipped: ${(e as Error)?.message ?? ""}`,
+      }).catch(() => {});
+      return false;
+    }
+  };
+  if (QBO_ACTIONS.has(action) && !entitlementExempt) {
+    let paid = false;
+    try { paid = await qboEntitled(); }
+    catch (e) { return dbFail(req, clientId, "check your QuickBooks subscription", e); }
+    if (!paid) {
+      // qbo_status answers SOFTLY, the way rtp_data does: the Settings → QuickBooks card
+      // loads its own state from this call, so a 403 would blank the tab instead of showing
+      // the not-connected teaser the tenant is meant to see. Reported as a real
+      // not-connected state (`connected: false`) so a client that has never heard of
+      // `entitled` renders exactly that.
+      if (action === "qbo_status") {
+        return json({
+          clientId, entitled: false, oauthReady: qboOauthReady(),
+          connected: false, companyName: null, realmIdMasked: null, connectedAt: null,
+          broken: false, brokenReason: null, refreshTokenExpiresAt: null,
+          disconnectReason: null, mappedCount: 0,
+        });
+      }
+      return json({ error: "QuickBooks sync is not part of your subscription — add it under Settings → Billing." }, 403);
+    }
   }
 
   // Re-apply after any RTP mutation: the SQL function no-ops unless the toggle is ON, and
@@ -1639,6 +2284,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         ? await admin.from("layout_item_pricing").update(patch).eq("id", existingId)
         : await admin.from("layout_item_pricing").insert({ client_id: clientId, item_key: itemKey, style_id: null, ...patch });
       if (res.error) { skipped.push(`${itemKey}: ${res.error.message}`); continue; }
+      // Dimensions for a wall-mounted item (171): depth of the drawn footprint, and how far off
+      // the floor it hangs — the number that lets a shelf sit above a workbench without the two
+      // colliding. They live on client_layout_items, not layout_item_pricing, so they are
+      // written separately and ONLY when the row carries the field: presence-guarded exactly
+      // like imageUrl above, so a save from an older client can never blank a builder's setup.
+      // An explicit empty string clears the override and falls back to the master default.
+      const dims: Record<string, unknown> = {};
+      let dimBad = "";
+      for (const [field, col] of [["depthIn", "depth_in"], ["heightOffFloorIn", "height_off_floor_in"]] as [string, string][]) {
+        if (!Object.prototype.hasOwnProperty.call(row, field)) continue;
+        const raw = String((row as Record<string, unknown>)[field] ?? "").trim();
+        if (raw === "") { dims[col] = null; continue; }
+        const n = Number(raw);
+        // Refuse, never coerce — the same posture as the rate above. A silently-zeroed depth
+        // would draw a zero-thickness shelf on the customer's plan.
+        if (!Number.isFinite(n) || n < 0) { dimBad = `${itemKey}: invalid ${field} "${raw}"`; break; }
+        dims[col] = n;
+      }
+      if (dimBad) { skipped.push(dimBad); continue; }
+      if (Object.keys(dims).length) {
+        const dRes = await admin.from("client_layout_items").update(dims).eq("client_id", clientId).eq("item_key", itemKey);
+        if (dRes.error) { skipped.push(`${itemKey}: ${dRes.error.message}`); continue; }
+      }
       saved++;
     }
     return json({ ok: true, saved, skipped });
@@ -1939,7 +2607,58 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // being deleted: run it after and a failure is unretryable, having thrown away the only
   // pointer to the thing left behind. The contact and opportunity are still untouched — they
   // outlive any single design (a repeat customer has several) and are not ours to remove.
+  // ── Expected close date, set from the pipeline board card (migration 206) ───────────
+  // The board reads `designs` over direct PostgREST, but 154/193's restrictive policies are
+  // SELECT-only and there is deliberately no tenant update policy on that table — so this is
+  // the write path, with the tenant resolved server-side and never taken from the body.
+  if (action === "set_expected_close") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!/^SS-[A-HJ-NP-Z2-9]{6,12}$/.test(shortCode)) return json({ error: "Unknown design." }, 400);
+
+    // null clears the date; anything else must be a real calendar date. The check is not
+    // cosmetic: `new Date("2026-02-31")` rolls into March rather than failing, so a typo
+    // would be stored as a date nobody chose.
+    const raw = payload?.expectedCloseDate;
+    let expected: string | null = null;
+    if (raw != null && String(raw).trim() !== "") {
+      const v = String(raw).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return json({ error: "That date isn't in a form we recognise." }, 400);
+      const d = new Date(v + "T00:00:00Z");
+      if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) {
+        return json({ error: "That date doesn't exist — check the day and month." }, 400);
+      }
+      // A pipeline forecast, not a history field. Bounded so a fat-fingered year cannot park
+      // a card in 2226 where no filter or sort will ever surface it again.
+      const year = Number(v.slice(0, 4));
+      if (year < 2000 || year > 2100) return json({ error: "Pick a close date within the next few years." }, 400);
+      expected = v;
+    }
+
+    const { error: updErr } = await admin.from("designs")
+      .update({ expected_close_date: expected })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (updErr) return dbFail(req, clientId, "save that close date", updErr);
+    return json({ ok: true, expectedCloseDate: expected });
+  }
+
   if (action === "delete_design") {
+    // ── OWNER/ADMIN ONLY ──────────────────────────────────────────────────────────────
+    // The screen has always said so ("a team member must not be able to destroy a customer
+    // record" — portal/02-sales.jsx hides the menu item on isAdmin) and the server used to
+    // agree, back when every mutation went through a role gate. Migration 100 replaced that
+    // with the area table above, and `designs:edit` is a Sales Rep's preset — so the check
+    // the browser was relying on had quietly stopped existing on this one action.
+    //
+    // Restated here rather than as a second area on the gate: this is a ROLE rule, and the
+    // GATES entry says so in its own comment. The area gate above is still the floor — you
+    // need designs:edit AND the title — so nothing widens; only the two halves agree again.
+    // Operators pass, as they do everywhere in this file: they act as the tenant, and a
+    // support operator has already been through checkGate on the owner's map.
+    if (!operator && role !== "owner" && role !== "admin") {
+      return json({
+        error: "Deleting a design is limited to an account owner or admin — ask one of them to remove it.",
+      }, 403);
+    }
     const shortCode = String(payload.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
 
@@ -2013,8 +2732,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     // 3. The estimate in the tenant's CRM. GHL exposes DELETE /invoices/estimate/:id; altId +
-    //    altType scope it to the sub-account, the same pair every other estimate call in this
-    //    file already sends. Two rules here, both deliberate:
+    //    altType scope it to the sub-account. They are NOT sent the way the rest of this file
+    //    sends them: for estimate MUTATIONS they are required in the JSON body, and only the
+    //    estimate LIST GET takes them on the query string. Assuming "the same pair every other
+    //    estimate call already sends" is what shipped a 422 here. Two rules, both deliberate:
     //
     //    (a) NEVER once an invoice exists. Converting an estimate marks it invoiced, and that
     //        invoice is the record behind money that may already have been collected —
@@ -2058,14 +2779,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                   Authorization: `Bearer ${creds.ghl_api_key}`,
                   Version: "2021-07-28",
                   Accept: "application/json",
+                  "Content-Type": "application/json",
                 },
+                // altId/altType go in the BODY for this endpoint. They are REQUIRED there, and
+                // sending them only on the query string is a missing-required-field DTO failure
+                // -> 422, which reads exactly like a state refusal and is why this looked like
+                // "GHL will not let us delete it" for a month. The query string is kept as well:
+                // it is harmless, and it covers the alternate reading of their docs.
+                body: JSON.stringify({ altId: creds.ghl_location_id, altType: "location" }),
               },
             );
             // 404 is the desired end state reached by another route (already deleted in the
             // CRM, or a half-finished earlier attempt), so it counts as done rather than as an
             // error the operator has to interpret. That is also what makes a retry safe.
             estimate = (r.ok || r.status === 404) ? "deleted" : "failed";
-            if (estimate === "failed") estimateError = `CRM returned ${r.status}`;
+            // Keep GHL's own words. A bare status turned a one-line DTO complaint into a
+            // month of guessing; the body is their validation output, so it carries no
+            // customer data. Capped because it lands in an error row, not a log stream.
+            if (estimate === "failed") {
+              const detail = (await r.text().catch(() => "")).slice(0, 300);
+              estimateError = `CRM returned ${r.status}${detail ? `: ${detail}` : ""}`;
+            }
           } catch (e) {
             estimate = "failed";
             estimateError = (e as Error)?.message || "network error";
@@ -2373,9 +3107,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // row, and a spec drafted from the first half of the walk. The response reports
     // `frames` for exactly that reason — a truncation that shows up in the UI is a bug you
     // can see, and this one otherwise looks like the model simply reading the shed wrong.
+    // 'combined' (2026-09-07, Ahsan: "I want the users to upload the video and images both
+    // after that we generate the 3D model") reads a walk-around's frames AND the builder's
+    // own photos in one call. It takes the VIDEO prompt, because a combined set still
+    // contains the walk-around and that prompt is the one that knows the roof was only ever
+    // seen from the ground — the single most important thing about this input.
+    //
+    // TWELVE is Carolyn's own number, 09-04 @13:53: "three from the back, three from this
+    // side, one three from this side, and three from this side."
     const fromVideo = payload.source === "video";
-    const photoUrls = sanitizePhotoUrls(payload.photoUrls, fromVideo ? 8 : 4);
+    const combined = payload.source === "combined";
+    const shapeFirst = fromVideo || combined;
+    const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? 8 : 4);
     if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
+    // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
+    // drafted from part of the set — and the builder concludes the AI reads sheds badly. The
+    // caller is told what was actually read, for every source and not just video, so the UI
+    // can say so instead of guessing from a constant it has to keep in step by hand.
+    const sentCount = Array.isArray(payload.photoUrls) ? payload.photoUrls.filter(Boolean).length : 0;
+    const droppedCount = Math.max(0, sentCount - photoUrls.length);
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
 
@@ -2398,7 +3149,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
     // path the ledger exists to meter (audit 2026-08-19). Refusing is the safe side; the
     // cap query above already failed soft for the read case.
-    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: fromVideo ? "video" : "photos" }).select("id").single();
+    const { data: ledgerRow, error: ledgerErr } = await admin.from("ai_style_calls").insert({ client_id: clientId, user_id: userId ?? null, style_key: String(payload.styleValue ?? "").slice(0, 120) || null, source: combined ? "combined" : fromVideo ? "video" : "photos" }).select("id").single();
     if (ledgerErr) return json({ error: "The AI drafting meter is unavailable right now - try again shortly." }, 503);
 
     // ── WALLET HOLD ────────────────────────────────────────────────────────────────
@@ -2424,7 +3175,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the uploaded video". The $20 is priced off the video's Anthropic cost, and the photo
     // path is slated for removal.
     let holdId: number | null = null;
-    if (fromVideo) {
+    // CHARGED FOR COMBINED TOO (2026-09-07). 129 rode the charge on video alone for two
+    // reasons, and migration 206's header records both and why they no longer hold: the
+    // photo path is no longer 'slated for removal' (it came back on 09-04 at Carolyn's
+    // request), and pricing the accurate option higher is backwards from what she asked
+    // for. One press is one hold is one charge, whichever inputs it read.
+    if (shapeFirst) {
       const { data: hold, error: holdErr } = await admin
         .rpc("wallet_hold", { p_client_id: clientId, p_kind: "video_3d_generation", p_idem: String(payload.idempotencyKey ?? "").slice(0, 120) || null, p_user: userId ?? null })
         .maybeSingle() as { data: any; error: any };
@@ -2544,14 +3300,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           model: "claude-sonnet-5",
           // The video prompt asks for an `observed` block on top of the spec, so it needs
           // the headroom. A truncated reply is unparseable, not partially useful.
-          max_tokens: fromVideo ? 900 : 700,
+          max_tokens: shapeFirst ? 900 : 700,
           messages: [{
             role: "user",
             content: [
               // URL sources: the photos live in public buckets, so Anthropic can fetch them
               // and we never proxy the bytes through this function.
               ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              { type: "text", text: fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
+              { type: "text", text: shapeFirst ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
             ],
           }],
         }),
@@ -2608,7 +3364,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `frames` makes a silent truncation visible; `observed` is the builder-facing note
     // about doors, windows and vents, which the spec has no field for; `balanceCents` lets
     // the panel show the new balance without a second round trip.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, observed: fromVideo ? parseObservedNotes(text) : null, balanceCents });
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: shapeFirst ? parseObservedNotes(text) : null, balanceCents });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
@@ -2637,6 +3393,421 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // clientId is JWT-resolved (own tenant only). The designer is selection-only today
   // (get_config exposes label/siding/trim/allowCustom/isDefault/swatch, never a price);
   // rate/pricing_method are persisted here for a later paint-pricing pass.
+  // Wall-height upgrades per building style (172). Full-replace for ONE style at a time: the
+  // editor renders a card per style and saves that card, so a tenant with eight styles never
+  // has to round-trip the other seven to change one. `styleId` scopes both the write and the
+  // delete sweep, and is verified to belong to THIS tenant before either.
+  if (action === "save_wall_heights") {
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId required" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+
+    // The style must be this tenant's. clientId comes from the JWT, never the body, so this
+    // is what stops a crafted styleId writing heights onto another builder's catalog.
+    const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
+    if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
+    if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
+
+    // The widths this style actually sells — used only to collapse an all-ticked list back to
+    // null, so a later-added width is offered automatically rather than needing a re-tick.
+    const szRes = await admin.from("building_sizes").select("width_ft").eq("client_id", clientId).eq("style_id", styleId).eq("active", true);
+    if (szRes.error) return dbFail(req, clientId, "read that style's sizes", szRes.error);
+    const allWidths = [...new Set((szRes.data ?? []).map((z: { width_ft: number }) => Number(z.width_ft)).filter((w) => Number.isFinite(w)))].sort((x, y) => x - y);
+
+    const exRes = await admin.from("style_wall_heights").select("id").eq("client_id", clientId).eq("style_id", styleId);
+    if (exRes.error) return dbFail(req, clientId, "read your current wall heights", exRes.error);
+    const existingIds = new Set((exRes.data ?? []).map((r: { id: string }) => String(r.id)));
+    const keptIds = new Set<string>();
+    let saved = 0; const skipped: string[] = [];
+    const seenDeltas = new Set<number>();
+    let i = 0;
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      // KEPT before validated — the save_colors invariant. A row that fails validation must be
+      // reported as skipped and LEFT ALONE, never swept by the delete below.
+      const rid = String(row?.id ?? "").trim();
+      const isExisting = rid !== "" && existingIds.has(rid);
+      if (isExisting) keptIds.add(rid);
+      const unchanged = isExisting ? " — existing row left unchanged" : "";
+
+      const deltaIn = Number(row?.deltaIn);
+      if (!Number.isInteger(deltaIn) || deltaIn <= 0 || deltaIn > 48) {
+        skipped.push(`row ${i}: "${row?.deltaIn}" is not a whole number of inches between 1 and 48${unchanged}`); i++; continue;
+      }
+      if (seenDeltas.has(deltaIn)) { skipped.push(`+${deltaIn} in: listed twice${unchanged}`); i++; continue; }
+      seenDeltas.add(deltaIn);
+
+      // Refuse, never coerce — the rate posture everywhere in this file. A blank rate is a
+      // deliberate "offer it later": the row is stored unpriced and get_config withholds it.
+      const rateRaw = String(row?.ratePerLf ?? "").trim();
+      let ratePerLf: number | null = null;
+      if (rateRaw !== "") {
+        const n = Number(rateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${rateRaw}" is not a usable dollar amount${unchanged}`); i++; continue; }
+        ratePerLf = n;
+      }
+      // Widths this increase is hauled at, written EXPLICITLY — never collapsed back to null
+      // (174). 173 borrowed the window-colour "null = all, including widths added later"
+      // contract, and the direction is what makes that wrong here: taller walls LOSE headroom
+      // as buildings get wider, so a living default auto-offers every unrestricted increase on
+      // each newly added width — usually the widest, i.e. exactly the case this refuses.
+      // Carolyn chose (asked directly): a new width arrives unticked, always.
+      // A row that ticks nothing at all falls back to this style's current widths rather than
+      // storing '{}', which would read as "offered on nothing" and silently retire the row.
+      let widthsFt: number[] | null = allWidths.length ? allWidths : null;
+      if (Array.isArray(row?.widthsFt)) {
+        const cleaned = (row.widthsFt as unknown[])
+          .map((w) => Number(w))
+          .filter((w) => Number.isFinite(w) && w > 0);
+        const picked = [...new Set(cleaned)].sort((x, y) => x - y);
+        if (picked.length) widthsFt = picked;
+      }
+      // Built on site (183). The flag is free-standing: a builder can mark an increase as
+      // on-site-only and charge nothing for it, which is why an absent fee is stored as NULL
+      // rather than refused. A fee that is PRESENT but unusable IS refused, the same posture
+      // as the rate above — a typo silently becoming $0 is the failure worth preventing.
+      const buildOnSite = row?.buildOnSite === true;
+      const bosRateRaw = String(row?.bosFeeRate ?? "").trim();
+      let bosFeeRate: number | null = null;
+      if (buildOnSite && bosRateRaw !== "") {
+        const n = Number(bosRateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${bosRateRaw}" is not a usable build-on-site fee${unchanged}`); i++; continue; }
+        bosFeeRate = n;
+      }
+      const BOS_BASES = ["each", "sqft_building", "perimeter_building"];
+      const bosBasisRaw = String(row?.bosFeeBasis ?? "").trim();
+      // An unrecognised basis is refused rather than defaulted: defaulting would price the fee
+      // by a rule the builder did not choose, and the three shapes differ by orders of
+      // magnitude on the same number.
+      if (buildOnSite && bosBasisRaw !== "" && !BOS_BASES.includes(bosBasisRaw)) {
+        skipped.push(`+${deltaIn} in: "${bosBasisRaw}" is not a build-on-site fee basis${unchanged}`); i++; continue;
+      }
+      const bosFeeBasis = buildOnSite ? (bosBasisRaw || "each") : null;
+
+      const patch = {
+        delta_in: deltaIn,
+        rate_per_lf: ratePerLf,
+        build_on_site: buildOnSite,
+        bos_fee_basis: bosFeeBasis,
+        bos_fee_rate: buildOnSite ? bosFeeRate : null,
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
+        sort_order: i,
+        widths_ft: widthsFt,
+        updated_at: new Date().toISOString(),
+      };
+      const res = isExisting
+        ? await admin.from("style_wall_heights").update(patch).eq("id", rid).eq("client_id", clientId)
+        : await admin.from("style_wall_heights").insert({ client_id: clientId, style_id: styleId, ...patch }).select("id").maybeSingle();
+      if (res.error) { skipped.push(`+${deltaIn} in: ${res.error.message}`); i++; continue; }
+      if (!isExisting && (res as { data?: { id?: string } }).data?.id) keptIds.add(String((res as { data: { id: string } }).data.id));
+      saved++; i++;
+    }
+    const sweep = [...existingIds].filter((id) => !keptIds.has(id));
+    let deleted = 0;
+    if (sweep.length) {
+      const del = await admin.from("style_wall_heights").delete().in("id", sweep).eq("client_id", clientId);
+      if (del.error) return dbFail(req, clientId, "remove the wall heights you deleted", del.error);
+      deleted = sweep.length;
+    }
+    return json({ ok: true, saved, deleted, skipped });
+  }
+
+  // Cladding offered per style (207). A FIXED four rows per style, one per D3_CLADDING type,
+  // so this upserts what it is sent and sweeps nothing: the set is closed, and a cladding the
+  // payload does not mention means "not sent", never "remove it".
+  //
+  // ⛔ THE ROW IS KEPT WHEN THE RATE IS BLANK, deliberately — the wall-heights posture, not the
+  // insulation one. Insulation deletes a cleared cell because the cell holds nothing but a
+  // rate; a cladding row also holds the customer-facing name, the basis and the tax flag, and
+  // deleting it would throw away a label a builder typed while they were still deciding what
+  // to charge. get_config's `rate is not null` filter is what withholds it from the customer.
+  if (action === "save_cladding") {
+    const styleId = String((payload as Record<string, unknown>).styleId ?? "").trim();
+    if (!styleId) return json({ error: "styleId required" }, 400);
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+
+    // The style must be this tenant's. clientId comes from the JWT, never the body — this is
+    // what stops a crafted styleId writing cladding onto another builder's catalog.
+    const stRes = await admin.from("building_styles").select("id").eq("client_id", clientId).eq("id", styleId).maybeSingle();
+    if (stRes.error) return dbFail(req, clientId, "read that style", stRes.error);
+    if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
+
+    const CLADDING_IDS = new Set(["panel", "lap", "batten", "agpanel"]);
+    // The product's shared pricing vocabulary (221). Kept as an explicit set rather than the
+    // pricing_method enum: the values match it deliberately, but a value added to that enum for
+    // another table must not silently become offerable here with no implementation behind it.
+    const BASES = new Set(["each", "lineal_ft", "sqft_option", "sqft_building",
+                           "perimeter_building", "pct_building_price", "pct_estimate_total"]);
+    let saved = 0; const skipped: string[] = [];
+    const seen = new Set<string>();
+    let i = 0;
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      const cid = String(row?.claddingId ?? "").trim();
+      // Refused, not defaulted. A fifth id would reach D3_CLADDING[id] in the browser as
+      // undefined and take the 3D wall material down with it, so it must never be stored.
+      if (!CLADDING_IDS.has(cid)) { skipped.push(`row ${i}: "${row?.claddingId}" is not a cladding we ship`); i++; continue; }
+      if (seen.has(cid)) { skipped.push(`${cid}: listed twice`); i++; continue; }
+      seen.add(cid);
+
+      // Refuse, never coerce — the rate posture everywhere in this file. Blank is a real
+      // state ("not offered on this style"), and it must reach the column as NULL rather than
+      // as 0: zero means INCLUDED AT NO CHARGE, which is what every tenant was seeded with.
+      const rateRaw = String(row?.rate ?? "").trim();
+      let rate: number | null = null;
+      if (rateRaw !== "") {
+        const n = Number(rateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`${cid}: "${rateRaw}" is not a usable dollar amount`); i++; continue; }
+        rate = n;
+      }
+      // An unrecognised basis is refused rather than defaulted: the three shapes differ by
+      // orders of magnitude on the same number, so defaulting would price by a rule the
+      // builder did not choose.
+      const basisRaw = String(row?.basis ?? "").trim();
+      if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${cid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
+
+      const patch = {
+        label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
+        rate,
+        basis: basisRaw || "sqft_option",
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
+        sort_order: i,
+        updated_at: new Date().toISOString(),
+      };
+      const up = await admin.from("style_cladding")
+        .upsert({ client_id: clientId, style_id: styleId, cladding_id: cid, ...patch },
+                { onConflict: "client_id,style_id,cladding_id" });
+      if (up.error) { skipped.push(`${cid}: ${up.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    return json({ ok: true, saved, skipped });
+  }
+
+  // Insulation rates (177). A fixed 2x3 matrix rather than a free row list, so this is an
+  // UPSERT per supplied cell plus a delete for any cell the builder cleared — there is no
+  // sweep, because the shape is fixed and a missing cell means "not sent", not "removed".
+  if (action === "save_electrical_items") {
+    const rows = Array.isArray((payload as Record<string, unknown>).rows)
+      ? (payload as Record<string, unknown>).rows as Record<string, unknown>[] : [];
+    if (rows.length > MAX_BULK_ROWS) return json({ error: `That's more than ${MAX_BULK_ROWS} items in one save.` }, 400);
+    const MOUNTS = new Set(["wall", "ceiling"]);
+    // A price is EITHER a number >= 0 or genuinely absent. "" means "not offered in this mode",
+    // which is a real state and must reach the column as NULL rather than as 0 — zero is a
+    // FREE item, and the two must never be confused.
+    const priceOf = (v: unknown): number | null | undefined => {
+      const t = String(v ?? "").trim();
+      if (t === "") return null;
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : undefined;   // undefined = reject
+    };
+    const keep: string[] = [];
+    let saved = 0;
+    for (const r of rows) {
+      const name = String(r?.name ?? "").trim().slice(0, 60);
+      if (!name) continue;
+      const withPkg = priceOf(r?.priceWithPackage);
+      const alone = priceOf(r?.priceStandalone);
+      if (withPkg === undefined || alone === undefined) {
+        return json({ error: `"${name}" has a price that isn't a number. Leave a price blank to mean you don't offer it that way.` }, 400);
+      }
+      const mount = MOUNTS.has(String(r?.mount ?? "")) ? String(r?.mount) : "wall";
+      const row: Record<string, unknown> = {
+        client_id: clientId,
+        name,
+        icon: String(r?.icon ?? "\u26a1").slice(0, 8) || "\u26a1",
+        mount,
+        height_off_floor_in: String(r?.heightOffFloorIn ?? "").trim() === "" ? null : Number(r?.heightOffFloorIn),
+        price_with_package: withPkg,
+        price_standalone: alone,
+        taxable: r?.taxable !== false,
+        active: r?.active !== false,
+        internal_only: r?.internalOnly === true,
+        sort_order: Number(r?.sortOrder) || 0,
+        updated_at: new Date().toISOString(),
+      };
+      // ── RENAME IS AN UPDATE, NOT AN UPSERT ────────────────────────────────────────────
+      // The row carries BOTH the primary key and a conflict target of (client_id, name), and
+      // those disagree the moment a builder renames an item: Postgres routes the statement by
+      // the named conflict target, finds no row with the NEW name, and inserts — straight into
+      // a primary-key violation on the id it was handed. Renaming an electrical item 500'd
+      // every time, with the authored "Couldn't save your electrical items" hiding a
+      // duplicate-key error underneath.
+      //
+      // Branching on the id fixes it and says what each path means: an id is "this row,
+      // whatever it is called now", no id is "a new item, keyed by its name". `.eq("client_id",
+      // clientId)` on the update is load-bearing and not decoration — the id arrives in the
+      // request body, and without the tenant scope a chosen id would reach another tenant's row.
+      const rawId = String(r?.id ?? "").trim();
+      // A malformed id is treated as "new" rather than passed to Postgres, which would answer
+      // 22P02 and turn a typo into another 500.
+      const id = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId) ? rawId : "";
+      // A name collision inside one payload (two rows renamed to the same thing, or a rename
+      // onto a name that already exists) is the builder's mistake, not a fault: name it.
+      const nameClash = (err: { code?: string } | null) =>
+        String(err?.code ?? "") === "23505"
+          ? json({ error: `You already have an electrical item called "${name}". Give one of them a different name.` }, 409)
+          : null;
+      let savedId: string | null = null;
+      if (id) {
+        const upd = await admin.from("electrical_items").update(row)
+          .eq("id", id).eq("client_id", clientId).select("id").maybeSingle();
+        if (upd.error) return nameClash(upd.error) ?? dbFail(req, clientId, "save your electrical items", upd.error);
+        savedId = upd.data?.id ? String(upd.data.id) : null;
+      }
+      // No id, or an id that no longer matches a row of this tenant's (deleted from another
+      // session mid-edit): fall through to the name-keyed upsert so the save still lands.
+      if (!savedId) {
+        const up = await admin.from("electrical_items").upsert(row, { onConflict: "client_id,name" }).select("id").single();
+        if (up.error) return nameClash(up.error) ?? dbFail(req, clientId, "save your electrical items", up.error);
+        savedId = up.data?.id ? String(up.data.id) : null;
+      }
+      // Every kept id, INCLUDING a renamed row's, or the sweep below deletes what we just saved.
+      if (savedId) keep.push(savedId);
+      saved++;
+    }
+    // Anything the editor did not send back was removed in the UI. Delete rather than
+    // deactivate: this is the builder's own list and they expect a removed row to be gone.
+    const del = await admin.from("electrical_items").delete().eq("client_id", clientId)
+      .not("id", "in", `(${keep.length ? keep.map((k) => `"${k}"`).join(",") : '"00000000-0000-0000-0000-000000000000"'})`);
+    if (del.error) return dbFail(req, clientId, "tidy up your electrical items", del.error);
+    return json({ ok: true, saved });
+  }
+
+  if (action === "save_electrical") {
+    // One row per tenant, upserted whole. Unlike the rate grids there is nothing here to
+    // partially clear: every field has a value, and the price is the one nullable.
+    const numOr = (v: unknown, dflt: number, min: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= min ? n : dflt;
+    };
+    // "" and null both mean "the package lays out none of these" — the picker's own empty
+    // option. Anything that is not a uuid is treated the same way, so a malformed id can
+    // never reach the FK as a Postgres error the builder cannot read.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const elecItemRef = (v: unknown): string | null => {
+      const t = String(v ?? "").trim();
+      return UUID_RE.test(t) ? t : null;
+    };
+    const rawPrice = String((payload as Record<string, unknown>).packagePrice ?? "").trim();
+    const price = rawPrice === "" ? null : Number(rawPrice);
+    if (price != null && (!Number.isFinite(price) || price < 0)) {
+      return json({ error: "The package price must be a number, or blank if you're not offering it yet." }, 400);
+    }
+    const row = {
+      client_id: clientId,
+      enabled: (payload as Record<string, unknown>).enabled === true,
+      package_price: price,
+      package_label: String((payload as Record<string, unknown>).packageLabel ?? "Electrical Package").slice(0, 60) || "Electrical Package",
+      taxable: (payload as Record<string, unknown>).taxable !== false,
+      internal_only: (payload as Record<string, unknown>).internalOnly === true,
+      // The spacings must stay > 0: they are divisors in the auto-layout, and a zero would
+      // produce an infinite device count in the customer's browser. The table CHECKs this too;
+      // this keeps the refusal a readable sentence rather than a Postgres constraint error.
+      outlet_spacing_ft: Math.max(0.5, numOr((payload as Record<string, unknown>).outletSpacingFt, 6, 0.5)),
+      light_spacing_ft: Math.max(0.5, numOr((payload as Record<string, unknown>).lightSpacingFt, 10, 0.5)),
+      outlet_height_in: numOr((payload as Record<string, unknown>).outletHeightIn, 24, 0),
+      outlet_above_bench_in: numOr((payload as Record<string, unknown>).outletAboveBenchIn, 42, 0),
+      switch_height_in: numOr((payload as Record<string, unknown>).switchHeightIn, 48, 0),
+      panel_height_in: numOr((payload as Record<string, unknown>).panelHeightIn, 60, 0),
+      include_panel: (payload as Record<string, unknown>).includePanel !== false,
+      // The three device pointers (206) — WHICH electrical_item the package lays out for each
+      // role. They were missing here until 2026-09-07, which made the pickers inert: the card
+      // could not read them back and this action never wrote them, so the only pointers in
+      // existence were the ones the migration set by hand. Ownership is checked below rather
+      // than left to the FK: the constraint proves the item EXISTS, not that it is this
+      // tenant's, and these ids arrive from the browser.
+      outlet_item_id: elecItemRef((payload as Record<string, unknown>).outletItemId),
+      switch_item_id: elecItemRef((payload as Record<string, unknown>).switchItemId),
+      light_item_id: elecItemRef((payload as Record<string, unknown>).lightItemId),
+      updated_at: new Date().toISOString(),
+    };
+    // Every non-null pointer must name one of THIS tenant's items. Refused loudly rather than
+    // nulled quietly: silently dropping a pointer looks like a save that worked and leaves the
+    // package laying out nothing.
+    const refs = [row.outlet_item_id, row.switch_item_id, row.light_item_id].filter((v): v is string => !!v);
+    if (refs.length) {
+      const own = await admin.from("electrical_items").select("id").eq("client_id", clientId).in("id", refs);
+      if (own.error) return dbFail(req, clientId, "save your electrical settings", own.error);
+      const ok = new Set((own.data ?? []).map((r: { id: string }) => r.id));
+      if (refs.some((id) => !ok.has(id))) {
+        return json({ error: "One of your standards points at an electrical item that isn't on your list. Save the item first, then pick it." }, 400);
+      }
+    }
+    const up = await admin.from("electrical_settings").upsert(row, { onConflict: "client_id" });
+    if (up.error) return dbFail(req, clientId, "save your electrical settings", up.error);
+    return json({ ok: true });
+  }
+
+  if (action === "save_insulation") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+    const TYPES = new Set(["batt", "spray_foam"]);
+    const AREAS = new Set(["floor", "walls", "roof"]);
+
+    // The master switch, presence-guarded so a save that does not mention it cannot flip it.
+    // It lives on client_settings (the ramp_enabled precedent) rather than on the rate rows,
+    // because turning insulation off must not touch the rates a builder spent time entering.
+    //
+    // UPSERT, not update: a tenant who has never written a client_settings row matched zero
+    // rows here, and PostgREST calls a zero-row update a success — so the switch reported
+    // saved, the card redrew from the same absent row, and insulation could never be turned
+    // on at all. This is the shape save_ramp_settings already uses for the same column family.
+    // The payload stays MINIMAL on purpose: client_id + the one column + updated_at, because an
+    // upsert is a full-row write on the create path and any column named here with a default
+    // would overwrite whatever else the row holds.
+    if (Object.prototype.hasOwnProperty.call(payload, "enabled")) {
+      const up = await admin.from("client_settings")
+        .upsert({
+          client_id: clientId,
+          insulation_enabled: payload.enabled === true,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "client_id" });
+      if (up.error) return dbFail(req, clientId, "save your insulation switch", up.error);
+    }
+
+    let saved = 0, cleared = 0; const skipped: string[] = [];
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      const insType = String(row?.type ?? "").trim();
+      const area = String(row?.area ?? "").trim();
+      if (!TYPES.has(insType) || !AREAS.has(area)) { skipped.push(`${insType}/${area}: not a known type or area`); continue; }
+
+      // Refuse, never coerce — the posture everywhere in this file. A blank rate is the
+      // deliberate "not offered": the row is REMOVED so get_config stops emitting it, which is
+      // what makes the customer's toggle disappear.
+      const rateRaw = String(row?.ratePerSqft ?? "").trim();
+      if (rateRaw === "") {
+        const del = await admin.from("insulation_offerings").delete()
+          .eq("client_id", clientId).eq("ins_type", insType).eq("area", area);
+        if (del.error) { skipped.push(`${insType}/${area}: ${del.error.message}`); continue; }
+        cleared++; continue;
+      }
+      const rate = Number(rateRaw);
+      if (!Number.isFinite(rate) || rate < 0) { skipped.push(`${insType}/${area}: "${rateRaw}" is not a usable dollar amount`); continue; }
+
+      const res = await admin.from("insulation_offerings").upsert({
+        client_id: clientId, ins_type: insType, area,
+        rate_per_sqft: rate,
+        taxable: row?.taxable !== false,
+        // `active` is the per-TYPE "do we offer this at all" switch — the portal writes the
+        // same value to all three areas of a type, which is how "batt or spray foam or both"
+        // is expressed without a second table.
+        active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "client_id,ins_type,area" });
+      if (res.error) { skipped.push(`${insType}/${area}: ${res.error.message}`); continue; }
+      saved++;
+    }
+    return json({ ok: true, saved, cleared, skipped });
+  }
+
   if (action === "save_colors") {
     if (!Array.isArray(payload.colors)) return json({ error: "colors[] required" }, 400);
     { const e = tooMany(payload.colors, "colors"); if (e) return json({ error: e }, 400); }
@@ -2797,7 +3968,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // on every ID-matched row — silently un-archiving retired doors into the customer
   // designer. The UI's toPayload and a full export round-trip send every field, so those
   // saves behave exactly as before; inserts get the old defaults via fixtureInsertDefaults.
-  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp"]);
+  // 'vent' added 2026-09-05 (Carolyn 09-04 @25:19). It needs NO validator branch: every
+  // door-only group (swing/operation, colour mode, trim colour, door_style) and every
+  // window-only group (window colours, sill) is already forced off by the `!isDoor` /
+  // `category !== "window"` invariants below, so a vent validates down to name, width,
+  // height and price — which is exactly what a vent is.
+  const FIXTURE_CATEGORIES = new Set(["door", "window", "ramp", "vent"]);
   const validateFixtureRow = (row: any, category: string, i: number): { rec?: Record<string, unknown>; err?: string } => {
     // JSON.stringify drops undefined-valued keys client-side, so "absent key" is the wire
     // form of "leave this field alone"; the explicit !== undefined guards a hand-built call.
@@ -2871,13 +4047,36 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         rec.window_color_ids = row.windowColorIds.map((x: unknown) => String(x ?? "").trim()).filter((s: string) => UUID_RE.test(s));
       }
     }
-    // Height off the FLOOR (139): windows only, presence-guarded, same shape as above.
-    // NULL sill_in means "use the designer's 3'6" default" and is deliberately NOT the same
-    // as 0 — 0 is a real answer, a window that starts at the floor. sill_mode 'variable'
-    // lets the customer slide it up and down the wall (Carolyn's transom); 'fixed' pins it.
-    // The 12 ft ceiling is a sanity bound, not a product rule: the designer clamps a window
-    // against the actual wall height at build time, which is the only place that knows it.
-    if (category !== "window") {
+    // Height off the FLOOR (139): windows AND DOORS, presence-guarded, same shape as above.
+    // NULL sill_in means "use the designer's default" and is deliberately NOT the same as 0 —
+    // 0 is a real answer, an opening that starts at the floor. sill_mode 'variable' lets the
+    // customer slide it up and down the wall (Carolyn's transom); 'fixed' pins it.
+    // The 12 ft ceiling is a sanity bound, not a product rule: the designer clamps against the
+    // actual wall height at build time, which is the only place that knows it.
+    //
+    // ⚠️ DOORS JOINED ON 2026-09-04, and the rule that stood here is written out rather than
+    // deleted because it was right for as long as 139 was the only feature reading these
+    // columns. It was: `if (category !== "window") { rec.sill_in = null; rec.sill_mode =
+    // "fixed"; }` — a sill was a window's business, and every other category had its pair
+    // blanked on save.
+    //
+    // Carolyn's LOFT DOOR is a category='door' fixture that hangs high on a gable end
+    // (2026-09-04 @24:43: "that's a door ... it's called a loft door ... A lot of them have
+    // that"; @27:16, on where it belongs: "that loft door goes with the doors"). Its height off
+    // the floor IS what makes it a loft door, so the old line would have stored every one of
+    // them at zero — a door every builder places at floor level, with nothing anywhere saying
+    // why. Reusing 139's own columns rather than adding a door_sill_in beside them: the fact is
+    // identical ("how far off the interior floor does this opening start") and so is the bound;
+    // a second column would be a second answer to one question.
+    //
+    // ⚠️ A DOOR IS ALWAYS 'fixed'. 'variable' lets the shopper slide the opening up and down
+    // the wall, and a loft door's height is set by where the builder's loft floor is — not
+    // something a customer picks. The designer enforces the same thing in exactly one place
+    // (its 3D vertical drag tests `type === "window"`), so pinning it here keeps the two
+    // agreeing without a third rule to remember, and the catalog UI accordingly offers a door
+    // the height field and NO placement select. Forced rather than presence-guarded, so a
+    // hand-built call or an older sheet cannot leave 'variable' on a door.
+    if (category !== "window" && !isDoor) {
       rec.sill_in = null; rec.sill_mode = "fixed";
     } else {
       if (has("sillIn")) {
@@ -2886,7 +4085,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (s !== null && ((s as number) < 0 || (s as number) > 144)) return { err: `${name}: height off floor must be between 0 and 12 ft` };
         rec.sill_in = s;
       }
-      if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
+      if (isDoor) rec.sill_mode = "fixed";
+      else if (has("sillMode")) rec.sill_mode = row?.sillMode === "variable" ? "variable" : "fixed";
+    }
+    // How the door is DRAWN in 3D (186): doors only, presence-guarded, whitelisted.
+    // 'auto' is today's behaviour (the fixture's photo if it has one, else the generic
+    // raised-panel slab) and is what anything unrecognised falls back to, so a typo or a
+    // value from a newer portal can only ever mean "render it the way you always did".
+    if (!isDoor) {
+      rec.door_style = "auto";
+    } else if (has("doorStyle")) {
+      // Widened by migration 187 from the single 'plank' to four built-in looks. The
+      // fallback is the whole point and must survive any future edit: anything unrecognised
+      // becomes 'auto', so a typo, an OLDER portal, or a value written by a NEWER portal than
+      // this deploy can only ever mean "draw it the way you always did" — never a blank door
+      // on a customer's building. Keep this list in step with 187's CHECK constraint and with
+      // D3_DOOR_STYLES in portal/03-catalog.jsx.
+      rec.door_style = ["plank", "zbrace", "xbrace", "rollup"].includes(String(row?.doorStyle ?? "").trim()) ? String(row?.doorStyle ?? "").trim() : "auto";
     }
     return { rec };
   };
@@ -2907,6 +4122,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!("window_color_ids" in rec)) rec.window_color_ids = null;
     if (!("sill_in" in rec)) rec.sill_in = null;
     if (!("sill_mode" in rec)) rec.sill_mode = "fixed";
+    if (!("door_style" in rec)) rec.door_style = "auto";
     return rec;
   };
 
@@ -3491,9 +4707,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       codes.length
         ? admin.from("designs").select("short_code, selections, image_url, paint_colors").in("short_code", codes).eq("client_id", clientId)
         : Promise.resolve({ data: [], error: null } as any),
+      // ── ROW SCOPE (migration 193) ────────────────────────────────────────────────────
+      // contact_id is selected so the estimates list can be narrowed below. These are the
+      // QUOTES customers have taken on a lot building and each one carries `contact` — the
+      // buyer's name — so on contacts:'own' a rep would read every colleague's live deal off
+      // the Inventory tab, which the sales_rep preset grants at inventory:'view'.
       unitIds.length
         ? admin.from("designs")
-          .select("short_code, inventory_unit_id, contact, status, ghl_estimate_number, created_at")
+          .select("short_code, inventory_unit_id, contact_id, contact, status, ghl_estimate_number, created_at")
           .eq("client_id", clientId).in("inventory_unit_id", unitIds).order("created_at", { ascending: false })
         : Promise.resolve({ data: [], error: null } as any),
     ]);
@@ -3520,8 +4741,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const masterByCode = new Map<string, MasterRow>(
       ((mastersRes.data ?? []) as MasterRow[]).map((d): [string, MasterRow] => [d.short_code, d]),
     );
+    // ⚠️ ONLY THE ESTIMATES ARE NARROWED — NOT `mastersRes`. A master is the builder's OWN
+    // building on their OWN lot: it has no customer, its contact_id is null, and running it
+    // through the same filter would drop every unit's style, size, image and colours from
+    // the Inventory tab for anyone on contacts:'own'. That is the "don't filter blindly"
+    // case, and the two reads sit four lines apart, so it is worth saying out loud.
+    const visibleEsts = await visibleDesignRows((estRes.data ?? []) as { contact_id?: string | null; inventory_unit_id: string }[]);
+    if (!visibleEsts) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     const estsByUnit = new Map<string, any[]>();
-    for (const d of estRes.data ?? []) {
+    for (const d of visibleEsts as any[]) {
       const list = estsByUnit.get(d.inventory_unit_id) ?? [];
       list.push({
         shortCode: d.short_code,
@@ -3634,6 +4862,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const rawUnit = payload.unitId;
     const unitId = rawUnit == null || rawUnit === "" ? null : String(rawUnit).trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
     if (unitId) {
       const { data: unit } = await admin.from("inventory_units")
         .select("id, serial, sale_state, sold_design_short_code, sold_first_name")
@@ -3713,32 +4946,97 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const id = String(payload.id ?? "").slice(0, 64);
     if (!id) return json({ error: "A record id is required." }, 400);
 
+    // ── CONTACT SCOPE ─────────────────────────────────────────────────────────────────
+    // This action serves two records through one gate (see GATES.crm_record), and the gate
+    // can only ask the looser of the two questions. Everything hanging off the PERSON — the
+    // crm_contacts row, their notes, their email and text threads, the files they sent, the
+    // signed URLs for those files — belongs to `contacts`, and this is where that is
+    // enforced. Two holders reach here without it:
+    //   * a designs-only title (the Crew Leader preset is designs:'view', contacts absent),
+    //     which satisfies the `any` gate on the designs half;
+    //   * a tenant without the CRM subscription, through the kind='design' entitlement
+    //     exemption above — which exists for the DESIGN, not for the CRM behind it.
+    const mayReadContacts = canRead("contacts") && crmPaid;
+    // A contact record IS the contact half. Nothing of it is theirs to see, so refuse the
+    // whole record rather than return an empty one.
+    if (kind === "contact" && !mayReadContacts) {
+      return json({
+        error: canRead("contacts")
+          ? "The built-in CRM is not part of your subscription - add it under Settings -> Billing."
+          : "Your access does not include Contacts. Ask an owner or admin.",
+      }, 403);
+    }
+
     let contact: any = null;
     let codes: string[] = [];
     let designs: any[] = [];
 
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // A caller on contacts:'own' may open only the customers they own or follow, and only
+    // the designs of those customers. Checked HERE and not by RLS, because this function is
+    // service-role and therefore BYPASSRLS — see the ownContacts block at the top.
+    //
+    // ⚠️ THE REFUSAL IS THE EXISTING 404, WORD FOR WORD, and that is deliberate. Carolyn's
+    // rule is "they can't see anything of it" — a distinct "that customer belongs to another
+    // rep" would confirm the customer exists, which is a thing about another rep's pipeline
+    // and is exactly what the builder asked us to stop leaking. The record page is reached
+    // by clicking a list this same rule has already filtered, so the honest 403 would only
+    // ever be produced by a stale tab or a hand-typed id.
     if (kind === "contact") {
       const { data: c } = await admin.from("crm_contacts").select("*").eq("client_id", clientId).eq("id", id).maybeSingle();
       if (!c) return json({ error: "That contact no longer exists." }, 404);
+      const seen = await visibleContactIds([c.id]);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (!seen.has(c.id)) return json({ error: "That contact no longer exists." }, 404);
       contact = c;
       const { data: ds } = await admin.from("designs")
-        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        // ss_invoice_sent_at drives whether the record page draws the Build and Delivery
+        // rails (Carolyn 2026-09-02: "can we make this like hide this if it doesn't have an
+        // invoice?"). ⚠️ It is HALF the answer, not the whole one — see the note on the
+        // design branch below.
+        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("contact_id", id).order("created_at", { ascending: false });
       designs = ds ?? [];
       codes = designs.map((d: any) => d.short_code);
     } else {
       const { data: d } = await admin.from("designs")
-        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url")
+        // ⚠️ ss_invoice_sent_at IS NOT ON ITS OWN A TEST FOR "HAS AN INVOICE", and the
+        // browser must not treat it as one. It has exactly ONE writer in this repo —
+        // send_invoice, below — so it marks a StructureStudio-issued invoice and nothing
+        // else. sync-design-status, which is what flips a GHL-quoted design to 'invoiced',
+        // writes {status, updated_at} and never touches this column; migration 136's
+        // backfill was narrowed to issued_by='structurestudio' for the same reason. So a
+        // design invoiced in GoHighLevel has this NULL forever, and on live that is 14 of
+        // junior-barns' buildings — every one of them physically on the build board.
+        //
+        // The pair is what answers the question: this column catches an SS invoice that is
+        // OUT BUT UNSIGNED (a state `status` cannot express, because send_invoice
+        // deliberately stopped flipping it), and `status` catches the GHL path. Neither
+        // half is redundant. crmHasInvoice in portal/02-sales.jsx is the union.
+        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("short_code", id).maybeSingle();
       if (!d) return json({ error: "That design no longer exists." }, 404);
+      // The design branch of the same rule. A design with contact_id NULL is refused here
+      // for everyone on 'own' — edge case 2: crm_ensure_contact returned NULL because the
+      // submission carried neither a phone nor an email, so there is no customer to own it.
+      const seen = await visibleDesignRows([d]);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (!seen.length) return json({ error: "That design no longer exists." }, 404);
       designs = [d];
       codes = [d.short_code];
-      if (d.contact_id) {
+      // The CRM record for the person behind this design — only for someone entitled to the
+      // contact half. Withheld, the design still opens: the fallback below rebuilds the
+      // Person panel from the design's OWN snapshot, which is the same name/phone/email the
+      // designs row has always carried and which whoever may read the design may read.
+      if (d.contact_id && mayReadContacts) {
         const { data: c } = await admin.from("crm_contacts").select("*").eq("client_id", clientId).eq("id", d.contact_id).maybeSingle();
         contact = c ?? null;
       }
       // Fall back to the jsonb blob for a design predating the backfill, so the Person
-      // panel is never empty on an old record.
+      // panel is never empty on an old record. It is also what a contacts-less caller gets:
+      // `id: null` is what carries the narrowing downward — the feed, the focus list and the
+      // consent lookup below all key off contact.id, so every contact-scoped read collapses
+      // to the design's own codes without a second condition to keep in step.
       if (!contact && d.contact) contact = { id: null, name: d.contact.name, phone: d.contact.phone, email: d.contact.email };
     }
 
@@ -3893,17 +5191,103 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       })(),
     };
 
+    // ── THE OTHER PEOPLE ON THE RECORD, AND WHO IS WATCHING IT ─────────────────────────
+    // Carolyn, 2026-09-04 ~1:13:00: "This is name one and then the wife and then the phone
+    // number … it doesn't have to be husband and wife, it can be two people buying, two
+    // business partners" — each with their own phone and email (migration 190). And at
+    // 1:09:30: "we do not ever assign deals. We only assign contacts and followers"
+    // (migration 189).
+    //
+    // Contact-scoped, because both hang off the PERSON: a design record shows them once its
+    // contact has been resolved, and shows nothing when it has not. They ride this fetch for
+    // the reason everything else here does — the record page makes exactly one call, since a
+    // direct browser read returns nothing in operator view-as.
+    //
+    // undefined on a failed read, [] on an empty one. Same distinction the orders block above
+    // exists to protect, and it matters more here than usual: until the migrations are
+    // applied these two tables do not exist, and "nobody is following this customer" is a
+    // very different sentence from "we could not ask".
+    let people: any[] | undefined;
+    let followers: any[] | undefined;
+    // The tenant's roster, for the owner picker. `undefined` on a contact record we never
+    // built it for, following this file's absent-vs-empty rule: [] would tell the browser
+    // "this tenant has no team", which is never true and would hide the picker for good.
+    let team: any[] | undefined;
+    if (contact?.id) {
+      const [pplRes, folRes] = await Promise.all([
+        admin.from("crm_contact_people")
+          .select("id, ordinal, name, phone, email, is_primary, source, created_at")
+          .eq("client_id", clientId).eq("contact_id", contact.id)
+          .order("ordinal", { ascending: true }).order("created_at", { ascending: true }).limit(25),
+        admin.from("crm_contact_followers")
+          .select("id, user_id, added_at, added_reason")
+          .eq("client_id", clientId).eq("contact_id", contact.id)
+          .order("added_at", { ascending: true }).limit(50),
+      ]);
+      people = pplRes.error ? undefined : (pplRes.data ?? []);
+      followers = folRes.error ? undefined : (folRes.data ?? []);
+      // A uuid is not a person. Resolved here rather than left to the browser, which has no
+      // way to ask: client_users' only policy is client_users_select_own, so a portal user
+      // cannot read their own colleagues' rows — a follower list rendered client-side would
+      // be a column of ids. The owner is resolved in the same pass, because the record page
+      // needs the assignee's name beside the same faces.
+      //
+      // THE WHOLE TEAM comes back, not only the ids in use, because the record page has to
+      // offer an OWNER PICKER and the same policy that stops the browser naming a follower
+      // stops it listing candidates: without this the picker would be an empty drop-down on
+      // a screen that is already showing the current owner's name, which reads as broken
+      // rather than as unauthorised. One read serves both — resolving the ids in use out of
+      // the roster costs nothing extra, so this REPLACES the previous `.in("user_id", …)`
+      // lookup rather than adding a second round trip.
+      //
+      // ⚠️ Capped, and ordered by name so the cap is stable rather than arbitrary. A tenant
+      // with more people than this needs a search field, not a longer list — and a silently
+      // truncated picker that happens to omit the person you want is worse than one that
+      // does not pretend to be complete.
+      const { data: roster } = await admin.from("client_users")
+        .select("user_id, full_name, title").eq("client_id", clientId)
+        .order("full_name", { ascending: true }).limit(200);
+      const byId = new Map((roster ?? []).map((u: any) => [u.user_id, u.full_name ?? null]));
+      if (followers) followers = followers.map((f: any) => ({ ...f, name: byId.get(f.user_id) ?? null }));
+      contact = { ...contact, owner_name: contact.owner_user_id ? (byId.get(contact.owner_user_id) ?? null) : null };
+      team = (roster ?? []).map((u: any) => ({ userId: u.user_id, name: u.full_name ?? null, title: u.title ?? null }));
+    }
+
     // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
     // the documents we generate, because Carolyn asked for exactly one place: "the top part
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs, people, followers, team });
   }
 
   if (action === "crm_feed") {
-    const codes = Array.isArray(payload.codes) ? payload.codes.map((c: unknown) => String(c).slice(0, 32)).slice(0, 200) : [];
-    const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
+    const rawCodes = Array.isArray(payload.codes) ? payload.codes.map((c: unknown) => String(c).slice(0, 32)).slice(0, 200) : [];
+    // ── TWO SCOPES, LAYERED. They arrived from two sessions the same night and they are not
+    // alternatives — they narrow along different axes, and taking either alone leaves a hole.
+    //
+    // AREA SCOPE first: this action's `any` gate is satisfied by designs:view, and
+    // `contactId` is what widens the feed from "these designs" to "this person's whole
+    // history" — their notes, both mail directions, both text directions and the files they
+    // uploaded. Somebody with no contacts access at all must not get that by asking here.
+    // Ignored rather than refused: the designs half of the request is legitimate and still
+    // answers, and the caller's own record page already hides the person's card.
+    const rawContactId = (payload.contactId && canRead("contacts")) ? String(payload.contactId).slice(0, 64) : null;
+    // ROW SCOPE second (migration 193): and of the customers they CAN see, only the ones
+    // assigned to or followed by them. BOTH inputs come straight from the browser and both
+    // address other people's rows, so both are narrowed. This is the action that would
+    // otherwise stay wide open after crm_record was fixed — the record page fetches its feed
+    // separately, so a caller on contacts:'own' could post any short code or any contact id
+    // here and read that customer's whole record, just without its header.
+    //
+    // A contact that is not theirs is DROPPED rather than refused, and the feed is built from
+    // whatever survives (nothing, usually). Refusing outright would make this endpoint an
+    // existence oracle for contact ids, which is the same leak in a different shape.
+    const codes = await visibleShortCodes(rawCodes);
+    if (!codes) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    const seen = await visibleContactIds([rawContactId]);
+    if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+    const contactId = rawContactId && seen.has(rawContactId) ? rawContactId : null;
     const feed = await buildCrmFeed(admin, clientId, { codes, contactId, isAdmin: true });
     return json({ ok: true, feed });
   }
@@ -3937,6 +5321,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "crm_file_sign") {
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     if (!contactId) return json({ error: "A file has to attach to a contact." }, 400);
+    // ⚠️ THE CONTACT HAS TO EXIST BEFORE THE URL IS SIGNED. `contactId` goes straight into
+    // the storage path, and any string used to make one: the bytes landed in the bucket, and
+    // then crm_file_attach's foreign key refused the ledger row — leaving an object nothing
+    // in the product can see, that no quota counts and that nobody can delete from a screen.
+    // This is the same check that FK performs, moved to where it prevents the orphan instead
+    // of stranding it. Tenant-scoped, so a real id belonging to another account fails it too.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contactId)) {
+      return json({ error: "That file does not belong to this contact." }, 400);
+    }
+    {
+      const { data: who, error: whoErr } = await admin.from("crm_contacts")
+        .select("id").eq("client_id", clientId).eq("id", contactId).maybeSingle();
+      if (whoErr) return dbFail(req, clientId, "look up that contact", whoErr);
+      if (!who) return json({ error: "That file does not belong to this contact." }, 400);
+    }
     const rawName = String(payload.name ?? "").trim().slice(0, 200);
     if (!rawName) return json({ error: "That file has no name." }, 400);
     const size = Number(payload.size);
@@ -3973,6 +5372,37 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true, path, token: signed?.token, signedUrl: signed?.signedUrl });
   }
 
+  // ── THE CONTACT AND THE DEAL MUST BE THE SAME CUSTOMER'S ───────────────────────────
+  // Returns a refusal Response, or null to carry on.
+  //
+  // WHY THIS ONLY MATTERS NOW. Until the record page grew a deal picker (Carolyn
+  // 2026-09-02: "you have to select a deal, or an order, in order for anything to show up
+  // here, so you know what you're talking about"), a contact-scoped write ALWAYS sent
+  // shortCode: null — the two ids were never both present, so there was no pair to
+  // disagree. Now every note, activity, text, email and upload made from a contact record
+  // carries the deal it is about, and a wrong code would file a note about customer A onto
+  // customer B's deal: a cross-record leak inside one tenant, visible in the other
+  // customer's history.
+  //
+  // It is deliberately NOT a requirement that a shortCode be present. Migration 131's own
+  // CHECK is "contact_id OR short_code", other callers legitimately send one or the other,
+  // and crm_save_note's edit path sends neither. Requiring one here would refuse writes
+  // that are correct. The rule is only: if you send both, they must agree.
+  //
+  // 400 rather than text_sign_link's 409 — that one means "the state is wrong", this means
+  // "these two arguments contradict each other".
+  const mismatchedPair = async (
+    contactId: string | null,
+    shortCode: string | null,
+  ): Promise<Response | null> => {
+    if (!contactId || !shortCode) return null;
+    const { data, error } = await admin.from("designs").select("short_code")
+      .eq("client_id", clientId).eq("short_code", shortCode).eq("contact_id", contactId).maybeSingle();
+    if (error) return dbFail(req, clientId, "check that deal", error);
+    if (!data) return json({ error: "That deal doesn't belong to this contact." }, 400);
+    return null;
+  };
+
   if (action === "crm_file_attach") {
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const path = String(payload.path ?? "");
@@ -3981,13 +5411,43 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!contactId || !path.startsWith(`${clientId}/${contactId}/`)) {
       return json({ error: "That file does not belong to this contact." }, 400);
     }
+    const attachCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    { const bad = await mismatchedPair(contactId, attachCode); if (bad) return bad; }
+
+    // ── THE SIZE IS THE BUCKET'S ANSWER, NOT THE BROWSER'S ────────────────────────────
+    // crm_files.size_bytes is the whole storage ledger: crm_file_sign sums it to decide
+    // whether a tenant is over quota. Until now it was whatever the caller declared, and the
+    // caller is the party the cap applies to — a understated number let an account keep
+    // uploading long past its limit, and an overstated one locked a tenant out of storage
+    // they were not using. Reading the object back closes both: the bucket's own 25 MB and
+    // mime limits (migration 151) still refuse the upload itself, and what we RECORD is now
+    // what actually landed.
+    //
+    // It doubles as the completion check. `list` finding nothing means the signed URL was
+    // never used, so there is no file to file — refuse rather than write a ledger row (and a
+    // feed entry, and a quota charge) for an object that does not exist.
+    const basename = path.slice(path.lastIndexOf("/") + 1);
+    const { data: objs, error: lsErr } = await admin.storage.from("customer-uploads")
+      .list(`${clientId}/${contactId}`, { search: basename, limit: 100 });
+    if (lsErr) return dbFail(req, clientId, "check that upload", lsErr);
+    // deno-lint-ignore no-explicit-any
+    const obj = (objs ?? []).find((o: any) => o?.name === basename);
+    if (!obj) {
+      return json({ error: "That upload didn't finish — send the file again." }, 409);
+    }
+    // deno-lint-ignore no-explicit-any
+    const realSize = Number((obj as any)?.metadata?.size);
     const row = {
       client_id: clientId,
       contact_id: contactId,
-      short_code: payload.shortCode ? String(payload.shortCode).slice(0, 32) : null,
+      short_code: attachCode,
       path,
       name: String(payload.name ?? "file").trim().slice(0, 200),
-      size_bytes: Math.max(0, Math.min(Number(payload.size) || 0, STORAGE_MAX_FILE)),
+      // The declared size stays only as the fallback for a provider that returned no
+      // metadata — never as the preferred answer.
+      size_bytes: Number.isFinite(realSize) && realSize >= 0
+        ? Math.round(realSize)
+        : Math.max(0, Math.min(Number(payload.size) || 0, STORAGE_MAX_FILE)),
       mime: payload.mime ? String(payload.mime).slice(0, 100) : null,
       uploaded_by: userId ?? null,
     };
@@ -4021,12 +5481,97 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // server-side and normalized there (see smsSend). A number in the request body would be
   // an open relay: anyone with a portal login could text any handset from the tenant's
   // registered number, on the shared A2P campaign every other builder depends on.
+  // ── text_sign_link: put the signing link on the customer's own phone ───────────────
+  //
+  // Carolyn 2026-09-01: "when we are sitting with a customer we want to be able to send
+  // them a text message and they click on the link, for them to sign on their phone."
+  //
+  // Re-delivery ONLY. It mints no invoice, allocates no number and changes no state — the
+  // worst case is a duplicate text to the design's own customer, which is why it is safe
+  // at orders/edit. The link carries `?q=<short_code>`, which my-quotes.html reads to land
+  // them on this invoice; it grants nothing on its own, because signing still needs the
+  // texted code and customer-quotes only returns designs matching that verified phone.
+  //
+  // ⚠️ SAME RULE AS crm_send_sms: the number is read HERE, from the design's own contact.
+  // Accepting one from the browser would be an open relay on the tenant's A2P campaign.
+  if (action === "text_sign_link") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, contact, status, ss_quote_number, ss_invoice_sent_at")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("invoice_in_ghl, business_name")
+      .eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (!cs || cs.invoice_in_ghl !== false) {
+      return json({ error: "This account invoices through the CRM — send it from there." }, 400);
+    }
+
+    // There must be something to sign. Texting "sign your invoice" at someone who has no
+    // invoice, or who already signed, is worse than refusing.
+    const { data: inv, error: iErr } = await admin.from("invoice_sends")
+      .select("invoice_number, status, issued_by, signed_at")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (iErr) return dbFail(req, clientId, "load that invoice", iErr);
+    if (!inv || inv.issued_by !== "structurestudio" || !["created", "sent"].includes(String(inv.status))) {
+      return json({ error: "There's no StructureStudio invoice on this order yet." }, 409);
+    }
+    if (inv.signed_at) return json({ error: "They've already signed this invoice." }, 409);
+
+    const to = String((d.contact as Record<string, unknown> | null)?.phone ?? "").trim();
+    if (!to) return json({ ok: true, sent: false, reason: "no phone number on this design" });
+
+    const link = `${myQuotesUrl(clientId, req)}&q=${encodeURIComponent(shortCode)}`;
+    const who = String(cs.business_name || "").trim();
+    const body = `${who ? who + ": " : ""}your invoice ${inv.invoice_number ?? ""} is ready to sign. `
+      + `Open ${link} and we'll text you a code to confirm it's you.`;
+
+    const secret = Deno.env.get("SMS_INBOUND_SECRET") ?? "";
+    const statusCallback = secret
+      ? `${Deno.env.get("SUPABASE_URL") ?? ""}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
+      : null;
+
+    const out = await sendTenantSms(admin, clientId, {
+      toPhone: to,
+      body,
+      shortCode,
+      sentBy: userId ?? null,
+      statusCallback,
+      // A rep pressing this with the customer in front of them is not what quiet hours
+      // exist to stop — it is the same "a human hitting send" case smsSend documents.
+      bypassQuietHours: true,
+    });
+    if (!out.sent) {
+      // `not_active` is the product being off, not a fault: it is where EVERY tenant sits
+      // until their A2P campaign clears. The portal turns this into "show them the QR
+      // code instead", which is a real answer rather than a dead end.
+      return json({
+        ok: true, sent: false,
+        reason: out.reason === "not_active"
+          ? (out.error ?? "texting isn't switched on for this account yet")
+          : (out.error ?? "the text could not be sent"),
+      });
+    }
+    return json({ ok: true, sent: true, to, id: out.id, invoiceNumber: inv.invoice_number ?? null });
+  }
+
   if (action === "crm_send_sms") {
     const body = String(payload.body ?? "").trim().slice(0, 1600);
     if (!body) return json({ error: "The message is empty." }, 400);
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId) return json({ error: "A text has to be addressed to a contact." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
 
     const { data: c, error: cErr } = await admin.from("crm_contacts")
       .select("phone").eq("client_id", clientId).eq("id", contactId).maybeSingle();
@@ -4116,15 +5661,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   if (action === "crm_send_email") {
-    const to = String(payload.to ?? "").trim().slice(0, 320);
+    const claimedTo = String(payload.to ?? "").trim().slice(0, 320);
     const subject = String(payload.subject ?? "").trim().slice(0, 200);
     const body = String(payload.body ?? "").trim().slice(0, 20000);
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return json({ error: "That doesn't look like an email address." }, 400);
     if (!subject) return json({ error: "Give the email a subject." }, 400);
     if (!body) return json({ error: "The email is empty." }, 400);
 
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
+
+    // ── THE BROWSER SENDS IDS, NEVER AN ADDRESS ───────────────────────────────────────
+    // Exactly the rule crm_send_sms and text_sign_link already state, applied to the channel
+    // that carries far more of the conversation. Taking the recipient from the body made this
+    // an open relay on the tenant's own verified domain: any login that may edit contacts
+    // could put any address in `to` and send whatever it liked, DKIM-signed as the builder,
+    // with the ledger row recording it as a customer conversation. The address is read HERE,
+    // server-side, from the record the ids name.
+    //
+    // `to` stays in the contract (production's frontend sends it) and is now a CONFIRMATION:
+    // if it disagrees with the record, the composer is pointed at a different customer than
+    // the one the request claims, and the honest answer is to refuse rather than pick one.
+    if (!contactId && !shortCode) {
+      return json({ error: "An email has to be addressed to a contact or a deal." }, 400);
+    }
+    let to = "";
+    // Shape-checked before it reaches Postgres: crm_contacts.id is a uuid, and a malformed one
+    // would answer 22P02 and turn a bad id into a 500 rather than the refusal below.
+    if (contactId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contactId)) {
+      const { data: c, error: cErr } = await admin.from("crm_contacts")
+        .select("email").eq("client_id", clientId).eq("id", contactId).maybeSingle();
+      if (cErr) return dbFail(req, clientId, "look up that contact", cErr);
+      to = String(c?.email ?? "").trim();
+    }
+    if (!to && shortCode) {
+      // A design whose contact predates the migration-130 backfill has no crm_contacts row at
+      // all — crm_record synthesizes the Person panel from this jsonb blob, so the composer
+      // has to be able to reach the same address or those records lose the feature.
+      const { data: dRow, error: dErr } = await admin.from("designs")
+        .select("contact").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      if (dErr) return dbFail(req, clientId, "look up that deal", dErr);
+      to = String((dRow?.contact as { email?: unknown } | null)?.email ?? "").trim();
+    }
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) {
+      return json({ error: "This customer has no email address on file. Add one to the contact first." }, 400);
+    }
+    if (claimedTo && claimedTo.toLowerCase() !== to.toLowerCase()) {
+      return json({ error: "That address doesn't match this customer's — reopen the record and try again." }, 400);
+    }
 
     // REPLY-TO FALLBACK ONLY: the staff member who wrote it. There is no `business_email`
     // column to default a reply address from (emailSend.ts says so in as many words), and the
@@ -4144,6 +5728,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const addr = u?.user?.email;
       if (typeof addr === "string" && addr.includes("@")) replyTo = addr;
     } catch (_) { /* no reply-to is worse than failing to send, but not by much */ }
+    // The person's OWN choice beats their login address (Settings → My View). A login and the
+    // address someone wants customer replies at are often different — a shared `office@` login,
+    // a personal alias, a role address — which is the gap Carolyn was describing.
+    //
+    // Their auth email stays the fallback: someone who has never opened that card must not lose
+    // the reply address they have had all along. Read from client_users keyed on the JWT's
+    // userId and NEVER on anything in the body, the same rule the auth lookup above follows —
+    // which is why this is a second query rather than a field the browser could send.
+    //
+    // save_prefs validates this on the way IN, so it is not re-validated here. If that
+    // whitelist is ever relaxed, re-validate at this end too: it goes into a mail header.
+    try {
+      const { data: pu } = await admin.from("client_users")
+        .select("prefs").eq("user_id", userId ?? "").maybeSingle();
+      const own = (pu?.prefs as Record<string, unknown> | null)?.replyToEmail;
+      if (typeof own === "string" && own.includes("@")) replyTo = own.trim();
+    } catch (_) { /* fall through to the auth email */ }
 
     // Plain text, escaped into a minimal HTML body. Deliberately NOT a rich template: a
     // conversation should look like a person typed it, not like a system notification, and
@@ -4181,7 +5782,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // status, so it declares itself a refusal — otherwise every send attempt on an
       // un-onboarded tenant files as an error someone has to triage.
       const r = json({ error: "Email sending isn't switched on for your account yet — connect your sending domain in Settings → Email Sending." }, 503);
+      // EXPOSED, or the browser cannot read it. A custom response header is invisible to
+      // cross-origin JS unless it is named in Access-Control-Expose-Headers, and the portal
+      // calls this function cross-origin. Without this line the mark is set, travels, and is
+      // silently unreadable in the browser - so a deliberate 5xx refusal ("Taking cards is not
+      // switched on for this account yet") kept filing as a FAULT in app_errors.
       r.headers.set(SS_REFUSAL_HEADER, "1");
+      r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
       return r;
     }
     return json({ error: `That email didn't send${out.error ? ` (${out.error})` : ""}. Try again — if it keeps happening, tell CSM Synergy.` }, 502);
@@ -4193,6 +5800,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "A note must attach to a contact or a design." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
     const row: Record<string, unknown> = { client_id: clientId, body, created_by: userId ?? null };
     if (contactId) row.contact_id = contactId;
     if (shortCode) row.short_code = shortCode;
@@ -4224,6 +5832,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const contactId = payload.contactId ? String(payload.contactId).slice(0, 64) : null;
     const shortCode = payload.shortCode ? String(payload.shortCode).slice(0, 32) : null;
     if (!contactId && !shortCode) return json({ error: "An activity must attach to a contact or a design." }, 400);
+    { const bad = await mismatchedPair(contactId, shortCode); if (bad) return bad; }
     const row: Record<string, unknown> = {
       client_id: clientId, kind, subject,
       due_at: payload.dueAt ? new Date(String(payload.dueAt)).toISOString() : null,
@@ -4276,8 +5885,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const city = fld(payload.city, 120);
     const state = fld(payload.state, 60);
     const zip = fld(payload.zip, 20);
+    // Billing address (188). A customer's building goes to one address and their paperwork to
+    // another. The four above stay the DELIVERY address — that is what a design submission
+    // populates and what a delivery stop is built from — so these are four more fields, not a
+    // relabelling of those.
+    const billingStreet = fld(payload.billingStreet, 200);
+    const billingCity = fld(payload.billingCity, 120);
+    const billingState = fld(payload.billingState, 60);
+    const billingZip = fld(payload.billingZip, 20);
+    // OWNER (188). Carolyn 2026-09-04: "we do not ever assign deals. We only assign contacts
+    // and followers." Same three-state contract as every field here, which is why it travels
+    // as TEXT: "" is a real instruction to UNASSIGN, and a uuid cannot carry it.
+    const owner = fld(payload.owner, 64);
     if (name === null && phone === null && email === null
-        && street === null && city === null && state === null && zip === null) {
+        && street === null && city === null && state === null && zip === null
+        && billingStreet === null && billingCity === null && billingState === null
+        && billingZip === null && owner === null) {
       return json({ error: "Nothing to change." }, 400);
     }
     // Only validate an address that is actually being SET. "" is a deliberate clear and
@@ -4285,11 +5908,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return json({ error: "That doesn't look like an email address." }, 400);
     }
+    // Shape-check the owner here so a mangled value gets a sentence rather than a Postgres
+    // cast error routed through dbFail. Membership is NOT checked here — the function does
+    // that, in the same statement as the write, so the check cannot be true when it is made
+    // and false when the row lands.
+    if (owner && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(owner)) {
+      return json({ error: "Pick the owner from the list — that isn't a team member." }, 400);
+    }
     const { data: n, error } = await admin.rpc("crm_update_contact", {
       p_client_id: clientId, p_id: id,
       p_name: name, p_phone: phone, p_email: email,
       p_actor: userId ?? null,
       p_street: street, p_city: city, p_state: state, p_zip: zip,
+      p_owner: owner,
+      p_billing_street: billingStreet, p_billing_city: billingCity,
+      p_billing_state: billingState, p_billing_zip: billingZip,
     });
     if (error) {
       // The tenant-wide partial unique index on (client_id, phone_digits) — migration 130.
@@ -4302,15 +5935,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (String(error.code) === "P0002" || /contact not found/i.test(String(error.message ?? ""))) {
         return json({ error: "That contact no longer exists." }, 404);
       }
+      // The two refusals crm_update_contact raises for the owner (188). They are the server
+      // saying no, not something breaking, so they answer with our own sentence rather than
+      // going through dbFail — the same split the error contract has always drawn between
+      // text we wrote and text we did not.
+      if (/owner is not on this team/i.test(String(error.message ?? ""))) {
+        return json({ error: "That person isn't on this team any more. Pick someone from the list." }, 400);
+      }
+      if (/owner must be a user id/i.test(String(error.message ?? ""))) {
+        return json({ error: "Pick the owner from the list — that isn't a team member." }, 400);
+      }
       return dbFail(req, clientId, "save that contact", error);
     }
     return json({ ok: true, changed: Number(n ?? 0) });
   }
 
   if (action === "contact_activity") {
-    const codes: string[] = Array.isArray(payload?.codes)
+    const rawCodes: string[] = Array.isArray(payload?.codes)
       ? payload.codes.map((c: unknown) => String(c)).filter(Boolean).slice(0, 50)
       : [];
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // The codes are caller-supplied, so they are narrowed BEFORE any of the four reads
+    // below rather than after: `codes` also drives the GHL estimate lookup and the
+    // invoice_sends read, and filtering only the returned designs would leave those two
+    // answering about somebody else's customer.
+    const codes = await visibleShortCodes(rawCodes);
+    if (!codes) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
     if (codes.length === 0) return json({ ok: true, designs: [], versions: [], estimates: {} });
 
     const [dRes, vRes] = await Promise.all([
@@ -4851,8 +6501,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!/^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain)) {
       return json({ error: "That doesn't look like a domain — enter just the part after the @, like yourbusiness.com." }, 400);
     }
-    const PLATFORM_APEXES = ["structurestudiosuite.com", "structurestudio.app"];
-    if (PLATFORM_APEXES.some((apex) => domain === apex || domain.endsWith(`.${apex}`))) {
+    const { data: cur, error: curErr } = await admin
+      .from("client_settings").select("email_domain, resend_domain_id, internal_account")
+      .eq("client_id", clientId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+
+    // Domains that are OURS. Connecting one would claim the sender identity the platform's
+    // own mail rides on — csmsynergy.com most of all, since that is where the account
+    // notifications and every fallback send come from. The internal account is exempt for
+    // the obvious reason: those domains are its own, and it is the tenant that really does
+    // connect them.
+    const PLATFORM_APEXES = ["structurestudiosuite.com", "structurestudio.app", "csmsynergy.com"];
+    if (!cur?.internal_account && PLATFORM_APEXES.some((apex) => domain === apex || domain.endsWith(`.${apex}`))) {
       return json({ error: "That domain belongs to StructureStudio — connect your own business domain instead." }, 400);
     }
     const fromLocalRaw = String(payload?.fromLocal ?? "").trim().toLowerCase();
@@ -4862,18 +6522,41 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const fromLocal = fromLocalRaw || "info";
     const fromName = String(payload?.fromName ?? "").trim().slice(0, 120) || null;
 
-    // Someone else already holds this domain? Refuse BEFORE creating anything on the
-    // provider; the unique-index catch below stays as the race-proof backstop.
+    // ── A CLAIM IS NOT OWNERSHIP UNTIL IT VERIFIES ────────────────────────────────────
+    // The row is written the moment someone types a domain, and the partial unique index
+    // (migration 107) then reserves it for that account whether or not they can prove they
+    // control it. So an UNVERIFIED claim on a domain — mistyped, abandoned, or simply typed
+    // by the wrong person — locked the rightful owner out with a permanent 409 that no
+    // screen in the product can clear. What settles ownership is the DNS records, and only a
+    // domain's real owner can publish those.
+    //
+    // So: a holder who has verified (now, or ever — a domain that later failed a re-check
+    // still PROVED control once) keeps it and is never displaceable. A holder who never
+    // verified is released, at the provider first and then in the row, and told why on their
+    // own card. The 23505 catch below stays exactly as it was: it is the race backstop for
+    // two accounts arriving between this read and that write, which this does not replace.
     const { data: holder, error: holderErr } = await admin
-      .from("client_settings").select("client_id")
+      .from("client_settings").select("client_id, email_domain_status, email_verified_at, resend_domain_id")
       .eq("email_domain", domain).neq("client_id", clientId).maybeSingle();
     if (holderErr) return dbFail(req, clientId, "check that domain", holderErr);
-    if (holder) return json({ error: "That domain is already connected to another account." }, 409);
-
-    const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("email_domain, resend_domain_id")
-      .eq("client_id", clientId).maybeSingle();
-    if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
+    if (holder && (holder.email_domain_status === "verified" || holder.email_verified_at)) {
+      return json({ error: "That domain is already connected to another account." }, 409);
+    }
+    if (holder) {
+      // ⚠️ DO NOT "RELEASE" ANOTHER TENANT'S UNVERIFIED CLAIM FROM HERE. The audit's own fix
+      // for this (2026-09-06) deleted the holder's domain at Resend and reset seventeen columns
+      // on their client_settings row, gated only on settings_email:edit - a grant every owner
+      // and admin holds. That would let any admin of any tenant destroy another tenant's email
+      // setup by typing their domain: a cross-tenant write this product has never allowed, and
+      // worse than the squatting it was meant to cure. "Unverified" is not an abandoned claim
+      // either - it is the normal state between connecting a domain and publishing the DNS, so
+      // the victim is usually a builder who is halfway through setup.
+      // Releasing a stale claim is an OPERATOR action. Refuse, and say who can help.
+      return json({
+        error: "That domain is already connected to another account. If it should be yours, " +
+               "contact support and we'll release it.",
+      }, 409);
+    }
 
     let d: RsDomain;
     try {
@@ -5013,7 +6696,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
   if (action === "email_disconnect") {
     const { data: cur, error: curErr } = await admin
-      .from("client_settings").select("resend_domain_id")
+      .from("client_settings").select("resend_domain_id, resend_inbound_domain_id")
       .eq("client_id", clientId).maybeSingle();
     if (curErr) return dbFail(req, clientId, "read your email sending settings", curErr);
     if (cur?.resend_domain_id) {
@@ -5027,6 +6710,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         logEdgeError({
           fn: "portal-settings", req, clientId, code: "email_disconnect_provider",
           message: `provider domain delete failed (id ${cur.resend_domain_id}): ${
+            e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
+          }`,
+        }).catch(() => {});
+      }
+    }
+    // ── AND THE RECEIVING DOMAIN, WHICH USED TO BE LEFT BEHIND ────────────────────────
+    // The write below clears BOTH halves locally (see the note on inbound_domain there), but
+    // only the sending domain was ever deleted at the provider — so reply.<domain> stayed on
+    // the shared account with receiving switched ON. Three consequences, none of them
+    // visible from inside the product: a domain slot burned for good on an account whose cap
+    // is what limits onboarding, a live mail sink still accepting replies to a builder who
+    // has left, and a reconnect that cannot re-create the subdomain because it already
+    // exists — leaving that tenant unable to turn replies back on at all.
+    //
+    // Its own try/catch and its own error code, deliberately: a failure on either delete
+    // must not skip the other, and support needs to be able to tell which domain leaked.
+    // The id is logged because the reset below is about to null it, and it is the only
+    // handle the provider dashboard can be searched by afterwards.
+    if (cur?.resend_inbound_domain_id) {
+      try {
+        await rsDeleteDomain(String(cur.resend_inbound_domain_id));
+      } catch (e) {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "email_disconnect_inbound_provider",
+          message: `provider inbound domain delete failed (id ${cur.resend_inbound_domain_id}): ${
             e instanceof ResendApiError ? `resend ${e.status}/${e.name_ || "unknown"}` : String((e as Error)?.message ?? e)
           }`,
         }).catch(() => {});
@@ -5223,6 +6931,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   if (action === "resend_quote_email") {
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     const { data: d, error: dErr } = await admin
       .from("designs")
@@ -5281,24 +6994,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // The CO row already exists (raised by the SS resubmit path, or by the order card's
   // form); this only delivers the request-for-signature email. Idempotent — re-sending is
   // a duplicate email at worst, so it doubles as the "Resend" button.
-  if (action === "send_change_order") {
-    const coId = String(payload?.changeOrderId ?? "").trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
-      return json({ error: "changeOrderId is required." }, 400);
+  // THE AMENDMENT GATE (migration 210).
+  // May this order be changed at all, and at what price? The SAME function the
+  // change_orders guard trigger asks on every insert, so the button, the document and the
+  // database can never answer differently -- three copies of this rule would drift, and the
+  // one that drifted would be the one that let a locked order through.
+  //
+  // It never raises and fails OPEN by design (see 210); a read failure here therefore
+  // reports open rather than locking a builder out of their own order.
+  const amendmentGate = async (shortCode: string): Promise<Record<string, unknown>> => {
+    const { data, error } = await admin.rpc("order_amendment_gate", {
+      p_client_id: clientId, p_short_code: shortCode,
+    });
+    if (error || !data) {
+      return { signed: false, open: true, authority: "free_window", unlock_id: null,
+               fee_cents: 0, fee_taxable: false, reason: "" };
     }
-    const { data: co, error: coErr } = await admin.from("change_orders")
-      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
-      .eq("client_id", clientId).eq("id", coId).maybeSingle();
-    if (coErr) return dbFail(req, clientId, "load that change order", coErr);
-    if (!co) return json({ error: "Change order not found." }, 404);
-    if (co.status !== "pending_ack") {
-      return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided." }, 400);
-    }
+    return data as Record<string, unknown>;
+  };
+
+  // The person's own name, for the evidence rows below. Denormalised at write time on
+  // purpose -- an unlock has to still read correctly after the person is renamed or gone,
+  // which is 178's argument for recorded_by_name and 126's for verbal_rep_name.
+  const callerName = async (): Promise<string | null> => {
+    if (!userId) return null;
+    const { data } = await admin.from("client_users")
+      .select("full_name").eq("user_id", userId).maybeSingle();
+    const n = String(data?.full_name ?? "").trim();
+    return n || (userEmail ? String(userEmail) : null);
+  };
+
+  // Money in a sentence a person reads. Matches customer-accept's fmtMoney character for
+  // character, so the consent text on a rep attestation and on a customer signature read
+  // alike in the evidence table -- they are the same event recorded by different people.
+  const usd = (n: number): string => {
+    const v = Math.round(n * 100) / 100;
+    const [int, frac] = Math.abs(v).toFixed(2).split(".");
+    return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+  };
+
+  // The customer's "here is what changed, please approve it" email. ONE definition, called by
+  // finalize_amendment (which sends it as part of finishing) and by send_change_order (the
+  // resend button). Two copies would drift the moment either grew a line.
+  // deno-lint-ignore no-explicit-any
+  const emailChangeOrder = async (co: any): Promise<{ sent: boolean; reason: string | null }> => {
     const { data: d } = await admin.from("designs")
       .select("contact, ss_quote_number")
       .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
     const to = String((d?.contact as { email?: unknown } | null)?.email ?? "").trim();
-    if (!isEmail(to)) return json({ ok: true, sent: false, reason: "no email address on this design" });
+    if (!isEmail(to)) return { sent: false, reason: "no email address on this design" };
     const { data: cs } = await admin.from("client_settings")
       .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
@@ -5319,13 +7063,781 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       kind: "change_order", shortCode: co.short_code, to,
       subject: content.subject, html: content.html, text: content.text,
     });
-    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+    // ⚠️ "failed" IS NOT A REASON, it is a status repeated back (found while testing the
+    // whole flow on beta, 2026-09-08). The rep's screen said "not emailed (failed)", which
+    // tells them nothing they can act on — while the server had the provider's actual answer
+    // sitting in `outcome.error`: `resend 422/validation_error`, i.e. the address was
+    // rejected. sendTenantEmail's contract carries both; only `reason` was being read.
+    //
+    // Every branch here names something the builder can DO. The raw provider string is
+    // deliberately not passed through — it is logged in email_sends.error for us, and
+    // "resend 422/validation_error" on a builder's screen is noise wearing authority.
+    if (outcome.sent) return { sent: true, reason: null };
+    const detail = String((outcome as { error?: unknown }).error ?? "");
+    const reason = outcome.reason === "not_active"
+      ? "your sending domain isn't live yet — check Settings → Branding → Email"
+      : /4(0[0-9]|2[0-9])|validation|invalid|recipient/i.test(detail)
+        ? `that email address was rejected (${to})`
+        : "the send didn't go through";
+    return { sent: false, reason };
+  };
+
+  // amendment_status: everything the Change Order button needs before it acts.
+  if (action === "amendment_status") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const gate = await amendmentGate(shortCode);
+    const [liveRes, unlockRes, csRes] = await Promise.all([
+      admin.from("change_orders")
+        .select("id, co_no, status, source, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable, raised_under, created_at")
+        .eq("client_id", clientId).eq("short_code", shortCode)
+        .in("status", ["draft", "pending_ack"]).limit(1),
+      admin.from("order_unlocks")
+        .select("id, reason, requested_by_name, requested_at, decision, decided_by_name, decided_at, decision_note, expires_at")
+        .eq("client_id", clientId).eq("short_code", shortCode)
+        .is("consumed_at", null).is("released_at", null)
+        .order("created_at", { ascending: false }).limit(1),
+      admin.from("client_settings")
+        .select("co_unlock_required, co_free_days, co_fee_cents, co_fee_taxable, co_fee_label")
+        .eq("client_id", clientId).maybeSingle(),
+    ]);
+    // Soft on every leg: this read decides which BUTTON renders, and a blank screen is a
+    // worse answer than a conservative one.
+    return json({
+      ok: true,
+      gate,
+      amendment: liveRes.error ? null : (liveRes.data?.[0] ?? null),
+      unlock: unlockRes.error ? null : (unlockRes.data?.[0] ?? null),
+      policy: csRes.error || !csRes.data ? null : {
+        unlockRequired: csRes.data.co_unlock_required === true,
+        freeDays: Number(csRes.data.co_free_days ?? 0),
+        feeCents: Number(csRes.data.co_fee_cents ?? 0),
+        feeTaxable: csRes.data.co_fee_taxable === true,
+        feeLabel: String(csRes.data.co_fee_label ?? "Change order fee"),
+      },
+    });
+  }
+
+  // request_order_unlock: the rep asks.
+  if (action === "request_order_unlock") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    const reason = String(payload?.reason ?? "").trim().slice(0, 500);
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+    // The reason is not paperwork: it is what the approver reads before deciding, and it
+    // lands permanently on the order's amendment trail.
+    if (!reason) return json({ error: "Say what needs changing -- whoever unlocks it will read this." }, 400);
+
+    const gate = await amendmentGate(shortCode);
+    if (gate.open === true) {
+      return json({ ok: true, needed: false, reason: String(gate.reason ?? ""), gate });
+    }
+
+    // CLOSER #1 from 210: an unlock that expired unused is released here rather than
+    // blocking the next request, and the release says why. The partial unique index cannot
+    // carry `expires_at > now()` (now() is not immutable), which is what makes this the
+    // place that has to do it.
+    await admin.from("order_unlocks")
+      .update({ released_at: new Date().toISOString(), release_reason: "expired unused" })
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .eq("decision", "granted").is("consumed_at", null).is("released_at", null)
+      .lt("expires_at", new Date().toISOString());
+
+    // ⚠️ NO `.neq("decision", "declined")` HERE, and that is not an oversight. A WAITING
+    // request has decision NULL, and `decision <> 'declined'` is NULL for a NULL — three-
+    // valued logic drops the row rather than keeping it. That filter made this check blind to
+    // exactly the row it exists to find: the second request fell through to the insert and
+    // came back as a 500 from the one-open-unlock index. Filter in JS, where null is null.
+    const { data: openRows } = await admin.from("order_unlocks")
+      .select("id, decision, requested_by_name, requested_at, expires_at")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .is("consumed_at", null).is("released_at", null)
+      .limit(5);
+    const openRow = (openRows ?? []).filter((u) => u.decision !== "declined");
+    if (openRow?.[0]) {
+      return json({
+        ok: true, already: true, unlock: openRow[0],
+        message: openRow[0].decision === "granted"
+          ? "This order is already unlocked."
+          : "Someone has already asked to unlock this order.",
+      });
+    }
+
+    const name = await callerName();
+    const { data: row, error: insErr } = await admin.from("order_unlocks").insert({
+      client_id: clientId, short_code: shortCode,
+      requested_by: userId ?? null, requested_by_name: name,
+      requested_at: new Date().toISOString(), reason,
+    }).select("id, reason, requested_by_name, requested_at").maybeSingle();
+    // Belt and braces behind the check above: the index is the real claim, and losing a race
+    // to it means somebody else asked first — which is an answer, not a fault.
+    if (insErr) {
+      if (String(insErr.code) === "23505") {
+        return json({ ok: true, already: true, message: "Someone has already asked to unlock this order." });
+      }
+      return dbFail(req, clientId, "ask for that order to be unlocked", insErr);
+    }
+    await audit("unlock_requested", null, `design=${shortCode}`).catch(() => {});
+    return json({ ok: true, requested: true, unlock: row });
+  }
+
+  // decide_order_unlock: the approver answers.
+  // The ONLY action gated on change_order_approve. An approver may also unlock an order
+  // nobody has asked about -- the builder often decides the change is happening before the
+  // rep has typed anything -- so a missing request is created and granted in one step
+  // rather than refused.
+  if (action === "decide_order_unlock") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    const decision = payload?.decision === "declined" ? "declined" : "granted";
+    const note = String(payload?.note ?? "").trim().slice(0, 500) || null;
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: cs } = await admin.from("client_settings")
+      .select("co_unlock_hours").eq("client_id", clientId).maybeSingle();
+    const hours = Math.min(720, Math.max(1, Number(cs?.co_unlock_hours ?? 72)));
+    const nowIso = new Date().toISOString();
+    const expiresIso = new Date(Date.now() + hours * 3600_000).toISOString();
+    const name = await callerName();
+
+    const patch = {
+      decision, decided_by: userId ?? null, decided_by_name: name,
+      decided_at: nowIso, decision_note: note,
+      // A DECLINE HAS NO EXPIRY -- nothing is being granted. The grant_shape CHECK only
+      // demands expires_at of a 'granted' row.
+      expires_at: decision === "granted" ? expiresIso : null,
+    };
+
+    const { data: pending } = await admin.from("order_unlocks")
+      .select("id").eq("client_id", clientId).eq("short_code", shortCode)
+      .is("decision", null).is("consumed_at", null).is("released_at", null)
+      .order("created_at", { ascending: false }).limit(1);
+
+    let row;
+    if (pending?.[0]) {
+      const upd = await admin.from("order_unlocks").update(patch)
+        .eq("id", pending[0].id).select("id, decision, decided_by_name, decided_at, expires_at, decision_note").maybeSingle();
+      if (upd.error) return dbFail(req, clientId, "record that decision", upd.error);
+      row = upd.data;
+    } else {
+      if (decision === "declined") {
+        return json({ error: "There is nothing to decline -- nobody has asked to unlock this order." }, 400);
+      }
+      const ins = await admin.from("order_unlocks").insert({
+        client_id: clientId, short_code: shortCode,
+        reason: note ?? "Unlocked without a request", ...patch,
+      }).select("id, decision, decided_by_name, decided_at, expires_at, decision_note").maybeSingle();
+      // The one-open-unlock index is the concurrency claim; a duplicate means somebody
+      // else got there first, which is not an error the approver needs to see as one.
+      if (ins.error) {
+        if (String(ins.error.code) === "23505") {
+          return json({ ok: true, already: true, message: "This order is already unlocked." });
+        }
+        return dbFail(req, clientId, "unlock that order", ins.error);
+      }
+      row = ins.data;
+    }
+
+    await auditStrict(`unlock_${decision}`, null, `design=${shortCode} hours=${decision === "granted" ? hours : 0}`);
+    return json({ ok: true, unlock: row });
+  }
+
+  // open_amendment: spend the unlock, open the draft.
+  // The draft is the rep's workspace: invisible to the customer (customer-quotes shows
+  // pending_ack only) and deliberately not a block on invoicing. Everything that decides
+  // whether this is allowed -- and what it costs -- is stamped by the guard trigger from the
+  // gate, never read from this handler's caller.
+  if (action === "open_amendment") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: d } = await admin.from("designs")
+      .select("short_code, ss_quote_number, accepted_at, estimate_lines, selections, paint_colors")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (!d) return json({ error: "Design not found." }, 404);
+    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
+
+    const { data: existing } = await admin.from("change_orders")
+      .select("id, co_no, status, fee_cents, fee_tax_cents, raised_under")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .in("status", ["draft", "pending_ack"]).limit(1);
+    if (existing?.[0]) {
+      return json({ ok: true, already: true, changeOrder: existing[0] });
+    }
+
+    const gate = await amendmentGate(shortCode);
+    if (gate.open !== true) {
+      return json({ error: String(gate.reason ?? "This order is signed and has to be unlocked first."), reason: "locked" }, 409);
+    }
+
+    // THE UNDO POINT, stamped HERE rather than at the first save (2026-09-07). The rep is
+    // about to edit the real design in the real designer -- there is no shadow copy, which is
+    // what makes "change anything, including the drawing" true without a second designer. So
+    // the only record of what the order looked like before is the one taken now. Without it
+    // "Discard the change" voids the change order and leaves the EDIT on the design, which is
+    // the discard drift the order screen has been warning about since migration 127.
+    //
+    // Same column and same shape stage_order_attribute_change writes, and that handler already
+    // declines to overwrite an existing snapshot_before -- so a rep who opens the amendment and
+    // then uses the order-screen dropdowns still restores to the right place.
+    const undoPoint = {
+      estimateLines: d.estimate_lines, selections: d.selections, paintColors: d.paint_colors,
+    };
+    // What the customer last put their name to, for the CO's version_before. Same read
+    // stage_order_attribute_change makes; null is acceptable (older designs have no version).
+    const { data: acc } = await admin.from("design_acceptances").select("design_version")
+      .eq("client_id", clientId).eq("short_code", shortCode)
+      .order("accepted_at", { ascending: false }).limit(1).maybeSingle();
+
+    // source 'design_edit': the rep is about to open the designer, and the description is
+    // GENERATED from the line diff when the amendment is finished -- never typed. A manual
+    // amendment converts on finalize; it cannot be decided here, before any editing.
+    const { data: co, error: coErr } = await admin.from("change_orders").insert({
+      client_id: clientId, short_code: shortCode, source: "design_edit", status: "draft",
+      description: "Change in progress",
+      snapshot_before: undoPoint,
+      version_before: acc?.design_version ?? null,
+    }).select("id, co_no, status, raised_under, unlock_id, fee_cents, fee_tax_cents, fee_taxable").maybeSingle();
+    if (coErr) {
+      // The trigger's refusal is a sentence written for a person; pass it through rather
+      // than burying it under dbFail's generic label.
+      //
+      // ⚠️ MATCHED NARROWLY, against the gate's OWN sentence. A loose /unlock|signed/ test
+      // read a foreign-key error naming `order_unlocks` as a refusal and told the rep their
+      // order was locked, when the real answer was a bug in the trigger (see migration 214).
+      // Anything this does not recognise is a fault and must go through dbFail, where it is
+      // logged with its Postgres detail instead of being shown to a builder as policy.
+      const msg = String(coErr.message ?? "");
+      if (/has to unlock it|unlock it before it can be changed|This order is signed/i.test(msg)) {
+        return json({ error: msg, reason: "locked" }, 409);
+      }
+      if (String(coErr.code) === "23505") return json({ error: "Someone just opened a change on this order." }, 409);
+      return dbFail(req, clientId, "open that change", coErr);
+    }
+    await audit("amendment_opened", null, `design=${shortCode} co=${co?.co_no} under=${co?.raised_under}`).catch(() => {});
+    return json({ ok: true, changeOrder: co });
+  }
+
+  // ── finalize_amendment: the rep is done editing; price it and ask the customer ─────────
+  //
+  // The draft becomes a real change order here, and every number on it is DERIVED. Nothing
+  // in the payload decides money or words: the description comes from the line diff
+  // (changeOrderDescription over the agreed baseline), the totals come from the snapshots
+  // either side of it, and the fee was stamped by the guard trigger when the change was
+  // opened and is frozen against every later write. A rep summarising their own change is
+  // how an acknowledgment drifts from the reality it is supposed to record.
+  if (action === "finalize_amendment") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, source, fee_cents, fee_tax_cents, fee_taxable, version_before")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status === "pending_ack") {
+      return json({ ok: true, already: true, changeOrder: co });
+    }
+    if (co.status !== "draft") {
+      return json({
+        error: co.status === "acknowledged"
+          ? "This change order is already acknowledged."
+          : "This change order was discarded — open a new one.",
+      }, 400);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, ss_quote_number, image_url, estimate_lines, accepted_snapshot, selections, paint_colors")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const agreed = agreedBaseline(d);
+    const description = changeOrderDescription(agreed.lines, d.estimate_lines);
+    const totalBefore = totalFromSnapshot(agreed.lines);
+    const totalAfter = totalFromSnapshot(d.estimate_lines);
+
+    // NOTHING CHANGED. Refuse rather than send the customer a change order describing no
+    // change — and say which of the two things to do about it, because a rep who opened this
+    // by mistake otherwise leaves a draft sitting on the order blocking the next one (the
+    // one-live-amendment index) with no idea why.
+    if (!description && totalBefore === totalAfter) {
+      return json({
+        error: "Nothing has changed on this order yet. Open the designer and make the change, or discard this one.",
+        reason: "no_change",
+      }, 400);
+    }
+
+    let versionAfter: number | null = null;
+    {
+      const { data: maxV } = await admin.from("design_versions").select("version")
+        .eq("short_code", co.short_code).order("version", { ascending: false }).limit(1).maybeSingle();
+      versionAfter = maxV?.version == null ? null : Number(maxV.version);
+    }
+
+    // `.eq("status","draft")` is the concurrency claim, not a formality: two reps on the same
+    // order would otherwise both "finish" it, and the second would rewrite words and money on
+    // a change the customer had already been emailed.
+    const { data: sent, error: updErr } = await admin.from("change_orders")
+      .update({
+        status: "pending_ack",
+        description: description ?? `Change to quote ${d.ss_quote_number ?? co.short_code}`,
+        total_before_cents: totalBefore == null ? null : Math.round(totalBefore * 100),
+        total_after_cents: totalAfter == null ? null : Math.round(totalAfter * 100),
+        version_after: versionAfter,
+      })
+      .eq("client_id", clientId).eq("id", co.id).eq("status", "draft")
+      .select("id, co_no, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable, short_code")
+      .maybeSingle();
+    if (updErr) return dbFail(req, clientId, "finish that change", updErr);
+    if (!sent) return json({ error: "Somebody else just finished this change." }, 409);
+
+    // The customer's quote PDF becomes the PROPOSAL — the document showing what they are
+    // being asked to approve, which is what it should show while an amendment is open. It is
+    // NOT the signed invoice: that lives at its own path and is never regenerated here, so
+    // nothing the customer has already put their name to is overwritten. The acceptance
+    // certificate on the quote is re-appended by regenerateQuotePdf itself.
+    const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, co.short_code, {
+      quoteNumber: String(d.ss_quote_number ?? co.short_code), snap: d.estimate_lines, planUrl: d.image_url,
+    });
+
+    const mail = await emailChangeOrder(sent);
+    await audit("amendment_finalized", null,
+      `design=${co.short_code} co=${sent.co_no} before=${totalBefore ?? "-"} after=${totalAfter ?? "-"} fee=${sent.fee_cents ?? 0}`).catch(() => {});
+    return json({
+      ok: true, changeOrder: sent, description: sent.description,
+      totalBefore, totalAfter, quotePdfUrl, sent: mail.sent, sendReason: mail.reason,
+    });
+  }
+
+  // ── attest_change_order: the rep records that the customer said yes ────────────────────
+  //
+  // MOVED OFF THE BROWSER (2026-09-07). The portal used to write `change_orders` directly
+  // under RLS for a verbal acknowledgment. That could never write the other half of the
+  // record: `design_acceptances` has SELECT policies and nothing else (migration 124), so
+  // writes are service-role only BY CONSTRUCTION — which is the entire safety argument behind
+  // rep-attested acceptance, and it cannot be honoured from a browser. Carolyn asked for a
+  // fresh signature on the amended order "or fill in the details we already have in place for
+  // it"; this is that second half, and it has to leave the same kind of evidence as the first.
+  //
+  // The row is subject='invoice' with revision = co_no (migration 213): the customer is
+  // approving the WHOLE revised order, not a document beside it. Revision 0 keeps the original
+  // signature verbatim; nothing is updated and nothing is deleted.
+  if (action === "attest_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    // When they said yes. Defaults to today; a rep recording yesterday's phone call should be
+    // able to say so, and the CHECK behind ack_method='verbal' demands the date either way.
+    const rawDate = String(payload?.conversationDate ?? "").trim();
+    const conversationDate = /^\d{4}-\d{2}-\d{2}$/.test(rawDate)
+      ? rawDate
+      : new Date().toISOString().slice(0, 10);
+    if (conversationDate > new Date().toISOString().slice(0, 10)) {
+      return json({ error: "That conversation date is in the future." }, 400);
+    }
+
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status === "acknowledged") return json({ ok: true, already: true });
+    if (co.status !== "pending_ack") {
+      return json({
+        error: co.status === "draft"
+          ? "This change isn't finished yet — finish it before recording their approval."
+          : "This change order was discarded.",
+      }, 400);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, ss_quote_number, image_url, contact, estimate_lines, accepted_snapshot")
+      .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    // WHO IS ATTESTING. From the verified session, never from the body — the
+    // change_orders.verbal_recorded_by posture, and design_acceptances_rep_named_check
+    // refuses the insert without it anyway. Denormalised because this row is evidence: it has
+    // to still read correctly after the person is renamed or gone.
+    const recordedByName = (await callerName()) ?? "";
+    if (!recordedByName.trim()) {
+      return json({ error: "We couldn't tell who is recording this. Sign out and back in, then try again." }, 400);
+    }
+
+    // ── THE NUMBER THEY AGREED TO ────────────────────────────────────────────────────────
+    // The whole amended order, fee included — not the change in isolation. This is the figure
+    // that goes into a sentence standing as the customer's approval, so it is computed from
+    // the same helper the acknowledging write will use a moment later rather than from a
+    // second arithmetic that could disagree with the money actually recorded.
+    const { data: ackedNow } = await admin.from("change_orders")
+      .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+      .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged");
+    const projected = orderCentsAfterAck(d.estimate_lines, [...(ackedNow ?? []), co]);
+    const newTotal = projected == null ? null : projected.totalCents / 100;
+
+    // ── REFUND OWED ──────────────────────────────────────────────────────────────────────
+    // Carolyn: show a cheaper-than-paid order as a refund owed. The customer should learn
+    // that at the moment their approval is recorded, not from a balance card weeks later.
+    let settledCents = 0;
+    {
+      const { data: ord } = await admin.from("orders").select("id")
+        .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle();
+      if (ord?.id) {
+        const { data: pays } = await admin.from("payments")
+          .select("amount_cents, funding_state, voided_at")
+          .eq("client_id", clientId).eq("order_id", ord.id);
+        for (const pmt of Array.isArray(pays) ? pays : []) {
+          if (pmt.voided_at) continue;
+          if (pmt.funding_state === "pending" || pmt.funding_state === "returned") continue;
+          settledCents += Number(pmt.amount_cents) || 0;
+        }
+      }
+    }
+    const refundCents = projected == null ? 0 : Math.max(0, settledCents - projected.totalCents);
+
+    const quoteNo = String(d.ss_quote_number || co.short_code);
+    const coLabel = `CO-${co.co_no}`;
+    const feeCents = Number(co.fee_cents) || 0;
+    const feeTaxCents = Number(co.fee_tax_cents) || 0;
+
+    // The consent text is the durable evidence, composed HERE and stored verbatim. It is
+    // written in the REP's voice throughout and ends with the clause that makes it honest —
+    // that sentence is the difference between a record and a forged signature.
+    const consentText =
+      `${recordedByName} recorded ${String((d.contact as { name?: unknown } | null)?.name ?? "").trim() || "the customer"}'s approval of change order ` +
+      `${coLabel} to quote ${quoteNo}, given on ${conversationDate}` +
+      (newTotal == null ? "" : `, for a revised order total of ${usd(newTotal)}`) +
+      (feeCents > 0 ? `, which includes a change order fee of ${usd((feeCents + feeTaxCents) / 100)}` : "") +
+      (refundCents > 0 ? `. The revised total is below what has already been paid, leaving ${usd(refundCents / 100)} to be refunded` : "") +
+      `. This is the builder's record of the customer's approval, not the customer's signature.`;
+
+    const acceptanceId = crypto.randomUUID();
+    const ackAtIso = new Date().toISOString();
+    const { error: insErr } = await admin.from("design_acceptances").insert({
+      id: acceptanceId,
+      client_id: clientId,
+      short_code: co.short_code,
+      // The WHOLE revised order, which is what they approved — and revision IS co_no, so the
+      // document a customer signed and the change it describes can never be numbered apart.
+      subject: "invoice",
+      revision: Number(co.co_no) || 0,
+      change_order_id: co.id,
+      quote_number: quoteNo,
+      total: newTotal,
+      // The tax as the AMENDED document carries it — that is what was approved.
+      ...taxFreeze(d.estimate_lines),
+      method: "rep",
+      signer_name: String((d.contact as { name?: unknown } | null)?.name ?? "").trim() || "(no name on file)",
+      consent_text: consentText,
+      // Not a claim about identity here (nothing matches on it — the customer never opened a
+      // session), just what the order has on file. Empty is honest and the column is NOT NULL.
+      phone_digits: phoneKey((d.contact as { phone?: unknown } | null)?.phone),
+      recorded_by_user_id: userId ?? null,
+      recorded_by_name: recordedByName,
+      ip: clientIp(req),
+      user_agent: (req.headers.get("user-agent") || "").slice(0, 300) || null,
+      accepted_at: ackAtIso,
+    });
+    if (insErr) {
+      // design_acceptances_co_once: somebody already recorded an answer for this change.
+      if (String(insErr.code) === "23505") return json({ ok: true, already: true });
+      return dbFail(req, clientId, "record that approval", insErr);
+    }
+
+    const { data: flipped, error: ackErr } = await admin.from("change_orders")
+      .update({
+        status: "acknowledged", ack_method: "verbal", acceptance_id: acceptanceId,
+        acknowledged_at: ackAtIso, verbal_rep_name: recordedByName,
+        verbal_conversation_date: conversationDate, verbal_recorded_by: userId ?? null,
+      })
+      .eq("client_id", clientId).eq("id", co.id).eq("status", "pending_ack")
+      .select("id, co_no").maybeSingle();
+    if (ackErr || !flipped) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: 500,
+        message: `CO attest flip failed: ${ackErr?.message ?? "no row"}`, context: { coId },
+      }).catch(() => {});
+      return json({ error: "The approval was recorded but the change didn't finalize. It's on the order — try again, or call it in." }, 500);
+    }
+
+    // ── THE ORDER'S MONEY ────────────────────────────────────────────────────────────────
+    // Re-read AFTER the flip, deliberately: change_orders_stamp_agreed (153) has by now moved
+    // accepted_snapshot forward onto the revision that was just agreed, and the acknowledged
+    // list now includes this change. Computing from stale copies is how the fee gets refunded
+    // by the next change order.
+    {
+      const [{ data: freshD }, { data: allAcked }] = await Promise.all([
+        admin.from("designs").select("estimate_lines, accepted_snapshot")
+          .eq("client_id", clientId).eq("short_code", co.short_code).maybeSingle(),
+        admin.from("change_orders")
+          .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+          .eq("client_id", clientId).eq("short_code", co.short_code).eq("status", "acknowledged"),
+      ]);
+      const money = orderCentsAfterAck(agreedBaseline(freshD).lines, allAcked ?? []);
+      if (money != null) {
+        // total_source='manual' also shields it from sync-design-status' GHL repricer.
+        const { error: totErr } = await admin.from("orders")
+          .update({
+            total_cents: money.totalCents,
+            pretax_subtotal_cents: money.pretaxCents,
+            tax_cents: money.taxCents,
+            total_source: "manual",
+            updated_at: ackAtIso,
+          })
+          .eq("client_id", clientId).eq("short_code", co.short_code);
+        if (totErr) {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: 500,
+            message: `CO attest order-total update failed: ${totErr.message}`, context: { coId },
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // The quote PDF stops being a proposal and becomes the agreed document.
+    const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, co.short_code, {
+      quoteNumber: quoteNo, snap: d.estimate_lines, planUrl: d.image_url,
+    });
+
+    await auditStrict("change_order_attested", null,
+      `design=${co.short_code} co=${co.co_no} by=${recordedByName} on=${conversationDate}`);
+    return json({
+      ok: true, acknowledgedAt: ackAtIso, coNo: co.co_no,
+      total: newTotal, refundCents, quotePdfUrl, consentText,
+    });
+  }
+
+  // ── reissue_invoice: rebuild the invoice document after an approved change ────────────
+  //
+  // ⚠️ THIS IS THE REMEDY THE STALE-INVOICE REFUSAL NAMES, and until 2026-09-08 it did not
+  // exist. Three places refuse a payment when an approved change is newer than the invoice
+  // ("Regenerate and resend it, then take the payment") -- the customer's pay screen, the
+  // invoice signature, and the rep's terminal. But:
+  //
+  //   * an invoice whose email already SENT returned "This design was already invoiced";
+  //   * the retry branch re-sent the STORED pdf, never rebuilding it, and moved the
+  //     staleness timestamp only if the email landed.
+  //
+  // So on an order whose customer email bounces -- an @example.com address, a typo, a
+  // customer with no email at all -- the refusal could never clear and NOBODY could take
+  // payment on that order again. Survivable while amending a signed order was rare; the
+  // change-order rebuild makes it ordinary, and Carolyn's requirement is explicitly that a
+  // change can happen after delivery and final payment.
+  //
+  // The email is BEST-EFFORT here and deliberately not the point: the document is what the
+  // refusal is about, so `document_at` moves when the PDF is rebuilt whether or not anything
+  // is delivered (221). A builder with the customer in front of them can print it.
+  if (action === "reissue_invoice") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, status, ss_quote_number, image_url, estimate_lines, accepted_snapshot, contact")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const { data: inv, error: iErr } = await admin.from("invoice_sends")
+      .select("invoice_number, invoice_pdf_url, issued_by, status")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (iErr) return dbFail(req, clientId, "load that invoice", iErr);
+    if (!inv || !inv.invoice_number || String(inv.issued_by) !== "structurestudio") {
+      return json({ error: "There is no StructureStudio invoice on this order to reissue." }, 400);
+    }
+
+    // A change nobody has approved is not on the bill yet, so rebuilding now would print a
+    // document that is wrong in the other direction. Same refusal send_invoice makes.
+    {
+      const { data: pend } = await admin.from("change_orders").select("co_no")
+        .eq("client_id", clientId).eq("short_code", shortCode).in("status", ["draft", "pending_ack"]).limit(1);
+      if (pend?.[0]) {
+        return json({ error: `Change CO-${pend[0].co_no} hasn't been approved yet. Settle that first — reissuing now would print a figure that is about to move.` }, 409);
+      }
+    }
+
+    // The SAME arithmetic send_invoice uses. agreedBaseline + acknowledged changes + the
+    // order's PRE-TAX figure, so the lines foot and the tax row lands on top exactly as they
+    // do on the original document. The fee label is joined in for the fee lines.
+    const agreedLines = agreedBaseline(d).lines;
+    const [coRes, ordRes, csRes] = await Promise.all([
+      admin.from("change_orders")
+        .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+      admin.from("orders").select("total_cents, pretax_subtotal_cents")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("client_settings")
+        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label")
+        .eq("client_id", clientId).maybeSingle(),
+    ]);
+    const feeLabel = String(csRes.data?.co_fee_label ?? "").trim() || "Change order fee";
+    const acked = (coRes.error ? [] : (coRes.data ?? [])).map((c) => ({ ...c, fee_label: feeLabel }));
+    const pretax = ordRes.data?.pretax_subtotal_cents ?? ordRes.data?.total_cents ?? null;
+    const amended = amendedInvoiceDocument(agreedLines, acked, pretax == null ? null : Number(pretax));
+
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+    const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
+
+    let pdfUrl = inv.invoice_pdf_url as string | null;
+    try {
+      const pdfBytes = await buildQuotePdf({
+        docKind: "invoice",
+        business: {
+          name: String(csRes.data?.business_name ?? "").trim() || clientId,
+          phone: csRes.data?.business_phone ?? null,
+          website: csRes.data?.business_website ?? null,
+          address: csRes.data?.business_address ?? null,
+        },
+        estimateNumber: String(inv.invoice_number),
+        dateIso: new Date().toISOString(),
+        // deno-lint-ignore no-explicit-any
+        lines: amended.lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
+        discount: amended.discount,
+        tax: amended.tax,
+        // deno-lint-ignore no-explicit-any
+        discountRows: (agreedLines as any)?.discounts?.rows ?? null,
+        quoteTerms: csRes.data?.quote_terms ?? null,
+        planPdfUrl: planUrl,
+      });
+      const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
+      const up = await admin.storage.from("floor-plans")
+        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+      if (up.error) return dbFail(req, clientId, "rebuild the invoice document", up.error);
+      const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
+      pdfUrl = pub?.publicUrl || pdfUrl;
+    } catch (e) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: 500,
+        message: `reissue_invoice PDF build failed: ${(e as Error).message}`, context: { shortCode },
+      }).catch(() => {});
+      return json({ error: "The invoice document couldn't be rebuilt. Try again — if it keeps happening, tell CSM Synergy and mention \"reissue the invoice\"." }, 500);
+    }
+
+    // THE WRITE THAT CLEARS THE REFUSAL. `document_at` — not `updated_at`, which the customer
+    // is shown as "sent" and which must not claim a send that did not happen.
+    const nowIso2 = new Date().toISOString();
+    const { error: recErr } = await admin.from("invoice_sends")
+      .update({ invoice_pdf_url: pdfUrl, document_at: nowIso2 })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (recErr) return dbFail(req, clientId, "record the reissued invoice", recErr);
+
+    // The email is a courtesy on this path, never the point — see the header.
+    let sent = false;
+    let sendReason: string | null = null;
+    const to = String((d.contact as { email?: unknown } | null)?.email ?? "").trim();
+    if (payload?.sendEmail !== false && isEmail(to)) {
+      const owed = amountOwed(agreedLines, acked, ordRes.data?.total_cents == null ? null : Number(ordRes.data.total_cents));
+      const content = invoiceEmail({
+        businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
+        logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
+        invoiceNumber: String(inv.invoice_number),
+        total: owed ?? "",
+        invoiceUrl: pdfUrl,
+        quoteTerms: csRes.data?.quote_terms,
+        signUrl: myQuotesUrl(clientId, req),
+      });
+      const out = await sendTenantEmail(admin, clientId, {
+        kind: "invoice", shortCode, to, subject: content.subject, html: content.html, text: content.text,
+      });
+      sent = out.sent;
+      if (out.sent) {
+        await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId).eq("short_code", shortCode);
+      } else {
+        const det = String((out as { error?: unknown }).error ?? "");
+        sendReason = out.reason === "not_active"
+          ? "your sending domain isn't live yet"
+          : /\b4(0[0-9]|2[0-9])\b|validation|invalid|recipient/i.test(det)
+            ? `that email address was rejected (${to})`
+            : "the send didn't go through";
+      }
+    } else if (!isEmail(to)) {
+      sendReason = "this design has no email address";
+    }
+
+    await audit("invoice_reissued", null, `design=${shortCode} invoice=${inv.invoice_number} emailed=${sent}`).catch(() => {});
+    return json({ ok: true, invoiceNumber: inv.invoice_number, invoicePdfUrl: pdfUrl, sent, sendReason });
+  }
+
+  if (action === "send_change_order") {
+    const coId = String(payload?.changeOrderId ?? "").trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
+      return json({ error: "changeOrderId is required." }, 400);
+    }
+    const { data: co, error: coErr } = await admin.from("change_orders")
+      .select("id, short_code, co_no, status, description, total_before_cents, total_after_cents")
+      .eq("client_id", clientId).eq("id", coId).maybeSingle();
+    if (coErr) return dbFail(req, clientId, "load that change order", coErr);
+    if (!co) return json({ error: "Change order not found." }, 404);
+    if (co.status !== "pending_ack") {
+      return json({
+        error: co.status === "draft"
+          // A draft has no priced diff yet and the customer has never been told it exists.
+          ? "This change is still open -- finish it before sending it to the customer."
+          : co.status === "acknowledged" ? "This change order is already acknowledged." : "This change order was voided.",
+      }, 400);
+    }
+    // One body, shared with finalize_amendment (which sends the first copy). This action is
+    // the RESEND: same email, same numbers, so a customer who lost the first one cannot be
+    // handed a second that says something different.
+    const outcome = await emailChangeOrder(co);
+    return json({ ok: true, sent: outcome.sent, reason: outcome.reason });
   }
 
   // ── order_paperwork: everything the invoice-style order document needs (migration 127) ──
   // One call: the tenant's letterhead identity, the active colors palette (labels + flags +
   // hex for the dropdowns — deliberately NO rates; prices are only ever computed server-side
   // by the staging action), and the invoice_sends fields the sidebar shows (the table is
+  // ── orders_designs: the designs behind the orders on screen ──────────────────────────
+  // 154_area_access_rls.sql:84-95 wrote this action's spec before it was needed, on the day
+  // the designs RLS policy was deliberately NOT widened: "the day OrdersView ships to tenants
+  // this becomes real for all four titles holding orders >= 'view'. Fix it THEN, in code —
+  // move the designs read behind a portal-settings action gated { area: 'orders', level:
+  // 'view' }, so the SERVER decides which design rows an order viewer may see."
+  //
+  // That day is today. A crew leader or driver holds orders:'view' and designs:'none'; before
+  // this, OrdersView read designs straight through RLS and would have handed them every
+  // customer's name, phone, selections and figures. The tempting shortcut — widening the
+  // designs policy to `designs OR orders` — is explicitly refused there and stays refused:
+  // designs_ensure_order mints an order row for EVERY accepted design, so that EXISTS
+  // resolves to "every design ever sold" and gives the least privileged title in the product
+  // a clean list of exactly the thing the policy exists to withhold.
+  //
+  // The projection is deliberately narrow and fixed here rather than chosen by the caller: a
+  // browser must not be able to widen its own column list.
+  if (action === "orders_designs") {
+    const codes = Array.isArray(payload?.shortCodes)
+      ? payload.shortCodes.map((c: unknown) => String(c ?? "").trim()).filter(Boolean).slice(0, 2000)
+      : [];
+    const detail = payload?.detail === true;
+    if (!codes.length) return json({ ok: true, designs: [] });
+    if (detail && codes.length !== 1) {
+      return json({ error: "detail reads one design at a time." }, 400);
+    }
+    // The order document needs the priced snapshot and the configuration it was priced from;
+    // the list needs only enough to label a row. Two shapes, one gate, neither caller-chosen.
+    //
+    // ── ROW SCOPE (migration 193) ──────────────────────────────────────────────────────
+    // contact_id joins the projection for one reason: it is what the row filter keys on, and
+    // resolving it here costs nothing where a second query would cost a round trip carrying
+    // up to 2000 short codes. Both shapes return `contact` — the customer's name, phone and
+    // email — so a rep on contacts:'own' holding orders:'view' would otherwise read every
+    // customer in the business off the Orders tab, which is the exact leak this action was
+    // created to close for crew leaders and drivers one gate up.
+    const cols = detail
+      ? "short_code, contact_id, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact"
+      : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at";
+    const { data, error } = await admin.from("designs")
+      .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
+    if (error) return dbFail(req, clientId, "read the designs for these orders", error);
+    const visible = await visibleDesignRows((data || []) as { contact_id?: string | null }[]);
+    if (!visible) return dbFail(req, clientId, "check who these customers are assigned to", { message: "contact scope unavailable" });
+    return json({ ok: true, designs: visible });
+  }
+
   // service-role only, so this is its portal projection).
   if (action === "order_paperwork") {
     const shortCode = String(payload?.shortCode ?? "").trim();
@@ -5342,10 +7854,39 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .select("id, label, hex, siding, trim, shingle, metal, allow_custom, is_default, sort_order")
         .eq("client_id", clientId).eq("active", true).order("sort_order", { ascending: true }),
       admin.from("invoice_sends")
-        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at, signed_at, acceptance_id")
+        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at, document_at, signed_at, acceptance_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
     ]);
     if (colRes.error) return dbFail(req, clientId, "read your colors", colRes.error);
+    // The cladding THIS DESIGN'S STYLE offers (207), so the document's dropdown lists what the
+    // tenant actually sells and calls it what they call it. Before this the browser carried a
+    // compiled-in list of three that had drifted from the designer's four — it omitted
+    // `batten`, and because the staging action validated against the same list and defaults to
+    // the design's CURRENT value, a Board & Batten design could not have ANY attribute changed
+    // on its order, not even a roof colour.
+    //
+    // Fails SOFT to an empty list: the browser falls back to the built-in four, which is what
+    // an account with no rows yet should see. A colours read failing blanks the document
+    // because you cannot price paint without a palette; a cladding read failing must not.
+    let cladding: { id: string; label: string | null }[] = [];
+    {
+      const dRes = await admin.from("designs").select("selections")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+      const styleKey = String(((dRes.data?.selections ?? {}) as Record<string, unknown>).style ?? "").trim();
+      if (!dRes.error && styleKey) {
+        const stRow = await admin.from("building_styles").select("id")
+          .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
+        if (!stRow.error && stRow.data?.id) {
+          const scRows = await admin.from("style_cladding").select("cladding_id, label_override, sort_order")
+            .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true)
+            .not("rate", "is", null).order("sort_order");
+          if (!scRows.error) {
+            cladding = (scRows.data ?? []).map((r: { cladding_id: string; label_override: string | null }) =>
+              ({ id: r.cladding_id, label: r.label_override }));
+          }
+        }
+      }
+    }
     return json({
       ok: true,
       business: {
@@ -5356,6 +7897,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: cs.quote_terms || null,
       },
       colors: colRes.data || [],
+      cladding,
       invoice: invRes.error ? null : (invRes.data || null),
     });
   }
@@ -5398,8 +7940,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!d) return json({ error: "Design not found." }, 404);
     if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet." }, 400);
     const dStatus = String(d.status || "");
-    if (dStatus === "invoiced" || dStatus === "delivered") {
-      return json({ error: "This order is already invoiced — its paperwork is frozen. Raise a manual change order instead." }, 400);
+    // WAS: a flat refusal on invoiced/delivered -- "its paperwork is frozen. Raise a manual
+    // change order instead." That single line is what made Carolyn's requirement false:
+    // "a change order can happen anytime throughout the process up until after delivery and
+    // final payment." The question is no longer WHICH STATUS the order is in but whether the
+    // builder's own rules leave it open -- the free window, or an unlock somebody granted.
+    // Same gate the trigger asks, so a refusal here and a refusal there always agree.
+    {
+      const gate = await amendmentGate(shortCode);
+      if (gate.open !== true) {
+        return json({
+          error: String(gate.reason ?? "This order is signed. Ask an admin or crew leader to unlock it."),
+          reason: "locked",
+        }, 409);
+      }
     }
     // deno-lint-ignore no-explicit-any
     const snap: any = d.estimate_lines;
@@ -5432,8 +7986,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
 
     // ── Validate against the catalog, loudly. ──
-    if (next.cladding && !CLADDING_OPTIONS.some((c) => c.id === next.cladding)) {
-      return json({ error: "That cladding isn't offered." }, 400);
+    // Cladding is per tenant, per STYLE since 207, so the offered set comes from this design's
+    // own style rather than from a list compiled into the function. A tenant or a style with no
+    // rows falls back to the closed four, which is how an account that predates 207 keeps
+    // behaving exactly as it did. (The old code validated against CLADDING_OPTIONS alone, and
+    // that list was missing `batten` — see attributeLines.ts for what that cost.)
+    const cladOverrides: Record<string, string> = {};
+    let cladOffered: string[] = [];
+    {
+      const styleKey = String(sel.style ?? "").trim();
+      if (styleKey) {
+        const stRow = await admin.from("building_styles").select("id")
+          .eq("client_id", clientId).eq("key", styleKey).maybeSingle();
+        if (stRow.error) return dbFail(req, clientId, "read that design's style", stRow.error);
+        if (stRow.data?.id) {
+          const scRows = await admin.from("style_cladding").select("cladding_id, label_override")
+            .eq("client_id", clientId).eq("style_id", stRow.data.id).eq("active", true).not("rate", "is", null);
+          if (scRows.error) return dbFail(req, clientId, "read your cladding", scRows.error);
+          for (const r of (scRows.data ?? []) as { cladding_id: string; label_override: string | null }[]) {
+            cladOffered.push(r.cladding_id);
+            if (r.label_override) cladOverrides[r.cladding_id] = r.label_override;
+          }
+        }
+      }
+    }
+    const cladOk = (id: string) => cladOffered.length
+      ? cladOffered.includes(id)
+      : CLADDING_OPTIONS.some((c) => c.id === id);
+    if (next.cladding && !cladOk(next.cladding)) {
+      return json({ error: "That cladding isn't offered on this building style. Check Settings → Options → Cladding." }, 400);
     }
     const { data: colRows, error: colErr } = await admin.from("colors")
       .select("id, label, rate, pricing_method, allow_custom, siding, trim, shingle, metal")
@@ -5514,14 +8095,40 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           ...(resolvedCo.reason ? { reason: resolvedCo.reason } : {}),
         };
       }
+      // METERED (179) — the third and last place a rate is resolved. A change order re-asks
+      // Avalara (Carolyn's rule: a change order is a fresh lookup), so under per-lookup
+      // pricing it is a real billable call and leaving it out would meter two of three.
+      if (resolvedCo.source === "avalara") {
+        const meterCo = await chargeTaxCalculation(admin, {
+          clientId,
+          kind: "tax_lookup",
+          idem: taxLookupIdem(clientId, String(shortCode), resolvedCo.rate, resolvedCo.jurisdiction),
+          refType: "change_order",
+          refId: String(shortCode),
+          memo: `Sales tax lookup${resolvedCo.jurisdiction ? ` — ${resolvedCo.jurisdiction}` : ""}`,
+          actorUserId: userId ?? null,
+        });
+        if (!meterCo.charged && meterCo.reason === "error") {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: "tax_meter",
+            message: `tax_lookup charge failed for change order on ${shortCode}`,
+          }).catch(() => {});
+        }
+      }
     }
 
-    // The pending CO, if any. snapshot_before is still read — but ONLY for the adoption
-    // stamp further down, never as a baseline (see the header: it is the undo point).
+    // The live CO, if any. snapshot_before is still read — but ONLY for the adoption stamp
+    // further down, never as a baseline (see the header: it is the undo point).
+    //
+    // 'draft' JOINED 'pending_ack' HERE ON 2026-09-07, and it is not cosmetic. open_amendment
+    // creates a DRAFT and that is now the ordinary way a change on a signed order begins — so
+    // a rep who opens the amendment and then reaches for these dropdowns finds a row this
+    // lookup could not see, falls through to the INSERT below, and collides with the
+    // one-live-amendment index. The same widening submit-estimate's own lookup already got.
     const { data: existingCo } = await admin.from("change_orders")
-      .select("id, co_no, version_before, snapshot_before")
+      .select("id, co_no, status, version_before, snapshot_before")
       .eq("client_id", clientId).eq("short_code", shortCode)
-      .eq("status", "pending_ack").eq("source", "design_edit")
+      .in("status", ["draft", "pending_ack"]).eq("source", "design_edit")
       .limit(1).maybeSingle();
     // The baseline is what the customer AGREED to (153). It used to be
     // `snapshot_before ?? the live design`, and on a CO adopted from a designer resubmit
@@ -5549,7 +8156,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const fromPaintStatus = (fromSel.paint && String(fromSel.paint).toLowerCase() === "painted") ? "Painted" : "Unpainted";
       say("Roof type", String(fromSel.roofType ?? ""), next.roofType);
       say("Roof color", String(fromSel.roofColor ?? ""), next.roofColor);
-      say("Cladding", claddingLabel(fromSel.cladding), claddingLabel(next.cladding));
+      // The tenant's own name for it, so the sentence the customer signs matches the word
+      // that was on their quote.
+      say("Cladding", claddingLabel(fromSel.cladding, cladOverrides), claddingLabel(next.cladding, cladOverrides));
       say("Paint", fromPaintStatus, nextPaintStatus);
       if (next.paintStatus === "Paint") {
         say("Paint body", String(fromPc.body ?? ""), next.paintBody);
@@ -5610,7 +8219,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
     const newPaintColors = next.paintStatus === "Paint" ? { body: next.paintBody, trim: next.paintTrim } : { body: "", trim: "" };
     const { error: updErr } = await admin.from("designs")
-      .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, updated_at: nowIso })
+      // total_cents rides the snapshot it is derived from, in the SAME update (206), so the
+      // card can never show a figure from a quote revision that is no longer on the design.
+      .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, total_cents: designTotalCents(newSnap), updated_at: nowIso })
       .eq("client_id", clientId).eq("short_code", shortCode);
     if (updErr) return dbFail(req, clientId, "apply the change", updErr);
 
@@ -5650,7 +8261,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             // nothing else, so its behaviour is byte-identical to before 153.
             ...(existingCo.snapshot_before ? {} : { snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc } }),
           })
-          .eq("id", existingCo.id).eq("status", "pending_ack");
+          // A DRAFT STAYS A DRAFT. Staging prices the change; it does not decide that the
+          // customer should be asked to approve it — finalize_amendment does that, once the
+          // rep says they are finished. Sending a half-made change for signature because
+          // someone touched a dropdown is precisely the wrong direction to fail in.
+          .eq("id", existingCo.id).in("status", ["draft", "pending_ack"]);
         if (coErr) return dbFail(req, clientId, "update the change order", coErr);
         changeOrderId = existingCo.id; coNo = existingCo.co_no;
       } else {
@@ -5672,11 +8287,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     // Regenerate the quote PDF from the patched snapshot, keeping the customer's
     // acceptance certificate page (regeneration must never silently drop the countersign).
+    //
+    // KEPT, DELIBERATELY (2026-09-07). The plan carried an open item to stop regenerating
+    // here, on the theory that the customer's document was moving under them mid-approval.
+    // Two things settle it the other way. The signed INVOICE pdf lives at its own path and is
+    // never touched by this — nothing the customer has put their name to is overwritten. And
+    // with the money pinned to the agreed baseline, what a regenerate now produces is exactly
+    // the document showing the customer the change they are being ASKED to approve, which is
+    // what a proposal should show. finalize_amendment and attest_change_order regenerate from
+    // the same helper at their own moments, so the file is never left stale on any path.
     const quotePdfUrl = await regenerateQuotePdf(admin, req, clientId, shortCode, {
       quoteNumber: String(d.ss_quote_number), snap: newSnap, planUrl: d.image_url,
     });
 
-    return json({ ok: true, changeOrderId, coNo, totalBefore, totalAfter, description, quotePdfUrl, pendingAck: !!changeOrderId });
+    // `pendingAck` drives the order screen's "waiting on the customer" copy, so a DRAFT must
+    // report false — nobody has been asked anything yet.
+    const stagedIsDraft = String(existingCo?.status ?? "") === "draft";
+    return json({ ok: true, changeOrderId, coNo, totalBefore, totalAfter, description, quotePdfUrl, pendingAck: !!changeOrderId && !stagedIsDraft, draft: stagedIsDraft });
   }
 
   // ── void_change_order: discard a staged-but-unsigned change (migration 127) ──
@@ -5695,7 +8322,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .eq("client_id", clientId).eq("id", coId).maybeSingle();
     if (coErr) return dbFail(req, clientId, "load that change order", coErr);
     if (!co) return json({ error: "Change order not found." }, 404);
-    if (co.status !== "pending_ack") {
+    // A DRAFT IS DISCARDABLE -- that is what the rep's "Discard the change" does, and it is
+    // also what releases the unlock they spent (the guard trigger's void branch).
+    if (co.status !== "pending_ack" && co.status !== "draft") {
       return json({ error: co.status === "acknowledged" ? "This change order is already acknowledged — it can't be discarded." : "This change order is already voided." }, 400);
     }
 
@@ -5709,6 +8338,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const { error: restErr } = await admin.from("designs")
         .update({
           estimate_lines: before.estimateLines,
+          // Reverting the lines reverts the value with them — a discarded change order must
+          // not leave the card quoting the number it was discarded for.
+          total_cents: designTotalCents(before.estimateLines),
           selections: before.selections ?? undefined,
           paint_colors: before.paintColors ?? undefined,
           updated_at: new Date().toISOString(),
@@ -5734,16 +8366,41 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
-    const { error: voidErr } = await admin.from("change_orders")
+    const { data: voided, error: voidErr } = await admin.from("change_orders")
       .update({ status: "void", void_reason: reason })
-      .eq("id", co.id).eq("status", "pending_ack");
+      // Both live states: the guard above already refused anything else, and a DRAFT is the
+      // common case now — "Discard the change" is a rep throwing away their own workspace,
+      // and it is what hands back the unlock they spent. Left at pending_ack alone, the
+      // action returned a cheerful 200 having changed nothing (found in verification).
+      .eq("id", co.id).in("status", ["draft", "pending_ack"])
+      // .select() so a conditional update that matched NOTHING is an answer, not a silent
+      // success — ChangeOrdersCard's recordVerbal carries the same guard for the same reason
+      // (portal/04-orders.jsx). Without it this returned 200 while the change order sat
+      // untouched and the unlock stayed spent.
+      .select("id");
     if (voidErr) return dbFail(req, clientId, "void the change order", voidErr);
+    if (!voided || voided.length === 0) {
+      return json({ error: "That change moved while you were looking at it — reload the order." }, 409);
+    }
     return json({ ok: true, reverted, coNo: co.co_no });
   }
 
-  if (action === "send_invoice") {
+  // push_to_invoice rides this same handler on purpose. It is send_invoice with ONE extra
+  // step in front of it — the rep-attested acceptance, migration 178 — and everything after
+  // that step must be the same code, not a copy of it: the claim ladder, the number
+  // allocation, the amendment math, the PDF and the email are the parts that are hard to get
+  // right, and a second implementation of them is a second thing to keep correct. The extra
+  // step is inserted immediately above the acceptance gate below; the gate itself is
+  // untouched and simply passes, because by then the acceptance is real.
+  if (action === "send_invoice" || action === "push_to_invoice") {
+    const pushToInvoice = action === "push_to_invoice";
     const shortCode = String(payload?.shortCode ?? "").trim();
     if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
 
     // An operator is emailing a real invoice to SOMEONE ELSE'S customer. Two extra
     // conditions, neither of which applies to a tenant sending their own:
@@ -5758,7 +8415,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({ error: "Operator sends require explicit confirmation (confirmSend)." }, 400);
       }
       try {
-        await auditStrict("operator_send_invoice_attempt", null, `short_code=${shortCode}`);
+        // The action name rides in the audit row: a push ALSO attests the acceptance on the
+        // customer's behalf, so "an operator invoiced a stranger's customer" and "an
+        // operator declared a stranger's customer had agreed" must not read the same later.
+        await auditStrict(`operator_${action}_attempt`, null, `short_code=${shortCode}`);
       } catch (e) {
         return json({ error: (e as Error).message }, 503);
       }
@@ -5776,11 +8436,45 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // OWN record (designs.status/accepted_at written by customer-accept, migration 124)
         // — there is no live GHL estimate to check.
         const { data: d, error: dErr } = await admin.from("designs")
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, inventory_unit_id")
+          // selections/paint_colors/contact are read ONLY for the push_to_invoice
+          // attestation below (the accepted_snapshot stamp and the phone precondition) and
+          // are untouched on the ordinary send_invoice path. That is a deliberate narrowing
+          // of the 2026-08-07 rule "no dead PII reads on the invoice path": the read is not
+          // dead here, it is the evidence. Nothing below logs any of the three.
+          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, accepted_snapshot, selections, paint_colors, contact, inventory_unit_id")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
         if (!d.ss_quote_number) return json({ error: "This design has no quote yet — submit it from the designer first." }, 400);
+
+        // The order this invoice belongs to, for the caller to navigate to. The portal's
+        // order deep link is /portal/orders/o-<orders.id>, keyed on the UUID and not on
+        // order_no, so the id is what has to travel back. Best-effort by contract: an invoice
+        // that went out is not undone by our failing to say where it landed, so every caller
+        // treats a null orderId as "no link", never as an error.
+        const loadOrderRef = async (): Promise<{ orderId: string | null; orderNo: number | null }> => {
+          try {
+            const { data: o } = await admin.from("orders").select("id, order_no")
+              .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            return { orderId: o?.id ?? null, orderNo: o?.order_no ?? null };
+          } catch (_) {
+            return { orderId: null, orderNo: null };
+          }
+        };
+
+        // THE AGREED LINES — what this branch bills from (2026-09-07).
+        //
+        // `estimate_lines` is the LIVE design and a rep rewrites it the moment they stage a
+        // change; `accepted_snapshot` (migration 153) is the design as the customer last
+        // agreed it, re-stamped by the trigger on every acknowledged change. Billing from the
+        // live copy meant a staged-but-unapproved revision could reach an invoice, a
+        // regenerated PDF and the sentence the customer signs.
+        //
+        // In the settled state the two are the same object — verified against live, where
+        // every design without an open change order matched exactly — so this changes nothing
+        // on the ordinary path. The push_to_invoice attestation below deliberately keeps
+        // reading `d.estimate_lines`: it is PERFORMING the acceptance, not billing one.
+        const agreedLines = agreedBaseline(d).lines;
 
         // AMENDMENTS (2026-08-27). A manual change order moves the TOTAL without touching
         // estimate_lines, so a document built from the snapshot alone bills the pre-change
@@ -5788,13 +8482,23 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // the PDF below and the email-retry branch just under here read from this, so a
         // re-send can never name a different number than the document it links to.
         // A missing change_orders table is tolerated exactly as the pending check does.
+        // THE FEE COLUMNS ARE NOT OPTIONAL HERE (2026-09-07). The acknowledging writer adds the
+        // fee to orders.pretax_subtotal_cents, which is the figure handed to the reconciler
+        // below. Select the fee and it prints as the line the tenant named; omit it and the
+        // order looks unexplained by exactly the fee, so the reconciler invents an anonymous
+        // "Order adjustment" row for it on the customer's invoice. fee_label is not a column on
+        // change_orders — the tenant names their own fee once, in settings — so it is joined on
+        // here rather than denormalised onto every row.
         const loadAmendments = async (): Promise<{ acked: any[]; orderTotalCents: number | null }> => {
-          const [coRes, ordRes] = await Promise.all([
-            admin.from("change_orders").select("co_no, description, total_before_cents, total_after_cents")
+          const [coRes, ordRes, feeRes] = await Promise.all([
+            admin.from("change_orders")
+              .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
               .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
             admin.from("orders").select("total_cents, pretax_subtotal_cents")
               .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+            admin.from("client_settings").select("co_fee_label").eq("client_id", clientId).maybeSingle(),
           ]);
+          const feeLabel = String(feeRes.data?.co_fee_label ?? "").trim() || "Change order fee";
           // PRE-TAX, deliberately (migration 148). amendedInvoiceDocument reconciles its lines
           // against this in SUBTOTAL space — `sum(qty x amount) - discount`, the PDF's own
           // arithmetic — and since 148 the PDF adds a tax row ON TOP of that sum. orders
@@ -5806,12 +8510,51 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           const ord = ordRes.error ? null : ordRes.data;
           const pretax = ord?.pretax_subtotal_cents ?? ord?.total_cents ?? null;
           return {
-            acked: coRes.error ? [] : (coRes.data ?? []),
+            acked: coRes.error ? [] : (coRes.data ?? []).map((c) => ({ ...c, fee_label: feeLabel })),
             orderTotalCents: pretax == null ? null : Number(pretax),
           };
         };
 
-        const dStatus = String(d.status || "");
+        // ── THE FIGURE THE EMAIL NAMES ────────────────────────────────────────────────
+        // "Amount due" in the invoice email has to be the number printed on the invoice, and
+        // since migration 148 that is not what amountOwed() returns here. The two moved apart
+        // for a good reason and the fix is not to move them back: loadAmendments hands the
+        // reconciler the PRE-TAX order figure, because the PDF adds its tax row ON TOP of the
+        // lines it foots (estimateLines.ts' contract, pinned by its tests) — so the document
+        // total is amended-subtotal + tax while the email was quoting amended-subtotal alone.
+        // On a taxed order the customer therefore read one number in the mail, a bigger one on
+        // the attachment, and signed for a third.
+        //
+        // Built from the SAME call the PDF uses, so there is one arithmetic and not two. The
+        // tax is never a re-resolved rate — amendedTax carries the accepted amount forward and
+        // adds only the increment — and a snapshot with no tax returns null, leaving this the
+        // old number exactly. Null stays null: "nothing to go on" renders as a blank rather
+        // than a fabricated $0.00.
+        //
+        // ⛔ NOT a change to amountOwed or amendedInvoiceDocument. customer-quotes and
+        // customer-accept pass those helpers the tax-INCLUSIVE orders.total_cents and land on
+        // the right figure through the reconciler; moving either would move the number the
+        // customer signs. This is the caller that had the wrong input, not the helper.
+        //
+        // 2026-09-07: the tax now comes from the SAME amendedInvoiceDocument call rather than
+        // from the snapshot beside it. `taxFromSnapshot` is the tax on the ACCEPTED lines, so
+        // on an amended order the email quoted the accepted tax against an amended subtotal
+        // and under-stated the bill by the tax on the change. One call, one arithmetic — which
+        // is the whole reason this helper exists.
+        const emailAmountDue = (
+          // deno-lint-ignore no-explicit-any
+          acked: any[],
+          orderTotalCents: number | null,
+        ): number | null => {
+          const doc = amendedInvoiceDocument(agreedLines, acked, orderTotalCents);
+          const owed = amountOwed(agreedLines, acked, orderTotalCents);
+          if (owed == null) return null;
+          return Math.round((owed + (Number(doc.tax?.amount) || 0)) * 100) / 100;
+        };
+
+        // `let`, not `const`: the push_to_invoice attestation below promotes the design and
+        // then brings this local up to what it wrote, so the acceptance gate reads the truth.
+        let dStatus = String(d.status || "");
         if (dStatus === "invoiced" || dStatus === "delivered") {
           // The invoice may have completed on paper (the email does not gate it — see
           // below). If the ledger says created-but-never-emailed, this click is the email
@@ -5836,7 +8579,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 businessName: String(cs2?.business_name ?? "").trim() || clientId,
                 logoUrl: cs2?.business_logo_url, phone: cs2?.business_phone, website: cs2?.business_website,
                 invoiceNumber: String(prior.invoice_number),
-                total: amountOwed(d.estimate_lines, amend2.acked, amend2.orderTotalCents) ?? "",
+                // The same figure the document it links to prints — a re-send must never name
+                // a different number than the original did.
+                total: emailAmountDue(amend2.acked, amend2.orderTotalCents) ?? "",
                 invoiceUrl: prior.invoice_pdf_url, quoteTerms: cs2?.quote_terms,
                 signUrl: myQuotesUrl(clientId, req),
               }),
@@ -5844,12 +8589,177 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             if (out2.sent) {
               await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
                 .eq("client_id", clientId).eq("short_code", shortCode);
-              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true });
+              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true, attested: false, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()) });
             }
             return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out (${out2.reason || "failed"}). Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
           }
           return json({ error: "This design was already invoiced." }, 400);
         }
+        // ── PUSH TO INVOICE: the rep attests the acceptance (migration 178) ─────────────
+        // Carolyn, 2026-09-01: the rep should be able to invoice straight off the designer
+        // success screen without waiting for the customer to click Accept.
+        //
+        // This does NOT relax the gate below — it satisfies it. The gate is not a nuisance
+        // check; it is the proxy for four things the ~250 lines under it assume exist: the
+        // orders row, accepted_snapshot, orders.total_cents, and a design_acceptances row.
+        // Issuing an invoice without them breaks five places at once and every one is
+        // silent. The worst is accepted_snapshot: submit-estimate's 9-ALT change-order block
+        // is gated on accepted_at, so a rep who revises AFTER invoicing would raise no
+        // change order, and sign_invoice would then recompute the total from the NEW lines —
+        // putting an amount on the countersigned certificate that is not the one on the
+        // invoice PDF the customer is reading. No guard anywhere catches that, because the
+        // staleness check compares a CO's acknowledged_at to the invoice and there is no CO.
+        //
+        // So: write a real acceptance, attributed to the rep and never dressed as the
+        // customer's. Same posture as the verbal change-order acknowledgement (126).
+        let attested = false;
+        if (pushToInvoice && dStatus !== "accepted" && !d.accepted_at) {
+          // A quote that already has a pending change order is already accepted, so this
+          // branch cannot be reached with one outstanding — the 409 below still owns that
+          // case, and reaching it means the design was accepted the ordinary way.
+          const contact = (d.contact ?? {}) as Record<string, unknown>;
+          const signerName = String(contact.name ?? "").trim();
+
+          // The customer signs the invoice through a phone OTP session, and sign_invoice
+          // compares phoneKey(contact.phone) against that session. Without a usable phone
+          // the invoice could never be signed — while still spending an invoice number,
+          // claiming the inventory unit and creating a QuickBooks invoice. Carolyn,
+          // 2026-09-01: refuse outright rather than warn.
+          const phoneDigits = phoneKey(contact.phone);
+          if (phoneDigits.length < 10) {
+            return json({ error: "This customer has no phone number on file, and they sign the invoice by text. Add their number to the contact first, then push it to an invoice." }, 400);
+          }
+
+          // Who is attesting. Read from client_users by the VERIFIED session's userId, never
+          // from the body — the change_orders.verbal_recorded_by posture. Denormalised onto
+          // the row because it is evidence: it must still read correctly after the user is
+          // renamed or removed.
+          let recordedByName = String(userEmail ?? "").trim();
+          if (userId) {
+            const { data: cu } = await admin.from("client_users")
+              .select("full_name").eq("user_id", userId).maybeSingle();
+            const fullName = String(cu?.full_name ?? "").trim();
+            if (fullName) recordedByName = fullName;
+          }
+          if (!recordedByName) {
+            // The rep_named CHECK would refuse the insert anyway; refuse here with a sentence
+            // a person can act on instead of a constraint violation.
+            return json({ error: "We couldn't tell who is issuing this invoice. Sign out and back in, then try again." }, 400);
+          }
+
+          const attestedAtIso = new Date().toISOString();
+          const attestedTotal = totalFromSnapshot(d.estimate_lines);
+          let designVersion: number | null = null;
+          {
+            const { data: v } = await admin.from("design_versions")
+              .select("version").eq("short_code", shortCode)
+              .order("version", { ascending: false }).limit(1).maybeSingle();
+            designVersion = v?.version ?? null;
+          }
+
+          // The consent text is the durable evidence, so it is composed HERE and says what
+          // actually happened. It must never read as though the customer agreed on their own
+          // — the whole point of method='rep' is that the record is honest about who spoke.
+          // Local rather than shared: this is the only money string portal-settings composes
+          // (the PDFs and emails format their own), and it matches customer-accept's fmtMoney
+          // output so the two consent sentences read alike in the evidence table.
+          const money = (n: number) => {
+            const v = Math.round(n * 100) / 100;
+            const [int, frac] = Math.abs(v).toFixed(2).split(".");
+            return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
+          };
+          const consentText =
+            `${recordedByName} issued invoice for quote ${d.ss_quote_number}` +
+            (attestedTotal != null ? ` for ${money(attestedTotal)}` : "") +
+            ` on the customer's behalf. The customer did not accept this quote electronically;` +
+            ` their agreement is recorded when they sign the invoice.`;
+
+          const { error: attErr } = await admin.from("design_acceptances").insert({
+            id: crypto.randomUUID(),
+            client_id: clientId,
+            short_code: shortCode,
+            subject: "quote",
+            quote_number: d.ss_quote_number,
+            design_version: designVersion,
+            total: attestedTotal,
+            ...taxFreeze(d.estimate_lines),
+            method: "rep",
+            signer_name: signerName || "(no name on file)",
+            consent_text: consentText,
+            phone_digits: phoneDigits,
+            recorded_by_user_id: userId ?? null,
+            recorded_by_name: recordedByName,
+            ip: clientIp(req),
+            user_agent: (req.headers.get("user-agent") || "").slice(0, 300) || null,
+            accepted_at: attestedAtIso,
+          });
+          if (attErr && String(attErr.code) !== "23505") {
+            return dbFail(req, clientId, "record the invoice authorisation", attErr);
+          }
+          attested = !attErr;
+
+          // 23505 on design_acceptances_quote_once = this quote was accepted between our read
+          // and our write — the customer clicked Accept, or a second push landed. THEIRS is
+          // the acceptance, and it has already promoted the design, stamped
+          // accepted_snapshot, opened the order and filled the total. Writing ours on top
+          // would move accepted_at to now and re-freeze the snapshot against lines they never
+          // saw — overwriting real customer evidence with a rep's. So take none of the writes
+          // below; just re-read what they wrote so the gate sees it, and invoice it.
+          if (!attested) {
+            const { data: fresh } = await admin.from("designs")
+              .select("status, accepted_at").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+            d.accepted_at = fresh?.accepted_at ?? d.accepted_at;
+            dStatus = String(fresh?.status || dStatus);
+            audit("push_to_invoice_raced", null, `short_code=${shortCode} — accepted concurrently, kept their acceptance`);
+          } else {
+
+            // Promote the design. accepted_snapshot (153) is the frozen agreement every later
+            // change order diffs against — the single most important write in this block.
+            {
+              const patch: Record<string, unknown> = {
+                accepted_at: attestedAtIso,
+                updated_at: attestedAtIso,
+                accepted_snapshot: {
+                  estimateLines: d.estimate_lines,
+                  selections: d.selections,
+                  paintColors: d.paint_colors,
+                },
+              };
+              if (dStatus === "sent" || dStatus === "") patch.status = "accepted";
+              const { error: promErr } = await admin.from("designs").update(patch)
+                .eq("client_id", clientId).eq("short_code", shortCode);
+              // Not best-effort: without accepted_at the gate below refuses, and without the
+              // snapshot the change-order baseline is missing — which is the bug this whole
+              // block exists to prevent. Refuse before anything irreversible happens.
+              if (promErr) return dbFail(req, clientId, "record the acceptance", promErr);
+            }
+
+            // The order row. The designs_ensure_order trigger fires on the status change where
+            // it exists, but its CREATE lives on the wip/orders branch, so the flow must not
+            // depend on it — same idempotent shape customer-accept uses.
+            const { error: ordErr } = await admin.from("orders").upsert(
+              { client_id: clientId, short_code: shortCode, ordered_at: attestedAtIso },
+              { onConflict: "client_id,short_code", ignoreDuplicates: true },
+            );
+            if (ordErr) return dbFail(req, clientId, "open the order", ordErr);
+            if (attestedTotal != null) {
+              // NULL-only: a rep-set total is never clobbered.
+              const { error: totErr } = await admin.from("orders")
+                .update({ ...orderMoneyCols(d.estimate_lines, attestedTotal), total_source: "manual", updated_at: attestedAtIso })
+                .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
+              if (totErr) {
+                logEdgeError({ fn: "portal-settings", req, clientId, code: 500, message: `push_to_invoice order total fill failed: ${totErr.message}`, context: { shortCode } }).catch(() => {});
+              }
+            }
+
+            // `d` was read before all of the above, so the gate immediately below would still
+            // refuse on the stale copy. Bring the locals up to what was just written.
+            d.accepted_at = attestedAtIso;
+            if (dStatus === "sent" || dStatus === "") dStatus = "accepted";
+            audit("push_to_invoice_attested", null, `short_code=${shortCode} quote=${d.ss_quote_number} by=${recordedByName}`);
+          } // end: we won the acceptance claim
+        }
+
         if (dStatus !== "accepted" && !d.accepted_at) {
           return json({ error: `The customer hasn't accepted this quote yet (status: ${dStatus || "sent"}). They accept it from their quote page, then you invoice them and they sign that.` }, 400);
         }
@@ -5874,9 +8784,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
 
         const nowIso = () => new Date().toISOString();
-        const setClaim = (patch: Record<string, unknown>) =>
-          admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+        const setClaim = async (patch: Record<string, unknown>) => {
+          const r = await admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
             .eq("client_id", clientId).eq("short_code", shortCode);
+          // Mirror the invoicer onto the design (migration 207) whenever this patch sets one.
+          // The board reads `designs` over PostgREST and cannot see invoice_sends at all, so
+          // this copy is the only way "invoiced by" reaches the Pipeline. Best-effort: the
+          // invoice is the real work and must never fail over an attribution write.
+          if (Object.prototype.hasOwnProperty.call(patch, "sender_user_id")) {
+            const who = operator ? null : (patch.sender_user_id ?? null);
+            await admin.from("designs").update({ invoiced_by_user_id: who })
+              .eq("client_id", clientId).eq("short_code", shortCode)
+              .then(() => undefined, () => undefined);
+          }
+          return r;
+        };
         const STALE_CLAIM_MS = 3 * 60 * 1000;
 
         // Claim — same PK-insert concurrency claim and recovery ladder as the CRM path.
@@ -5886,6 +8808,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           client_id: clientId, short_code: shortCode,
           issued_by: "structurestudio", status: "claimed", attempts: 1,
           sent_by_operator: operator ? operator.email : null,
+          // Who raised it. The GHL branch has always written this; the SS branch never did,
+          // so every StructureStudio-issued invoice has had a null commission earner
+          // (portal-commissions reads invoice_sends.sender_user_id). Putting a rep-initiated
+          // invoice button in the designer is the moment that stops being theoretical.
+          sender_user_id: userId ?? null,
           invoice_type: invoiceTypeFor(d),
         });
         if (claimIns.error) {
@@ -5946,8 +8873,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // The bill is the ORDER's total, not the quote snapshot's: acknowledged change
         // orders become real lines so the document both foots and explains itself.
         const amend = await loadAmendments();
-        const amended = amendedInvoiceDocument(d.estimate_lines, amend.acked, amend.orderTotalCents);
-        const totalNum = amountOwed(d.estimate_lines, amend.acked, amend.orderTotalCents);
+        const amended = amendedInvoiceDocument(agreedLines, amend.acked, amend.orderTotalCents);
+        // ⚠️ TWO FIGURES, AND THEY ARE NOT INTERCHANGEABLE — read this before touching either.
+        //   totalNum   the reconciled PRE-TAX total: what the PDF's line items foot to, which
+        //              is what the ledger write below feeds (orderMoneyCols derives the
+        //              tax-inclusive orders.total_cents from the snapshot itself and only
+        //              falls back to this when there is no snapshot to derive from).
+        //   emailTotal the same total WITH the accepted tax added — the figure the PDF
+        //              actually prints, and therefore the only one the email may quote.
+        const totalNum = amountOwed(agreedLines, amend.acked, amend.orderTotalCents);
+        const emailTotal = emailAmountDue(amend.acked, amend.orderTotalCents);
         if (!invoicePdfUrl) {
           try {
             const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -5974,8 +8909,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               //
               // It rides ON TOP of amendedInvoiceDocument's reconciled lines, which is why
               // loadAmendments now hands that function the PRE-TAX order figure — see there.
-              tax: d.estimate_lines?.tax ?? null,
-              discountRows: d.estimate_lines?.discounts?.rows ?? null,
+              //
+              // 2026-09-07: `amended.tax`, NOT `d.estimate_lines.tax`. estimatePdf's grand
+              // total is the tax object's POOLS, not a sum of the lines it prints — so every
+              // line amendedInvoiceDocument adds was printed here and then silently left out
+              // of the Total. Its `amendedTax` moves the pools over those lines and adds only
+              // the increment, leaving the accepted amount exactly as the customer agreed it.
+              tax: amended.tax,
+              discountRows: agreedLines?.discounts?.rows ?? null,
               quoteTerms: cur0?.quote_terms ?? null,
               planPdfUrl: planUrl,
             });
@@ -5994,7 +8935,62 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }
 
         // Record BEFORE the email: from here a retry re-sends this exact number + document.
-        await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
+        //
+        // ⚠️ AND THE RESULT IS CHECKED. This write is what makes the number real — the ledger
+        // row is the only place an issued invoice number is recorded — and it is the one write
+        // in this branch that can be REFUSED: migration 125's partial unique index on
+        // (client_id, invoice_number) fires when the number has already gone out on another
+        // design, which is what a numbering counter set back below what has been issued
+        // produces. Ignored, the customer received an invoice carrying a number the books do
+        // not have and the next send would hand out the same one again. Nothing has left the
+        // building at this point — the PDF is written, the email is still below — so this is
+        // the last moment a collision can be refused instead of delivered.
+        //
+        // The recovery ladder is untouched by this: 'created' and 'sent' rows re-send with
+        // their OWN stored number, so this update sets the value the row already holds and
+        // cannot collide with itself.
+        const recorded = await setClaim({ status: "created", issued_by: "structurestudio", invoice_number: invNumber, invoice_pdf_url: invoicePdfUrl, error: null });
+        if (recorded.error) {
+          const collision = String((recorded.error as { code?: string }).code ?? "") === "23505";
+          // Park the failure on the row WITHOUT the number, so this update cannot hit the same
+          // index. Best-effort: the refusal below is the outcome either way.
+          await setClaim({ status: "failed", error: `record: ${recorded.error.message}`.slice(0, 500) });
+          logEdgeError({
+            fn: "portal-settings", req, clientId,
+            code: collision ? "ss_invoice_number_collision" : "ss_invoice_record_failed",
+            message: `invoice ${invNumber} could not be recorded for ${shortCode}: ${recorded.error.message}`,
+          }).catch(() => {});
+          return json({
+            error: collision
+              ? `Invoice number ${invNumber} has already been used on another invoice for this account, so nothing was sent. Raise the starting invoice number in Settings → CRM Connection → Quotes & Invoices, then send it again.`
+              : "The invoice couldn't be recorded, so nothing was sent to your customer. Try again — if it keeps happening, tell CSM Synergy.",
+            invoiceNumber: invNumber, invoicePdfUrl, sent: false,
+          }, collision ? 409 : 502);
+        }
+
+        // METERED (migration 179), and this is the right side of the record: the invoice now
+        // EXISTS and every retry from here re-sends this same number, so the charge keys on
+        // that number and a resend collapses onto it rather than billing twice. Only charged
+        // when the tax on it came from Avalara — a fallback rate cost us nothing to produce.
+        // Inert until `tax_invoice` is armed, and it cannot fail the send: the invoice is
+        // already recorded and the customer is waiting for it.
+        if ((agreedLines as { tax?: { source?: unknown } } | null)?.tax?.source === "avalara") {
+          const meter = await chargeTaxCalculation(admin, {
+            clientId,
+            kind: "tax_invoice",
+            idem: taxInvoiceIdem(clientId, shortCode, invNumber),
+            refType: "invoice",
+            refId: String(invNumber),
+            memo: `Sales tax on invoice ${invNumber}`,
+            actorUserId: userId ?? null,
+          });
+          if (!meter.charged && meter.reason === "error") {
+            logEdgeError({
+              fn: "portal-settings", req, clientId, code: "tax_meter",
+              message: `tax_invoice charge failed for ${shortCode} (invoice ${invNumber})`,
+            }).catch(() => {});
+          }
+        }
 
         // The email. Contact read only here (the PII discipline of 2026-08-07). There is
         // NO GHL fallback in SS mode — there is no GHL invoice object to email.
@@ -6014,7 +9010,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               phone: cur0?.business_phone,
               website: cur0?.business_website,
               invoiceNumber: invNumber,
-              total: totalNum == null ? "" : totalNum,
+              // emailTotal, NOT totalNum: this has to be the figure on the attached document
+              // (see the pair's note above). They differ by exactly the sales tax.
+              total: emailTotal == null ? "" : emailTotal,
               invoiceUrl: invoicePdfUrl,
               quoteTerms: cur0?.quote_terms,
               // The CTA has to land where they can SIGN. A link straight to the PDF is a
@@ -6055,7 +9053,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             .update({
               // pretax + tax = total, written together (migration 148): total_cents alone is no
               // longer a safe pre-tax figure and portal-commissions reads it as one.
-              ...orderMoneyCols(d.estimate_lines, totalNum),
+              ...orderMoneyCols(agreedLines, totalNum),
               total_source: "manual", updated_at: nowIso(),
             })
             .eq("client_id", clientId).eq("short_code", shortCode).is("total_cents", null);
@@ -6067,13 +9065,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // qboInvoice.ts never reads GHL (verified 2026-08-23): lines come from the same
         // estimate_lines snapshot, the customer from designs.contact. `ghlTotal` is a
         // misnomer here — it only feeds the books' mismatch note.
-        await pushQboInvoice(admin, clientId, {
-          shortCode,
-          docNumber: invNumber,
-          ghlTotal: totalNum,
-        });
+        //
+        // Entitlement-checked like every other QuickBooks door (see QBO_ACTIONS above): a
+        // tenant whose subscription lapsed keeps their connection until they revoke it, and
+        // this is the path that would otherwise go on writing into their books for free.
+        if (await qboPushAllowed()) {
+          await pushQboInvoice(admin, clientId, {
+            shortCode,
+            docNumber: invNumber,
+            ghlTotal: totalNum,
+          });
+        }
 
-        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, ...(sent ? {} : { emailReason: sendReason }) });
+        // attested says whether THIS call performed the acceptance, so the designer can tell
+        // the rep "invoiced" from "recorded their approval and invoiced". orderId is the
+        // navigation target. sent:false is not a failure — the email never gates the invoice.
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, attested, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()), ...(sent ? {} : { emailReason: sendReason }) });
       }
     }
 
@@ -6112,9 +9119,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
 
     const nowIso = () => new Date().toISOString();
-    const setClaim = (patch: Record<string, unknown>) =>
-      admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
+    const setClaim = async (patch: Record<string, unknown>) => {
+      const r = await admin.from("invoice_sends").update({ ...patch, updated_at: nowIso() })
         .eq("client_id", clientId).eq("short_code", shortCode);
+      // See the twin above: mirror the invoicer onto the design for the Pipeline board.
+      if (Object.prototype.hasOwnProperty.call(patch, "sender_user_id")) {
+        const who = operator ? null : (patch.sender_user_id ?? null);
+        await admin.from("designs").update({ invoiced_by_user_id: who })
+          .eq("client_id", clientId).eq("short_code", shortCode)
+          .then(() => undefined, () => undefined);
+      }
+      return r;
+    };
     // Every GHL call is wrapped: an unhandled fetch rejection would otherwise surface as
     // an opaque 500 with no CORS headers, losing the "invoice was created" warning.
     const ghl = async (url: string, init?: RequestInit) => {
@@ -6213,7 +9229,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (claimIns.error) {
       // 23505 = the row exists → inspect it instead of converting again.
       const { data: prior } = await admin.from("invoice_sends")
-        .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id")
+        .select("status, invoice_id, invoice_number, updated_at, attempts, sender_user_id, ghl_sender_user_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
       if (!prior) return dbFail(req, clientId, "start the invoice send", claimIns.error);
       const st = String(prior.status || "");
@@ -6224,7 +9240,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // The invoice EXISTS in GHL but was never emailed → re-send it, do not convert.
         resendInvoiceId = prior.invoice_id ? String(prior.invoice_id) : null;
         resendInvoiceNumber = prior.invoice_number ? String(prior.invoice_number) : null;
-        resendSenderUserId = prior.sender_user_id ? String(prior.sender_user_id) : null;
+        // `ghl_sender_user_id`, NOT `sender_user_id` (migration 215). Those are two different
+        // ids and they were one column until today: this one is GoHighLevel's own user id, an
+        // API argument naming which GHL user the email appears to come from; the other is the
+        // portal user who pressed send, which is what commissions pay.
+        //
+        // Reading the right one is what keeps a RESEND going out as the same GHL user the
+        // invoice was raised as. Falling back to `users[0]` would re-send junior-barns'
+        // invoices as whoever happens to be first in his sub-account — and he is the only
+        // builder whose invoices are real money, and sells exclusively through GHL.
+        resendSenderUserId = prior.ghl_sender_user_id ? String(prior.ghl_sender_user_id) : null;
         if (!resendInvoiceId) return json({ error: "An invoice was created in your CRM for this design but its id wasn't recorded — send it from your CRM." }, 409);
       } else if (st === "claimed") {
         const age = Date.now() - new Date(String(prior.updated_at)).getTime();
@@ -6267,14 +9292,29 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         return json({ error: `The customer hasn't accepted this estimate yet (status: ${estStatus || "sent"}).` }, 400);
       }
 
-      // ── 3. Resolve the sender BEFORE converting (GHL: "either userId or sentFrom"). ──
-      let userId = String(est?.sentBy ?? "");
-      if (!userId) {
+      // ── 3. Resolve the GHL sender BEFORE converting (GHL: "either userId or sentFrom"). ──
+      //
+      // ⚠️ RENAMED FROM `userId` ON 2026-09-07, AND THE OLD NAME WAS THE BUG. A local `userId`
+      // here SHADOWED the caller's own `userId` from r.ctx (destructured at the top of this
+      // file), so `sender_user_id: userId` a few lines down stored a GOHIGHLEVEL user id in a
+      // column that portal-commissions reads as the commission earner. Two different kinds of
+      // id in one column, and the wrong one winning on every GHL-issued invoice.
+      //
+      // What it cost, measured 2026-09-07: 10 of 10 GHL invoices carried a GHL id, none of
+      // which matches a portal user, so portal-commissions:858 (`!teamSet.has(earner)`)
+      // discarded every one. Live state at the time: 21 commission_entries, 3 with an earner,
+      // ZERO with an amount. Nobody had been credited for a sale since invoicing began.
+      //
+      // This value is still a GHL id and MUST stay one — it is an argument to GHL's own API,
+      // naming which of their users the email appears to come from. It is not a person in this
+      // product. Never store it as an actor.
+      let ghlSenderId = String(est?.sentBy ?? "");
+      if (!ghlSenderId) {
         const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
         const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
-        userId = String(users[0]?.id ?? "");
+        ghlSenderId = String(users[0]?.id ?? "");
       }
-      if (!userId) {
+      if (!ghlSenderId) {
         // Fail fast: converting first would leave an un-sendable invoice behind.
         await setClaim({ status: "failed", error: "no GHL user to send as" });
         return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then try again. (Nothing was invoiced.)" }, 400);
@@ -6299,17 +9339,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
       // Record it IMMEDIATELY: from here on the invoice exists in GHL, so even if the
       // email fails (or this function dies) the retry re-sends instead of converting.
-      await setClaim({ status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null, sender_user_id: userId });
+      // BOTH ids, each in its own column (migration 215):
+      //   sender_user_id      — `userId` is the OUTER one again, the portal user who pressed
+      //                         send. The actor. What commissions pay.
+      //   ghl_sender_user_id  — the GHL user the invoice was raised as, so a later resend
+      //                         goes out as the same person rather than whoever GHL lists
+      //                         first.
+      await setClaim({
+        status: "created", invoice_id: invoiceId, invoice_number: invoiceNumber, error: null,
+        sender_user_id: userId ?? null,
+        ghl_sender_user_id: ghlSenderId || null,
+      });
 
       // ── 5. Email it to the customer — own-domain branch first, GHL's email otherwise.
       //    tryOwnDomainEmail returning false (whatever the reason) lands on the stock GHL
       //    send below unchanged; if send_manually already ran, that second send call is
       //    idempotent (verified live 2026-08-10). ──
-      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, ghlInvoiceTotal);
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, ghlSenderId, ghlInvoiceTotal);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
           method: "POST", headers: ghlHeaders,
-          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId: ghlSenderId }),
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `send ${sendRes.status || sendRes.netErr}: ${sendRes.body?.message ?? ""}`.slice(0, 500) });
@@ -6322,23 +9372,24 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     } else {
       // ── Recovery path: the invoice already exists, only the email is outstanding.
       //    Reuse the sender recorded on the first attempt when we have it. ──
-      let userId = resendSenderUserId || "";
-      if (!userId) {
+      // Same rename, same reason as the block above: a GHL API parameter, not an actor.
+      let ghlSenderId = resendSenderUserId || "";
+      if (!ghlSenderId) {
         const ur = await ghl(`https://services.leadconnectorhq.com/users/?locationId=${encodeURIComponent(locationId)}`, { headers: ghlHeaders });
         const users: any[] = Array.isArray(ur.body?.users) ? ur.body.users : [];
-        userId = String(users[0]?.id ?? "");
+        ghlSenderId = String(users[0]?.id ?? "");
       }
-      if (!userId) {
+      if (!ghlSenderId) {
         return json({ error: "Your CRM has no user to send the invoice as — add a user to that sub-account, then retry." }, 400);
       }
       // Own-domain branch first here too — the recovery is only ever about the EMAIL
       //  (the invoice already exists), so the same rule applies: our branded send when the
       //  tenant is Resend-active, the stock GHL email as the unchanged fallback.
-      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, userId, null);
+      const ownDomainSent = await tryOwnDomainEmail(invoiceId, invoiceNumber, ghlSenderId, null);
       if (!ownDomainSent) {
         const sendRes = await ghl(`https://services.leadconnectorhq.com/invoices/${encodeURIComponent(invoiceId)}/send`, {
           method: "POST", headers: ghlHeaders,
-          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId }),
+          body: JSON.stringify({ altId: locationId, altType: "location", action: "email", liveMode: true, userId: ghlSenderId }),
         });
         if (!sendRes.ok) {
           await setClaim({ status: "created", error: `resend ${sendRes.status || sendRes.netErr}`.slice(0, 500) });
@@ -6369,11 +9420,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // pushQboInvoice never throws and never touches this response; every outcome lands
     // on the invoice_sends row (qbo_* columns). Dark unless the tenant is connected AND
     // the design has an estimate_lines snapshot, so this is a no-op for everyone today.
-    await pushQboInvoice(admin, clientId, {
-      shortCode,
-      docNumber: invoiceNumber,
-      ghlTotal: ghlInvoiceTotal,
-    });
+    // Entitlement-checked, the same as the SS branch's push — see QBO_ACTIONS above.
+    if (await qboPushAllowed()) {
+      await pushQboInvoice(admin, clientId, {
+        shortCode,
+        docNumber: invoiceNumber,
+        ghlTotal: ghlInvoiceTotal,
+      });
+    }
 
     return json({ ok: true, invoiceId, invoiceNumber, sent: true });
   }

@@ -57,13 +57,13 @@ Any non-trivial edit must be mirrored in both files or the browser deliverable w
 
 **In-browser Babel was removed from the pages.** Visitors used to download a 2.85MB compiler and pay 1.5–4s of main-thread JSX compilation on EVERY page load; the pages now ship **committed, pre-compiled classic scripts**. What changed and what didn't:
 
-- **Sources (hand-edited, linted):** `structure-studio.component.js` (+ its `StructureStudio.jsx` twin — the mirror rule is unchanged), and the per-page app sources extracted from the pages: `index.mount.jsx`, `admin.app.jsx`, and the portal's **nine ordered parts under `portal/`**. **Never edit a `*.compiled.js` file.**
-- **`portal.app.jsx` NO LONGER EXISTS** (split 2026-08-19). It is `portal/01-core.jsx` → `09-shell.jsx`, listed in `PORTAL_PARTS` in `scripts/compile.mjs`, which **concatenates them in order** and compiles the result as one script. The split exists so two people can edit different areas of the portal without colliding in a 13,476-line file (Carolyn 2026-08-18) — it was verified as a pure reorganisation: the parts rejoin to the original byte-for-byte and `portal.app.compiled.js` kept its exact pre-split hash `140d2ac0`.
+- **Sources (hand-edited, linted):** `structure-studio.component.js` (+ its `StructureStudio.jsx` twin — the mirror rule is unchanged), and the per-page app sources extracted from the pages: `index.mount.jsx`, `admin.app.jsx`, and the portal's **twelve ordered parts under `portal/`**. **Never edit a `*.compiled.js` file.**
+- **`portal.app.jsx` NO LONGER EXISTS** (split 2026-08-19). It is `portal/01-core.jsx` → `12-shell.jsx`, listed in `PORTAL_PARTS` in `scripts/compile.mjs`, which **concatenates them in order** and compiles the result as one script. The split exists so two people can edit different areas of the portal without colliding in a 13,476-line file (Carolyn 2026-08-18) — it was verified as a pure reorganisation: the parts rejoin to the original byte-for-byte and `portal.app.compiled.js` kept its exact pre-split hash `140d2ac0`.
   - **ORDER IS LOAD-BEARING.** `const` does not hoist, so moving a part changes evaluation order. Parts are contiguous slices cut only at top-level boundaries — never inside a function. Add a new part in the right position, never just at the end.
   - **The numeric prefix IS the concatenation index.** Inserting a part renumbers every later one, so a directory listing and `PORTAL_PARTS` can never disagree — the number is the one thing a reader checks, and a file numbered `09` that evaluates sixth is a trap. **Renumber; do not append.** Appending is also wrong on its own terms: the last part ends with `ReactDOM.createRoot(…).render(<PortalApp/>)` and the `__ssAppBooted` sentinel, which is *defined* as the last statement that runs.
   - **The 3D code is `portal/06-3d.jsx`, split out of `05-schedule.jsx` on 2026-08-21** (Ahsan) so Carolyn can work on the schedule while he works on 3D — the same collision the original split was for, one level down. It holds `Studio3DStatus`, `DesignerTab`, and the fixture-photo straightening block (`ssSolveHomography`/`ssWarpQuad`/`ssFitImageForUpload`/`SSStraightenPhoto`). Verified the same way as the original split: `05-schedule.jsx` + `06-3d.jsx` rejoin byte-for-byte and `portal.app.compiled.js` kept its hash `4c4b4547`. ⚠️ Two of those helpers are **not 3D-only callers** — `03-catalog.jsx` uses `ssFitImageForUpload` and `SSStraightenPhoto` for fixture and colour photo uploads. They live here because straightening exists *for* 3D (a tilted photo becomes a leaning door on the customer's building), but deleting them with a 3D feature would break the catalog.
   - **Why concatenation and not one `<script>` per module:** each compiled artifact is wrapped in its own IIFE, so separate artifacts share **no lexical scope** — all ~75 top-level components would need re-plumbing through a `window.*` namespace. That buys nothing here (the portal is ONE page; every tab's code loads on any route either way) and it is a large, risky rewrite. If you ever DO want per-module artifacts, that is the work, and it is not free.
-  - **`09-shell.jsx` holds `Dashboard` and `PortalApp` together on purpose.** Dashboard's hook-order constraints and its render-time `ssTargetClientId` assignment are documented hazards; keeping the shell whole means none of them move. Do not split Dashboard out.
+  - **`12-shell.jsx` holds `Dashboard` and `PortalApp` together on purpose.** (It was `09-shell.jsx` until `09-table-engine.jsx`, `10-projects.jsx` and `11-sms.jsx` were inserted ahead of it — `09-` is now the generic table engine, a different file, so read the number off `PORTAL_PARTS` rather than from memory.) Dashboard's hook-order constraints and its render-time `ssTargetClientId` assignment are documented hazards; keeping the shell whole means none of them move. Do not split Dashboard out.
   - Preflight derives its lint list from `TARGETS`/`readTarget()` in compile.mjs, so a part is linted the moment it is compiled, and it **refuses an orphan** — a `portal/*.jsx` missing from `PORTAL_PARTS` is compiled by nothing and linted by nothing, which is the worst failure for a file someone thinks they are editing.
 - **Artifacts (generated, committed):** `structure-studio.component.compiled.js`, `index.mount.compiled.js`, `portal.app.compiled.js`, `admin.app.compiled.js` — regenerate with **`npm run compile`** (scripts/compile.mjs). The compiler is the **vendored `vendor/babel-standalone-7.23.9.min.js` loaded in Node with the exact options its in-browser runner used** — parity by construction, zero new dependencies. Each artifact is wrapped in `(function(){ if (window.__ssBootBlocked) return; … })()`: that flag is the boot guard's neutralise mechanism, and the wrapper preserves the isolated-scope semantics the sources were written for (all cross-script handoffs are explicit `window.*` publishes).
 - **Pages:** three `/vendor/` library tags (React, ReactDOM, supabase-js — babel-standalone is no longer served) + `defer`'d compiled tags in document order (component before the page's own app script) + the boot guard. Compiled tags carry **content-hash `?v=` busters that `npm run compile` rewrites** — never hand-bump them.
@@ -233,9 +233,139 @@ resolution is a **third area flag, `ownerGranted`** (`_shared/access.ts`), which
 `sanitizeAccess(raw, title?)` is title-aware for the same reason; **calling it without a
 title drops owner-granted keys**, which is the safe direction for a caller that doesn't know
 whose map it is holding. `access.ts` is bundled per function, so a change here means
-redeploying **every** consumer (`portal-billing`, `portal-commissions`, `portal-schedule`,
-`portal-settings`, `qbo-oauth-connect`, `sync-design-status`) — leaving one behind means two
-copies of the permission model disagreeing, which is unobservable until it matters.
+redeploying **every** consumer — leaving one behind means two copies of the permission model
+disagreeing, which is unobservable until it matters. ⚠️ **Do not trust this list; derive it** — and ⛔ **the `grep -rl` recipe this paragraph used to
+prescribe OVER-COUNTS, which is how the number here read 12 when it was 10.** `grep -rl` matches
+the module path anywhere in the file, *including inside a comment*, and `portal-feedback:337` and
+`submit-estimate:247` both merely MENTION these modules. Neither imports them. Deploying to that
+list wastes two deploys and, worse, invites the opposite error — someone reconciling "12" against
+a real importer list concludes they have missed two functions and goes looking for a bug that
+does not exist.
+
+Derive it with something that actually parses an import, multiline-aware (the
+`portal-commissions` import spans a dozen lines, so a line-anchored regex misses it and lands on
+9):
+
+```
+for f in supabase/functions/*/index.ts; do perl -0777 -ne 'exit(/import\s[^;]*?from\s+"\.\.\/_shared\/(access|resolveTenant)\.ts"/s ? 0 : 1)' "$f" && echo "$f"; done
+```
+
+As of 2026-09-05 that is **10**: `portal-billing`, `portal-commissions`, `portal-payments`,
+`portal-projects`, `portal-schedule`, `portal-settings`, `portal-setup`, `portal-sms`,
+`qbo-oauth-connect`, `submit-estimate`, `sync-design-status`. **`portal-projects` joined on
+2026-09-03** — it used to import only `logError.ts`, and now carries the permission model
+because Settings → Team grants Projects access. ⚠️ **That grep matches PROSE on purpose — leave
+it loose.** `portal-feedback` is in the twelve only because a COMMENT names
+`_shared/resolveTenant.ts`; its sole `_shared` import is `logError.ts` and it resolves the caller
+with its own inline `auth.getUser()` → `client_users` read, so it carries no copy of the
+permission model and its refusals have no `reason` classifier. Redeploying it anyway is the cheap
+error: over-matching wastes one deploy, under-matching leaves two permission models disagreeing.
+(Do not "tighten" this to an import-line-only grep and drop names — an audit once proposed cutting
+`submit-estimate` too, and it imports `access.ts` directly.) Also note `_shared/pmRoster.ts` and
+`_shared/projectsAccess.ts` import `access.ts` themselves, so a function importing only one of
+those bundles the permission model without matching the grep above — both current importers
+(`portal-commissions`, `portal-projects`) are already listed, but check for new ones.
+
+⚠️ **`access.ts` HAS A SECOND COPY IN SQL, and the two drifted twice without anyone noticing.**
+`area_level_for()` mirrors `effectiveAccess()` for the RLS policies (migration 154, re-issued
+by **183**). `change_orders` was added here on 2026-09-01 and never reached the SQL; the
+sales_rep preset's `orders` went view→edit the same week and the mirror kept saying view. Both
+were inert — 154's policies key on designs/contacts/inventory only, and an unknown area
+returns `'none'` rather than raising — which is exactly why they lasted.
+
+⛔ **This paragraph, and migration 183's own header, claimed `scripts/preflight.mjs` cross-checked
+the two lists. THAT WAS FALSE FROM THE DAY IT WAS WRITTEN UNTIL 2026-09-05** — the script contained
+no reference to `access.ts`, `AREAS`, `PRESETS` or `area_level_for` at all. A documented guard that
+does not exist is worse than an admitted gap: it is why both drifts above sat unnoticed, because
+anyone who wondered read this sentence and stopped looking.
+
+✅ **It is true now.** `checkAreaMirror()` compares the area KEY SET and each area's LEVEL
+VOCABULARY, in both directions, against whichever migration most recently *defines* the function
+(never the highest NNN prefix — 183 is used twice on beta and the ledger keys on the timestamp).
+`--self-test` proves all four directions: clean on the real files, fires on an area missing from
+SQL, fires on a level mismatch, and refuses to run blind if `AREAS` is renamed. If it fires, add
+the area to the SQL in the same commit rather than bypassing it.
+
+✅ **Since 2026-09-07 it also compares the JOB TITLES, across all THREE copies of that list:**
+`TITLES` in access.ts, `k_presets` in the SQL, and the `when p_title in (...)` CASE inside the same
+SQL function (normTitle's mirror). Both directions, and the self-test proves each fires. The third
+copy earns its check: a title in `k_presets` but missing from the CASE does not error, it falls
+through to **`sales_rep`** and silently resolves someone else's preset.
+
+⚠️ **What it still does NOT cover: the preset LEVELS** (does sales_rep hold `orders` at view or
+edit?) — and the sales_rep `orders` drift above is exactly that, so it would still get through.
+`PRESETS.owner` is computed (`Object.fromEntries(AREA_KEYS.map(...))`), so the table cannot be read
+statically the way the areas can, and a regex that skipped the computed row would report a clean
+diff while covering nine titles out of ten. Closing it needs the TypeScript evaluated, not scanned.
+What IS closed is the failure that actually deletes access: a title one side has never heard of.
+
+### Ten job titles (migration 218, 2026-09-07)
+
+Carolyn asked for nine — *"Owner, Office Staff, Sales Manager, Sales Rep, Dealer, Crew Leader, Crew
+Member, Scheduler, Driver"* — and her decision was to **keep Admin as a tenth** rather than fold it
+into Office Staff, because admin is not merely a label: it is the only title that may HOLD a granted
+Billing switch (`ownerGranted`), and `roleForTitle` maps it to the coarse `role='admin'` that older
+policies read. Renaming it would have moved real people's access under cover of a relabel.
+
+The five new presets (reasoning lives beside each one in `access.ts`, decisions are Carolyn's):
+`office_staff` paperwork — designer/designs/contacts/inventory/orders/change_orders edit, the three
+boards + reports view, branding + QuickBooks edit (the designer was omitted for a few hours and
+Carolyn corrected it the same day — see migration 219); `sales_manager` a rep plus change orders,
+reports edit and **everyone's payouts**; `dealer` a rep narrowed to `contacts:'own'` (which WRITES — see below); `scheduler` all
+three boards edit, everything else view; `crew_member` build_schedule + repairs **view only**.
+Overrides are untouched — `client_users.access` stores deviations, so every switch set before this
+resolves exactly as it did, which migration 218's PART 3 asserts rather than claims.
+
+⛔ **Adding an eleventh title is a THREE-PLACE change and two of them fail silently.** `TITLES` +
+`PRESETS`; `k_presets` + the normTitle CASE (preflight now catches both); and
+**`client_users_title_check`**, a hardcoded CHECK re-issued by 218 — a title missing there cannot be
+SAVED at all, and nothing guards it. `176_operator_support_only.sql:26-29` flagged that trap in 2026-08
+and noted no code comment mentioned it; `TITLES`' own doc block does now.
+
+### `contacts:'own'` is a WRITE scope (2026-09-07)
+
+It shipped read-only on 2026-09-05 and access.ts said in as many words that changing that "would
+mean per-row ownership checks on eleven write actions", calling it "a second decision, and it is
+hers". Carolyn made it two days later: *"Yes, let dealers edit their own contacts."* Offered a
+fifth level so read-only-own could survive beside a writing one, she chose to redefine the one
+switch — your customers are yours to work. Nobody held a contacts override at the time, so
+nothing silently widened.
+
+**Two mechanisms, and the second is the one that matters.** The `ownWrites` flag on an area says
+its `'own'` level writes (`contacts` yes, `commissions` emphatically no — a rep editing their own
+payout is what that feature exists to prevent); `canEdit` reads it, so `contacts:'own'` now
+satisfies the eleven `contacts:'edit'` gates. **That alone is a blanket edit on the whole
+tenant.** The narrowing is a FOURTH enforcement point beside the three the row scope already had:
+**`CONTACT_ROW_SCOPE` in `portal-settings`**, where every one of those actions declares how to find
+the contact it touches (`contactKeys` / `codeKeys` / `rowTable`), and an own-scoped caller naming a
+contact that is not theirs gets a 404 — the same status a design they cannot see returns, so a
+refusal never confirms the row exists. It denies by default: naming no visible contact, or none at
+all, is refused.
+
+⚠️ **A new contacts write is a TWO-file change**, and `scripts/preflight.mjs` refuses a push where a
+`contacts:'edit'` action in GATES is missing from that table — because the failure is silent:
+the action does not 403, it RUNS, against every customer on the tenant. `crm_save_note` is the
+shape to remember: given an `id` it updates a note by primary key and never mentions a contact, so
+it reads like it needs no check and needs one most.
+
+⚠️ **`mayGrant` gained a fourth rule** for the same change. RANK scores `'own'` and `'view'` the
+same (both read), so rule 2 would have let a granter narrowed to read-only contacts hand somebody
+a write they do not hold themselves. It now compares the WRITE property directly.
+
+⚠️ **Known, pre-existing, NOT closed:** `portal-sms`'s `opt_outs` read gates on `contacts:'view'`,
+which `'own'` has always satisfied — so a narrowed caller can list the tenant's opted-out phone
+numbers. Its write twin `set_opt_out` newly became reachable and is **refused outright** for an
+own-scoped caller (the register is keyed on a phone number, not a contact, so it cannot be
+narrowed). Narrowing the read is a separate decision.
+
+⛔ **`area_level_for`'s "current definition" is NOT 193, and this file said it was.** 218 was very
+nearly written against `193_contacts_own_scope.sql`, which would have `create or replace`d the
+`change_order_approve` area (added by **212**, hours earlier) straight back out — silently, since an
+unknown area returns `'none'` rather than raising. **Derive the newest definition, never read it off
+a doc:** `grep -l 'create or replace function public.area_level_for' supabase/migrations/*.sql`, and
+cross-check what is actually deployed with
+`select pg_get_functiondef('public.area_level_for(text,text,jsonb,text)'::regprocedure);` — the live
+database ran an area this clone's migrations 208-217 had never been committed with.
 
 Post-launch shape changes (092–095), each from real use:
 - **092** — an inventory unit rides TWO loads over its life (shop → sales lot as a spec

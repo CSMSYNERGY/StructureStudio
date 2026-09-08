@@ -41,9 +41,22 @@ const HAWAII: Zone = { std: -10, dst: false };
  * Area codes by zone. Compiled from the NANP assignment list; states that split a timezone
  * are assigned by where the bulk of the code's population sits, which is the same
  * approximation every commercial sender makes.
+ *
+ * ⚠️ THE LISTS BELOW OVERLAP ON PURPOSE — a code that straddles a line appears in both zone
+ * lists and the later `put` wins. That is fine between two plain zones, but it must NEVER
+ * apply to the 8pm states: their close is legislated, the plain lists are an approximation,
+ * and a duplicate entry silently widening a code back out to 9pm is a compliance defect, not
+ * a rounding error. So `put` refuses to downgrade earlyClose. Whoever edits a zone list next
+ * does not have to notice that a code is already spoken for.
  */
 const AREA_ZONES: Record<string, Zone> = {};
-const put = (zone: Zone, codes: string[]) => { for (const c of codes) AREA_ZONES[c] = zone; };
+const put = (zone: Zone, codes: string[]) => {
+  for (const c of codes) {
+    const prior = AREA_ZONES[c];
+    if (prior?.earlyClose && !zone.earlyClose) continue; // never widen a legislated 8pm close
+    AREA_ZONES[c] = zone;
+  }
+};
 
 // Florida, Connecticut, Maryland — 8pm close.
 put(EASTERN_EARLY, [

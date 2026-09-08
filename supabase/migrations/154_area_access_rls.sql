@@ -184,6 +184,28 @@
 --                     See PART 2's DEFAULT-OPEN note for why that can never widen anything.
 --   Typo'd area key   PART 4 aborts the migration.
 --
+-- ── SINCE THIS SHIPPED — READ BEFORE TRUSTING THE WALK OR THE TABLE LIST ──────────────────
+-- Two things this file states as fact have moved. Both are recorded here rather than edited
+-- into the text above, because the reasoning above is still the reasoning and only its
+-- snapshot of the product has aged.
+--
+-- 1. CONSEQUENCE 1 HAPPENED. OrdersView shipped to tenants on 2026-09-01 and now mounts for
+--    anyone holding `orders` — a crew leader and a driver included. It was done the way this
+--    file said to do it and NOT by widening a policy: both designs reads moved behind
+--    portal-settings' `orders_designs`, gated orders:'view'. portal/12-shell.jsx:1413-1425
+--    records the change and cites this header by line. So THE WALK's "⛔ IT IS UNREACHABLE"
+--    is history, its mechanism paragraph is now live, and its eight-row table of direct
+--    PostgREST reads is a 2026-08 snapshot — there are considerably more today. RE-DERIVE
+--    that table with the grep the METHOD paragraph gives before relying on it; the walk's
+--    method is sound, its output is perishable.
+--
+-- 2. THE GUARDED SET IS BIGGER THAN THE FIVE TABLES BELOW. 164_sms_consent_and_guard.sql
+--    added sms_messages on the same 'contacts' key, and 194_area_access_rls_extend.sql added
+--    eleven more (the CRM feed tables, design_acceptances, billing_subscriptions and the five
+--    scheduling tables) after 164's header counted 34 tenant-readable tables with no
+--    restrictive guard. PART 0's panic button and PART 6 cover THIS file's five policies only;
+--    each of those migrations carries its own.
+--
 -- Rollback: PART 6. The one-line panic button is at the top of PART 0.
 
 -- ═════════════════════════════════════════════════════════════════════════════════════════

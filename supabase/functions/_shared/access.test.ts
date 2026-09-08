@@ -21,6 +21,8 @@
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
   AREA_KEYS,
+  AREAS,
+  accessMetadata,
   canEdit,
   canRead,
   checkGate,
@@ -30,10 +32,12 @@ import {
   type Level,
   mayGrant,
   mayGrantMap,
+  ownContactsOnly,
   PRESETS,
   roleForTitle,
   sanitizeAccess,
   seesAllPayouts,
+  TITLES,
 } from "./access.ts";
 
 Deno.test("owner is absolute — stored overrides cannot reduce them", () => {
@@ -301,4 +305,398 @@ Deno.test("Team comes with the title and can never be granted as a switch", () =
   // And an owner can still create an admin: mayGrantMap must not refuse the resulting map.
   const owner = effectiveAccess("owner", "owner", null);
   assertEquals(mayGrantMap("owner", owner, effectiveAccess("admin", "admin", null)), null);
+});
+
+// ── PROJECTS: CSM SYNERGY'S OWN BOARDS, GRANTED FROM THE TEAM SCREEN ──────────────────
+// Carolyn, 2026-09-02: "I feel like THIS should be where we add them. And here we say ...
+// we give them access to projects."
+//
+// The area is the grant. What makes it safe is that it is omitted from every preset (so it
+// denies by default, property 2 above) AND that portal-projects establishes the tenant is
+// ours before it consults the area at all — every builder's OWNER resolves projects=edit,
+// because owners are absolute, so the area could never be the tenancy boundary.
+
+Deno.test("projects is denied by default to every staff title", () => {
+  for (const title of ["admin", "sales_rep", "crew_leader", "driver"] as const) {
+    const acc = effectiveAccess("user", title, null);
+    assertEquals(acc.projects, "none", `${title} must not get the internal board by title`);
+  }
+});
+
+Deno.test("an owner resolves projects=edit — including a BUILDER's owner", () => {
+  // Not a bug, and worth pinning so nobody "fixes" it: owners are absolute by construction.
+  // Junior Barns' owner holds projects=edit in their map and still cannot open the console,
+  // because the internal_account check runs first. If this ever asserted 'none' instead,
+  // somebody has moved the tenancy boundary into the area, where it does not belong.
+  assertEquals(effectiveAccess("owner", "owner", null).projects, "edit");
+});
+
+Deno.test("the Team switch actually grants it, at both levels", () => {
+  assertEquals(effectiveAccess("user", "sales_rep", { projects: "view" }).projects, "view");
+  assertEquals(effectiveAccess("user", "admin", { projects: "edit" }).projects, "edit");
+  // view/edit is the split portal-projects already has (READ_ACTIONS vs can_write), which is
+  // why an area was the right shape and a boolean was not.
+  assert(canRead(effectiveAccess("user", "sales_rep", { projects: "view" }), "projects"));
+  assertFalse(canEdit(effectiveAccess("user", "sales_rep", { projects: "view" }), "projects"));
+  assert(canEdit(effectiveAccess("user", "admin", { projects: "edit" }), "projects"));
+});
+
+Deno.test("nobody grants projects above what they hold", () => {
+  const viewer = effectiveAccess("user", "admin", { projects: "view" });
+  assertFalse(mayGrant("admin", viewer, "projects", "edit"), "cannot grant beyond your own level");
+  assert(mayGrant("admin", viewer, "projects", "view"));
+  assert(mayGrant("admin", viewer, "projects", "none"), "taking it away is always allowed");
+});
+
+Deno.test("accessMetadata HIDES internal-only areas by default", () => {
+  // ⚠️ This ships to every tenant's browser. The default has to be the answer that cannot
+  // leak, because a caller that has not thought about whose screen it is building will take
+  // it. A builder seeing a "Projects" switch would be told about an internal tool they can
+  // never reach, and would raise a support question about a permission that does nothing.
+  const shown = accessMetadata().areas.map((a) => a.key);
+  assertFalse(shown.includes("projects"), "a builder must not be offered the Projects switch");
+  assert(shown.includes("designs"), "ordinary areas are unaffected");
+
+  const ours = accessMetadata({ internal: true }).areas.map((a) => a.key);
+  assert(ours.includes("projects"), "our own tenant must be offered it");
+  assertEquals(ours.length, AREAS.length, "nothing else is filtered");
+  assertEquals(shown.length, AREAS.length - 1, "exactly one area is internal-only today");
+
+  // The filter is presentation, not resolution: the area still exists for everyone, which is
+  // what lets the server resolve a stored grant regardless of who asked for the grid.
+  assert(AREA_KEYS.includes("projects"));
+  assertEquals(accessMetadata({ internal: false }).areas.map((a) => a.key).includes("projects"), false);
+});
+
+// ─── contacts:'own' (2026-09-05, migration 193) ──────────────────────────────────────────
+// The FIRST level that narrows ROWS rather than tabs, which is why it gets its own block.
+// Carolyn's dealer client, 09-04 @1:02:16: "he also doesn't want them to see each other's
+// quotes either." The rule is enforced in three places -- RLS, the edge functions' own
+// filters, and the client -- and these pin the resolver half the other two read from.
+Deno.test("contacts:'own' resolves, reads, and WRITES", () => {
+  // Written 2026-09-05 as "...and does NOT write", which was the level's shape for two days.
+  // Carolyn made the second decision that comment invited on 2026-09-07 -- "Yes, let dealers
+  // edit their own contacts" -- so the third assertion is inverted rather than deleted: the
+  // pairing of a true canRead with a canEdit is the thing worth keeping in one place.
+  const a = effectiveAccess("user", "sales_rep", { contacts: "own" });
+  assertEquals(a.contacts, "own", "a stored 'own' must survive resolution");
+  assert(canRead(a, "contacts"), "'own' reads -- the rep sees their own customers");
+  assert(canEdit(a, "contacts"), "'own' now satisfies an edit gate; the ROWS are narrowed elsewhere");
+  assert(ownContactsOnly(a), "the one place 'own' is compared for this area -- and now the "
+    + "only thing standing between a dealer and the whole customer list");
+});
+
+// The reason 'own' was ADDED beside 'view' instead of replacing it: every stored
+// {"contacts":"view"} would otherwise fall back to the title preset with nothing logged --
+// 'none' for a crew leader, i.e. a silent revocation dressed as a refactor.
+Deno.test("contacts:'view' still resolves after 'own' was added", () => {
+  const a = effectiveAccess("user", "crew_leader", { contacts: "view" });
+  assertEquals(a.contacts, "view");
+  assert(canRead(a, "contacts"));
+  assertFalse(ownContactsOnly(a), "'view' is everyone's customers, not own-only");
+});
+
+// Property 1 from the header, at the one place a new level could break it: an owner's stored
+// map is ignored ENTIRELY. A hostile or stale {"contacts":"own"} on an owner must not narrow
+// the person who is supposed to be able to see "this customer went through employee B and C".
+Deno.test("an owner carrying a stored contacts:'own' is still unrestricted", () => {
+  const a = effectiveAccess("owner", "owner", { contacts: "own" });
+  assertEquals(a.contacts, "edit");
+  assertFalse(ownContactsOnly(a), "owners are absolute in every layer, this one included");
+});
+
+// RANK scores 'own' and 'view' equally, so the generic "you may pass on what you hold" rule
+// would have let an admin an owner had narrowed to 'own' hand a rep the FULL list -- widening
+// by delegation, which is the escalation nobody looks for.
+Deno.test("an 'own' holder cannot grant 'view' on contacts", () => {
+  assertFalse(mayGrant("user", { contacts: "own" }, "contacts", "view"),
+    "passing on more than you hold is the whole thing mayGrant exists to stop");
+  assert(mayGrant("user", { contacts: "own" }, "contacts", "own"),
+    "passing on exactly what you hold stays allowed");
+  assert(mayGrant("owner", {}, "contacts", "view"), "an owner is unaffected");
+});
+
+// ── APPROVE CHANGES — a SEPARATE area, not a level above `edit` (2026-09-07) ────────────
+// Carolyn: "there should be both the option to give approval for a change order, but they can
+// also make the change order if they are given permission." These pin that the two grants are
+// genuinely independent in both directions, which is the whole reason it is a second area.
+
+Deno.test("Approve Changes is denied by default to every staff title", () => {
+  for (const t of ["sales_rep", "crew_leader", "driver"] as const) {
+    assertEquals(effectiveAccess("user", t, null).change_order_approve, "none", t);
+  }
+});
+
+Deno.test("owners and admins hold Approve Changes without anyone setting it", () => {
+  assertEquals(effectiveAccess("owner", "owner", null).change_order_approve, "edit");
+  assertEquals(effectiveAccess("user", "admin", null).change_order_approve, "edit");
+});
+
+Deno.test("granting Approve does not grant Raise, and granting Raise does not grant Approve", () => {
+  const approver = effectiveAccess("user", "crew_leader", { change_order_approve: "edit" });
+  assertEquals(approver.change_order_approve, "edit");
+  assertEquals(approver.change_orders, "none", "an approver cannot raise unless separately granted");
+
+  const raiser = effectiveAccess("user", "sales_rep", { change_orders: "edit" });
+  assertEquals(raiser.change_orders, "edit");
+  assertEquals(raiser.change_order_approve, "none", "a raiser cannot approve their own change");
+});
+
+Deno.test("one person can hold both", () => {
+  const both = effectiveAccess("user", "crew_leader", { change_orders: "edit", change_order_approve: "edit" });
+  assertEquals([both.change_orders, both.change_order_approve], ["edit", "edit"]);
+});
+
+Deno.test("Approve Changes has two levels — 'view' is not one of them", () => {
+  // An out-of-vocabulary override is discarded, not stored through. The SQL mirror asserts
+  // the same thing; this is the half that runs in CI.
+  assertEquals(effectiveAccess("user", "crew_leader", { change_order_approve: "view" }).change_order_approve, "none");
+});
+
+Deno.test("an approver can pass Approve on; a raiser cannot", () => {
+  const approver = effectiveAccess("user", "admin", null);
+  assertEquals(mayGrant("user", approver, "change_order_approve", "edit"), true);
+  const raiser = effectiveAccess("user", "sales_rep", { change_orders: "edit" });
+  assertEquals(mayGrant("user", raiser, "change_order_approve", "edit"), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The five titles added 2026-09-07 (migration 218)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Carolyn asked for nine job titles and for each to seed sensible defaults "but we still
+// keep the override access that is already set". The second half is the part that can
+// regress invisibly — a preset is easy to eyeball, a preset-plus-override is not — so it is
+// pinned per title rather than once.
+
+Deno.test("every TITLE has a preset, and every preset key is a real area", () => {
+  // Guards the two directions a title can be half-added: named in TITLES with no preset (it
+  // silently resolves to all-none) or given a preset that no pill can select.
+  for (const t of TITLES) {
+    assert(PRESETS[t.key] !== undefined, `TITLES has ${t.key} but PRESETS does not`);
+  }
+  for (const key of Object.keys(PRESETS)) {
+    assert(TITLES.some((t) => t.key === key), `PRESETS has ${key} but TITLES does not`);
+  }
+  for (const [title, preset] of Object.entries(PRESETS)) {
+    for (const [area, level] of Object.entries(preset)) {
+      const a = AREAS.find((x) => x.key === area);
+      assert(a, `preset ${title} names unknown area ${area}`);
+      assert(
+        a.levels.includes(level as Level),
+        `preset ${title} gives ${area}=${level}, which is not in that area's vocabulary`,
+      );
+    }
+  }
+});
+
+Deno.test("office staff run the paperwork and cannot reshape the product", () => {
+  const a = effectiveAccess("user", "office_staff", null);
+  assertEquals(a.orders, "edit");
+  assertEquals(a.change_orders, "edit");
+  assertEquals(a.inventory, "edit");
+  assertEquals(a.settings_branding, "edit");
+  assertEquals(a.settings_quickbooks, "edit");
+  // The designer, since 2026-09-07 (Carolyn, same day she picked the preset): the person
+  // answering the phone is the one who builds the quote.
+  assertEquals(a.designer, "edit");
+  // Sees the boards, moves nothing on them.
+  assertEquals(a.build_schedule, "view");
+  assertEquals(a.delivery_schedule, "view");
+  assertFalse(canEdit(a, "build_schedule"));
+  // Deliberately absent — see the preset's own comment.
+  assertEquals(a.commissions, "none");
+  assertEquals(a.settings_structures, "none");
+  assertEquals(a.settings_team, "none");
+  assertEquals(a.settings_billing, "none");
+});
+
+Deno.test("a sales manager sees everyone's payouts; a rep and a dealer see only their own", () => {
+  assert(seesAllPayouts(effectiveAccess("user", "sales_manager", null)));
+  assertFalse(seesAllPayouts(effectiveAccess("user", "sales_rep", null)));
+  assertFalse(seesAllPayouts(effectiveAccess("user", "dealer", null)));
+  // The manager's other two differences from a rep.
+  assertEquals(effectiveAccess("user", "sales_manager", null).change_orders, "edit");
+  assertEquals(effectiveAccess("user", "sales_manager", null).reports, "edit");
+});
+
+Deno.test("a dealer WORKS their own customers and sees nobody else's", () => {
+  // Carolyn, 2026-09-07: "Yes, let dealers edit their own contacts." Before that, 'own' was
+  // read-only on contacts and this test asserted the opposite of the line below.
+  const a = effectiveAccess("user", "dealer", null);
+  assert(ownContactsOnly(a));
+  assert(canRead(a, "contacts"));
+  assert(canEdit(a, "contacts"));
+  // Everything else is a sales rep.
+  assertEquals(a.designer, "edit");
+  assertEquals(a.orders, "edit");
+  assertEquals(a.commissions, "own");
+  assertFalse(ownContactsOnly(effectiveAccess("user", "sales_rep", null)));
+});
+
+Deno.test("'own' writes on contacts and does NOT write on commissions", () => {
+  // The whole reason ownWrites is a per-area flag rather than a change to RANK. A rep on
+  // commissions:'own' seeing their own payout must never be able to edit it, and that is the
+  // confidentiality rule the commissions feature is built on.
+  const dealer = effectiveAccess("user", "dealer", null);
+  assert(canEdit(dealer, "contacts"));
+  assertFalse(canEdit(dealer, "commissions"));
+  assertFalse(seesAllPayouts(dealer));
+  // And the flag is declared where it is read, not inferred from the level.
+  assert(AREAS.find((x) => x.key === "contacts")?.ownWrites);
+  assertFalse(!!AREAS.find((x) => x.key === "commissions")?.ownWrites);
+});
+
+Deno.test("an own-scoped caller satisfies a contacts:'edit' GATE", () => {
+  // The eleven contacts write actions are gated { area: 'contacts', level: 'edit' }, so this
+  // is the exact question resolveTenant asks before dispatch. It must now be YES — and the
+  // row narrowing is a separate mechanism (portal-settings' CONTACT_ROW_SCOPE) that this
+  // module cannot express and must not be assumed to cover.
+  const dealer = effectiveAccess("user", "dealer", null);
+  assertEquals(checkGate({ area: "contacts", level: "edit" }, dealer), null);
+  assertEquals(checkGate({ area: "contacts", level: "view" }, dealer), null);
+  // ...while a genuinely read-only person is still refused.
+  const viewer = effectiveAccess("user", "crew_leader", { contacts: "view" });
+  assert(checkGate({ area: "contacts", level: "edit" }, viewer) !== null);
+});
+
+Deno.test("a contacts:'view' holder cannot grant contacts:'own' — it now writes", () => {
+  // The hole rule 4 of mayGrant closes. RANK scores 'own' and 'view' the SAME (both read),
+  // so `RANK[own] <= RANK[view]` is true and rule 2 alone would wave this through: an admin
+  // an owner had narrowed to read-only contacts could hand somebody the ability to edit
+  // customer records, notes and SMS — a write the granter does not hold.
+  const readOnly = effectiveAccess("admin", "admin", { contacts: "view" });
+  assertFalse(canEdit(readOnly, "contacts"));
+  assertFalse(mayGrant("admin", readOnly, "contacts", "own"));
+  assertFalse(mayGrant("admin", readOnly, "contacts", "edit"));
+  assert(mayGrant("admin", readOnly, "contacts", "view"));
+  assert(mayGrant("admin", readOnly, "contacts", "none"));
+  // Someone who DOES write may still narrow a person to 'own'.
+  const writer = effectiveAccess("admin", "admin", null);
+  assert(mayGrant("admin", writer, "contacts", "own"));
+  // And commissions is untouched by rule 4, because its 'own' does not write.
+  const repPay = effectiveAccess("user", "sales_rep", null);
+  assert(mayGrant("user", repPay, "commissions", "own"));
+  assertFalse(mayGrant("user", repPay, "commissions", "edit"));
+});
+
+Deno.test("an 'own' holder still passes on 'own' and never widens it", () => {
+  // Rule 3, re-pinned: 'own' is a row scope, not a rank, so a dealer-scoped granter cannot
+  // hand out the whole customer list even though they can now write to their slice of it.
+  const narrowed = effectiveAccess("admin", "admin", { contacts: "own" });
+  assert(canEdit(narrowed, "contacts"));
+  assert(mayGrant("admin", narrowed, "contacts", "own"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "view"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "edit"));
+});
+
+Deno.test("a scheduler owns all three boards and can change no sale", () => {
+  const a = effectiveAccess("user", "scheduler", null);
+  assertEquals(a.build_schedule, "edit");
+  assertEquals(a.delivery_schedule, "edit");
+  assertEquals(a.repairs, "edit");
+  assertEquals(a.orders, "view");
+  assertEquals(a.designs, "view");
+  assertEquals(a.contacts, "view");
+  assertFalse(canEdit(a, "orders"));
+});
+
+Deno.test("a crew member reads the boards their leader runs, and nothing else", () => {
+  const a = effectiveAccess("user", "crew_member", null);
+  assertEquals(a.build_schedule, "view");
+  assertEquals(a.repairs, "view");
+  assertFalse(canEdit(a, "build_schedule"));
+  // The difference from a crew leader, stated as a difference.
+  const leader = effectiveAccess("user", "crew_leader", null);
+  assertEquals(leader.build_schedule, "edit");
+  assertEquals(leader.repairs, "edit");
+  for (const k of ["designs", "orders", "inventory", "contacts", "designer", "commissions"]) {
+    assertEquals(a[k], "none", `crew_member should not hold ${k}`);
+  }
+});
+
+Deno.test("THE OVERRIDES STILL WIN on every new title", () => {
+  // The half of Carolyn's request that must not regress: a preset is a starting point, and
+  // a stored deviation layers on top of it exactly as it did on the five older titles.
+  assertEquals(effectiveAccess("user", "dealer", { contacts: "edit" }).contacts, "edit");
+  assertEquals(effectiveAccess("user", "crew_member", { orders: "view" }).orders, "view");
+  assertEquals(effectiveAccess("user", "office_staff", { designer: "none" }).designer, "none");
+  assertEquals(effectiveAccess("user", "scheduler", { orders: "edit" }).orders, "edit");
+  // ...including taking one AWAY, which is the direction a preset cannot express.
+  assertEquals(effectiveAccess("user", "sales_manager", { commissions: "own" }).commissions, "own");
+});
+
+Deno.test("the three skips still apply to the new titles", () => {
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    // Team comes with the title; Billing is holdable only by an admin; an unknown area is
+    // never trusted out of the stored blob.
+    assertEquals(effectiveAccess("user", t, { settings_team: "edit" }).settings_team, "none");
+    assertEquals(effectiveAccess("user", t, { settings_billing: "edit" }).settings_billing, "none");
+    assertEquals(effectiveAccess("user", t, { no_such_area: "edit" }).no_such_area, undefined);
+    // ...and an out-of-vocabulary level is discarded rather than stored: 'own' is not in
+    // orders' vocabulary, so the preset stands.
+    const preset = PRESETS[t as keyof typeof PRESETS];
+    assertEquals(effectiveAccess("user", t, { orders: "own" }).orders, preset.orders ?? "none");
+  }
+});
+
+Deno.test("every new title is coarse role 'user' — none of them is a second admin", () => {
+  // roleForTitle feeds client_users.role, which older RLS policies read. A new title that
+  // resolved to 'admin' would hand out the Billing grant and the Team screen by accident.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(roleForTitle(t), "user");
+    assertEquals(effectiveAccess("user", t, null).settings_team, "none");
+  }
+  assertEquals(roleForTitle("admin"), "admin");
+  assertEquals(roleForTitle("owner"), "owner");
+});
+
+Deno.test("Approve Changes stayed denied by default when five titles were added", () => {
+  // 212's rule, re-pinned because 218 rewrote the same preset table: everyone starts at
+  // None except owners and admins.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(effectiveAccess("user", t, null).change_order_approve, "none");
+  }
+  assertEquals(effectiveAccess("admin", "admin", null).change_order_approve, "edit");
+});
+
+Deno.test("sanitizeAccess accepts the new titles and still refuses Billing on them", () => {
+  // A title the sanitizer does not recognise falls back to sales_rep, which would silently
+  // rewrite what an owner saved. Checked per title rather than inferred from normTitle.
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(sanitizeAccess({ orders: "edit" }, t), { orders: "edit" });
+    assertEquals(sanitizeAccess({ settings_billing: "edit" }, t), {});
+    assertEquals(sanitizeAccess({ settings_team: "edit" }, t), {});
+  }
+});
+
+Deno.test("an owner may hand out any new title's whole preset; a sales manager may not", () => {
+  const owner = effectiveAccess("owner", "owner", null);
+  for (const t of ["office_staff", "sales_manager", "dealer", "scheduler", "crew_member"]) {
+    assertEquals(mayGrantMap("owner", owner, effectiveAccess("user", t, null)), null);
+  }
+  // Nobody grants above themselves. A sales manager holds inventory at 'view' and no
+  // settings at all, so they cannot mint an office staffer who edits either. mayGrantMap
+  // reports the FIRST area it refuses in AREA_KEYS order, and Inventory precedes the
+  // settings group — so this asserts both that the refusal happens and where.
+  const mgr = effectiveAccess("user", "sales_manager", null);
+  assertEquals(
+    mayGrantMap("user", mgr, effectiveAccess("user", "office_staff", null)),
+    "Inventory",
+  );
+  // ...and it is not only the first one it names. Asked area by area, a manager holds none
+  // of what makes office staff office staff.
+  assertFalse(mayGrant("user", mgr, "inventory", "edit"));
+  assertFalse(mayGrant("user", mgr, "settings_branding", "edit"));
+  assertFalse(mayGrant("user", mgr, "settings_quickbooks", "edit"));
+  assertFalse(mayGrant("user", mgr, "build_schedule", "view"));
+});
+
+Deno.test("a dealer's narrowed contacts scope cannot be widened by someone who shares it", () => {
+  // Rule 3 of mayGrant, exercised on the title the 'own' scope was built for: an admin whom
+  // an owner had deliberately narrowed to contacts:'own' cannot hand a dealer the whole list.
+  const narrowed = effectiveAccess("admin", "admin", { contacts: "own" });
+  assertFalse(mayGrant("admin", narrowed, "contacts", "view"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "edit"));
+  assert(mayGrant("admin", narrowed, "contacts", "own"));
 });

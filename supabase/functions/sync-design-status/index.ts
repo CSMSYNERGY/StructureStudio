@@ -131,6 +131,19 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  // ── Warm-up ───────────────────────────────────────────────────────────────────────
+  // A table-free ping, the same shape as portal-schedule's, so the first real call does not
+  // also pay a cold isolate boot (~2.5 s before the first query). Three properties are
+  // deliberate and load-bearing:
+  //   • it answers BEFORE any client, auth or tenant resolution, so it costs no round trip
+  //     and cannot log a refusal — a ping firing on every boot must never fill app_errors;
+  //   • it is a QUERY PARAM, not an action, so it needs no GATES entry (preflight
+  //     cross-checks gates against action branches) and unknown-action handling is untouched;
+  //   • it never reads the request BODY — the code below owns the single parse of that
+  //     stream, and consuming it here would break every real call.
+  // Booting the isolate IS the whole job; there is nothing to return but the acknowledgement.
+  if (new URL(req.url).searchParams.get("warm") === "1") return json({ ok: true });
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
@@ -259,13 +272,26 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // sync. Trade-off, deliberate: SS designs give up opportunity-stage promotion —
     // acceptance lives on our quote page, not in the CRM pipeline.
     if (!d.ghl_estimate_id && d.ss_quote_number) { statuses[d.short_code] = d.status || "sent"; continue; }
+    // THE HYBRID FLOOR (mirror of the SS fence above, for the case it deliberately lets past).
+    // A design quoted through GHL BEFORE the tenant switched to StructureStudio quotes keeps its
+    // ghl_estimate_id forever, so the two-condition fence at the line above does not fire — but
+    // its paperwork is now LOCAL: the number came from allocate_ss_quote_number, the signature
+    // from customer-accept, the invoice from the SS invoice path. The old GHL estimate is frozen
+    // at whatever it said back then, so recomputing from the 'sent' baseline would DOWNGRADE a
+    // signed-and-invoiced design to that stale value. Cached status becomes a floor for anything
+    // carrying a local quote number; the hybrid still gets GHL-derived PROMOTION from both the
+    // estimate and the opportunity stage below, which is the whole point of letting it through.
+    // Keyed on ss_quote_number and deliberately NOT on ss_invoice_sent_at: that is stamped when
+    // the invoice is SENT, before the customer signs (migration 136 stopped send_invoice moving
+    // status), so flooring there would promote an unsigned invoice and hand it the build board.
+    const ssLocal = !!d.ss_quote_number;
     // The baseline is 'sent' only when the GHL data is trustworthy enough to justify a downgrade.
     // Otherwise start from what we already believe, so the computation below can raise the status
     // but never lower it (see dataComplete above).
     const cachedStage = (d.status && STAGE_RANK[d.status as keyof typeof STAGE_RANK] !== undefined)
       ? (d.status as "sent" | "accepted" | "invoiced" | "delivered")
       : "sent";
-    let stage: "sent" | "accepted" | "invoiced" | "delivered" = dataComplete ? "sent" : cachedStage;
+    let stage: "sent" | "accepted" | "invoiced" | "delivered" = (dataComplete && !ssLocal) ? "sent" : cachedStage;
 
     const estStatus = d.ghl_estimate_id ? estStatusById.get(String(d.ghl_estimate_id)) : undefined;
     if (estStatus !== undefined) {

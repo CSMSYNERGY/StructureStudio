@@ -27,9 +27,15 @@ export function safeEqual(a: string, b: string): boolean {
 // rotating 13.248.121.x proxy address — bucketing on it gave every request a fresh bucket
 // and defeated the lockout entirely. The leftmost entry is the real caller.
 //
-// A client CAN prepend a forged value, so per-IP lockout is a brake on naive scripts and
-// the source of honest audit attribution — NOT the last line of defence. The defence that
-// cannot be rotated away is the global failure brake below.
+// A client CAN prepend a forged value, so per-IP lockout is a brake on naive scripts —
+// NOT the last line of defence. The defence that cannot be rotated away is the global
+// failure brake below.
+//
+// ⚠️ AND THE BUCKET IS NOT TRUSTWORTHY ATTRIBUTION EITHER. This comment used to call it
+// "the source of honest audit attribution"; it is not, because the value is chosen by the
+// caller. An `admin_auth_failed` row naming an address is evidence that SOMEONE claimed
+// that address, never that the request came from it — read a run of them as a pattern, and
+// never as an accusation against whoever really owns the IP.
 export function clientIp(req: Request): string {
   const xff = req.headers.get("x-forwarded-for") || "";
   const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
@@ -102,23 +108,50 @@ export async function checkAdminPassword(
     .eq("bucket", bucket)
     .maybeSingle();
 
-  if (row?.locked_until && new Date(row.locked_until).getTime() > nowMs) {
-    const retryAfter = Math.ceil((new Date(row.locked_until).getTime() - nowMs) / 1000);
+  const lockedUntilMs = row?.locked_until ? new Date(row.locked_until).getTime() : 0;
+  const locked = lockedUntilMs > nowMs;
+
+  // 2. COMPARE FIRST, AND REFUSE THE LOCKOUT ONLY ON A WRONG PASSWORD.
+  //
+  // ⚠️ THE ORDER IS THE WHOLE FIX. This used to refuse a locked bucket BEFORE comparing, and
+  // the bucket is `x-forwarded-for`, which the CLIENT CHOOSES. So twenty failures carrying
+  // `X-Forwarded-For: <the operator's IP>` locked the OPERATOR out of admin-catalog and
+  // admin-save-settings for six hours, from anywhere, at a cost of twenty requests. The
+  // attacker never needed the password — the lockout was the weapon.
+  //
+  // This is the identical reasoning the GLOBAL brake below already states — "delay-only,
+  // never a hard lock, because a global lock would hand an attacker a way to lock the
+  // operator out of their own admin tool" — which was simply never applied to the per-IP
+  // lock sitting above it.
+  //
+  // Comparing first gives an attacker NOTHING: without the password they are still refused,
+  // still counted, still delayed, and the lockout still costs them every escalation tier. It
+  // only stops a lockout someone else provoked from refusing a person who holds the secret.
+  // No new oracle either — the only state a correct password reveals is that it was correct,
+  // which is already the end of the game.
+  const ok = typeof supplied === "string" && supplied.length > 0 && safeEqual(supplied, expected);
+
+  if (ok) {
+    // Clear this bucket's history so a successful operator never carries old failures — and,
+    // now, so a lockout an attacker planted on their address does not outlive their next
+    // successful sign-in.
+    if (row) { try { await admin.from("admin_auth_attempts").delete().eq("bucket", bucket); } catch (_e) { /* non-fatal */ } }
+    return { ok: true };
+  }
+
+  // 3. Wrong password on a locked bucket: refuse without spending another escalation. The
+  //    counter is deliberately NOT advanced here — the lock is already at its tier, and a
+  //    caller hammering a locked bucket must not be able to push a bucket that may not be
+  //    theirs deeper into the 6-hour tier.
+  if (locked) {
+    const retryAfter = Math.ceil((lockedUntilMs - nowMs) / 1000);
     await audit(admin, "admin_auth_locked", `bucket=${bucket} action=${attemptedAction} retry_after_s=${retryAfter}`);
+    await sleep(FAIL_DELAY_MS);
     return {
       ok: false,
       status: 429,
       body: { error: `Too many incorrect attempts. Try again in ${retryAfter >= 60 ? Math.ceil(retryAfter / 60) + " min" : retryAfter + "s"}.`, retryAfterSeconds: retryAfter },
     };
-  }
-
-  // 2. Constant-time compare.
-  const ok = typeof supplied === "string" && supplied.length > 0 && safeEqual(supplied, expected);
-
-  if (ok) {
-    // Clear this bucket's history so a successful operator never carries old failures.
-    if (row) { try { await admin.from("admin_auth_attempts").delete().eq("bucket", bucket); } catch (_e) { /* non-fatal */ } }
-    return { ok: true };
   }
 
   // 3. Failure: count it, escalate, audit, and slow the caller down.
