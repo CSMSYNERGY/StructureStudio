@@ -59,6 +59,10 @@ const GATES: GateTable = {
   // Deliberately its own tiny action rather than making those tabs fetch the whole board.
   schedule_links: { area: "build_schedule", level: "view" },
   move_job:     { area: "build_schedule", level: "edit" },
+  // "We have re-read the plans" (migration 219). Gated at EDIT because it is a claim about
+  // work, not a preference: the crew leader who says the flag can come down is asserting
+  // that somebody has actually looked. A viewer sees the flag and cannot silence it.
+  clear_job_change: { area: "build_schedule", level: "edit" },
   add_note:     { area: "build_schedule", level: "edit" },
   save_stages:  { area: "build_schedule", level: "edit" },
   // create_job burns a number from the shared take_next_serial() sequence, so this level
@@ -1112,6 +1116,31 @@ Deno.serve(withErrorLog("portal-schedule", async (req: Request) => {
       if (!note) return json({ error: "Note text is required." }, 400);
       const job = await requireRow("build_jobs", payload?.jobId, "Job");
       await act("build_job", job.id, "noted", { detail: note.slice(0, 2000) });
+      return json({ ok: true });
+    }
+
+    // ── clear_job_change: the crew says the plans have been re-read (migration 219) ─────
+    // The flag is stamped by a TRIGGER when a change order is acknowledged; only this clears
+    // it. `build_jobs` carries a SELECT policy and nothing else, so a browser cannot clear it
+    // by itself even if a future UI tried — which is the same reason the stamp is a trigger.
+    //
+    // Clearing sets changed_at back to NULL rather than writing a second "seen" timestamp.
+    // Two changes either side of one clear would otherwise leave the two timestamps in an
+    // order that reads as "already seen" for a change nobody saw. The history keeps both
+    // events, and it is append-only.
+    if (action === "clear_job_change") {
+      const job = await requireRow("build_jobs", payload?.jobId, "Job");
+      if (job.changed_at == null) return json({ ok: true, already: true });
+      const coNo = job.changed_co_no;
+      const { error: clrErr } = await admin.from("build_jobs")
+        .update({ changed_at: null, changed_co_no: null, changed_summary: null, updated_at: new Date().toISOString() })
+        .eq("id", job.id).eq("client_id", clientId);
+      if (clrErr) return json({ error: clrErr.message }, 500);
+      // WHO cleared it is the point of the record — `act` stamps the caller, unlike the
+      // trigger's row, which is deliberately unattributed (the service role acknowledged it).
+      await act("build_job", job.id, "change_read", {
+        detail: coNo == null ? "Plans re-read" : `Plans re-read after CO-${coNo}`,
+      });
       return json({ ok: true });
     }
 

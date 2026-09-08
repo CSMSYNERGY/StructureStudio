@@ -146,6 +146,10 @@ const SCHED_ACT_VERB = {
   created: "added", moved: "moved", updated: "edited", noted: "note", completed: "marked built",
   deleted: "removed", loaded: "put on a load", unloaded: "taken off a load",
   out: "sent out", delivered: "delivered", override: "override",
+  // Migration 219. `changed` is written by a TRIGGER with no user attached (the customer has
+  // no login, and the four acknowledging writers all run as the service role), so it renders
+  // unattributed on purpose — the detail names the change order instead.
+  changed: "CHANGED by the customer", change_read: "re-read the plans",
 };
 function SchedJobHistory({ jobId, refreshKey = 0 }) {
   const [rows, setRows] = useState(null);   // null = loading, [] = none
@@ -662,6 +666,18 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           // The card is the only thing tying the popup to its spot on the board or calendar —
           // so say which card the popup is showing. One treatment in every view.
           ...(open ? { outline: `2px solid ${ACCENT}`, outlineOffset: -1 } : null) }}>
+        {/* ⚠️ 0 · THE PLANS MOVED (migration 219). Above the serial row and outside the chip
+            row, deliberately: a crew member scanning the board has to meet this BEFORE they
+            read the building, not alongside the source label. It stays until somebody says
+            they have re-read the plans, and it comes back if the order changes again. */}
+        {job.changed_at && (
+          <div style={{ background: "#DC2626", color: "#FFF", borderRadius: 7, padding: "5px 8px", marginBottom: 6, fontSize: 10.5, fontWeight: 800, letterSpacing: 0.3, lineHeight: 1.35 }}>
+            CHANGED — RE-READ THE PLANS
+            {job.changed_summary && (
+              <div style={{ fontWeight: 600, letterSpacing: 0, marginTop: 2, opacity: 0.92 }}>{job.changed_summary}</div>
+            )}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 4 }}>
           <span style={{ fontSize: 11, fontWeight: 800, color: "#64748B", fontVariantNumeric: "tabular-nums" }}>{job.serial ? "#" + job.serial : (job.source === "repair" ? "Repair" : "—")}</span>
           <span style={{ ...schedChip(src.bg, src.fg), marginLeft: "auto" }}>{src.label}</span>
@@ -730,6 +746,20 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
   // state from the job prop once, and React keeps that state across re-renders, so without
   // the key an open card kept showing pre-refresh values. Remounting also re-reads the
   // history, which had the same staleness for the same reason.
+  // "We have re-read the plans." The ONLY thing that takes the red banner down, and it goes
+  // through the server because build_jobs carries a SELECT policy and nothing else — the same
+  // reason the flag is stamped by a trigger rather than by whichever writer acknowledged the
+  // change. Clearing records WHO cleared it; the stamp is deliberately unattributed.
+  const clearJobChange = async (job) => {
+    setBusy(true); setSaveErr(null);
+    const { data, error } = await sb.functions.invoke("portal-schedule", {
+      body: { action: "clear_job_change", jobId: job.id },
+    });
+    setBusy(false);
+    if (error || (data && data.error)) { setSaveErr((data && data.error) || error.message); return; }
+    load();
+  };
+
   const detailModal = () => {
     const job = jobs.find((j) => j.id === expandedId);
     if (!job) return null;
@@ -763,6 +793,29 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
             <button type="button" onClick={close} aria-label="Close details"
               style={{ ...S.btn("#F1F5F9", "#64748B"), marginLeft: "auto", padding: "4px 11px" }}>×</button>
           </div>
+          {/* The same warning the card carries, with the one action that answers it. A
+              viewer sees the banner and gets no button: saying the plans have been re-read is
+              a claim about work somebody did, and the server gates it at build_schedule:edit
+              — which is exactly what a crew leader holds. */}
+          {job.changed_at && (
+            <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderLeft: "4px solid #DC2626", borderRadius: 9, padding: "10px 13px", marginBottom: 12 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: "#991B1B", letterSpacing: 0.2 }}>
+                CHANGED — RE-READ THE PLANS{job.changed_co_no ? ` (CO-${job.changed_co_no})` : ""}
+              </div>
+              {job.changed_summary && (
+                <div style={{ fontSize: 12, color: "#7F1D1D", marginTop: 3, lineHeight: 1.5 }}>{job.changed_summary}</div>
+              )}
+              <div style={{ fontSize: 11, color: "#B91C1C", marginTop: 4 }}>
+                The customer approved a change after this job reached the board. Open the design and check it before you build.
+              </div>
+              {canEdit && (
+                <button type="button" disabled={busy} onClick={() => clearJobChange(job)}
+                  style={{ ...S.btn("#DC2626", "#FFF"), padding: "6px 12px", fontSize: 12, marginTop: 9, opacity: busy ? 0.6 : 1 }}>
+                  {busy ? "Saving…" : "We have re-read the plans"}
+                </button>
+              )}
+            </div>
+          )}
           <SchedJobEditor key={schedEditorKey(job)} job={job} stages={stages} crews={crews} canEdit={canEdit} busy={busy} error={saveErr}
             onSave={(patch) => saveJob(job, patch)} onComplete={() => completeJob(job)} onDelete={() => deleteJob(job)}
             onOpenDesign={onOpenDesign} />
