@@ -16096,7 +16096,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </div>
           )}
-          {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false && (
+          {/* ⛔ NOT while a change is still a draft. The suppression IS deliberate there
+              (submit-estimate refuses to mail a half-made change), so this banner's advice —
+              "copy the customer link and send it yourself" — is the exact opposite of what
+              should happen, printed directly beneath a panel offering the right three
+              choices. A rep reading top to bottom would send the customer a link to a change
+              nobody has finished. */}
+          {savedDesign && savedDesign.ssQuote && savedDesign.quoteEmailed === false
+            && !(savedDesign.changeOrder && savedDesign.changeOrder.draft) && (
             /* The quote exists but no email went out (no address on file, or the tenant's
                sending domain isn't live). Silence here reads as "the customer got it". */
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
