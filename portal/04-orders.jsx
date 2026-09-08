@@ -2719,8 +2719,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   // A change approved AFTER the invoice was issued means the PDF in the customer's inbox
   // shows the wrong amount. customer-accept refuses to let them sign a stale invoice, so
   // the operator has to be told the remedy is "regenerate", not "wait" (migration 136).
+  // `document_at` since migration 221 — the DOCUMENT's freshness, not when an email last
+  // succeeded. Reading `updated_at` here meant a builder whose customer email bounces saw
+  // this banner forever, because the only thing that moved that column was a successful send.
   const ackedAfterInvoice = !!invoice && !invoice.signed_at && ackedCos.some((c) =>
-    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.updated_at || "")));
+    Date.parse(String(c.acknowledged_at || "")) > Date.parse(String(invoice.document_at || invoice.updated_at || "")));
 
   const cur = {
     roofType: String(sel.roofType || "").trim(),
@@ -3152,12 +3155,26 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                         ? `Rebuild invoice ${invoice.invoice_number || ""} from the current totals and email it again?\n\nSame invoice number — the customer can't sign the outdated one.`
                         : `Email invoice ${invoice.invoice_number || ""} to the customer again?`)) return;
                       setBusy(true); onMsg(null);
-                      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code, ...(regen ? { regenerate: true } : {}) } });
+                      // ⚠️ REGENERATE GOES TO `reissue_invoice`, NOT send_invoice (2026-09-08).
+                      // send_invoice's already-invoiced branch is an EMAIL RETRY: it re-sends
+                      // the stored PDF without rebuilding it, and moves the staleness
+                      // timestamp only if the email lands. So this button said "Regenerate"
+                      // and regenerated nothing — and on a customer whose address bounces it
+                      // could never clear the banner, leaving the order unpayable by anyone.
+                      // reissue_invoice rebuilds the document and stamps document_at whether
+                      // or not anything is delivered; the email rides along as a courtesy.
+                      const { data, error } = regen
+                        ? await sb.functions.invoke("portal-settings", { body: { action: "reissue_invoice", shortCode: o.short_code } })
+                        : await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
                       setBusy(false);
                       if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
                       onMsg(data && data.sent === false
-                        ? { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print it or copy the customer link.` }
-                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent again — still awaiting their signature.` });
+                        ? (regen
+                          // The document IS rebuilt — say so, or a builder reads a send
+                          // failure as "nothing happened" and clicks again forever.
+                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.` }
+                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.` })
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.` });
                       onChanged();
                     }}
                     style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>

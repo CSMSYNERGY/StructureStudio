@@ -221,26 +221,45 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
    * not stop a builder taking money they are owed — the same tolerance `send_invoice`'s
    * pending check carries. Returns the sentence to refuse with, or null to proceed.
    */
-  const changeRefusal = async (shortCode: string | null): Promise<string | null> => {
+  //
+  // ⚠️ IT RETURNS WHICH REFUSAL, NOT JUST A SENTENCE (fixed 2026-09-08, found by testing).
+  // These are TWO different problems with two different remedies — chase the customer, or
+  // regenerate the invoice — and both were being reported as `reason: "change_pending"`. The
+  // `message` was right, so a rep who read it was fine; any code branching on the classifier
+  // was not, and a classifier that cannot tell two states apart is worse than none, because
+  // it looks like it can.
+  const changeRefusal = async (
+    shortCode: string | null,
+  ): Promise<{ reason: "change_pending" | "invoice_stale"; message: string } | null> => {
     if (!shortCode) return null;
     try {
       const [coRes, invRes] = await Promise.all([
         admin.from("change_orders").select("status, acknowledged_at")
           .eq("client_id", clientId).eq("short_code", shortCode),
-        admin.from("invoice_sends").select("updated_at")
+        // `document_at` since migration 221: staleness is a property of the DOCUMENT, and
+        // `updated_at` only moves when an email lands — so a bad address made this refusal
+        // permanent and locked the order out of every payment path. Coalesced for rows
+        // written before 221.
+        admin.from("invoice_sends").select("updated_at, document_at")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
       ]);
       if (coRes.error) return null;
       const cos = coRes.data ?? [];
       if (cos.some((c) => c.status === "pending_ack" || c.status === "draft")) {
-        return "There's a change on this order the customer hasn't approved yet. Settle that first — the amount due may move.";
+        return {
+          reason: "change_pending",
+          message: "There's a change on this order the customer hasn't approved yet. Settle that first — the amount due may move.",
+        };
       }
-      const invoiceAt = Date.parse(String(invRes.data?.updated_at || "")) || 0;
+      const invoiceAt = Date.parse(String(invRes.data?.document_at || invRes.data?.updated_at || "")) || 0;
       const stale = invoiceAt > 0 && cos.some((c) =>
         c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt
       );
       if (stale) {
-        return "This invoice was issued before the latest approved change. Regenerate and resend it, then take the payment.";
+        return {
+          reason: "invoice_stale",
+          message: "This invoice was issued before the latest approved change. Regenerate and resend it, then take the payment.",
+        };
       }
       return null;
     } catch (_) {
@@ -261,8 +280,8 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     return json({
       ok: true,
       canCharge: decision.ok && !blocked,
-      reason: blocked ? "change_pending" : (decision.ok ? null : decision.reason),
-      message: blocked ?? (decision.ok ? null : amountRefusalText(decision.reason)),
+      reason: blocked ? blocked.reason : (decision.ok ? null : decision.reason),
+      message: blocked ? blocked.message : (decision.ok ? null : amountRefusalText(decision.reason)),
       askCents: decision.ok ? decision.askCents : 0,
       askKind: decision.ok ? decision.kind : null,
       balanceCents: decision.balanceCents,
@@ -315,7 +334,7 @@ Deno.serve(withErrorLog("portal-payments", async (req: Request) => {
     // means the amount due is still moving, and a charge taken against it is money that has
     // to be given back.
     const blocked = await changeRefusal(money.shortCode);
-    if (blocked) return json({ error: blocked, reason: "change_pending" }, 409);
+    if (blocked) return json({ error: blocked.message, reason: blocked.reason }, 409);
     const decision = paymentAmountDecision(money);
     if (!decision.ok) return json({ error: amountRefusalText(decision.reason), reason: decision.reason }, 409);
 

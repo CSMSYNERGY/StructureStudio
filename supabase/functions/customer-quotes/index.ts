@@ -262,19 +262,22 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
   }
   if (ssMode && mine.length > 0) {
     const { data: invs } = await admin.from("invoice_sends")
-      .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at")
+      .select("short_code, invoice_number, invoice_pdf_url, status, signed_at, updated_at, document_at")
       .eq("client_id", identity.clientId)
       .eq("issued_by", "structurestudio")
       .in("short_code", mine.map((d) => d.short_code));
     for (const iv of invs ?? []) {
       if (!["created", "sent"].includes(String(iv.status))) continue;
       const sentAt = Date.parse(String(iv.updated_at || "")) || 0;
+      // STALE is about the document (221); `sentAt` above stays the send, which is what
+      // the customer is shown. Two facts, two columns — see the migration.
+      const docAt = Date.parse(String(iv.document_at || iv.updated_at || "")) || 0;
       invByCode.set(iv.short_code, {
         number: iv.invoice_number ?? null,
         pdfUrl: iv.invoice_pdf_url ?? null,
         sentAt: iv.updated_at ?? null,
         signedAt: iv.signed_at ?? null,
-        stale: (lastAckByCode.get(iv.short_code) ?? 0) > sentAt,
+        stale: (lastAckByCode.get(iv.short_code) ?? 0) > docAt,
       });
     }
   }

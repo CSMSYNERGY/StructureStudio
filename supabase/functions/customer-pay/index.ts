@@ -160,7 +160,7 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   if (!dPhone || dPhone !== phoneKey(identity.phoneDigits)) return notYours;
 
   const { data: inv, error: iErr } = await admin.from("invoice_sends")
-    .select("invoice_number, status, issued_by, signed_at, updated_at, deposit_cents")
+    .select("invoice_number, status, issued_by, signed_at, updated_at, document_at, deposit_cents")
     .eq("client_id", identity.clientId).eq("short_code", code).maybeSingle();
   if (iErr) return dbFail(req, identity.clientId, "load your invoice", iErr);
   if (!inv || inv.issued_by !== "structurestudio" || !["created", "sent"].includes(String(inv.status))) {
@@ -183,7 +183,8 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
       return json({ error: "There's a change to approve before you can pay — check the change order above." }, 409);
     }
   }
-  const invoiceAt = Date.parse(String(inv.updated_at || "")) || 0;
+  // migration 221: the DOCUMENT's freshness, not when an email last succeeded.
+  const invoiceAt = Date.parse(String(inv.document_at || inv.updated_at || "")) || 0;
   const stale = (cos ?? []).some((c: Record<string, unknown>) =>
     c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt
   );

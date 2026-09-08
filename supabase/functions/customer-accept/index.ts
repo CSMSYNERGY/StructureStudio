@@ -432,7 +432,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     // this read happens here rather than being trusted from the request.
     const { data: inv, error: iErr } = await admin
       .from("invoice_sends")
-      .select("invoice_number, invoice_pdf_url, status, issued_by, signed_at, updated_at")
+      .select("invoice_number, invoice_pdf_url, status, issued_by, signed_at, updated_at, document_at")
       .eq("client_id", identity.clientId)
       .eq("short_code", code)
       .maybeSingle();
@@ -459,7 +459,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         return json({ error: "There's a change to approve before you can sign this invoice — check the change order above." }, 409);
       }
     }
-    const invoiceAt = Date.parse(String(inv.updated_at || "")) || 0;
+    // migration 221: the DOCUMENT's freshness, not when an email last succeeded.
+    const invoiceAt = Date.parse(String(inv.document_at || inv.updated_at || "")) || 0;
     const staleCo = (cos ?? []).some(
       (c) => c.status === "acknowledged" && (Date.parse(String(c.acknowledged_at || "")) || 0) > invoiceAt,
     );

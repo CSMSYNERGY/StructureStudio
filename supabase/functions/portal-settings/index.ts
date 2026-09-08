@@ -285,6 +285,10 @@ const GATES: GateTable = {
   // 2026-09-07: a signature on an AMENDED order goes through this same link, and gating it on
   // orders:'edit' alone would have let someone open a change they could not then get signed.
   text_sign_link:   { any: [{ area: "orders", level: "edit" }, { area: "change_orders", level: "edit" }] },
+  // Rebuild the invoice DOCUMENT from the current amended figures (migration 221). Issuing
+  // paperwork is `orders`, the same area send_invoice sits on -- this reissues a document,
+  // it does not decide whether a change may happen.
+  reissue_invoice:  { area: "orders", level: "edit" },
   // Emails a pending change order to the customer for signature (migration 126).
   // Moved off `orders` onto `change_orders` (2026-09-01) when reps gained orders:edit —
   // amending a signed agreement is the one order power that is granted separately.
@@ -7499,6 +7503,158 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     });
   }
 
+  // ── reissue_invoice: rebuild the invoice document after an approved change ────────────
+  //
+  // ⚠️ THIS IS THE REMEDY THE STALE-INVOICE REFUSAL NAMES, and until 2026-09-08 it did not
+  // exist. Three places refuse a payment when an approved change is newer than the invoice
+  // ("Regenerate and resend it, then take the payment") -- the customer's pay screen, the
+  // invoice signature, and the rep's terminal. But:
+  //
+  //   * an invoice whose email already SENT returned "This design was already invoiced";
+  //   * the retry branch re-sent the STORED pdf, never rebuilding it, and moved the
+  //     staleness timestamp only if the email landed.
+  //
+  // So on an order whose customer email bounces -- an @example.com address, a typo, a
+  // customer with no email at all -- the refusal could never clear and NOBODY could take
+  // payment on that order again. Survivable while amending a signed order was rare; the
+  // change-order rebuild makes it ordinary, and Carolyn's requirement is explicitly that a
+  // change can happen after delivery and final payment.
+  //
+  // The email is BEST-EFFORT here and deliberately not the point: the document is what the
+  // refusal is about, so `document_at` moves when the PDF is rebuilt whether or not anything
+  // is delivered (221). A builder with the customer in front of them can print it.
+  if (action === "reissue_invoice") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "A design code is required." }, 400);
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select("short_code, status, ss_quote_number, image_url, estimate_lines, accepted_snapshot, contact")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "load that design", dErr);
+    if (!d) return json({ error: "Design not found." }, 404);
+
+    const { data: inv, error: iErr } = await admin.from("invoice_sends")
+      .select("invoice_number, invoice_pdf_url, issued_by, status")
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (iErr) return dbFail(req, clientId, "load that invoice", iErr);
+    if (!inv || !inv.invoice_number || String(inv.issued_by) !== "structurestudio") {
+      return json({ error: "There is no StructureStudio invoice on this order to reissue." }, 400);
+    }
+
+    // A change nobody has approved is not on the bill yet, so rebuilding now would print a
+    // document that is wrong in the other direction. Same refusal send_invoice makes.
+    {
+      const { data: pend } = await admin.from("change_orders").select("co_no")
+        .eq("client_id", clientId).eq("short_code", shortCode).in("status", ["draft", "pending_ack"]).limit(1);
+      if (pend?.[0]) {
+        return json({ error: `Change CO-${pend[0].co_no} hasn't been approved yet. Settle that first — reissuing now would print a figure that is about to move.` }, 409);
+      }
+    }
+
+    // The SAME arithmetic send_invoice uses. agreedBaseline + acknowledged changes + the
+    // order's PRE-TAX figure, so the lines foot and the tax row lands on top exactly as they
+    // do on the original document. The fee label is joined in for the fee lines.
+    const agreedLines = agreedBaseline(d).lines;
+    const [coRes, ordRes, csRes] = await Promise.all([
+      admin.from("change_orders")
+        .select("co_no, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, fee_taxable")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "acknowledged"),
+      admin.from("orders").select("total_cents, pretax_subtotal_cents")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("client_settings")
+        .select("business_name, business_phone, business_website, business_address, quote_terms, co_fee_label")
+        .eq("client_id", clientId).maybeSingle(),
+    ]);
+    const feeLabel = String(csRes.data?.co_fee_label ?? "").trim() || "Change order fee";
+    const acked = (coRes.error ? [] : (coRes.data ?? [])).map((c) => ({ ...c, fee_label: feeLabel }));
+    const pretax = ordRes.data?.pretax_subtotal_cents ?? ordRes.data?.total_cents ?? null;
+    const amended = amendedInvoiceDocument(agreedLines, acked, pretax == null ? null : Number(pretax));
+
+    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+    const expectedPdfPrefix = `${supabaseUrl}/storage/v1/object/public/floor-plans/${clientId}/`;
+    const planUrl = d.image_url && String(d.image_url).startsWith(expectedPdfPrefix) ? String(d.image_url) : null;
+
+    let pdfUrl = inv.invoice_pdf_url as string | null;
+    try {
+      const pdfBytes = await buildQuotePdf({
+        docKind: "invoice",
+        business: {
+          name: String(csRes.data?.business_name ?? "").trim() || clientId,
+          phone: csRes.data?.business_phone ?? null,
+          website: csRes.data?.business_website ?? null,
+          address: csRes.data?.business_address ?? null,
+        },
+        estimateNumber: String(inv.invoice_number),
+        dateIso: new Date().toISOString(),
+        // deno-lint-ignore no-explicit-any
+        lines: amended.lines.map((l: any) => ({ ...l, desc: deHtml(String(l?.desc ?? "")) })),
+        discount: amended.discount,
+        tax: amended.tax,
+        // deno-lint-ignore no-explicit-any
+        discountRows: (agreedLines as any)?.discounts?.rows ?? null,
+        quoteTerms: csRes.data?.quote_terms ?? null,
+        planPdfUrl: planUrl,
+      });
+      const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
+      const up = await admin.storage.from("floor-plans")
+        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+      if (up.error) return dbFail(req, clientId, "rebuild the invoice document", up.error);
+      const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
+      pdfUrl = pub?.publicUrl || pdfUrl;
+    } catch (e) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: 500,
+        message: `reissue_invoice PDF build failed: ${(e as Error).message}`, context: { shortCode },
+      }).catch(() => {});
+      return json({ error: "The invoice document couldn't be rebuilt. Try again — if it keeps happening, tell CSM Synergy and mention \"reissue the invoice\"." }, 500);
+    }
+
+    // THE WRITE THAT CLEARS THE REFUSAL. `document_at` — not `updated_at`, which the customer
+    // is shown as "sent" and which must not claim a send that did not happen.
+    const nowIso2 = new Date().toISOString();
+    const { error: recErr } = await admin.from("invoice_sends")
+      .update({ invoice_pdf_url: pdfUrl, document_at: nowIso2 })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (recErr) return dbFail(req, clientId, "record the reissued invoice", recErr);
+
+    // The email is a courtesy on this path, never the point — see the header.
+    let sent = false;
+    let sendReason: string | null = null;
+    const to = String((d.contact as { email?: unknown } | null)?.email ?? "").trim();
+    if (payload?.sendEmail !== false && isEmail(to)) {
+      const owed = amountOwed(agreedLines, acked, ordRes.data?.total_cents == null ? null : Number(ordRes.data.total_cents));
+      const content = invoiceEmail({
+        businessName: String(csRes.data?.business_name ?? "").trim() || clientId,
+        logoUrl: null, phone: csRes.data?.business_phone, website: csRes.data?.business_website,
+        invoiceNumber: String(inv.invoice_number),
+        total: owed ?? "",
+        invoiceUrl: pdfUrl,
+        quoteTerms: csRes.data?.quote_terms,
+        signUrl: myQuotesUrl(clientId, req),
+      });
+      const out = await sendTenantEmail(admin, clientId, {
+        kind: "invoice", shortCode, to, subject: content.subject, html: content.html, text: content.text,
+      });
+      sent = out.sent;
+      if (out.sent) {
+        await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
+          .eq("client_id", clientId).eq("short_code", shortCode);
+      } else {
+        const det = String((out as { error?: unknown }).error ?? "");
+        sendReason = out.reason === "not_active"
+          ? "your sending domain isn't live yet"
+          : /\b4(0[0-9]|2[0-9])\b|validation|invalid|recipient/i.test(det)
+            ? `that email address was rejected (${to})`
+            : "the send didn't go through";
+      }
+    } else if (!isEmail(to)) {
+      sendReason = "this design has no email address";
+    }
+
+    await audit("invoice_reissued", null, `design=${shortCode} invoice=${inv.invoice_number} emailed=${sent}`).catch(() => {});
+    return json({ ok: true, invoiceNumber: inv.invoice_number, invoicePdfUrl: pdfUrl, sent, sendReason });
+  }
+
   if (action === "send_change_order") {
     const coId = String(payload?.changeOrderId ?? "").trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(coId)) {
@@ -7591,7 +7747,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .select("id, label, hex, siding, trim, shingle, metal, allow_custom, is_default, sort_order")
         .eq("client_id", clientId).eq("active", true).order("sort_order", { ascending: true }),
       admin.from("invoice_sends")
-        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at, signed_at, acceptance_id")
+        .select("status, issued_by, invoice_number, invoice_pdf_url, created_at, updated_at, document_at, signed_at, acceptance_id")
         .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
     ]);
     if (colRes.error) return dbFail(req, clientId, "read your colors", colRes.error);
