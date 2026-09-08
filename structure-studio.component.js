@@ -1809,6 +1809,24 @@ function ssRowSection(key) {
   return ssOpeningRank(key) >= 0 ? "openings" : "options";
 }
 
+// Fill in any selection row whose amount is "rate% of every OTHER line" — today only cladding
+// on pct_estimate_total. computeSelectionRows cannot do this itself: it runs before the other
+// lines exist and its own output is part of the base, so the row leaves it with total null and
+// a `pct`, and whoever knows the subtotal finishes the job.
+//
+// ⚠️ `base` must EXCLUDE these rows. A null total contributes 0 to every sum in the product,
+// so a caller that adds up rows before calling this gets the right base for free — which is
+// exactly why the total is null rather than 0 with a flag.
+//
+// Mirrors submit-estimate step 7a, including that every deferred row resolves against the SAME
+// fixed base so two of them cannot compound on each other.
+function ssResolvePctSelectionRows(rows, base) {
+  const b = Number(base) || 0;
+  (rows || []).forEach((r) => {
+    if (r && r.total == null && r.pct != null) r.total = Math.round((Number(r.pct) / 100) * b * 100) / 100;
+  });
+  return rows;
+}
 function computeSelectionRows(sel, paintColors, C, items) {
   const styleKey = sel && sel.style;
   const showP = !!(C && C.showPricing);
@@ -2077,25 +2095,55 @@ function computeSelectionRows(sel, paintColors, C, items) {
   // product. get_config computes `charged` from the real number server-side.
   const cladOpt = resolveCladding(C, styleKey, sel && sel.cladding);
   if (cladOpt && cladOpt.charged) {
-    const cladBasis = String(cladOpt.basis || "wall_sqft");
+    // ALL SEVEN of the product’s pricing methods (221, Carolyn: "add all these as options for
+    // the pricing"), meaning exactly what the Options header says they mean. Cladding is a
+    // whole-building option rather than a placed item, so two of them read as follows:
+    //   • sqft_option — "rate × option area", and the option’s area here is the WALL area:
+    //     perimeter × wall height, which is why a taller-walls upgrade is charged for
+    //     automatically. This is the default, and what `wall_sqft` used to be called.
+    //   • lineal_ft — "rate × total feet"; a whole-building option has no length of its own,
+    //     so its feet are the perimeter. That makes it identical to perimeter_building here,
+    //     deliberately: both names are in the vocabulary and both must price.
+    const cladBasis = String(cladOpt.basis || "sqft_option");
     const stEntryC = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
     // The wall height that is actually BILLED, so the preview and the estimate agree to the
     // penny — which is what submit-estimate’s own comment demands of these two. Same helper
     // insulation uses below; keep the two identical.
     const cladWallH = pricedWallHeightFt(C, stEntryC, styleKey, sel, bW);
-    const cladQty = cladBasis === "wall_sqft" ? Math.round(buildingPerimeter * cladWallH)
-                  : cladBasis === "lineal_ft" ? buildingPerimeter
-                  : 1;
+    const cladWallArea = Math.round(buildingPerimeter * cladWallH);
     const cladRate = cladOpt.rate != null ? Number(cladOpt.rate) : null;
-    const cladUnitWord = cladBasis === "wall_sqft" ? " / sq ft" : cladBasis === "lineal_ft" ? " / ft" : "";
-    if (cladQty > 0) {
+    // qty is what the customer is charged FOR; unitWord names it. pct methods are quantity 1 —
+    // the rate is a percentage, not a per-unit price — matching how layout items render theirs.
+    const cladShape =
+      cladBasis === "sqft_option"        ? { qty: cladWallArea,       unitWord: " / sq ft of wall", bare: "sq ft of wall" }
+      : cladBasis === "sqft_building"    ? { qty: buildingArea,       unitWord: " / sq ft of building", bare: "sq ft" }
+      : cladBasis === "lineal_ft"        ? { qty: buildingPerimeter,  unitWord: " / ft", bare: "ft" }
+      : cladBasis === "perimeter_building" ? { qty: buildingPerimeter, unitWord: " / ft of perimeter", bare: "ft" }
+      : cladBasis === "pct_building_price" ? { qty: 1, unitWord: null, bare: "", pctOf: "building price" }
+      : cladBasis === "pct_estimate_total" ? { qty: 1, unitWord: null, bare: "", pctOf: "subtotal", deferred: true }
+      : /* each */                         { qty: 1, unitWord: " each", bare: "" };
+    if (cladShape.qty > 0) {
+      // pct_estimate_total CANNOT be resolved here: it is "rate% of every OTHER line", and this
+      // function runs BEFORE those lines exist — it is itself part of the base. So the row
+      // carries its rate and a null total, and ssResolvePctSelectionRows fills it in once the
+      // subtotal is known. Every display site must call that; the base-building pass in
+      // computeLayoutPricingRows deliberately must NOT, which is why a null total is the
+      // correct contribution there.
+      const total =
+        !showP || cladRate == null ? null
+        : cladShape.deferred ? null
+        : cladBasis === "pct_building_price" ? Math.round((cladRate / 100) * buildingPrice * 100) / 100
+        : Math.round(cladRate * cladShape.qty * 100) / 100;
       rows.push({
         key: "cladding",
         label: claddingLabelOf(cladOpt, cladOpt.id),
-        qty: cladQty,
-        unit: cladRate != null ? fmtMoney2(cladRate) + cladUnitWord : (cladBasis === "wall_sqft" ? "sq ft" : ""),
-        total: showP && cladRate != null ? Math.round(cladRate * cladQty * 100) / 100 : null,
+        qty: cladShape.qty,
+        unit: cladRate == null ? cladShape.bare
+              : cladShape.pctOf ? cladRate + "% of " + cladShape.pctOf
+              : fmtMoney2(cladRate) + cladShape.unitWord,
+        total: total,
         method: cladBasis,
+        ...(cladShape.deferred && showP && cladRate != null ? { pct: cladRate } : {}),
       });
     }
   }
@@ -9839,6 +9887,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
         return s + amt * q;
       }, 0);
+      // A pct_estimate_total selection row is null here and so contributes 0 — which IS the
+      // base it wants. Resolve it against that base, then sum again, or the asking price would
+      // silently omit a line the estimate charges.
+      const preBase = selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+        + (C.showPricing ? roList.length * roRate : 0)
+        + customTotal;
+      ssResolvePctSelectionRows(selRows, preBase);
       return Math.max(0,
         selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
         + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
@@ -15596,6 +15652,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const discountTotal = (sel.discounts || []).reduce((s, r) => s + Math.max(0, parseFloat(r && r.amount) || 0), 0);
             const deliveryAmt = parseFloat(sel.deliveryFee) || 0;
             const showDelivery = deliveryOpen || String(sel.deliveryFee || "") !== "";
+            // Any "% of subtotal" selection row is still unresolved at this point and reads as
+            // 0 in the sum below — which is precisely the base it is a percentage OF. Fill it in
+            // first, against a base that excludes delivery and discounts exactly as
+            // submit-estimate step 7a does, then take the subtotal with it included.
+            ssResolvePctSelectionRows(selRows,
+              selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+              + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
+              + (C.showPricing ? roList.length * roRate : 0)
+              + customTotal);
             // Mirrors the estimate's pre-tax total: all line items + delivery − discounts.
             const subtotal = Math.max(0,
               selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)

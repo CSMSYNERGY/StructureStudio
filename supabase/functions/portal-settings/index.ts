@@ -3426,7 +3426,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!stRes.data) return json({ error: "That building style is not in your catalog." }, 400);
 
     const CLADDING_IDS = new Set(["panel", "lap", "batten", "agpanel"]);
-    const BASES = new Set(["wall_sqft", "lineal_ft", "each"]);
+    // The product's shared pricing vocabulary (221). Kept as an explicit set rather than the
+    // pricing_method enum: the values match it deliberately, but a value added to that enum for
+    // another table must not silently become offerable here with no implementation behind it.
+    const BASES = new Set(["each", "lineal_ft", "sqft_option", "sqft_building",
+                           "perimeter_building", "pct_building_price", "pct_estimate_total"]);
     let saved = 0; const skipped: string[] = [];
     const seen = new Set<string>();
     let i = 0;
@@ -3458,7 +3462,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const patch = {
         label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
         rate,
-        basis: basisRaw || "wall_sqft",
+        basis: basisRaw || "sqft_option",
         taxable: row?.taxable !== false,
         active: row?.active !== false,
         internal_only: row?.internalOnly === true,

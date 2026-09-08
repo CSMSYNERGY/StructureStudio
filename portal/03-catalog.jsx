@@ -3586,13 +3586,24 @@ const SS_CLADDING_ROWS = [
   { id: "batten", label: "Board & Batten" },
   { id: "agpanel", label: "Metal" },
 ];
-// wall_sqft is perimeter × wall height — the same geometry the Insulation card's Walls row
-// uses, so a taller-wall upgrade is picked up without a second rule. It is NOT the shared
-// pricing_method enum: that enum's `sqft_building` is the FOOTPRINT, and nobody clads a floor.
+// The product's SHARED pricing vocabulary, all seven of it (Carolyn 2026-09-07: "add all these
+// as options for the pricing"). Same names and same meanings as the Options header, which is
+// rendered above the table so a builder reads the definitions in place.
+//
+// Cladding is a whole-BUILDING option rather than something placed on the plan, so two of the
+// seven need saying out loud, and the header does:
+//   • sqft option — the option's area IS the wall area: perimeter × wall height.
+//   • lineal ft — a whole-building option has no length of its own, so its feet are the
+//     perimeter, which makes it the same sum as perimeter building. Both names are in the
+//     vocabulary and both price; the duplication is the vocabulary's, not ours.
 const SS_CLADDING_BASES = [
-  ["wall_sqft", "per sq ft of wall"],
-  ["lineal_ft", "per lineal ft"],
-  ["each", "flat"],
+  ["sqft_option", "sqft option — per sq ft of wall"],
+  ["sqft_building", "sqft building"],
+  ["lineal_ft", "lineal ft"],
+  ["perimeter_building", "perimeter building"],
+  ["each", "each"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
 ];
 
 function CladdingView({ viewingLabel = null, clientId = null }) {
@@ -3625,7 +3636,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
           builtIn: c.label,
           labelOverride: (r && r.label_override) || "",
           rate: r && r.rate != null ? String(r.rate) : "",
-          basis: (r && r.basis) || "wall_sqft",
+          basis: (r && r.basis) || "sqft_option",
           taxable: !r || r.taxable !== false,
           active: !r || r.active !== false,
           internalOnly: !!(r && r.internal_only),
@@ -3685,7 +3696,7 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
             <thead><tr>
               <th style={S.th}>Cladding</th>
               <th style={S.th} title="What the customer sees this called. Leave blank to use our name.">Shown as</th>
-              <th style={S.th} title="Wall square footage is the perimeter times the wall height, so a taller-walls upgrade is charged for automatically.">How it&rsquo;s priced</th>
+              <th style={S.th} title="The same seven methods the rest of Options uses — the definitions are above the table.">How it&rsquo;s priced</th>
               <th style={S.th} title="Blank = you do not offer it on this style. 0 = included at no charge. Anything else is an upcharge.">Rate (USD)</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page.">Internal only</th>
               <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this.">Taxable</th>
@@ -3700,8 +3711,11 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
                       style={{ ...S.input, width: 170 }} />
                   </td>
                   <td style={S.td}>
+                    {/* 230, not 160: "sqft option — per sq ft of wall" is the default and the
+                        longest, and a clipped method name is the one thing on this row a
+                        builder cannot afford to misread. */}
                     <select value={r.basis} onChange={(e) => setRow(st.id, i, "basis", e.target.value)}
-                      style={{ ...S.input, width: 160 }}>
+                      style={{ ...S.input, width: 230 }}>
                       {SS_CLADDING_BASES.map(([v, lbl]) => <option key={v} value={v}>{lbl}</option>)}
                     </select>
                   </td>
@@ -3741,10 +3755,26 @@ function CladdingView({ viewingLabel = null, clientId = null }) {
         The siding a customer can choose, per building style — not every style takes every
         cladding, and metal in particular is far from universal. Leave a rate <b>blank</b> and you
         do not offer it on that style; enter <b>0</b> and it is included at no charge; anything
-        else is an upcharge. <b>Per sq ft of wall</b> is the perimeter &times; the wall height, so
-        a taller-walls upgrade is charged for automatically. Rename any of them under <b>Shown
+        else is an upcharge. Rename any of them under <b>Shown
         as</b> to whatever your customers know it as &mdash; the drawing and the 3D view are
         unaffected, because the siding itself is still the same one of our four.
+      </p>
+      {/* The SAME wording as the Options header, because it is the same vocabulary. Two
+          sentences are appended for cladding specifically: a whole-building option has no area
+          or length of its own, so `sqft option` and `lineal ft` need their meaning stated here
+          or a builder has to guess which one charges what. */}
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        Set how cladding is priced &mdash;<b>each</b> = rate &times; count; <b>lineal ft</b> = rate
+        &times; total feet; <b>sqft option</b> = rate &times; option area;<b>sqft building</b> =
+        rate &times; (width &times; depth); <b>perimeter building</b> = rate &times; 2 &times;
+        (width + depth); <b>pct building price</b> = (rate &divide; 100) &times; base building
+        price; <b>pct estimate total</b> = (rate &divide; 100) &times; subtotal of all other lines,
+        resolved last.
+        <br />
+        For cladding the <b>option area</b> is the <b>wall</b> area &mdash; the perimeter &times;
+        the wall height &mdash; so a taller-walls upgrade is charged for automatically. And since a
+        whole building has no length of its own, <b>lineal ft</b> uses the perimeter, which makes
+        it the same sum as <b>perimeter building</b>.
       </p>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" · ")}</div>}</div>}

@@ -1012,6 +1012,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
   }
 
+  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
+  // HERE rather than beside the layout add-ons that also use it, because cladding registers into
+  // it and `const` has no hoisting — a declaration below the first use is a TDZ ReferenceError
+  // at runtime, on the one code path that would only fire for a builder who chose that method.
+  // deno-lint-ignore no-explicit-any
+  const deferredPctLines: { item: any; rate: number }[] = [];
+
   // ── Cladding (207) ──────────────────────────────────────────────────────────────────────
   // The third SELECTION charge, and it copies the wall-height shape exactly: nothing is on the
   // floor plan, so this sits outside pushItem and the inclusion machinery, and the rate is
@@ -1044,32 +1051,53 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
     const cladRate = Number(sc.rate) || 0;
     if (cladRate > 0) {
-      const basis = String(sc.basis || "wall_sqft");
-      // wall_sqft is perimeter x wall height — the SAME geometry insulation's Walls row uses,
-      // deliberately, so a taller-wall upgrade lands on both without a second rule.
-      const cladQty = basis === "wall_sqft" ? Math.round(buildingPerimeter * resolvedWallHeightFt)
-                    : basis === "lineal_ft" ? buildingPerimeter
-                    : 1;
-      const cladUnit = basis === "wall_sqft" ? "sq ft of wall" : basis === "lineal_ft" ? "ft of wall" : "";
+      // ALL SEVEN pricing methods (221), meaning exactly what the Options header says. Two read
+      // specially because cladding is a whole-building option rather than a placed item:
+      // sqft_option's "option area" is the WALL area (perimeter x wall height, so a taller-wall
+      // upgrade is charged for automatically), and lineal_ft's "total feet" is the perimeter,
+      // which makes it identical to perimeter_building here on purpose — both names are in the
+      // vocabulary and both must price. MIRRORS the designer's cladShape switch exactly; if one
+      // side changes, change both, or the customer is shown one number and billed another.
+      const basis = String(sc.basis || "sqft_option");
+      const cladWallArea = Math.round(buildingPerimeter * resolvedWallHeightFt);
+      const cladShape: { qty: number; unit: string } =
+        basis === "sqft_option"          ? { qty: cladWallArea,      unit: "sq ft of wall" }
+        : basis === "sqft_building"      ? { qty: buildingArea,      unit: "sq ft of building" }
+        : basis === "lineal_ft"          ? { qty: buildingPerimeter, unit: "ft of wall" }
+        : basis === "perimeter_building" ? { qty: buildingPerimeter, unit: "ft of perimeter" }
+        : /* each / pct_* */               { qty: 1,                 unit: "" };
       // The tenant's own name for it, falling back to the built-in — the customer must read the
       // same words on the estimate that they read on the designer.
       const cladName = (sc.label_override || "").trim()
         || (String((selections as Record<string, unknown>).cladding ?? "").trim())
         || claddingId;
-      if (cladQty > 0) {
-        targetItems.push(tagLine({
+      if (cladShape.qty > 0) {
+        // pct_building_price resolves here (the base price is already known). pct_estimate_total
+        // CANNOT: it is a share of every OTHER line, so it goes out at 0 and joins the existing
+        // step 7a pass, which recomputes it against a fixed base — the same machinery layout
+        // add-ons have used since 006, and the reason multiple percentage lines never compound.
+        const cladAmount =
+          basis === "pct_building_price" ? (cladRate / 100) * buildingPrice
+          : basis === "pct_estimate_total" ? 0
+          : cladRate;
+        const cladLine = tagLine({
           name: cladName,
-          qty: cladQty,
-          amount: cladRate,
+          qty: cladShape.qty,
+          amount: cladAmount,
           priceId: "",
           productId: "",
           attachments: [],
           currency: "USD",
           type: "one_time",
-          description: cladUnit
-            ? `${cladQty} ${cladUnit} at $${cladRate.toFixed(2)} each`
-            : `${cladName} for this building`,
-        }, { kind: "cladding", nonTaxable: sc.taxable === false }));
+          description:
+            basis === "pct_building_price" ? `${cladRate}% of the building price`
+            : basis === "pct_estimate_total" ? `${cladRate}% of the rest of this quote`
+            : cladShape.unit
+              ? `${cladShape.qty} ${cladShape.unit} at $${cladRate.toFixed(2)} each`
+              : `${cladName} for this building`,
+        }, { kind: "cladding", nonTaxable: sc.taxable === false });
+        targetItems.push(cladLine);
+        if (basis === "pct_estimate_total") deferredPctLines.push({ item: cladLine, rate: cladRate });
       }
     }
   }
@@ -1148,7 +1176,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   //   pct_building_price -> qty=count,     amount=(rate/100) × base building price
   //   pct_estimate_total -> qty=count,     amount resolved LAST against the running subtotal
   // An item with no configured pricing row (or rate) lands at $0. GHL products are never consulted.
-  const deferredPctLines: { item: any; rate: number }[] = [];
+  // (declared above the cladding block — `const` is not hoisted, and cladding registers here)
   const pushItem = (
     search: string | string[],
     itemKey: string | undefined,

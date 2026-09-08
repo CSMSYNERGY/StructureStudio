@@ -60,26 +60,40 @@ var WIDTHS   = [8, 10, 12, 14];
 var LENGTHS  = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40];
 var BASEWALL = [6.4, 6.5, 7, 8];        // every distinct building_styles.d3.wallHeightFt
 var DELTAS   = [0, 6, 12];              // every offered wall-height increase
-var BASES    = ["wall_sqft", "lineal_ft", "each"];
-var RATE     = 1.75;
+// ALL SEVEN of the product's pricing methods (221). pct_estimate_total is the odd one: it is
+// "rate% of every OTHER line", so the preview leaves it null and a display site resolves it —
+// the audit does the same, against a base it fixes itself, exactly as submit-estimate step 7a
+// resolves it against a base of every non-deferred line.
+var BASES      = ["sqft_option", "sqft_building", "lineal_ft", "perimeter_building", "each",
+                  "pct_building_price", "pct_estimate_total"];
+var RATE       = 1.75;
+var BASE_PRICE = 1000;   // the size's basePrice, for pct_building_price
+var PCT_BASE   = 4200;   // a stand-in subtotal of every other line, for pct_estimate_total
 
 // ── The SERVER's arithmetic, transcribed from submit-estimate's cladding block ──
 //   resolvedWallHeightFt starts at the style's own height (220/this session's fix) and the
 //   increase is added and clamped; qty follows the basis; a rate of 0 emits no line.
 function serverExpect(w, l, baseWall, deltaIn, basis, rate) {
-  var perim = 2 * (w + l);
+  var perim = 2 * (w + l), area = w * l;
   var wall = baseWall;
   if (deltaIn > 0) wall = Math.max(5, Math.min(14, wall + deltaIn / 12));
-  var qty = basis === "wall_sqft" ? Math.round(perim * wall) : basis === "lineal_ft" ? perim : 1;
+  var qty = basis === "sqft_option" ? Math.round(perim * wall)
+          : basis === "sqft_building" ? area
+          : (basis === "lineal_ft" || basis === "perimeter_building") ? perim
+          : 1;
   if (!(rate > 0) || !(qty > 0)) return null;
-  return { qty: qty, amount: Math.round(rate * qty * 100) / 100 };
+  // The LINE total (server: qty x amount). pct methods are qty 1 with the whole sum in amount.
+  var lineTotal = basis === "pct_building_price" ? (rate / 100) * BASE_PRICE
+                : basis === "pct_estimate_total" ? (rate / 100) * PCT_BASE
+                : rate * qty;
+  return { qty: qty, amount: Math.round(lineTotal * 100) / 100 };
 }
 
 (async function () {
   var src = await (await fetch("/structure-studio.component.compiled.js")).text();
   var head = "(function(){if(!window.__ssBootBlocked){";
   var i = src.indexOf(head) + head.length;
-  var inj = "window.__A={};[['computeSelectionRows',()=>computeSelectionRows],['ssRowSection',()=>ssRowSection]]"
+  var inj = "window.__A={};[['computeSelectionRows',()=>computeSelectionRows],['ssRowSection',()=>ssRowSection],['ssResolvePctSelectionRows',()=>ssResolvePctSelectionRows]]"
           + ".forEach(function(p){try{window.__A[p[0]]=p[1]()}catch(e){window.__A[p[0]]=null}});";
   (0, eval)(src.slice(0, i) + inj + src.slice(i));
   var A = window.__A;
@@ -100,11 +114,15 @@ function serverExpect(w, l, baseWall, deltaIn, basis, rate) {
       wallHeightOptions: delta > 0 ? { s: [{ deltaIn: delta, ratePerLf: 1 }] } : {},
       claddingOptions: { s: [{ id: "lap", rate: RATE, basis: basis, label: null, charged: true }] },
     };
-    C.sizePricing.s[label] = { widthFt: w, lengthFt: l, basePrice: 1000 };
+    C.sizePricing.s[label] = { widthFt: w, lengthFt: l, basePrice: BASE_PRICE };
     var sel = { style: "s", size: label, cladding: "lap", paint: "No Paint" };
     if (delta > 0) sel.wallHeightDeltaIn = delta;
 
-    var row = A.computeSelectionRows(sel, {}, C, []).filter(function (r) { return r.key === "cladding"; })[0] || null;
+    var selRows = A.computeSelectionRows(sel, {}, C, []);
+    // What a display site does: resolve any "% of subtotal" row against the subtotal of the
+    // others. A non-deferred row is untouched by this, so calling it unconditionally is right.
+    A.ssResolvePctSelectionRows(selRows, PCT_BASE);
+    var row = selRows.filter(function (r) { return r.key === "cladding"; })[0] || null;
     var exp = serverExpect(w, l, baseWall, delta, basis, RATE);
     cases++;
     var got = row ? { qty: row.qty, amount: row.total } : null;
@@ -125,14 +143,14 @@ function serverExpect(w, l, baseWall, deltaIn, basis, rate) {
       buildingStyles: [{ value: "s", label: "S", d3: { wallHeightFt: bw } }],
       sizePricing: { s: { "12x24": { widthFt: 12, lengthFt: 24, basePrice: 1000 } } },
       wallHeightOptions: {},
-      claddingOptions: { s: [{ id: "lap", rate: RATE, basis: "wall_sqft", label: null, charged: true }] } };
+      claddingOptions: { s: [{ id: "lap", rate: RATE, basis: "sqft_option", label: null, charged: true }] } };
     // A customer who set 10 ft in the old 3D footer, and bought no increase.
     var selL = { style: "s", size: "12x24", cladding: "lap", paint: "No Paint", wallHeight: 10 };
     var rowL = A.computeSelectionRows(selL, {}, CL, []).filter(function (r) { return r.key === "cladding"; })[0] || null;
-    var expL = serverExpect(12, 24, bw, 0, "wall_sqft", RATE);
+    var expL = serverExpect(12, 24, bw, 0, "sqft_option", RATE);
     var gotL = rowL ? { qty: rowL.qty, amount: rowL.total } : null;
     if (JSON.stringify(gotL) !== JSON.stringify(expL)) {
-      legacyFails.push({ building: "12x24", baseWall: bw, delta: "legacy 10ft", basis: "wall_sqft",
+      legacyFails.push({ building: "12x24", baseWall: bw, delta: "legacy 10ft", basis: "sqft_option",
                          preview: JSON.stringify(gotL), estimate: JSON.stringify(expL) });
     }
   }
@@ -143,19 +161,23 @@ function serverExpect(w, l, baseWall, deltaIn, basis, rate) {
     var C0 = { showPricing: true, colors: [],
       buildingStyles: [{ value: "s", label: "S", d3: { wallHeightFt: 8 } }],
       sizePricing: { s: { "12x24": { widthFt: 12, lengthFt: 24, basePrice: 1000 } } },
-      claddingOptions: { s: [{ id: "lap", rate: 0, basis: "wall_sqft", label: null, charged: false }] } };
+      claddingOptions: { s: [{ id: "lap", rate: 0, basis: "sqft_option", label: null, charged: false }] } };
     if (A.computeSelectionRows({ style: "s", size: "12x24", cladding: "lap", paint: "No Paint" }, {}, C0, [])
          .some(function (r) { return r.key === "cladding"; })) zeroFails++;
   }
 
   // SPOT: the transcription above, checked against numbers computed independently in SQL.
   var SPOT = [
-    { w: 12, l: 24, baseWall: 6.5, delta: 0,  basis: "wall_sqft",  qty: 468, amount: 819 },
-    { w: 12, l: 24, baseWall: 6.5, delta: 12, basis: "wall_sqft",  qty: 540, amount: 945 },
-    { w: 8,  l: 8,  baseWall: 6.4, delta: 0,  basis: "wall_sqft",  qty: 205, amount: 358.75 },
-    { w: 14, l: 40, baseWall: 8,   delta: 6,  basis: "wall_sqft",  qty: 918, amount: 1606.5 },
-    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "lineal_ft",  qty: 72,  amount: 126 },
-    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "each",       qty: 1,   amount: 1.75 },
+    { w: 12, l: 24, baseWall: 6.5, delta: 0,  basis: "sqft_option",        qty: 468, amount: 819 },
+    { w: 12, l: 24, baseWall: 6.5, delta: 12, basis: "sqft_option",        qty: 540, amount: 945 },
+    { w: 8,  l: 8,  baseWall: 6.4, delta: 0,  basis: "sqft_option",        qty: 205, amount: 358.75 },
+    { w: 14, l: 40, baseWall: 8,   delta: 6,  basis: "sqft_option",        qty: 918, amount: 1606.5 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "sqft_building",      qty: 288, amount: 504 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "lineal_ft",          qty: 72,  amount: 126 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "perimeter_building", qty: 72,  amount: 126 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "each",               qty: 1,   amount: 1.75 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "pct_building_price", qty: 1,   amount: 17.5 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "pct_estimate_total", qty: 1,   amount: 73.5 },
   ];
   var spotFails = SPOT.filter(function (s) {
     var e = serverExpect(s.w, s.l, s.baseWall, s.delta, s.basis, RATE);
