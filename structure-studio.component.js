@@ -12798,7 +12798,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         p_bldg_h: bldgH,
         p_image_url: imageUrl,
       });
-      if (dbErr) throw new Error(`Save failed: ${dbErr.message}`);
+      // A GATE REFUSAL IS NOT A FAULT, and must not wear a fault's words (migration 220).
+      // save_design refuses when the builder's own rules hold the order shut, and its message
+      // is a sentence written for a person — "Save failed: …" in front of it turns a policy
+      // into what reads like a broken product. The amendment panel normally stops a rep
+      // reaching this at all; this is the backstop, and the backstop should still read well.
+      if (dbErr) {
+        const raw = String((dbErr && dbErr.message) || "");
+        throw new Error(/unlock it before it can be changed|this design is locked/i.test(raw)
+          ? raw
+          : `Save failed: ${raw}`);
+      }
 
       // 5. Update the URL so a refresh / share-link reopens the same design.
       //    Keep the ?client= tenant param so the link reopens with the right branding.
