@@ -944,9 +944,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       // manual change order's typed words are never touched.
       var dtxt = String(co.description);
       if (co.totalBefore != null || co.totalAfter != null) {
-        dtxt = dtxt.replace(/
-?Total:[^
-]*$/, "");
+        // Split-and-pop rather than a multiline regex: this file is hand-written HTML with
+        // no build step and no linter behind it, and an escape that survives one edit and
+        // not the next takes the WHOLE page down for every customer. Plain string work
+        // cannot be mangled the same way.
+        var dlines = dtxt.split(String.fromCharCode(10));
+        if (dlines.length > 1 && /^Total:/.test(dlines[dlines.length - 1])) dlines.pop();
+        dtxt = dlines.join(String.fromCharCode(10));
       }
       desc.textContent = dtxt;   // textContent — never innerHTML
       box.appendChild(desc);
