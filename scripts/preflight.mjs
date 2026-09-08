@@ -719,6 +719,10 @@ function run(files) {
   // The permission model's two hand-maintained copies must agree. See checkAreaMirror().
   errors.push(...checkAreaMirror(files));
 
+  // ...and every contacts write must know which ROW it is allowed to touch. See
+  // checkContactRowScope() — this is the guard for the write half of contacts:'own'.
+  errors.push(...checkContactRowScope(files));
+
   // Cache-buster lockstep between the two hosts of the shared component artifact. Busters
   // are CONTENT HASHES now, rewritten by `npm run compile`; whether each hash matches its
   // artifact's real bytes is the compile drift gate's job (it recompiles and compares) —
@@ -1424,6 +1428,95 @@ function checkAreaMirror(files, inject = null) {
     }
   }
 
+  return errors;
+}
+
+/**
+ * Every contacts:'edit' action must declare how to find the row it touches.
+ *
+ * WHY THIS IS A PUSH-BLOCKING RULE AND NOT A CODE REVIEW NOTE. `contacts:'own'` became a
+ * WRITE scope on 2026-09-07 (access.ts's ownWrites flag), so a person who may only touch
+ * their own customers now PASSES every contacts:'edit' gate. The gate is the floor — "may
+ * you do this kind of thing" — and portal-settings' CONTACT_ROW_SCOPE table is the only
+ * thing that answers "to WHICH row". An action gated contacts:'edit' and absent from that
+ * table is not refused and does not error: it runs, unnarrowed, against the whole tenant's
+ * customer list. That is the entire failure mode of the feature, in one forgotten line.
+ *
+ * It is the same argument the GATES cross-check already makes, one level down, and it is
+ * checked the same way: read both tables out of the source and compare them. The two halves
+ * live ~5000 lines apart in one file, which is exactly the distance at which people stop
+ * updating the second one.
+ *
+ * Deliberately NOT checked here: whether the declared resolver is CORRECT. A rule that
+ * parsed intent would be guessing; this one asserts only that the author was made to think
+ * about the row, which is the step that gets skipped.
+ */
+function checkContactRowScope(files, inject = null) {
+  const errors = [];
+  const F = "supabase/functions/portal-settings/index.ts";
+  const src = (inject && inject.src) ?? files[F] ?? readIfExists(F);
+  if (!src) {
+    errors.push(`${F}: missing — the contacts row-scope check has no subject and is silently `
+      + "inert; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+
+  // GATES entries requiring contacts at 'edit'. Tolerates the `{ any: [...] }` / `{ all: [...] }`
+  // shapes by scanning each entry's whole value for a contacts/edit pair.
+  const gatesAt = src.indexOf(GATES_DECL);
+  if (gatesAt < 0) {
+    errors.push(`${F}: no GATES table found — the contacts row-scope check cannot run; `
+      + "re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gatesEnd = src.indexOf("\n};", gatesAt);
+  if (gatesEnd < 0) {
+    errors.push(`${F}: the GATES table's braces never close — the contacts row-scope check `
+      + "is blind; re-anchor it in scripts/preflight.mjs");
+    return errors;
+  }
+  const gatesSrc = src.slice(gatesAt, gatesEnd);
+  const needsScope = [];
+  for (const line of gatesSrc.split("\n")) {
+    const m = /^\s*([a-z0-9_]+)\s*:/i.exec(line);
+    if (!m) continue;
+    if (/area:\s*"contacts"\s*,\s*level:\s*"edit"/.test(line)) needsScope.push(m[1]);
+  }
+  if (!needsScope.length) {
+    errors.push(`${F}: parsed ZERO contacts:'edit' actions out of GATES — the entry shape `
+      + "changed and this rule is now blind; re-anchor it rather than trusting a clean run");
+    return errors;
+  }
+
+  const scopeMatch = /const\s+CONTACT_ROW_SCOPE\s*:/.exec(src);
+  if (!scopeMatch) {
+    errors.push(`${F}: cannot find \`const CONTACT_ROW_SCOPE\` — contacts:'own' is a WRITE `
+      + "scope, so without that table every contacts:'edit' action runs unnarrowed against "
+      + "the whole tenant's customer list. Re-anchor this rule, or restore the table.");
+    return errors;
+  }
+  const scopeEnd = src.indexOf("\n  };", scopeMatch.index);
+  const scopeSrc = scopeEnd < 0 ? "" : src.slice(scopeMatch.index, scopeEnd);
+  const declared = new Set(
+    [...scopeSrc.matchAll(/^\s{4}([a-z0-9_]+)\s*:/gim)].map((m) => m[1]),
+  );
+
+  for (const a of needsScope) {
+    if (!declared.has(a)) {
+      errors.push(`${F}: action "${a}" is gated contacts:'edit' but is MISSING from `
+        + "CONTACT_ROW_SCOPE. contacts:'own' writes, so this action currently runs "
+        + "unnarrowed for a dealer — against every customer on the tenant, not just theirs. "
+        + "Declare how to find its contact (contactKeys / codeKeys / rowTable), or mark it "
+        + "tenantWide if it genuinely is not per-contact.");
+    }
+  }
+  for (const a of declared) {
+    if (!needsScope.includes(a)) {
+      errors.push(`${F}: action "${a}" is in CONTACT_ROW_SCOPE but is not gated `
+        + "contacts:'edit' in GATES — either its gate was loosened (and the row scope is now "
+        + "dead code guarding nothing) or the name is a typo, which reads identically.");
+    }
+  }
   return errors;
 }
 
@@ -2451,6 +2544,42 @@ if (process.argv.includes("--self-test")) {
     console.error("self-test FAILED: a renamed TITLES export reported clean instead of blind");
     process.exit(1);
   }
+  // ── contacts row scope ──────────────────────────────────────────────────────────────
+  const crsFile = "supabase/functions/portal-settings/index.ts";
+  const crsSrc = readIfExists(crsFile);
+  if (!crsSrc) {
+    console.error("self-test FAILED: portal-settings is missing — the contacts row-scope rule "
+      + "has no subject and is silently inert");
+    process.exit(1);
+  }
+  // (a) CLEAN on the real file. If this fires, a contacts write really is unnarrowed.
+  const crsClean = checkContactRowScope({});
+  if (crsClean.length) {
+    console.error("self-test FAILED: a contacts:'edit' action is not row-scoped today:");
+    for (const e of crsClean) console.error("  " + e);
+    process.exit(1);
+  }
+  // (b) FIRES when an action is dropped from CONTACT_ROW_SCOPE — the whole point of the rule.
+  const dropScope = crsSrc.replace(/^\s{4}crm_save_note:.*$/m, "");
+  if (dropScope === crsSrc) {
+    console.error("self-test FAILED: could not remove an entry from CONTACT_ROW_SCOPE — the "
+      + "table's shape changed and this assertion no longer tests anything");
+    process.exit(1);
+  }
+  if (!checkContactRowScope({}, { src: dropScope })
+        .some((e) => /"crm_save_note" is gated contacts:'edit' but is MISSING/.test(e))) {
+    console.error("self-test FAILED: an unnarrowed contacts write did not fire");
+    process.exit(1);
+  }
+  // (c) REFUSES TO RUN BLIND if the table is renamed away, rather than reporting clean.
+  if (!checkContactRowScope({}, { src: crsSrc.replace("const CONTACT_ROW_SCOPE:", "const CONTACT_ROW_SCOPE_OLD:") })
+        .some((e) => /cannot find `const CONTACT_ROW_SCOPE`/.test(e))) {
+    console.error("self-test FAILED: a renamed CONTACT_ROW_SCOPE reported clean instead of blind");
+    process.exit(1);
+  }
+  console.log("self-test passed: every contacts:'edit' action is row-scoped, the rule fires on "
+    + "one that is not, and it refuses to run blind if the table is renamed");
+
   console.log("self-test passed: the permission-model mirror agrees today, fires on an area "
     + "missing from SQL, on a level-vocabulary mismatch, on a job title missing from either "
     + "SQL copy, is not fooled by a header comment naming the tables, and refuses to run "

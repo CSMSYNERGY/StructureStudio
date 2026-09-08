@@ -23,6 +23,25 @@
 //                  contributes NOTHING there and the filter is added by hand at the read;
 //   3. the browser — portal/01-core.jsx's row-scope registry, a courtesy like the nav.
 // Change the meaning of 'own' and all three move together. See ownContactsOnly() below.
+//
+// ── AND SINCE 2026-09-07 IT IS A WRITE SCOPE TOO, WHICH ADDS A FOURTH ───────────────────
+// Carolyn: "Yes, let dealers edit their own contacts." 'own' shipped read-only two days
+// earlier — this module said in as many words that making it write "would mean per-row
+// ownership checks on eleven write actions", and that is exactly what it now means. The
+// `ownWrites` flag on the area says the level writes; canEdit reads it, so contacts:'own'
+// satisfies the eleven contacts:'edit' gates that used to refuse it.
+//
+// ⛔ THE FLAG ALONE IS A BLANKET EDIT. Passing a gate says the person may write SOMETHING;
+// nothing in this module can say which rows, because nothing here has a row in its hands.
+// The narrowing is the fourth enforcement point:
+//   4. portal-settings' CONTACT_ROW_SCOPE — every contacts:'edit' action declares how to
+//      find the contact it touches, and an own-scoped caller is refused when that contact
+//      is not theirs. It is a TABLE for the same reason GATES is: a check-per-branch is a
+//      check somebody eventually forgets, and preflight refuses a push where a
+//      contacts:'edit' action is missing from it.
+// A new contacts write action is therefore a TWO-file change, and forgetting the second is
+// the one mistake here that hands a dealer the whole customer list. The gate fails closed;
+// so does the row scope.
 
 export type Level = "none" | "view" | "edit" | "own";
 export type Title =
@@ -62,6 +81,24 @@ export interface Area {
    * and the server agrees instead of trusting the screen.
    */
   byTitleOnly?: boolean;
+  /**
+   * Does this area's 'own' level WRITE, or only read?
+   *
+   * 'own' means "your rows only" and says nothing by itself about what you may do to them,
+   * so each area that offers the level has to answer this. They answer differently and both
+   * answers are deliberate:
+   *   contacts    — ownWrites. Your customers are yours to work: edit the record, add notes
+   *                 and activities, send SMS and email, attach files. Somebody else's
+   *                 customers are not in your list at all.
+   *   commissions — NOT ownWrites. 'own' there means "see your own payout"; a rep editing
+   *                 their own commission is the thing the whole feature exists to prevent.
+   *
+   * Read by canEdit() and by mayGrant(). It is NOT the row filter — that is ownContactsOnly()
+   * and the three enforcement points it names. This flag only answers "may they write at
+   * all"; "to which rows" is a separate question with a separate mechanism, and an area that
+   * sets this flag without wiring the row filter has granted a blanket edit.
+   */
+  ownWrites?: boolean;
   /**
    * Belongs to CSM Synergy's OWN tenants and must never appear on a builder's Team screen.
    *
@@ -104,22 +141,31 @@ export const AREAS: Area[] = [
   // visible because its CUSTOMER is. So `designs` keeps none/view/edit and answers "may you
   // open the Pipeline at all", while this row answers "whose rows are in it".
   //
-  // ⚠️ 'own' IS A READ SCOPE, EXACTLY AS IT IS ON COMMISSIONS. RANK puts it level with
-  // 'view', so canEdit() is false for it and every contacts:'edit' action — the contact
-  // editor, notes, activities, SMS, email, customer files — is REFUSED for someone set to
-  // 'own'. That is a consequence, not an oversight, and it is written down here so the next
-  // reader does not "fix" it by hand: Carolyn asked about SEEING, four times in three
-  // sentences, and making 'own' a write scope would mean per-row ownership checks on eleven
-  // write actions plus a level that outranks 'view' — neither of which she has been asked
-  // for. A builder who needs dealers that can WORK their own records but see nobody else's
-  // is a second decision, and it is hers.
+  // ⚠️ 'own' HERE IS A READ *AND WRITE* SCOPE — unlike commissions, where it reads only.
+  // This paragraph used to record the opposite and to name the reason: Carolyn had asked
+  // about SEEING, four times in three sentences, and a write scope "would mean per-row
+  // ownership checks on eleven write actions". It called that "a second decision, and it is
+  // hers". She made it on 2026-09-07 — "Yes, let dealers edit their own contacts" — and the
+  // eleven checks are the CONTACT_ROW_SCOPE table in portal-settings.
+  //
+  // So 'own' now means: the contact editor, notes, activities, SMS, email and customer
+  // files, ON YOUR OWN CUSTOMERS, and nobody else's rows are in your list to begin with.
+  // The `ownWrites` flag above is what makes canEdit() true; the row scoping is separate and
+  // is NOT optional — see the module header's fourth enforcement point.
+  //
+  // ⚠️ ONE SWITCH, NOT TWO, AND THAT WAS THE CHOICE. Offered a fifth level so read-only-own
+  // could survive alongside a writing one, Carolyn picked redefining this one: "your
+  // customers are yours to work". Nobody held a contacts override at the time (checked), so
+  // nothing silently widened. Reinstating a read-only-own means a NEW level, never quietly
+  // narrowing this one back — every dealer would lose their notes and SMS on the next page
+  // load, with nothing anywhere to notice.
   //
   // ADDED to the vocabulary rather than replacing 'view'. effectiveAccess DISCARDS a stored
   // override whose level is not in the area's list, so dropping 'view' would silently drop
   // every stored {"contacts":"view"} back to the title preset — 'none' for a crew leader —
   // on the next page load, with nothing anywhere to notice.
-  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired — 'Own only' hides other reps' customers",
-    levels: ["none", "own", "view", "edit"] },
+  { key: "contacts",          label: "Contacts",           group: "workspace", hint: "Everyone who has enquired — 'Own only' means they work their own customers and see nobody else's",
+    levels: ["none", "own", "view", "edit"], ownWrites: true },
   { key: "inventory",         label: "Inventory",          group: "workspace", hint: "Buildings on your lots",              levels: RVE },
   { key: "orders",            label: "Orders",             group: "workspace", hint: "Accepted quotes through delivery",    levels: RVE },
   // Amending a SIGNED order. Split out of `orders` (Carolyn, 2026-09-01: "Change Orders is
@@ -373,8 +419,20 @@ export function effectiveAccess(
 export function canRead(access: Record<string, Level>, area: string): boolean {
   return RANK[access[area] ?? "none"] >= 1;
 }
+/**
+ * May they CHANGE things in this area? 'own' counts wherever the area says it writes — see
+ * the ownWrites flag — which is how contacts:'own' passes the eleven contacts:'edit' gates
+ * while commissions:'own' still does not pass anything.
+ *
+ * ⚠️ THIS ANSWERS "MAY THEY WRITE", NEVER "TO WHICH ROWS". A caller on 'own' who reaches a
+ * write must still be narrowed to the rows they own, and this function cannot do that for
+ * you — it has no row in its hands. portal-settings' CONTACT_ROW_SCOPE table is where that
+ * happens, and preflight refuses a push where a contacts:'edit' action is missing from it.
+ */
 export function canEdit(access: Record<string, Level>, area: string): boolean {
-  return (access[area] ?? "none") === "edit";
+  const lvl = access[area] ?? "none";
+  if (lvl === "edit") return true;
+  return lvl === "own" && !!AREA_BY_KEY.get(area)?.ownWrites;
 }
 /** Commissions only: may they see OTHER people's payouts, or just their own? */
 export function seesAllPayouts(access: Record<string, Level>): boolean {
@@ -386,9 +444,11 @@ export function seesAllPayouts(access: Record<string, Level>): boolean {
  *
  * The one place the literal 'own' is compared for this area, so the three enforcement points
  * (RLS, the edge filters, the browser registry) cannot come to mean different things. It
- * answers a narrower question than canRead/canEdit and deliberately does not overlap them:
- * 'own' still READS (canRead is true — RANK puts it level with 'view') and still cannot
- * WRITE (canEdit is false). All this adds is "…but only some of the rows".
+ * answers a narrower question than canRead/canEdit and deliberately does not overlap them.
+ * Since contacts gained `ownWrites` (2026-09-07) BOTH of those are true for 'own' — it reads
+ * and it writes — so this is the only thing left that says "…but only some of the rows", and
+ * it is doing more work than it used to. A write path that checks canEdit and not this one
+ * has granted a dealer the entire customer list.
  *
  * OWNERS CANNOT REACH IT and that is structural, not a check here: effectiveAccess()
  * short-circuits `role === "owner"` to 'edit' on every area before a stored map is ever
@@ -432,6 +492,14 @@ export function mayGrant(
   if (a.ownerGranted) return false;
   const held = granterAccess[area] ?? "none";
   if (held === "own" && level !== "own" && level !== "none") return false;
+  // 4. NOBODY GRANTS A WRITE THEY DO NOT HOLD. RANK scores 'own' and 'view' the same,
+  //    because it was written when 'own' was purely a read scope. Since contacts gained
+  //    ownWrites that tie is a hole in rule 2: a granter narrowed to contacts:'view' —
+  //    genuinely read-only — would pass `RANK[own] <= RANK[view]` and be able to hand
+  //    somebody the ability to edit customer records, notes and SMS. Comparing the WRITE
+  //    property directly closes it without disturbing what RANK means for row breadth.
+  const writes = (lv: Level) => lv === "edit" || (lv === "own" && !!a.ownWrites);
+  if (writes(level) && !writes(held)) return false;
   return RANK[level] <= RANK[held];
 }
 

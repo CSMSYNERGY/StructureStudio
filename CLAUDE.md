@@ -311,7 +311,7 @@ The five new presets (reasoning lives beside each one in `access.ts`, decisions 
 `office_staff` paperwork — designer/designs/contacts/inventory/orders/change_orders edit, the three
 boards + reports view, branding + QuickBooks edit (the designer was omitted for a few hours and
 Carolyn corrected it the same day — see migration 219); `sales_manager` a rep plus change orders,
-reports edit and **everyone's payouts**; `dealer` a rep narrowed to `contacts:'own'`; `scheduler` all
+reports edit and **everyone's payouts**; `dealer` a rep narrowed to `contacts:'own'` (which WRITES — see below); `scheduler` all
 three boards edit, everything else view; `crew_member` build_schedule + repairs **view only**.
 Overrides are untouched — `client_users.access` stores deviations, so every switch set before this
 resolves exactly as it did, which migration 218's PART 3 asserts rather than claims.
@@ -321,6 +321,42 @@ resolves exactly as it did, which migration 218's PART 3 asserts rather than cla
 **`client_users_title_check`**, a hardcoded CHECK re-issued by 218 — a title missing there cannot be
 SAVED at all, and nothing guards it. `176_operator_support_only.sql:26-29` flagged that trap in 2026-08
 and noted no code comment mentioned it; `TITLES`' own doc block does now.
+
+### `contacts:'own'` is a WRITE scope (2026-09-07)
+
+It shipped read-only on 2026-09-05 and access.ts said in as many words that changing that "would
+mean per-row ownership checks on eleven write actions", calling it "a second decision, and it is
+hers". Carolyn made it two days later: *"Yes, let dealers edit their own contacts."* Offered a
+fifth level so read-only-own could survive beside a writing one, she chose to redefine the one
+switch — your customers are yours to work. Nobody held a contacts override at the time, so
+nothing silently widened.
+
+**Two mechanisms, and the second is the one that matters.** The `ownWrites` flag on an area says
+its `'own'` level writes (`contacts` yes, `commissions` emphatically no — a rep editing their own
+payout is what that feature exists to prevent); `canEdit` reads it, so `contacts:'own'` now
+satisfies the eleven `contacts:'edit'` gates. **That alone is a blanket edit on the whole
+tenant.** The narrowing is a FOURTH enforcement point beside the three the row scope already had:
+**`CONTACT_ROW_SCOPE` in `portal-settings`**, where every one of those actions declares how to find
+the contact it touches (`contactKeys` / `codeKeys` / `rowTable`), and an own-scoped caller naming a
+contact that is not theirs gets a 404 — the same status a design they cannot see returns, so a
+refusal never confirms the row exists. It denies by default: naming no visible contact, or none at
+all, is refused.
+
+⚠️ **A new contacts write is a TWO-file change**, and `scripts/preflight.mjs` refuses a push where a
+`contacts:'edit'` action in GATES is missing from that table — because the failure is silent:
+the action does not 403, it RUNS, against every customer on the tenant. `crm_save_note` is the
+shape to remember: given an `id` it updates a note by primary key and never mentions a contact, so
+it reads like it needs no check and needs one most.
+
+⚠️ **`mayGrant` gained a fourth rule** for the same change. RANK scores `'own'` and `'view'` the
+same (both read), so rule 2 would have let a granter narrowed to read-only contacts hand somebody
+a write they do not hold themselves. It now compares the WRITE property directly.
+
+⚠️ **Known, pre-existing, NOT closed:** `portal-sms`'s `opt_outs` read gates on `contacts:'view'`,
+which `'own'` has always satisfied — so a narrowed caller can list the tenant's opted-out phone
+numbers. Its write twin `set_opt_out` newly became reachable and is **refused outright** for an
+own-scoped caller (the register is keyed on a phone number, not a contact, so it cannot be
+narrowed). Narrowing the read is a separate decision.
 
 ⛔ **`area_level_for`'s "current definition" is NOT 193, and this file said it was.** 218 was very
 nearly written against `193_contacts_own_scope.sql`, which would have `create or replace`d the

@@ -928,6 +928,113 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
     return null;
   };
 
+  /**
+   * ── CONTACT_ROW_SCOPE ── which contact does each contacts:'edit' action touch?
+   *
+   * Since 2026-09-07 `contacts:'own'` WRITES (access.ts's ownWrites flag — Carolyn: "Yes, let
+   * dealers edit their own contacts"), so every one of these actions is now reachable by
+   * someone who may only touch their own customers. Passing the gate says they may write
+   * something; this table is what says WHICH ROW, and without it the level is a blanket edit
+   * on the whole tenant's customer list.
+   *
+   * A TABLE, for the same reason GATES is one and stated in the same words: these actions are
+   * a long if-chain, so a branch with a forgotten check does not fail, it RUNS. Eleven checks
+   * written by hand today is eleven checks that survive exactly as long as everyone remembers.
+   * scripts/preflight.mjs refuses a push where a contacts:'edit' action in GATES is missing
+   * from here, so forgetting fails at the push instead of in a builder's account.
+   *
+   * How a row is found, in order:
+   *   `rowTable`     payload.id names an existing row — read ITS contact. This is the case
+   *                  that reads like it needs no check and needs it most: crm_save_note with
+   *                  an id updates a note by primary key and never mentions a contact, so
+   *                  without this a dealer edits any note on the tenant by guessing an id.
+   *   `contactKeys`  payload keys holding a contact id directly.
+   *   `codeKeys`     payload keys holding a design short code — resolved to its contact.
+   *
+   * DENY BY DEFAULT: an own-scoped call that names no contact this caller can see is refused,
+   * including when it names nothing at all. That covers migration 193's edge case 2 — a
+   * design whose submission carried neither phone nor email has a NULL contact_id, so it has
+   * no owner and no follower, and it is invisible to a narrowed reader. A write to it is
+   * refused for the same reason rather than falling through to "allowed".
+   */
+  const CONTACT_ROW_SCOPE: Record<string, {
+    rowTable?: string;
+    contactKeys?: string[];
+    codeKeys?: string[];
+    /** Not per-contact at all — refuse a narrowed caller outright. See set_opt_out's twin. */
+    tenantWide?: boolean;
+  }> = {
+    crm_save_contact:      { contactKeys: ["id"] },
+    crm_save_note:         { rowTable: "crm_notes",      contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_delete_note:       { rowTable: "crm_notes" },
+    crm_save_activity:     { rowTable: "crm_activities", contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_complete_activity: { rowTable: "crm_activities" },
+    crm_send_email:        { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_send_sms:          { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_record_consent:    { contactKeys: ["contactId"] },
+    crm_file_sign:         { contactKeys: ["contactId"] },
+    crm_file_attach:       { contactKeys: ["contactId"], codeKeys: ["shortCode"] },
+    crm_file_delete:       { rowTable: "crm_files" },
+  };
+
+  /**
+   * The one call that enforces the table. Runs before dispatch for EVERY action and returns
+   * null instantly for anyone who is not narrowed, which is every caller on every tenant
+   * until an owner sets somebody to 'Own only'.
+   *
+   * 404 rather than 403, matching refuseUnlessDesignVisible and crm_record: a distinct
+   * refusal would confirm the row exists, which is the same leak wearing a different status
+   * code. A failed CHECK refuses too — a transient error that blocks a write is an
+   * annoyance, one that lets it through is what this exists to stop.
+   */
+  const refuseUnlessOwnContactRow = async (): Promise<Response | null> => {
+    if (!ownContacts) return null;
+    const rule = CONTACT_ROW_SCOPE[action];
+    if (!rule) return null;
+    if (rule.tenantWide) {
+      return json({ error: "That list covers the whole business, and you only have access to your own customers." }, 403);
+    }
+
+    const ids: string[] = [];
+    const codes: string[] = [];
+    const rowId = rule.rowTable && payload.id ? String(payload.id).slice(0, 64) : "";
+
+    if (rowId) {
+      const { data, error } = await admin.from(rule.rowTable!)
+        .select("contact_id, short_code").eq("client_id", clientId).eq("id", rowId).maybeSingle();
+      if (error) return dbFail(req, clientId, "check who this customer is assigned to", error);
+      // Gone, or another tenant's: the same answer a narrowed caller gets for a row that is
+      // simply not theirs, so the refusal never distinguishes the two.
+      if (!data) return json({ error: "That is not one of yours." }, 404);
+      if (data.contact_id) ids.push(String(data.contact_id));
+      else if (data.short_code) codes.push(String(data.short_code));
+    } else {
+      for (const k of rule.contactKeys ?? []) {
+        if (payload[k]) ids.push(String(payload[k]).slice(0, 64));
+      }
+      for (const k of rule.codeKeys ?? []) {
+        if (payload[k]) codes.push(String(payload[k]).slice(0, 32));
+      }
+    }
+
+    if (!ids.length && !codes.length) {
+      return json({ error: "That is not one of yours." }, 404);
+    }
+    if (ids.length) {
+      const seen = await visibleContactIds(ids);
+      if (!seen) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (ids.some((id) => !seen.has(id))) return json({ error: "That customer is not one of yours." }, 404);
+    }
+    if (codes.length) {
+      const ok = await visibleShortCodes(codes);
+      if (!ok) return dbFail(req, clientId, "check who this customer is assigned to", { message: "contact scope unavailable" });
+      if (codes.some((c) => !ok.includes(c))) return json({ error: "That design is not one of yours." }, 404);
+    }
+    return null;
+  };
+
+  { const bad = await refuseUnlessOwnContactRow(); if (bad) return bad; }
+
   // ── Record that a building has been sold ────────────────────────────────────────
   // Carolyn 2026-08-08: "we should never be able to mark it sold. Always needs an invoice."
   // There is no button and no action behind this — a sale is a CONSEQUENCE, recorded in

@@ -373,12 +373,17 @@ Deno.test("accessMetadata HIDES internal-only areas by default", () => {
 // Carolyn's dealer client, 09-04 @1:02:16: "he also doesn't want them to see each other's
 // quotes either." The rule is enforced in three places -- RLS, the edge functions' own
 // filters, and the client -- and these pin the resolver half the other two read from.
-Deno.test("contacts:'own' resolves, reads, and does NOT write", () => {
+Deno.test("contacts:'own' resolves, reads, and WRITES", () => {
+  // Written 2026-09-05 as "...and does NOT write", which was the level's shape for two days.
+  // Carolyn made the second decision that comment invited on 2026-09-07 -- "Yes, let dealers
+  // edit their own contacts" -- so the third assertion is inverted rather than deleted: the
+  // pairing of a true canRead with a canEdit is the thing worth keeping in one place.
   const a = effectiveAccess("user", "sales_rep", { contacts: "own" });
   assertEquals(a.contacts, "own", "a stored 'own' must survive resolution");
-  assert(canRead(a, "contacts"), "'own' is a READ level -- the rep sees their own customers");
-  assertFalse(canEdit(a, "contacts"), "'own' must never satisfy an edit gate");
-  assert(ownContactsOnly(a), "the one place 'own' is compared for this area");
+  assert(canRead(a, "contacts"), "'own' reads -- the rep sees their own customers");
+  assert(canEdit(a, "contacts"), "'own' now satisfies an edit gate; the ROWS are narrowed elsewhere");
+  assert(ownContactsOnly(a), "the one place 'own' is compared for this area -- and now the "
+    + "only thing standing between a dealer and the whole customer list");
 });
 
 // The reason 'own' was ADDED beside 'view' instead of replacing it: every stored
@@ -515,16 +520,74 @@ Deno.test("a sales manager sees everyone's payouts; a rep and a dealer see only 
   assertEquals(effectiveAccess("user", "sales_manager", null).reports, "edit");
 });
 
-Deno.test("a dealer sees only their own customers — and that is a READ scope", () => {
+Deno.test("a dealer WORKS their own customers and sees nobody else's", () => {
+  // Carolyn, 2026-09-07: "Yes, let dealers edit their own contacts." Before that, 'own' was
+  // read-only on contacts and this test asserted the opposite of the line below.
   const a = effectiveAccess("user", "dealer", null);
   assert(ownContactsOnly(a));
-  assert(canRead(a, "contacts"));       // 'own' still reads
-  assertFalse(canEdit(a, "contacts"));  // ...and still cannot write. Documented, not a bug.
+  assert(canRead(a, "contacts"));
+  assert(canEdit(a, "contacts"));
   // Everything else is a sales rep.
   assertEquals(a.designer, "edit");
   assertEquals(a.orders, "edit");
   assertEquals(a.commissions, "own");
   assertFalse(ownContactsOnly(effectiveAccess("user", "sales_rep", null)));
+});
+
+Deno.test("'own' writes on contacts and does NOT write on commissions", () => {
+  // The whole reason ownWrites is a per-area flag rather than a change to RANK. A rep on
+  // commissions:'own' seeing their own payout must never be able to edit it, and that is the
+  // confidentiality rule the commissions feature is built on.
+  const dealer = effectiveAccess("user", "dealer", null);
+  assert(canEdit(dealer, "contacts"));
+  assertFalse(canEdit(dealer, "commissions"));
+  assertFalse(seesAllPayouts(dealer));
+  // And the flag is declared where it is read, not inferred from the level.
+  assert(AREAS.find((x) => x.key === "contacts")?.ownWrites);
+  assertFalse(!!AREAS.find((x) => x.key === "commissions")?.ownWrites);
+});
+
+Deno.test("an own-scoped caller satisfies a contacts:'edit' GATE", () => {
+  // The eleven contacts write actions are gated { area: 'contacts', level: 'edit' }, so this
+  // is the exact question resolveTenant asks before dispatch. It must now be YES — and the
+  // row narrowing is a separate mechanism (portal-settings' CONTACT_ROW_SCOPE) that this
+  // module cannot express and must not be assumed to cover.
+  const dealer = effectiveAccess("user", "dealer", null);
+  assertEquals(checkGate({ area: "contacts", level: "edit" }, dealer), null);
+  assertEquals(checkGate({ area: "contacts", level: "view" }, dealer), null);
+  // ...while a genuinely read-only person is still refused.
+  const viewer = effectiveAccess("user", "crew_leader", { contacts: "view" });
+  assert(checkGate({ area: "contacts", level: "edit" }, viewer) !== null);
+});
+
+Deno.test("a contacts:'view' holder cannot grant contacts:'own' — it now writes", () => {
+  // The hole rule 4 of mayGrant closes. RANK scores 'own' and 'view' the SAME (both read),
+  // so `RANK[own] <= RANK[view]` is true and rule 2 alone would wave this through: an admin
+  // an owner had narrowed to read-only contacts could hand somebody the ability to edit
+  // customer records, notes and SMS — a write the granter does not hold.
+  const readOnly = effectiveAccess("admin", "admin", { contacts: "view" });
+  assertFalse(canEdit(readOnly, "contacts"));
+  assertFalse(mayGrant("admin", readOnly, "contacts", "own"));
+  assertFalse(mayGrant("admin", readOnly, "contacts", "edit"));
+  assert(mayGrant("admin", readOnly, "contacts", "view"));
+  assert(mayGrant("admin", readOnly, "contacts", "none"));
+  // Someone who DOES write may still narrow a person to 'own'.
+  const writer = effectiveAccess("admin", "admin", null);
+  assert(mayGrant("admin", writer, "contacts", "own"));
+  // And commissions is untouched by rule 4, because its 'own' does not write.
+  const repPay = effectiveAccess("user", "sales_rep", null);
+  assert(mayGrant("user", repPay, "commissions", "own"));
+  assertFalse(mayGrant("user", repPay, "commissions", "edit"));
+});
+
+Deno.test("an 'own' holder still passes on 'own' and never widens it", () => {
+  // Rule 3, re-pinned: 'own' is a row scope, not a rank, so a dealer-scoped granter cannot
+  // hand out the whole customer list even though they can now write to their slice of it.
+  const narrowed = effectiveAccess("admin", "admin", { contacts: "own" });
+  assert(canEdit(narrowed, "contacts"));
+  assert(mayGrant("admin", narrowed, "contacts", "own"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "view"));
+  assertFalse(mayGrant("admin", narrowed, "contacts", "edit"));
 });
 
 Deno.test("a scheduler owns all three boards and can change no sale", () => {

@@ -2,6 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { resolveTenant } from "../_shared/resolveTenant.ts";
+import { ownContactsOnly } from "../_shared/access.ts";
 import { optInDisclosureUrl, designerUrl } from "../_shared/smsConsentText.ts";
 import { fetchPage } from "../_shared/safeFetchText.ts";
 import { policyPageChecks, optInPageChecks, consistencyChecks } from "../_shared/smsComplianceCheck.ts";
@@ -906,6 +907,26 @@ Deno.serve(withErrorLog("portal-sms", async (req: Request) => {
       }
 
       case "set_opt_out": {
+        // NEWLY REACHABLE ON 2026-09-07, and refused here rather than left to fall through.
+        // contacts:'own' became a WRITE scope that day (access.ts's ownWrites), so this
+        // action's `contacts: edit` gate now admits somebody who may only touch their own
+        // customers — where before canEdit() refused them at the door.
+        //
+        // It cannot be narrowed to their rows, because it is not keyed on a contact at all:
+        // sms_opt_outs is a PHONE-NUMBER register, the tenant's FCC revocation record, and
+        // one number can match several customers or none. Un-suppressing a number would let
+        // a dealer re-open texting to somebody who revoked consent through a colleague, and
+        // there is no row here to check that against. So the honest answer is a refusal that
+        // says why, not a silent narrowing that cannot work.
+        //
+        // ⚠️ Its READ twin, `opt_outs`, is NOT covered: it gates on contacts:'view', which
+        // 'own' has always satisfied, so a narrowed caller could already list the tenant's
+        // opted-out numbers before this change and still can. That is pre-existing rather
+        // than introduced here, and narrowing it is a separate decision — but it is real,
+        // and this comment is where the next reader will find it.
+        if (ownContactsOnly(r.ctx.access)) {
+          return json({ error: "The opt-out list covers the whole business, and you only have access to your own customers." }, 403);
+        }
         const digits = String(p.phoneDigits ?? "").replace(/\D/g, "");
         if (digits.length !== 10) return json({ error: "That is not a US phone number." }, 400);
         if (p.optedOut === false) {

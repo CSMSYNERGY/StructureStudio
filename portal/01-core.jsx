@@ -668,15 +668,26 @@ function ssCanRead(access, area) {
   const v = access && access[area];
   return v === "view" || v === "edit" || v === "own";
 }
-// The write half. 'own' is NOT write: it is a read SCOPE — "your own commission rows", "your
-// own customers" — and treating it as edit would let a rep act on rows they may only look
-// at. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead is.
+// The write half. Mirrored from canEdit in _shared/access.ts for the same reason ssCanRead
+// is — and it has to mirror the ownWrites rule too, not just the 'edit' comparison.
 //
-// This is also what hides the contact editor, the note box, the activity form and the
-// SMS/email composers from someone on contacts:'own': every one of those actions is gated
-// contacts:'edit' server-side, so rendering them would be offering a button that 403s.
+// 'own' means "your rows only" and each area says separately whether that WRITES:
+//   contacts    — yes, since 2026-09-07 (Carolyn: "let dealers edit their own contacts"), so
+//                 the contact editor, note box, activity form and SMS/email composers all
+//                 render for a dealer. The server narrows each one to their own customers
+//                 (portal-settings' CONTACT_ROW_SCOPE); this only decides what is offered.
+//   commissions — no. 'own' there is "see your own payout", and a rep editing their own
+//                 commission is what the whole feature exists to prevent.
+//
+// OWN_WRITE_AREAS is the browser's copy of that flag. It is small enough to be worth the
+// duplication and dangerous enough to be worth naming: adding an area to it without the
+// server agreeing renders buttons that 403, and the reverse hides a button somebody has
+// every right to press.
+const OWN_WRITE_AREAS = new Set(["contacts"]);
 function ssCanWrite(access, area) {
-  return !!access && access[area] === "edit";
+  if (!access) return false;
+  const v = access[area];
+  return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
 }
 
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
