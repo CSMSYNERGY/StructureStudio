@@ -308,8 +308,9 @@ Billing switch (`ownerGranted`), and `roleForTitle` maps it to the coarse `role=
 policies read. Renaming it would have moved real people's access under cover of a relabel.
 
 The five new presets (reasoning lives beside each one in `access.ts`, decisions are Carolyn's):
-`office_staff` paperwork — designs/contacts/inventory/orders/change_orders edit, the three boards +
-reports view, branding + QuickBooks edit, **no designer**; `sales_manager` a rep plus change orders,
+`office_staff` paperwork — designer/designs/contacts/inventory/orders/change_orders edit, the three
+boards + reports view, branding + QuickBooks edit (the designer was omitted for a few hours and
+Carolyn corrected it the same day — see migration 219); `sales_manager` a rep plus change orders,
 reports edit and **everyone's payouts**; `dealer` a rep narrowed to `contacts:'own'`; `scheduler` all
 three boards edit, everything else view; `crew_member` build_schedule + repairs **view only**.
 Overrides are untouched — `client_users.access` stores deviations, so every switch set before this

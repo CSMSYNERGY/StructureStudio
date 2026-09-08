@@ -492,12 +492,14 @@ Deno.test("office staff run the paperwork and cannot reshape the product", () =>
   assertEquals(a.inventory, "edit");
   assertEquals(a.settings_branding, "edit");
   assertEquals(a.settings_quickbooks, "edit");
+  // The designer, since 2026-09-07 (Carolyn, same day she picked the preset): the person
+  // answering the phone is the one who builds the quote.
+  assertEquals(a.designer, "edit");
   // Sees the boards, moves nothing on them.
   assertEquals(a.build_schedule, "view");
   assertEquals(a.delivery_schedule, "view");
   assertFalse(canEdit(a, "build_schedule"));
   // Deliberately absent — see the preset's own comment.
-  assertEquals(a.designer, "none");
   assertEquals(a.commissions, "none");
   assertEquals(a.settings_structures, "none");
   assertEquals(a.settings_team, "none");
@@ -555,7 +557,7 @@ Deno.test("THE OVERRIDES STILL WIN on every new title", () => {
   // a stored deviation layers on top of it exactly as it did on the five older titles.
   assertEquals(effectiveAccess("user", "dealer", { contacts: "edit" }).contacts, "edit");
   assertEquals(effectiveAccess("user", "crew_member", { orders: "view" }).orders, "view");
-  assertEquals(effectiveAccess("user", "office_staff", { designer: "edit" }).designer, "edit");
+  assertEquals(effectiveAccess("user", "office_staff", { designer: "none" }).designer, "none");
   assertEquals(effectiveAccess("user", "scheduler", { orders: "edit" }).orders, "edit");
   // ...including taking one AWAY, which is the direction a preset cannot express.
   assertEquals(effectiveAccess("user", "sales_manager", { commissions: "own" }).commissions, "own");

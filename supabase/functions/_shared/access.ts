@@ -258,10 +258,18 @@ export const PRESETS: Record<Title, Record<string, Level>> = {
   // print on an estimate, and the accounting mappings. Team, Billing, Structures, Options,
   // CRM and Email are all omitted, so they cannot reshape the product or the money.
   //
-  // ⚠️ `designer` is deliberately absent: this title manages quote RECORDS, it does not build
-  // them. An office staffer who takes phone orders needs designer:'edit' switched on per
-  // person — one click on the Team screen — rather than every office staffer getting it.
+  // `designer` shipped ABSENT here for a few hours on 2026-09-07 and Carolyn corrected it the
+  // same day — "Give Office Staff the designer too". The reasoning it replaced was that this
+  // title manages quote RECORDS rather than building them, with the designer switched on per
+  // person for whoever takes phone orders. That had the ratio backwards: in a shed business
+  // the person answering the phone IS the one who builds the quote, so the exception was the
+  // rule and every office staffer would have needed the same click.
+  //
+  // Note they could already SUBMIT one — submit-estimate accepts designer:'edit' OR
+  // designs:'edit' — so the absence only ever hid the tab, which is the confusing half of a
+  // half-granted permission rather than a safe one.
   office_staff: {
+    designer: "edit",
     designs: "edit", contacts: "edit", inventory: "edit", orders: "edit",
     change_orders: "edit",
     build_schedule: "view", delivery_schedule: "view", repairs: "view", reports: "view",
