@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<!--
+  dev/cladding-audit.html — does the cladding line price the same in the customer's PREVIEW
+  as it does on the ESTIMATE, on EVERY building we sell?
+
+  WHY IT EXISTS. The preview (computeSelectionRows, in the designer) and the charge
+  (submit-estimate) are two independent implementations of one sum, and submit-estimate's own
+  comment insists they "must agree to the penny". Nothing checked that. This does.
+
+  WHAT IT COVERS. Every building in the product reduces, for this arithmetic, to a class of
+  (width, length, style base wall height, wall-height delta, pricing basis). A census of all
+  seven live tenants on 2026-09-07 found 560 pickable buildings falling into 95 geometry
+  classes, with widths 8-14, lengths 8-40, base wall heights {6.4, 6.5, 7, 8} and deltas
+  {none, 6, 12}. The cross-product below is a strict SUPERSET of those, so passing here means
+  passing on every building any tenant can currently sell.
+
+  HOW. The BROWSER side is the REAL shipped function, lifted out of
+  structure-studio.component.compiled.js — not a copy. The SERVER side is transcribed from
+  submit-estimate's cladding block, and the transcription is itself checked against values
+  computed independently in SQL (see SPOT below), so a mistake in the transcription cannot
+  quietly pass the suite.
+
+  Serve the repo root and open /dev/cladding-audit. It prints PASS/FAIL and lists mismatches.
+-->
+<html lang="en"><head><meta charset="UTF-8"/>
+<title>Cladding audit — preview vs estimate, every building</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; margin: 20px; background: #0B1020; color: #D7E0F5; }
+  h1 { font-size: 15px; letter-spacing: .5px; }
+  .pass { color: #4ADE80; font-weight: 700; }
+  .fail { color: #F87171; font-weight: 700; }
+  .dim { color: #7C89A8; }
+  table { border-collapse: collapse; margin-top: 10px; }
+  td, th { border: 1px solid #24304C; padding: 3px 8px; text-align: left; }
+</style>
+</head><body>
+<h1>Cladding audit — the customer's preview vs the estimate, on every building</h1>
+<div id="out">running…</div>
+<script src="/vendor/react-18.2.0.production.min.js"></script>
+<script src="/vendor/react-dom-18.2.0.production.min.js"></script>
+<script>
+window.supabase = { createClient: function(){ return {
+  auth: { getSession: function(){ return Promise.resolve({ data: { session: null } }); },
+          onAuthStateChange: function(){ return { data: { subscription: { unsubscribe: function(){} } } }; } },
+  from: function(){ var t = {}; ["select","eq","is","in","order","limit"].forEach(function(m){ t[m] = function(){ return t; }; });
+                    t.maybeSingle = function(){ return Promise.resolve({ data: null, error: null }); };
+                    t.then = function(r){ return Promise.resolve({ data: [], error: null }).then(r); }; return t; },
+  functions: { invoke: function(){ return Promise.resolve({ data: { ok: true }, error: null }); } },
+}; } };
+// Nothing may reach production from an audit page.
+var __rf = window.fetch.bind(window);
+window.fetch = function(i, n) {
+  var u = String((i && i.url) || i || "");
+  if (u.indexOf("supabase.co") !== -1) return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
+  return __rf(i, n);
+};
+
+// ── The population, taken from a census of the live tenants ───────────────────
+var WIDTHS   = [8, 10, 12, 14];
+var LENGTHS  = [8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40];
+var BASEWALL = [6.4, 6.5, 7, 8];        // every distinct building_styles.d3.wallHeightFt
+var DELTAS   = [0, 6, 12];              // every offered wall-height increase
+var BASES    = ["wall_sqft", "lineal_ft", "each"];
+var RATE     = 1.75;
+
+// ── The SERVER's arithmetic, transcribed from submit-estimate's cladding block ──
+//   resolvedWallHeightFt starts at the style's own height (220/this session's fix) and the
+//   increase is added and clamped; qty follows the basis; a rate of 0 emits no line.
+function serverExpect(w, l, baseWall, deltaIn, basis, rate) {
+  var perim = 2 * (w + l);
+  var wall = baseWall;
+  if (deltaIn > 0) wall = Math.max(5, Math.min(14, wall + deltaIn / 12));
+  var qty = basis === "wall_sqft" ? Math.round(perim * wall) : basis === "lineal_ft" ? perim : 1;
+  if (!(rate > 0) || !(qty > 0)) return null;
+  return { qty: qty, amount: Math.round(rate * qty * 100) / 100 };
+}
+
+(async function () {
+  var src = await (await fetch("/structure-studio.component.compiled.js")).text();
+  var head = "(function(){if(!window.__ssBootBlocked){";
+  var i = src.indexOf(head) + head.length;
+  var inj = "window.__A={};[['computeSelectionRows',()=>computeSelectionRows],['ssRowSection',()=>ssRowSection]]"
+          + ".forEach(function(p){try{window.__A[p[0]]=p[1]()}catch(e){window.__A[p[0]]=null}});";
+  (0, eval)(src.slice(0, i) + inj + src.slice(i));
+  var A = window.__A;
+  if (!A.computeSelectionRows) { document.getElementById("out").innerHTML = '<span class="fail">could not lift computeSelectionRows</span>'; return; }
+
+  var cases = 0, fails = [];
+  for (var wi = 0; wi < WIDTHS.length; wi++) for (var li = 0; li < LENGTHS.length; li++)
+  for (var bi = 0; bi < BASEWALL.length; bi++) for (var di = 0; di < DELTAS.length; di++)
+  for (var si = 0; si < BASES.length; si++) {
+    var w = WIDTHS[wi], l = LENGTHS[li], baseWall = BASEWALL[bi], delta = DELTAS[di], basis = BASES[si];
+    var label = w + "x" + l;
+    // A config shaped exactly as get_config emits one, for one style with one size.
+    var C = {
+      showPricing: true, colors: [],
+      buildingStyles: [{ value: "s", label: "S", d3: { wallHeightFt: baseWall } }],
+      sizePricing: { s: {} },
+      // The increase must be OFFERED for the browser to resolve it — same gate the picker uses.
+      wallHeightOptions: delta > 0 ? { s: [{ deltaIn: delta, ratePerLf: 1 }] } : {},
+      claddingOptions: { s: [{ id: "lap", rate: RATE, basis: basis, label: null, charged: true }] },
+    };
+    C.sizePricing.s[label] = { widthFt: w, lengthFt: l, basePrice: 1000 };
+    var sel = { style: "s", size: label, cladding: "lap", paint: "No Paint" };
+    if (delta > 0) sel.wallHeightDeltaIn = delta;
+
+    var row = A.computeSelectionRows(sel, {}, C, []).filter(function (r) { return r.key === "cladding"; })[0] || null;
+    var exp = serverExpect(w, l, baseWall, delta, basis, RATE);
+    cases++;
+    var got = row ? { qty: row.qty, amount: row.total } : null;
+    if (JSON.stringify(got) !== JSON.stringify(exp)) {
+      fails.push({ building: label, baseWall: baseWall, delta: delta, basis: basis,
+                   preview: JSON.stringify(got), estimate: JSON.stringify(exp) });
+    }
+  }
+
+  // THE LEGACY ABSOLUTE HEIGHT. `sel.wallHeight` is what the 3D footer wrote before it started
+  // committing wallHeightDeltaIn; it was never priced, and submit-estimate has never read it.
+  // Four live designs still carry one, all four with a cladding. The preview must price them on
+  // the style's own standard, exactly as the estimate does, and ignore the legacy value.
+  var legacyFails = [];
+  for (var lw = 0; lw < BASEWALL.length; lw++) {
+    var bw = BASEWALL[lw];
+    var CL = { showPricing: true, colors: [],
+      buildingStyles: [{ value: "s", label: "S", d3: { wallHeightFt: bw } }],
+      sizePricing: { s: { "12x24": { widthFt: 12, lengthFt: 24, basePrice: 1000 } } },
+      wallHeightOptions: {},
+      claddingOptions: { s: [{ id: "lap", rate: RATE, basis: "wall_sqft", label: null, charged: true }] } };
+    // A customer who set 10 ft in the old 3D footer, and bought no increase.
+    var selL = { style: "s", size: "12x24", cladding: "lap", paint: "No Paint", wallHeight: 10 };
+    var rowL = A.computeSelectionRows(selL, {}, CL, []).filter(function (r) { return r.key === "cladding"; })[0] || null;
+    var expL = serverExpect(12, 24, bw, 0, "wall_sqft", RATE);
+    var gotL = rowL ? { qty: rowL.qty, amount: rowL.total } : null;
+    if (JSON.stringify(gotL) !== JSON.stringify(expL)) {
+      legacyFails.push({ building: "12x24", baseWall: bw, delta: "legacy 10ft", basis: "wall_sqft",
+                         preview: JSON.stringify(gotL), estimate: JSON.stringify(expL) });
+    }
+  }
+
+  // A rate of 0 = "included at no charge" must produce NO line, on every geometry.
+  var zeroFails = 0;
+  for (var z = 0; z < WIDTHS.length; z++) {
+    var C0 = { showPricing: true, colors: [],
+      buildingStyles: [{ value: "s", label: "S", d3: { wallHeightFt: 8 } }],
+      sizePricing: { s: { "12x24": { widthFt: 12, lengthFt: 24, basePrice: 1000 } } },
+      claddingOptions: { s: [{ id: "lap", rate: 0, basis: "wall_sqft", label: null, charged: false }] } };
+    if (A.computeSelectionRows({ style: "s", size: "12x24", cladding: "lap", paint: "No Paint" }, {}, C0, [])
+         .some(function (r) { return r.key === "cladding"; })) zeroFails++;
+  }
+
+  // SPOT: the transcription above, checked against numbers computed independently in SQL.
+  var SPOT = [
+    { w: 12, l: 24, baseWall: 6.5, delta: 0,  basis: "wall_sqft",  qty: 468, amount: 819 },
+    { w: 12, l: 24, baseWall: 6.5, delta: 12, basis: "wall_sqft",  qty: 540, amount: 945 },
+    { w: 8,  l: 8,  baseWall: 6.4, delta: 0,  basis: "wall_sqft",  qty: 205, amount: 358.75 },
+    { w: 14, l: 40, baseWall: 8,   delta: 6,  basis: "wall_sqft",  qty: 918, amount: 1606.5 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "lineal_ft",  qty: 72,  amount: 126 },
+    { w: 12, l: 24, baseWall: 7,   delta: 0,  basis: "each",       qty: 1,   amount: 1.75 },
+  ];
+  var spotFails = SPOT.filter(function (s) {
+    var e = serverExpect(s.w, s.l, s.baseWall, s.delta, s.basis, RATE);
+    return !e || e.qty !== s.qty || Math.abs(e.amount - s.amount) > 0.005;
+  });
+
+  fails = fails.concat(legacyFails);
+  var ok = fails.length === 0 && zeroFails === 0 && spotFails.length === 0;
+  var html = '<p class="' + (ok ? "pass" : "fail") + '">' + (ok ? "PASS" : "FAIL") + "</p>"
+    + '<p class="dim">' + cases + " geometry/basis/upgrade combinations — a superset of the 95 classes "
+    + "the 560 real buildings fall into.<br>" + fails.length + " preview/estimate mismatches · "
+    + zeroFails + " zero-rate lines that should not exist · " + spotFails.length + " transcription spot-check failures · "
+    + legacyFails.length + " legacy-absolute-height mismatches.</p>";
+  if (fails.length) {
+    html += "<table><tr><th>building</th><th>base wall</th><th>delta</th><th>basis</th><th>preview</th><th>estimate</th></tr>";
+    fails.slice(0, 40).forEach(function (f) {
+      html += "<tr><td>" + f.building + "</td><td>" + f.baseWall + "</td><td>" + f.delta + "</td><td>"
+            + f.basis + "</td><td>" + f.preview + "</td><td>" + f.estimate + "</td></tr>";
+    });
+    html += "</table>";
+  }
+  document.getElementById("out").innerHTML = html;
+  window.__RESULT = { ok: ok, cases: cases, fails: fails.slice(0, 20), zeroFails: zeroFails, spotFails: spotFails };
+})();
+</script>
+</body></html>

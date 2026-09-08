@@ -1447,6 +1447,26 @@ function d3BaseWallHeightFt(C, styleCfg) {
 function d3WallHeightFromDelta(baseFt, deltaIn) {
   return Math.max(5, Math.min(14, (Number(baseFt) || 8) + (Number(deltaIn) || 0) / 12));
 }
+// The wall height anything priced BY WALL AREA must use — cladding and insulation both.
+//
+// ⛔ NOT d3CustomerWallHeightFt, and the difference is a real mispricing. That one falls back
+// to `sel.wallHeight`, the LEGACY absolute height the 3D footer used to write before it started
+// committing wallHeightDeltaIn instead. That height was never priced and submit-estimate has
+// never heard of it: the server resolves the style’s own standard plus a RESOLVED increase and
+// nothing else. Feeding the legacy value into a quantity showed the customer a wall area they
+// were not billed for — reachable today on four live designs, every one of them carrying a
+// cladding.
+//
+// So this mirrors the server exactly: the style’s base, plus the increase only when that
+// increase actually resolves (offered, active, priced, and legal at this width), clamped the
+// same way. d3CustomerWallHeightFt keeps the legacy fallback because the 3D VIEW should draw
+// the height the customer is looking at; money must not.
+function pricedWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
+  const base = d3BaseWallHeightFt(C, styleCfg);
+  const d = Number(sel && sel.wallHeightDeltaIn) || 0;
+  if (d > 0 && resolveWallHeight(C, styleKey, d, widthFt)) return d3WallHeightFromDelta(base, d);
+  return base;
+}
 function d3CustomerWallHeightFt(C, styleCfg, styleKey, sel, widthFt) {
   const d = Number(sel && sel.wallHeightDeltaIn) || 0;
   if (d > 0 && resolveWallHeight(C, styleKey, d, widthFt)) {
@@ -1963,10 +1983,11 @@ function computeSelectionRows(sel, paintColors, C, items) {
   }
   if (insSel.length) {
     const offered = insulationOffered(C);
-    // The wall height the customer actually gets, so wall square footage tracks the upgrade.
+    // The wall height that is actually BILLED, so wall square footage tracks the upgrade and
+    // matches what submit-estimate charges. It used to read d3CustomerWallHeightFt, which falls
+    // back to the unpriced legacy `sel.wallHeight` the server ignores — see pricedWallHeightFt.
     const stEntry0 = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
-    const wallH = d3CustomerWallHeightFt(C, stEntry0, styleKey, sel, bW) ||
-      Number(((stEntry0 && stEntry0.d3) || {}).wallHeightFt) || Number(C && C.wallHeightFt) || 8;
+    const wallH = pricedWallHeightFt(C, stEntry0, styleKey, sel, bW);
     INSULATION_AREAS.forEach((area) => {
       const pick = insSel.find((s) => s && s.area === area);
       if (!pick) return;
@@ -2055,10 +2076,10 @@ function computeSelectionRows(sel, paintColors, C, items) {
   if (cladOpt && cladOpt.charged) {
     const cladBasis = String(cladOpt.basis || "wall_sqft");
     const stEntryC = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
-    // The wall height the customer actually gets, so wall area tracks a taller-walls upgrade.
-    // Same expression insulation uses below; keep the two identical.
-    const cladWallH = d3CustomerWallHeightFt(C, stEntryC, styleKey, sel, bW) ||
-      Number(((stEntryC && stEntryC.d3) || {}).wallHeightFt) || Number(C && C.wallHeightFt) || 8;
+    // The wall height that is actually BILLED, so the preview and the estimate agree to the
+    // penny — which is what submit-estimate’s own comment demands of these two. Same helper
+    // insulation uses below; keep the two identical.
+    const cladWallH = pricedWallHeightFt(C, stEntryC, styleKey, sel, bW);
     const cladQty = cladBasis === "wall_sqft" ? Math.round(buildingPerimeter * cladWallH)
                   : cladBasis === "lineal_ft" ? buildingPerimeter
                   : 1;
