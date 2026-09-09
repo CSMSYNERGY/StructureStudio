@@ -5,6 +5,7 @@ import { isInternalTenant, loginTenant } from "../_shared/internalTenant.ts";
 import { canEdit as accCanEdit, effectiveAccess, type Level } from "../_shared/access.ts";
 import { resolveProjectsAccess } from "../_shared/projectsAccess.ts";
 import { FEATURE_KEYS } from "../_shared/featureCheck.ts";
+import { buildOverlayItems, overlaySlugs } from "../_shared/pmOverlay.ts";
 
 // Internal "Projects" module backend (portal.html Projects tab): CSM Synergy's own
 // project management — bugs, feature requests, roadmap — replacing Monday.com.
@@ -642,8 +643,57 @@ Deno.serve(withErrorLog("portal-projects", async (req: Request) => {
         if (itemsRes.error) throw itemsRes.error;
         if (opsRes.error) throw opsRes.error;
         if (viewsRes.error) throw viewsRes.error;
+        // ── THE WORKING BOARD ────────────────────────────────────────────────────────────
+        // Carolyn, 2026-09-08 48:49: "I don't want to do our things in bugs feature request
+        // or roadmap. I think we need another table for that", and 48:00: "I'm tired of
+        // seeing completed in here."
+        //
+        // A board opts in through its OWN settings — { "overlay_from": ["bugs", "features"] }
+        // — and then also shows every un-finished item from those boards. NOTHING MOVES, and
+        // that is the requirement rather than a shortcut: a finished item has to drop off this
+        // table while staying on the board the client filed it on, never deleted and never
+        // archived. move_items refuses cross-board moves for the same reason.
+        //
+        // ⚠️ INERT TODAY. No board sets overlay_from, so overlaySlugs returns [] for every one
+        // of them and this block is skipped entirely — an ordinary board answers exactly what
+        // it answered before.
+        //
+        // ⚠️ Foreign rows keep their REAL id and board_id. update_item is keyed by id and
+        // resolves columns from the item's own board_id, so an edit made from here lands on
+        // the home board with the home board's columns; the remapping is for DISPLAY only and
+        // cannot mis-key a write. Why remapping is needed at all: every board seeds its own
+        // column UUIDs, so Bugs' "Status" and this board's "Status" are different ids for the
+        // same meaning. See _shared/pmOverlay.ts.
+        const ovSlugs = overlaySlugs(board);
+        let outItems = itemsRes.data || [];
+        let outGroups = groupsRes.data || [];
+        if (ovSlugs.length) {
+          const { data: srcBoards } = await admin.from("pm_boards")
+            .select("id, slug, name").in("slug", ovSlugs).is("archived_at", null);
+          const sources = [];
+          for (const sbd of (srcBoards || [])) {
+            const [sCols, sItems] = await Promise.all([
+              boardColumns(sbd.id),
+              admin.from("pm_items").select("*").eq("board_id", sbd.id).is("archived_at", null)
+                .order("position").limit(2000),
+            ]);
+            if (sItems.error) throw sItems.error;
+            sources.push({ board: sbd, columns: sCols, items: sItems.data || [] });
+          }
+          const foreign = buildOverlayItems({ destColumns: columns, sources });
+          // One synthetic group per source board, so the table has somewhere to put them. The
+          // "overlay:" prefix cannot collide with a real pm_groups uuid, and dropping an item
+          // onto one is refused anyway because no such group row exists.
+          outGroups = outGroups.concat(sources.map((s, i) => ({
+            id: "overlay:" + s.board.slug, board_id: boardId,
+            name: "From " + s.board.name, color: "#94A3B8",
+            position: 1000000 + i, overlay: true,
+          })));
+          outItems = outItems.concat(foreign.map((f) => ({ ...f, group_id: "overlay:" + f.home_board_slug })));
+        }
+
         return json({
-          board, columns, groups: groupsRes.data, items: itemsRes.data,
+          board, columns, groups: outGroups, items: outItems,
           people: opsRes.data, views: viewsRes.data, canWrite,
         });
       }

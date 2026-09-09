@@ -1611,6 +1611,66 @@ function ProjectsTab({ sub, onSub }) {
               </span>
             </div>
 
+            {/* WHAT IS IN FLIGHT, above the table. Carolyn, 2026-09-08 48:00: "I also want to
+                take it and add where a dashboard that shows us. Basically, I'm tired of seeing
+                completed in here."
+                COUNTS ARE OVER ALL LOADED ROWS, never the filtered subset — the rule
+                StatusChips already follows, and the reason is that a tile whose number changes
+                the moment you click it cannot be used to navigate. Clicking one sets the
+                ordinary status facet, so this is a shortcut into the filters that already
+                exist rather than a second filtering model living beside them.
+                Finished labels are omitted: they are precisely what she does not want to see,
+                and `kind` is the only machine-readable way to know which those are. */}
+            {(() => {
+              const st = (data.columns || []).find((c) => c.type === "status");
+              if (!st) return null;
+              const labels = (st.settings && st.settings.labels) || [];
+              const all = data.items || [];
+              const doneIds = new Set(labels.filter((l) => l && l.kind === "done").map((l) => l.id));
+              const count = new Map();
+              for (const it of all) {
+                const v = (it.values || {})[st.id];
+                if (typeof v === "string") count.set(v, (count.get(v) || 0) + 1);
+              }
+              const dateCol = (data.columns || []).find((c) => c.type === "date");
+              const today = new Date().toISOString().slice(0, 10);
+              const overdue = !dateCol ? 0 : all.filter((it) => {
+                const vals = it.values || {};
+                const d = vals[dateCol.id];
+                const s = vals[st.id];
+                // Past its date AND not finished. A finished item with an old date is not a
+                // problem, and counting it would make this number permanently red.
+                return typeof d === "string" && d && d < today && !(typeof s === "string" && doneIds.has(s));
+              }).length;
+              const live = labels.filter((l) => l && !doneIds.has(l.id) && (count.get(l.id) || 0) > 0);
+              if (!live.length && !overdue) return null;
+              const tile = (key, label, n, color, active, onClick) => (
+                <button key={key} type="button" onClick={onClick}
+                  style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 88, textAlign: "left",
+                    background: active ? "#EEF2FF" : "#FFF", border: "1px solid " + (active ? ACCENT : "#E2E8F0"),
+                    borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontFamily: "inherit" }}>
+                  <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: color || "#94A3B8", whiteSpace: "nowrap" }}>{label}</span>
+                  <span style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", lineHeight: 1.1 }}>{n}</span>
+                </button>
+              );
+              return (
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", margin: "0 0 10px" }}>
+                  {live.map((l) => tile(l.id, l.label, count.get(l.id) || 0, l.color,
+                    facets[st.id] === l.id,
+                    () => setFacets((f) => ({ ...f, [st.id]: f[st.id] === l.id ? null : l.id }))))}
+                  {overdue > 0 && tile("__overdue", "Overdue", overdue, "#DC2626", false, () => {
+                    // No facet for "overdue" exists, so this drives the WHEN filter the
+                    // toolbar already owns rather than inventing a parallel one.
+                    // ⚠️ whenColId too, not just the condition: WHEN applies to whichever date
+                    // column is bound, so setting the condition alone would filter on some
+                    // other column — or on none — and quietly show the wrong rows.
+                    setWhenColId(dateCol.id); setWhenCond("before");
+                    setWhenA(new Date().toISOString().slice(0, 10));
+                  })}
+                </div>
+              );
+            })()}
+
             <PMTable
               columns={data.columns} rows={filtered} boardGroups={data.groups} ctx={ctx}
               groupBy={view.groupBy} hiddenCols={new Set(view.hiddenCols)}
