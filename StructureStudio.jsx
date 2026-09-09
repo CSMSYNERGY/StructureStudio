@@ -8540,7 +8540,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt = 0, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt = 0, activeWall = null, suspended, canEdit, onEdit, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -8757,6 +8757,32 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
         // building that grew pushes the camera out and one that shrank does not jump. The
         // orbit ANGLE survives; only the look-at height and the distance clamps move.
         // No render() here -- the applyFull() that always accompanies this queues one.
+        // TURN TO THE WALL BEING WORKED ON. Carolyn, 2026-09-08 09:37: "let's have that move
+        // so that we can see what we placed, so that we don't have to go over and click it
+        // because we placed it ... And then obviously, if you put a loft on, it makes no
+        // sense to move it."
+        //
+        // This REPLACES the door's old claim on the angle rather than adding to it. The door
+        // defined the front and the front defined the camera, so moving the door swung the
+        // whole building — the thing she called the biggest annoying thing. The door is now
+        // just another opening, and the camera follows whatever is being edited.
+        //
+        // ⚠️ AZIMUTH ONLY. Distance, height and target are left exactly as the user left
+        // them, so somebody who has zoomed in stays zoomed in. Orbiting is this panel's whole
+        // affordance, and yanking the zoom back would be the same theft in a different axis —
+        // which is what the mount-effect comment below has always said about re-aiming.
+        aimAtWall: (wall) => {
+          const dir = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[wall];
+          if (!dir) return;
+          const t = controls.target, cur = camera.position;
+          const dx = cur.x - t.x, dz = cur.z - t.z;
+          // Preserve the CURRENT orbit radius, not the mount-time one.
+          const rad = Math.sqrt(dx * dx + dz * dz) || frameFor(pRef.current).dist;
+          const len = Math.sqrt(dir[0] * dir[0] + dir[1] * dir[1]);
+          camera.position.set(t.x + (dir[0] / len) * rad, cur.y, t.z + (dir[1] / len) * rad);
+          controls.update();
+          render();   // direct, not rAF — a backgrounded tab never fires rAF
+        },
         applyFraming: () => {
           const p = pRef.current;
           const f = frameFor(p);
@@ -8835,6 +8861,18 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
     e.applyFull();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [geomSig]);
+
+  // The dock turns to whatever exterior wall is being worked on. A null — an interior item,
+  // or nothing selected — leaves the camera exactly where it is: turning for a loft would be
+  // motion carrying no information, which is the half of this Carolyn ruled out herself.
+  //
+  // Placement and selection are the same trigger because every placement path selects what it
+  // just placed, so "show me what I just put down" and "show me what I just clicked" are one
+  // effect rather than two that could disagree.
+  useEffect(() => {
+    const e = engineRef.current;
+    if (e && activeWall) e.aimAtWall(activeWall);
+  }, [activeWall]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", overflow: "hidden" }}>
@@ -11177,6 +11215,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ...(cfg.heightOffFloorIn != null ? { heightOffFloorIn: cfg.heightOffFloorIn } : {}) };
     }
     setItems((p) => [...p, ni]);
+    // SELECT WHAT WAS JUST PLACED. Four other placement paths already did this (the included
+    // chip, the ramp, and both pickers); this one -- the built-in wall and floor placements --
+    // did not, which is a plain inconsistency and was invisible until something depended on it.
+    //
+    // The docked 3D now turns to the wall being worked on, and it reads that from the
+    // selection. Carolyn's ask was "so that we don't have to go over and click it because we
+    // placed it", so the placement itself has to count as working on that wall.
+    setSelectedId(ni.id);
     setActiveTool(null);
     setToast(null);
   }, [activeTool, dragging, getSvgPt, items, mgX, mgY, pW, pH, scale, ITEMS, pendingRemoval, selectedId, editingNoteId, gateRequired, doorPaintColors, windowColorList, paintColors]);
@@ -15636,6 +15682,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               fixtures={C.fixtures} doorColors={doorPaintColors} windowColors={windowColorList} bodyColors={bodyPaintPool} trimColors={trimPaintPool}
               dormerWindowId={sel.dormerWindowId || null}
               dormerWindowOffset={sel.dormerWindowOffset || 0}
+              /* ⚠️ wallOnly ONLY, and that is Carolyn's own line: "if you put a loft on, it
+                 makes no sense to move it." A loft, shelf or bench HAS a wall, so keying on
+                 `it.wall` alone would turn the view for every interior item too. Only the
+                 openings that cut the exterior wall are worth turning to. */
+              activeWall={(() => {
+                const it = (items || []).find((i) => i.id === selectedId);
+                const c = it && ITEMS[it.type];
+                return (c && c.wallOnly && it.wall) ? it.wall : null;
+              })()}
               suspended={Boolean(dragging || resizing)}
               canEdit={!planLocked}
               /* ⚠️ THE GATE APPLIES HERE TOO. This button is the one route from the view-only
