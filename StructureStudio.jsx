@@ -304,22 +304,52 @@ function slabDepthFt(cfg, it) {
 // the workbench silently succeeded and produced exactly the layout that toast exists to
 // prevent, rasterized into the PDF and sent to the shop. `cand` is the placing item when the
 // caller is itself a slab; a wallOnly caller passes nothing and blocks the full height.
-// ⚠️ KNOWN GAP, left open deliberately on 2026-09-04 rather than found again later. A
-// wallOnly caller passes no `cand`, so its candidate band defaults to full height and a
-// RAISED door (Carolyn's loft door — see doorSillStamps) is still refused above a workbench
-// or a low shelf, which is a legal arrangement. checkDoorCollision above now answers the
-// other direction correctly, so the invariant is currently enforced ASYMMETRICALLY — the
-// exact fault this function's own comment was written to fix, one level up.
+// EVERY DRAG REFUSAL SAYS WHY. Carolyn, 2026-09-07 12:13, dragging a window that would not
+// go: "Look, I just clicked, and that window just bang went back here. Now I don't. I
+// clicked, and it's gone. I don't even know where it went."
 //
-// The fix is not in here: the band machinery already works. It is that the ~11 wallOnly call
-// sites must each pass the candidate they already hold, and this function must fall back to
-// ssItemVBand (feet) when ssSlabBand (INCHES) returns null for a non-slab. Not done in this
-// change because it touches every placement path in two hand-mirrored files with no way to
-// exercise them, and the failure it leaves behind is an honest, actionable toast ("A
-// workbench is on that wall") rather than a wrong drawing.
+// She was right that nothing was wrong with the placement rules there — the item WAS being
+// refused, correctly. What was missing is that a refused DRAG was a bare `return`, while
+// every click-to-place path already called setToast/flash3. So a legal-but-blocked move and
+// a dropped click looked identical, which is why the real placement bugs below went
+// unreportable for weeks: she could not tell a refusal from a glitch.
+//
+// One wording per reason, shared by both the 2D and the 3D drag, so the same illegal move is
+// never explained two different ways.
+const SS_REFUSE_WALL = "Something else is already on that part of the wall.";
+const SS_REFUSE_SLAB = "A workbench or shelf is in the way at that height — slide it along the wall, or raise it.";
+const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other.";
+
+// ✅ THE 2026-09-04 GAP IS CLOSED (2026-09-09). It read: a wallOnly caller passes no `cand`, so
+// its candidate band defaults to full height and a RAISED door — or a transom — is refused
+// above a workbench or a low shelf, which is a legal arrangement. Carolyn hit it from the
+// other side on 09-07: "there are times when if a window fits above a workbench, that it can
+// be placed. Okay, so we need to look at measurements so that it can be placed."
+//
+// Every wallOnly call site now passes the candidate it was ALREADY building for
+// checkDoorCollision, and ssCandBandIn below falls back to ssItemVBand for a non-slab. So a
+// 2'x1' transom over a bench places, and a full-height door across one is still refused. The
+// two directions finally agree, which is what this function's header has wanted since it was
+// written.
+//
+// ⚠️ ssItemVBand speaks FEET; ssSlabBand speaks INCHES. Mixing them makes every opening twelve
+// times too tall, which does not read as a unit bug — it reads as "nothing can be placed
+// anywhere". Convert at this boundary, the only place that knows both units.
+//
+// ⚠️ A null band still means ASSUME CLASH, never "no overlap". An item that states no height is
+// exactly the case where guessing is unsafe, so it keeps the old full-height blocker.
+function ssCandBandIn(cand, itemTypes) {
+  if (!cand) return [0, 1e4];
+  const slab = ssSlabBand(cand, itemTypes);
+  if (slab) return slab;
+  const cfg = itemTypes && itemTypes[cand.type];
+  const v = cfg ? ssItemVBand(cand, cfg, itemTypes) : null;
+  if (!v || !isFinite(v.bottomFt) || !isFinite(v.topFt)) return [0, 1e4];
+  return [v.bottomFt * 12, v.topFt * 12];
+}
 function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
   if (!sn.wall) return false;
-  const candBand = (cand && ssSlabBand(cand, itemTypes)) || [0, 1e4];
+  const candBand = ssCandBandIn(cand, itemTypes);
   const isH = sn.wall === "north" || sn.wall === "south";
   const candPos = isH ? sn.x : sn.y;
   const candHalf = widthFtPx / 2;
@@ -482,7 +512,7 @@ function reflowItems(items, prev, next, ITEMS) {
           : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY);
         const cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
         if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
-        if (checkWallSlabOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale)) continue;
+        if (checkWallSlabOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale, cand)) continue;
         return sn;
       }
     }
@@ -7244,7 +7274,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // snap/collision functions, same stamped fields, committed through the
       // same onItemAdd callback. Never invent a 3D-only placement rule here.
       const flash3 = (m) => {
-        setMsg3(m);
+        // Bail out when the message has not changed: a refused DRAG calls this on every
+        // pointermove, and re-rendering the viewer per rejected pixel is felt on a phone.
+        setMsg3((cur) => (cur === m ? cur : m));
         setTimeout(() => setMsg3((cur) => (cur === m ? null : cur)), 4000);
       };
       const itemLabel3 = (type) => (itemTypes[type] && (itemTypes[type].shortLabel || itemTypes[type].label)) || type;
@@ -7382,7 +7414,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // Workbench check too — checkDoorCollision deliberately skips workbenches, so the
         // in-viewer picker / included chip could drop its door or window straight onto one.
         // Same refusal the 2D placement paths gained in the 2026-08-20 audit.
-        if (checkWallSlabOverlap(sn, widthFt * scale, liveItems, itemTypes, scale)) {
+        if (checkWallSlabOverlap(sn, widthFt * scale, liveItems, itemTypes, scale, ni)) {
           flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return false;
         }
@@ -7518,7 +7550,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           flash3("Something is already on that spot. Pick a clear part of the wall.");
           return;
         }
-        if (checkWallSlabOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale)) {
+        if (checkWallSlabOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale, cand)) {
           flash3("A workbench is on that wall — place this somewhere else on the wall.");
           return;
         }
@@ -7703,8 +7735,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // refusal exactly so semantics match. Guarding here, above the vertical branch,
             // covers both commit sites below with one check.
             const dOthers3 = liveItems.filter((i) => i.id !== it.id);
-            if (checkDoorCollision({ ...it, ...sn, widthFt: wFt }, { ...c, width: wFt }, dOthers3, itemTypes, scale)) return;
-            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale)) return;
+            const dCand3 = { ...it, ...sn, widthFt: wFt };
+            if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale)) { flash3(SS_REFUSE_WALL); return; }
+            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3)) { flash3(SS_REFUSE_SLAB); return; }
             if (vertical) {
               // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
@@ -7746,7 +7779,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const nw = getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
             const sn = snapToWallInterior(nw, pageX, pageY, wFt * scale, slabDepthFt(c, it) * scale, pWpx, pHpx, mgX, mgY);
             const others = liveItems.filter((i) => i.id !== it.id);
-            if (checkDoorCollision({ ...it, ...sn }, { ...c, width: wFt }, others, itemTypes, scale)) return;
+            if (checkDoorCollision({ ...it, ...sn }, { ...c, width: wFt }, others, itemTypes, scale)) { flash3(SS_REFUSE_WALL); return; }
             if (checkWallSlabOverlap(sn, wFt * scale, others, itemTypes, scale, { ...it, ...sn })) return;
             if (sn.x !== it.x || sn.y !== it.y || sn.wall !== it.wall) commitLive(it, sn, { interior: true });
           } else if (it.type === "loft") {
@@ -7792,7 +7825,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
               const o = otherLofts[oi];
               const oW2 = (o.widthFt || 6) / 2, oH2 = (o.heightFt || 4) / 2;
               const oCx2 = (o.x - mgX) / scale, oCy2 = (o.y - mgY) / scale;
-              if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) return;
+              if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) { flash3(SS_REFUSE_LOFT); return; }
             }
             const nx = mgX + cxFt * scale, ny = mgY + cyFt * scale;
             if (nx !== it.x || ny !== it.y) commitLive(it, { x: nx, y: ny }, { interior: true });
@@ -10085,6 +10118,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (additionalOpen && !detailsLocked) { captureLeadSilently(); saveDraftSilently(); }
   }, [additionalOpen, detailsLocked]);
   const [toast, setToast] = useState(null);
+  // The 2D drag's refusal channel, mirroring flash3's proven shape: setToast bails out when
+  // the message is unchanged (no re-render per rejected pixel), and the timer's stale-guard
+  // means an older timer can never blank a newer message. A plain const, NOT a hook, so it
+  // adds nothing to the hook order.
+  const refuseDrag = (m) => {
+    setToast((cur) => (cur === m ? cur : m));
+    setTimeout(() => setToast((cur) => (cur === m ? null : cur)), 4000);
+  };
   // ─── 3D view state ───
   const [show3D, setShow3D] = useState(false);
   // ── Docked view-only 3D (Carolyn 2026-08-19) ──
@@ -10927,7 +10968,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Workbench check too, as the built-in wall placement below runs — checkDoorCollision
       // skips workbenches, so an included chip could drop its door/window straight onto one
       // (audit 2026-08-20).
-      if (checkWallSlabOverlap(sn, iwPx2, items, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, iwPx2, items, ITEMS, scale, ni)) {
         setToast("A workbench is on that wall — place this somewhere else on the wall."); setTimeout(() => setToast(null), 4000); return;
       }
       setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
@@ -11094,7 +11135,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setTimeout(() => setToast(null), 4000);
         return;
       }
-      if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, cand)) {
         setToast("A workbench is on that wall — place this somewhere else on the wall.");
         setTimeout(() => setToast(null), 4000);
         return;
@@ -11137,13 +11178,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
       const others = items.filter((it) => it.id !== swapId);
-      if (checkDoorCollision({ ...cur, ...sn, widthFt: wFt }, { width: wFt }, others, ITEMS, scale)) {
+      const swapDoorCand = { ...cur, ...sn, widthFt: wFt };
+      if (checkDoorCollision(swapDoorCand, { width: wFt }, others, ITEMS, scale)) {
         setToast("That door doesn't fit here — something else is in the way on this wall.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setDoorPick(null);
         return;
       }
-      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale, swapDoorCand)) {
         setToast("A workbench is on that wall — the wider door would overlap it.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setDoorPick(null);
@@ -11221,7 +11263,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // skips workbenches (wallSnap, not wallOnly), so a picked catalog door landed straight
     // on a workbench — the exact layout checkWallSlabOverlap exists to prevent
     // (audit 2026-08-20).
-    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
+    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, ni)) {
       setToast("A workbench is on that wall — place this somewhere else on the wall.");
       setTimeout(() => setToast(null), 4000);
       setDoorPick(null);
@@ -11252,13 +11294,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       const sn = snapToWall(cur.wall, cur.x, cur.y, wFt * scale, 0.5 * scale, pW, pH, mgX, mgY);
       const others = items.filter((it) => it.id !== swapId);
-      if (checkDoorCollision({ ...cur, ...sn, widthFt: wFt }, { width: wFt }, others, ITEMS, scale)) {
+      const swapWinCand = { ...cur, ...sn, widthFt: wFt };
+      if (checkDoorCollision(swapWinCand, { width: wFt }, others, ITEMS, scale)) {
         setToast("That window doesn't fit here — something else is in the way on this wall.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setWindowPick(null);
         return;
       }
-      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale)) {
+      if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale, swapWinCand)) {
         setToast("A workbench is on that wall — the wider window would overlap it.");
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setWindowPick(null);
@@ -11309,7 +11352,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     // Workbench check too, as the built-in wall placement runs — checkDoorCollision skips
     // workbenches, so a picked catalog window landed straight on one (audit 2026-08-20).
-    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale)) {
+    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, ni)) {
       setToast("A workbench is on that wall — place this somewhere else on the wall.");
       setTimeout(() => setToast(null), 4000);
       setWindowPick(null);
@@ -11623,8 +11666,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
       const dOthers = items.filter((i) => i.id !== dragging.id);
       const dCand = { ...it, ...sn, widthFt: iWidthFt };
-      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) return;
-      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale)) return;
+      if (checkDoorCollision(dCand, { ...cfg, width: iWidthFt }, dOthers, ITEMS, scale)) { refuseDrag(SS_REFUSE_WALL); return; }
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, dOthers, ITEMS, scale, dCand)) { refuseDrag(SS_REFUSE_SLAB); return; }
       // A ramp snapped to this door must follow it (position + wall); otherwise it
       // detaches and the stale geometry is rasterized into the exported PDF. (audit #F4)
       // rampPlacementForDoor honours the ramp's own depth (catalog ramps vary), so it
@@ -11643,9 +11686,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const cand = { ...it, ...sn };
       // Check collision with doors AND other workbenches on same wall
       const others = items.filter((i) => i.id !== dragging.id);
-      if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)) return;
+      if (checkDoorCollision(cand, { ...cfg, width: iWidthFt }, others, ITEMS, scale)) { refuseDrag(SS_REFUSE_WALL); return; }
       // Refuse a move that would land this slab on another at the same height
-      if (checkWallSlabOverlap(sn, iWidthFt * scale, others, ITEMS, scale, cand)) return;
+      if (checkWallSlabOverlap(sn, iWidthFt * scale, others, ITEMS, scale, cand)) { refuseDrag(SS_REFUSE_SLAB); return; }
       setItems((p) => p.map((i) => i.id === dragging.id ? { ...i, ...sn } : i));
     } else {
       // Notes drag anywhere on the visible page (no plan constraint)
@@ -11721,7 +11764,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         for (const o of otherLofts) {
           const oW2 = (o.widthFt || cfg.width) / 2, oH2 = (o.heightFt || cfg.height) / 2;
           const oCx2 = (o.x - mgX) / scale, oCy2 = (o.y - mgY) / scale;
-          if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) return;
+          if (fL < oCx2 + oW2 - 0.1 && fR > oCx2 - oW2 + 0.1 && fT < oCy2 + oH2 - 0.1 && fB > oCy2 - oH2 + 0.1) { refuseDrag(SS_REFUSE_LOFT); return; }
         }
 
         // Validate attachment — both ends of at least one axis must touch walls or other lofts
