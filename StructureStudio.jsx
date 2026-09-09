@@ -80,6 +80,10 @@ const LEGACY_LAYOUT_FALLBACK = {
   singleDoor: { label: "Single Door (36\")", icon: "🚪", color: "#D97706", width: 3, height: 0.5, shortLabel: "SD", wallOnly: true, noPalette: true },
   doubleDoor: { label: "Double Door (60\")", icon: "🚪🚪", color: "#B45309", width: 5, height: 0.5, shortLabel: "DD", wallOnly: true, noPalette: true },
   window: { label: "Window (24\")", icon: "🪟", color: "#0EA5E9", width: 2, height: 0.5, shortLabel: "W", wallOnly: true, noPalette: true },
+  // The generic rough opening, retired in favour of roughOpeningDoor/roughOpeningWindow
+  // (migration 224). Same role as the three above: RENDER ONLY, so every design already
+  // carrying one keeps drawing at exactly today's geometry — floor to D3.RO_H, no sill.
+  roughOpening: { label: "Rough Opening", icon: "⬜", color: "#000000", width: 3, height: 0.5, shortLabel: "RO", wallOnly: true, noPalette: true },
   // NOTE: ramp is NOT here — it's fully self-contained now (SIMPLE_RAMP_CFG below), decoupled from
   // the built-in `ramp` layout item, so a tenant's ramp works whether or not that legacy row exists.
 };
@@ -412,7 +416,27 @@ function rampPosFor(rmp, sn, g) {
 // Items the customer sizes themselves, so shrinking one to fit a smaller building
 // preserves their intent. A DOOR is not in this list on purpose: a 6 ft double door
 // quietly becoming 4 ft would change what they are buying.
-const SS_SHRINKABLE = { workbench: true, roughOpening: true, loft: true, shelf: true, doubleShelf: true };
+// Rough openings split into a DOOR ro and a WINDOW ro (2026-09-08, migration 224). The generic
+// `roughOpening` is RENDER-ONLY from here on: LEGACY_LAYOUT_FALLBACK keeps it drawing on the
+// designs that already carry one, and every branch below accepts all three keys so an old design
+// behaves exactly as it always did. The key is NEVER renamed — 171_interior_shelves.sql:44 states
+// the rule: item_key is the join to every layout_item_pricing row and to the `type` string on
+// every saved design.
+const SS_RO_KEYS = ["roughOpening", "roughOpeningDoor", "roughOpeningWindow"];
+function ssIsRO(t) { return t === "roughOpening" || t === "roughOpeningDoor" || t === "roughOpeningWindow"; }
+// The window RO is the only one that sits off the floor. The legacy key stays door-shaped, which
+// is what it has always been in 3D (D3.RO_H === D3.DOOR_H, sill 0).
+function ssIsWindowRO(t) { return t === "roughOpeningWindow"; }
+// Plan/PDF label: RO-D1 / RO-W1 for the two new kinds, bare RO-1 for legacy items so old plans
+// re-export identically. Numbering is PER KIND and positional, like the single counter it
+// replaces — recomputed at render time, never stored.
+function ssRoPrefix(t) { return t === "roughOpeningDoor" ? "RO-D" : t === "roughOpeningWindow" ? "RO-W" : "RO-"; }
+function ssRoLabel(item, items) {
+  const idx = items.filter((i) => i.type === item.type).findIndex((r) => r.id === item.id);
+  return ssRoPrefix(item.type) + (idx + 1);
+}
+
+const SS_SHRINKABLE = { workbench: true, roughOpening: true, roughOpeningDoor: true, roughOpeningWindow: true, loft: true, shelf: true, doubleShelf: true };
 // Palette sections, in display order. The KEY is what `layout_item_types.palette_group`
 // stores; an item with no group (every tenant config until it is regenerated) renders in the
 // unlabelled tail, which is what keeps the grouped palette safe to ship ahead of the data.
@@ -481,7 +505,7 @@ function reflowItems(items, prev, next, ITEMS) {
       let wFt = it.widthFt || cfg.width;
       const wallLen = isH ? next.w : next.h;
       if (wFt > wallLen && SS_SHRINKABLE[it.type]) {
-        const shrunk = Math.max(it.type === "roughOpening" ? 0.5 : 2, wallLen);
+        const shrunk = Math.max(ssIsRO(it.type) ? 0.5 : 2, wallLen);
         if (shrunk !== wFt) { wFt = shrunk; events.push({ id: it.id, type: it.type, label: labelOf(it), kind: "resized", to: wFt }); }
       }
       let sn = seat(it, cfg, it.wall, wantFt, wFt, hFt);
@@ -1110,7 +1134,7 @@ function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
     // checkDoorCollision reads it, and a roll-up understated by half a foot would let a loft
     // door be placed into the top of it.
     if (!isFinite(h) || h <= 0) { const hi = Number(item.heightIn); if (hi > 0) h = hi / 12; }
-    if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : D3.DOOR_H;
+    if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : ssIsWindowRO(item.type) ? D3.RO_WINDOW_H : D3.DOOR_H;
     let sill = Number(item.sillFt != null ? item.sillFt : def.sillFt);
     if (!isFinite(sill) || sill < 0) sill = 0;
     return { bottomFt: sill, topFt: sill + h };
@@ -1787,8 +1811,8 @@ const SS_SECTION_HEADING = { openings: "Doors & Windows", options: "Options on y
 // so it reads with the windows rather than off in the general options.
 function ssOpeningRank(key) {
   const k = String(key || "");
-  if (k === "singleDoor" || k === "doubleDoor" || k.indexOf("fx:") === 0) return 0;      // doors
-  if (k === "window" || k.indexOf("win:") === 0 || k === "roughOpening") return 1;        // windows
+  if (k === "singleDoor" || k === "doubleDoor" || k === "roughOpeningDoor" || k.indexOf("fx:") === 0) return 0;      // doors
+  if (k === "window" || k.indexOf("win:") === 0 || k === "roughOpening" || k === "roughOpeningWindow") return 1;        // windows
   // Shutters and flower boxes rank WITH the windows they hang on, so the quote reads
   // "Window — White" and then "Shutters — Black" underneath it, instead of burying the
   // dressing in the generic options block halfway down the page.
@@ -1894,7 +1918,7 @@ function computeSelectionRows(sel, paintColors, C, items) {
       if (it.type === "fixtureDoor") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); continue; }
       if (it.type === "window") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); else placedKeys.add("window"); continue; }
       if (it.type === "ramp") { if (it.fixtureItemId) placedKeys.add(String(it.fixtureItemId)); placedKeys.add("ramp"); continue; }
-      if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "shelf" || it.type === "doubleShelf" || it.type === "roughOpening") placedKeys.add(it.type);
+      if (it.type === "singleDoor" || it.type === "doubleDoor" || it.type === "loft" || it.type === "workbench" || it.type === "shelf" || it.type === "doubleShelf" || ssIsRO(it.type)) placedKeys.add(it.type);
     }
   }
   const declinedLines = []; let declinedTotal = 0;
@@ -2555,8 +2579,10 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
   // building line BEFORE the % pass) + paint/roof + all non-% add-ons + rough
   // openings + custom options (delivery excluded, matching submit-estimate).
   if (deferred.length) {
-    const roRate = (resolve("roughOpening") || { rate: 0 }).rate;
-    const roCount = items.filter((i) => i.type === "roughOpening").length;
+    // One term per RO key: the door and window ROs price independently, and the legacy generic
+    // key still prices for the designs that carry one.
+    const roTotal = SS_RO_KEYS.reduce((s, k) =>
+      s + (resolve(k) || { rate: 0 }).rate * items.filter((i) => i.type === k).length, 0);
     const customTotal = (customOptions || []).reduce((s, co) => {
       if (!co || !co.name || !String(co.name).trim()) return s;
       const amt = parseFloat(co.amount) || 0;
@@ -2574,7 +2600,7 @@ function computeLayoutPricingRows(items, sel, customOptions, C, paintColors) {
       .reduce((s, r) => s + (Number(r.total) || 0), 0);
     const buildingRow = selRowsForBase.find((r) => r.key === "building");
     const netBuilding = buildingRow && buildingRow.total != null ? Number(buildingRow.total) : buildingPrice;
-    const base = netBuilding + selectionTaxable + nonPctSubtotal + roRate * roCount + customTotal;
+    const base = netBuilding + selectionTaxable + nonPctSubtotal + roTotal + customTotal;
     for (const d of deferred) d.row.total = (d.pct / 100) * base * (d.row.qty || 1); // ×count: the server bills GHL line = qty×amount, so the preview must scale by count too or it under-shows (audit #F1)
   }
 
@@ -3284,7 +3310,9 @@ function scanToFeet(m) {
 const D3 = {
   WALL_H: 8,          // wall plate height
   DOOR_H: 6.5,        // door opening height
-  RO_H: 6.5,          // rough-opening height
+  RO_H: 6.5,          // rough-opening height (door RO, and the legacy generic RO)
+  RO_WINDOW_H: 3,     // window rough-opening height
+  RO_WINDOW_SILL: 3.5, // window rough-opening sill elevation
   WINDOW_H: 3,        // window opening height
   WINDOW_SILL: 3.5,   // window sill elevation
   LOFT_ELEV: 5.5,     // loft platform top elevation
@@ -3971,7 +3999,11 @@ function d3SwatchCssBuiltIn(label, fallback) {
 // these with D3 fallbacks, so legacy designs (no fields) render identically.
 function d3OpeningDefaults(type) {
   if (type === "window") return { openingHeightFt: D3.WINDOW_H, sillFt: D3.WINDOW_SILL };
-  if (type === "roughOpening") return { openingHeightFt: D3.RO_H };
+  if (type === "roughOpeningWindow") return { openingHeightFt: D3.RO_WINDOW_H, sillFt: D3.RO_WINDOW_SILL };
+  // sillFt: 0 is STATED for the same reason the door branch below states it — "a door rough
+  // opening sits on the floor" belongs written down beside its height rather than assumed
+  // separately in two renderers.
+  if (type === "roughOpening" || type === "roughOpeningDoor") return { openingHeightFt: D3.RO_H, sillFt: 0 };
   // sillFt: 0 is STATED rather than left absent, so the door branch has the same shape as
   // the window branch above. Both readers already default an absent sill to the floor, so
   // this moves no pixel today; what it changes is that "a door sits at 0" is now written
@@ -4931,7 +4963,16 @@ function buildShed3DModel(THREE, p) {
       if (s0 + wh > maxTop) s0 = Math.max(0.35, maxTop - wh);   // tall window, short wall: drop the sill
       return [s0, s0 + wh];
     }
-    if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
+    if (ssIsWindowRO(it.type)) {
+      // Same shape as the window branch above, sill and clamp together: a tall opening on a
+      // short wall drops its sill rather than pushing through the plate. The sill panel below
+      // then emits on its own, because y0 > 0.
+      const rh = Math.min(it.openingHeightFt || D3.RO_WINDOW_H, maxTop - 0.35);
+      let r0 = it.sillFt != null ? it.sillFt : D3.RO_WINDOW_SILL;
+      if (r0 + rh > maxTop) r0 = Math.max(0.35, maxTop - rh);
+      return [r0, r0 + rh];
+    }
+    if (ssIsRO(it.type)) return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
     // singleDoor / doubleDoor / fixtureDoor (every catalog door placement)
     //
     // ⚠️ THE FLOOR USED TO BE HARD-CODED HERE, and the old line is kept because it was right
@@ -7028,7 +7069,13 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           if (s0 + wh > maxTop) s0 = Math.max(0.35, maxTop - wh);
           return [s0, s0 + wh];
         }
-        if (it.type === "roughOpening") return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
+        if (ssIsWindowRO(it.type)) {
+          const rh = Math.min(it.openingHeightFt || D3.RO_WINDOW_H, maxTop - 0.35);
+          let r0 = it.sillFt != null ? it.sillFt : D3.RO_WINDOW_SILL;
+          if (r0 + rh > maxTop) r0 = Math.max(0.35, maxTop - rh);
+          return [r0, r0 + rh];
+        }
+        if (ssIsRO(it.type)) return [0, Math.min(it.openingHeightFt || D3.RO_H, maxTop)];
         // The door branch mirrors openingSpan's, sill and clamp together, for the reason
         // stated at the top of this function: a highlight that does not track the hole is
         // worse than none. A loft door's highlight has to be up the wall with the door.
@@ -7434,7 +7481,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           commitPlaced3({ id: idCounter++, type: "loft", x: mgX + (bldgW / 2) * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, elevationFt: D3.LOFT_ELEV });
           return;
         }
-        // wallOnly built-ins (config singleDoor/doubleDoor/window/roughOpening)
+        // wallOnly built-ins (config window/roughOpeningDoor/roughOpeningWindow)
         const w2 = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
         const sn = snapToWall(w2, pageX, pageY, cfg.width * scale, cfg.height * scale, pWpx, pHpx, mgX, mgY);
         const cand = { id: -1, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
@@ -9875,10 +9922,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       const selRows = computeSelectionRows(sel, paintColors, C, items);
       const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
-      const roList = items.filter((i) => i.type === "roughOpening");
-      const lp = C.layoutPricing && C.layoutPricing.roughOpening;
-      const ov = (lp && lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
-      const roRate = lp ? (Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0) : 0;
+      const roList = items.filter((i) => ssIsRO(i.type));
+      const roRateOf = (key) => {
+        const lp = C.layoutPricing && C.layoutPricing[key];
+        if (!lp) return 0;
+        const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
+        return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
+      };
+      const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
       const customTotal = (customOptions || []).reduce((s, r) => {
         const amt = Math.max(0, parseFloat(r && r.amount) || 0);
         const q = r && r.qty ? Math.abs(parseInt(r.qty, 10)) || 1 : 1;
@@ -9889,13 +9940,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // silently omit a line the estimate charges.
       const preBase = selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
         + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
-        + (C.showPricing ? roList.length * roRate : 0)
+        + (C.showPricing ? roTotal : 0)
         + customTotal;
       ssResolvePctSelectionRows(selRows, preBase);
       return Math.max(0,
         selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
         + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
-        + (C.showPricing ? roList.length * roRate : 0)
+        + (C.showPricing ? roTotal : 0)
         + customTotal);
     } catch (_e) { return 0; }
   };
@@ -11452,7 +11503,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Wall-attached 1D resize: workbench snaps to integer feet, rough
       // opening resizes smoothly to whatever width the user drags to.
       const isHoriz = it.wall === "north" || it.wall === "south";
-      const isRO = it.type === "roughOpening";
+      const isRO = ssIsRO(it.type);
 
       // Mouse position in feet along the wall axis.
       //
@@ -11925,7 +11976,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } else if (cfg.wallOnly) {
         // Rounded rect for door/window bar (matches SVG rx=1)
         const barH = 10, barR = 1;
-        ctx.fillStyle = item.type === "roughOpening" ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : isVentItem(item) ? FIXTURE_VENT_COLOR : cfg.color;
+        ctx.fillStyle = ssIsRO(item.type) ? "#FFFFFF" : item.type === "fixtureDoor" ? fixtureDoorColor(item) : isVentItem(item) ? FIXTURE_VENT_COLOR : cfg.color;
         ctx.beginPath();
         ctx.moveTo(-iw / 2 + barR, -barH / 2);
         ctx.lineTo(iw / 2 - barR, -barH / 2);
@@ -11937,7 +11988,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ctx.lineTo(-iw / 2, -barH / 2 + barR);
         ctx.quadraticCurveTo(-iw / 2, -barH / 2, -iw / 2 + barR, -barH / 2);
         ctx.fill();
-        if (item.type === "roughOpening") { ctx.strokeStyle = "#000000"; ctx.lineWidth = 1.5; ctx.stroke(); }
+        if (ssIsRO(item.type)) { ctx.strokeStyle = "#000000"; ctx.lineWidth = 1.5; ctx.stroke(); }
         if (item.type === "singleDoor") {
           ctx.strokeStyle = cfg.color + "60"; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
           const out = item.wall === "north" || item.wall === "east";
@@ -11980,10 +12031,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         let label = cfg.shortLabel;
         if (item.type === "fixtureDoor") label = item.planLabel || cfg.shortLabel;
         if (item.type === "window") label = item.planLabel || cfg.shortLabel;
-        if (item.type === "roughOpening") {
-          const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
-          label = `RO-${idx + 1}`;
-        }
+        if (ssIsRO(item.type)) label = ssRoLabel(item, items);
         // Doors + windows prefix their width, e.g. "6' DD".
         if (item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window") {
           const w = fmtFtIn((item.widthFt || cfg.width) * 12);
@@ -12085,9 +12133,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }
     const rampCount = items.filter((i) => i.type === "ramp").length;
     if (rampCount > 0) bullets.push(`Ramp${rampCount > 1 ? " ×" + rampCount : ""}`);
-    items.filter((i) => i.type === "roughOpening").forEach((ro, idx) => {
+    items.filter((i) => ssIsRO(i.type)).forEach((ro) => {
       const d = (roDimensions[ro.id] || "").trim();
-      const label = `RO-${idx + 1}`;
+      const label = ssRoLabel(ro, items);
       bullets.push(d ? `${label} — ${d}` : label);
     });
     // Lines and notes are not bulleted — they already render at their position on the page.
@@ -13186,8 +13234,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         discounts: (Array.isArray(sel.discounts) ? sel.discounts : [])
           .map((d) => ({ description: String(d.description || "").trim(), amount: Math.abs(parseFloat(d.amount) || 0), taxable: d.taxable !== false }))
           .filter((d) => d.amount > 0),
-        roughOpenings: items.filter((i) => i.type === "roughOpening").map((ro, idx) => ({
-          name: `RO-${idx + 1}`,
+        // itemKey is ADDITIVE: submit-estimate defaults a missing one to "roughOpening", so an
+        // old cached bundle and a resubmit of a legacy design both still price correctly.
+        roughOpenings: items.filter((i) => ssIsRO(i.type)).map((ro) => ({
+          name: ssRoLabel(ro, items),
+          itemKey: ro.type,
           dimensions: (roDimensions[ro.id] || "").trim(),
           qty: 1,
         })),
@@ -15301,7 +15352,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </>
                 ) : cfg.wallOnly ? (
                   <>
-                    {item.type === "roughOpening" ? (
+                    {ssIsRO(item.type) ? (
                       <rect x={-iw / 2} y={-5} width={iw} height={10} fill="#FFFFFF" stroke="#000000" strokeWidth={1.5} rx={1} />
                     ) : (
                       <rect x={-iw / 2} y={-5} width={iw} height={10} fill={item.type === "fixtureDoor" ? fixtureDoorColor(item) : isVentItem(item) ? FIXTURE_VENT_COLOR : cfg.color} rx={1} />
@@ -15329,10 +15380,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         is the one cue that does not survive. Canvas twin in generatePNG. */}
                     {isVentItem(item) && <g>{[-2, 0, 2].map((ly) => <line key={ly} x1={-iw / 2 + 2} y1={ly} x2={iw / 2 - 2} y2={ly} stroke="#FFF" strokeWidth={1.2} />)}</g>}
                     <text x={0} y={(item.wall === "north" || item.wall === "east") ? 14 : -10} textAnchor="middle" fill="#1E293B" fontSize={9} fontWeight="700">{(() => {
-                      if (item.type === "roughOpening") {
-                        const idx = items.filter((i) => i.type === "roughOpening").findIndex((r) => r.id === item.id);
-                        return `RO-${idx + 1}`;
-                      }
+                      if (ssIsRO(item.type)) return ssRoLabel(item, items);
                       const base = ((item.type === "fixtureDoor" || item.type === "window") && item.planLabel) ? item.planLabel : cfg.shortLabel;
                       // Doors + windows prefix their width, e.g. "6' DD", so the size reads off the plan.
                       const isDoorOrWin = item.type === "singleDoor" || item.type === "doubleDoor" || item.type === "fixtureDoor" || item.type === "window";
@@ -15348,7 +15396,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       return upFt ? `${lbl} @ ${fmtDimFtIn(upFt)}` : lbl;
                     })()}</text>
                     {/* RO resize handles — drag end to change width freely */}
-                    {item.type === "roughOpening" && isSel && (() => {
+                    {ssIsRO(item.type) && isSel && (() => {
                       const cursor = (item.wall === "north" || item.wall === "south") ? "ew-resize" : "ns-resize";
                       const endZoneW = Math.min(Math.max(iw / 5, 10), 22, iw * 0.4);
                       return (
@@ -15631,16 +15679,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // no action get a 28px spacer; rows with no qty just omit that cell.
             const selRows = computeSelectionRows(sel, paintColors, C, items);
             const priceRows = C.showPricing ? computeLayoutPricingRows(items, sel, customOptions, C, paintColors).rows : [];
-            const roList = items.filter((i) => i.type === "roughOpening");
+            const roList = items.filter((i) => ssIsRO(i.type));
             // Rough-opening rate: same per-style resolution as the estimate (layoutPricing,
             // byStyle override wins) — the old C.layoutPrices read was a stale key that
-            // showed $0.00 while the estimate charged the real rate.
-            const roRate = (() => {
-              const lp = C.layoutPricing && C.layoutPricing.roughOpening;
+            // showed $0.00 while the estimate charged the real rate. One rate PER KEY now, so a
+            // door RO and a window RO can be priced differently.
+            const roRateOf = (key) => {
+              const lp = C.layoutPricing && C.layoutPricing[key];
               if (!lp) return 0;
               const ov = (lp.byStyle && sel.style) ? lp.byStyle[sel.style] : null;
               return Number(ov && ov.rate != null ? ov.rate : lp.rate) || 0;
-            })();
+            };
+            const roTotal = roList.reduce((s, ro) => s + roRateOf(ro.type), 0);
             const customTotal = customOptions.reduce((s, r) => {
               if (!r || !r.name || !String(r.name).trim()) return s;
               const amt = Math.max(0, parseFloat(r.amount) || 0);
@@ -15657,13 +15707,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ssResolvePctSelectionRows(selRows,
               selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
               + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
-              + (C.showPricing ? roList.length * roRate : 0)
+              + (C.showPricing ? roTotal : 0)
               + customTotal);
             // Mirrors the estimate's pre-tax total: all line items + delivery − discounts.
             const subtotal = Math.max(0,
               selRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
               + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
-              + (C.showPricing ? roList.length * roRate : 0)
+              + (C.showPricing ? roTotal : 0)
               + customTotal + deliveryAmt - discountTotal);
             const qtyCell = { width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" };
             const amtCell = { width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" };
@@ -15809,19 +15859,54 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
             {roList.length > 0 && (
               <div style={{ marginTop: 14 }}>
-                {roList.map((ro, idx) => {
+                {roList.map((ro) => {
                   const dim = roDimensions[ro.id] || "";
                   const invalid = !dim.trim();
+                  // The opening height, and for a window RO its sill, are the CUSTOMER's to set
+                  // per opening (Carolyn 2026-09-08). They are written straight onto the item,
+                  // where openingSpan / openSpanOf / ssItemVBand already read them — so the 3D
+                  // hole, the drag highlight and the printed elevation band all move together
+                  // with no new plumbing, no DB column and no config change.
+                  //
+                  // This lives HERE rather than on the plan because a rough opening is a number
+                  // a builder frames to, not a shape to eyeball — and because the last attempt at
+                  // a vertical editing surface (a wall-elevation panel beside the plan, 2026-09-04)
+                  // made the plan jump 131px mid-gesture and had to be removed.
+                  const roDef = d3OpeningDefaults(ro.type) || {};
+                  const setRoNum = (field, raw) => {
+                    if (planLocked) return;
+                    const t = String(raw).trim();
+                    const n = Number(t);
+                    if (t !== "" && (!isFinite(n) || n < 0)) return;   // refuse, never coerce to 0
+                    setItems((p) => p.map((i) => (i.id === ro.id ? { ...i, [field]: t === "" ? roDef[field] : n } : i)));
+                  };
+                  const roNumBox = { width: 58, flex: "0 0 auto", border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px", fontSize: 12, outline: "none", background: "#FFF" };
+                  const roNumLbl = { display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748B", flex: "0 0 auto" };
+                  const roVal = (field) => (ro[field] != null ? ro[field] : (roDef[field] != null ? roDef[field] : ""));
                   return (
-                    <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                      <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>RO-{idx + 1}</span>
+                    <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+                      <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>{ssRoLabel(ro, items)}</span>
                       <input type="text" value={dim} placeholder='Enter Rough Opening size: e.g. 3 x 6 or 29⅞ × 34½"'
                         readOnly={planLocked || undefined}
                         onChange={(e) => { if (planLocked) return; setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value })); }}
-                        style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                        style={{ flex: 1, minWidth: 120, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
+                      <label style={roNumLbl} title="How tall the opening is, in feet">
+                        Ht
+                        <input type="number" min="0" step="0.5" value={roVal("openingHeightFt")}
+                          readOnly={planLocked || undefined}
+                          onChange={(e) => setRoNum("openingHeightFt", e.target.value)} style={roNumBox} />
+                      </label>
+                      {ssIsWindowRO(ro.type) && (
+                        <label style={roNumLbl} title="How far the bottom of the opening sits off the floor, in feet">
+                          Sill
+                          <input type="number" min="0" step="0.5" value={roVal("sillFt")}
+                            readOnly={planLocked || undefined}
+                            onChange={(e) => setRoNum("sillFt", e.target.value)} style={roNumBox} />
+                        </label>
+                      )}
                       {C.showPricing && (<>
                         <div style={qtyCell}>1</div>
-                        <div style={amtCell}>{fmtMoney2(roRate)}</div>
+                        <div style={amtCell}>{fmtMoney2(roRateOf(ro.type))}</div>
                       </>)}
                       {!planLocked && <button title="Remove this rough opening from the plan"
                         onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}
