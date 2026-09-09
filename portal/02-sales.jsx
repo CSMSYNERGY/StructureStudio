@@ -1897,6 +1897,52 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
   }, [kind, recordId]);
   useEffect(() => { load(); }, [load]);
 
+  // THE EXPANDED DEAL on a contact record — a short_code, or null for none. Carolyn,
+  // 2026-09-07 36:50: "I would like to be able to click this here and see those custom fields
+  // like when he's in here and he's talking with the customer", and at 37:20 the one she
+  // actually needed: "The main and only thing right now is the expected close date."
+  //
+  // ⚠️ THERE ARE NO CUSTOM FIELDS IN THIS PRODUCT. Nothing defines one, stores one or renders
+  // one. `expected_close_date` is a plain column on `designs` (migration 206) and everything
+  // else she named is already inside `selections`. So this is a fixed panel over fields that
+  // exist, NOT a field builder — building one on the strength of the words "custom fields"
+  // would be a multi-day feature nobody asked for.
+  //
+  // ⚠️ THESE HOOKS SIT ABOVE THE EARLY RETURNS, like every other hook here. CrmRecord returns
+  // early on `!data`, so a hook declared beside the deals renderer would be absent on the
+  // first render and present on the second — React #310, and the record page goes white the
+  // moment its data arrives. That has shipped more than once (13ca37e, app_errors bb53f026).
+  //
+  // They are BELOW `load` on purpose: saveDealClose closes over it, and `const` does not
+  // hoist, so declaring them above would be a TDZ throw rather than a subtle bug.
+  const [dealOpen, setDealOpen] = useState(null);
+  const [dealBusy, setDealBusy] = useState(false);
+
+  // Optimistic, and deliberately the SAME action the Pipeline board's saveCloseDate calls:
+  // one write path means the board and the contact record cannot disagree about what a close
+  // date is. `designs` has no tenant UPDATE policy (154/193 are SELECT-only), so the edge
+  // function is not a convenience here — it is the only way in.
+  const saveDealClose = useCallback(async (shortCode, value) => {
+    const iso = value || null;
+    setDealBusy(true);
+    setData((d) => (!d ? d : { ...d, designs: (d.designs || []).map((x) => (x.short_code === shortCode ? { ...x, expected_close_date: iso } : x)) }));
+    try {
+      const { data: r, error: e } = await sb.functions.invoke("portal-settings", {
+        body: { action: "set_expected_close", shortCode, expectedCloseDate: iso },
+      });
+      if (e) throw new Error(await fnError(e));
+      if (r && r.error) throw new Error(r.error);
+      setOpErr(null);
+    } catch (e2) {
+      // Reload rather than repaint from a remembered value: this panel is one of two screens
+      // writing the same column, so the server's answer is the only one worth trusting.
+      await load();
+      setOpErr({ where: "deals", msg: e2.message || "That close date did not save." });
+    } finally {
+      setDealBusy(false);
+    }
+  }, [load]);
+
   if (err) {
     return (
       <div style={S.card}>
@@ -2294,24 +2340,68 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               away. The glyph is there because colour alone is not a state indicator. */}
           {(data.designs || []).map((d) => {
             const sel = activeCode === d.short_code;
+            const open = dealOpen === d.short_code;
+            const s = d.selections || {};
+            const pc = s.paint_colors || s.paintColors || {};
+            const colour = [pc.body, pc.trim].filter(Boolean).join(" / ") || s.paint || "—";
+            const fieldRow = (label, node) => (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                <div style={{ width: 96, flexShrink: 0, fontSize: 10.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
+                <div style={{ minWidth: 0, fontSize: 12.5, color: "#334155" }}>{node}</div>
+              </div>
+            );
             return (
-              <div key={d.short_code}
-                style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
-                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderRadius: 6, marginBottom: 5, overflow: "hidden" }}>
-                <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
-                  title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
-                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
-                    padding: "7px 9px", cursor: "pointer" }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                    <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
-                    {[(d.selections || {}).style, (d.selections || {}).size].filter(Boolean).join(" ") || d.short_code}
+              <div key={d.short_code} style={{ marginBottom: 5 }}>
+                <div style={{ display: "flex", alignItems: "stretch", gap: 0, background: sel ? "#EEF2FF" : "#F8FAFC",
+                  border: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                  borderRadius: open ? "6px 6px 0 0" : 6, overflow: "hidden" }}>
+                  <button onClick={() => setSelCode(sel ? null : d.short_code)} aria-pressed={sel}
+                    title={sel ? "Showing this deal — click to clear" : "Show this deal's stages, build and delivery"}
+                    style={{ flex: 1, minWidth: 0, textAlign: "left", background: "transparent", border: "none",
+                      padding: "7px 9px", cursor: "pointer" }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                      <span style={{ color: sel ? ACCENT : "#CBD5E1", marginRight: 6 }}>{sel ? "●" : "○"}</span>
+                      {[s.style, s.size].filter(Boolean).join(" ") || d.short_code}
+                    </div>
+                    <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
+                  </button>
+                  {/* ⚠️ A THIRD SIBLING, never a child of the row button. Same rule the two
+                      buttons beside it already carry: a <button> inside a <button> is invalid
+                      HTML and React will not render it, so an "expand" chevron nested in the
+                      row is the one obvious way to build this and it does not work. */}
+                  <button onClick={() => setDealOpen(open ? null : d.short_code)} aria-expanded={open}
+                    title={open ? "Hide this deal's details" : "Show this deal's details"}
+                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                      padding: "0 9px", fontSize: 12, color: "#94A3B8", cursor: "pointer" }}>{open ? "▾" : "▸"}</button>
+                  <button onClick={() => onNavigate("design", d.short_code)}
+                    title="Open this deal's own record"
+                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
+                      padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
+                </div>
+                {open && (
+                  <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
+                    borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
+                    {fieldRow("Expected close", canEdit ? (
+                      <input type="date" value={d.expected_close_date || ""} disabled={dealBusy}
+                        onChange={(e) => saveDealClose(d.short_code, e.target.value)}
+                        style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
+                    ) : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
+                    {fieldRow("Style", s.style || "—")}
+                    {fieldRow("Size", s.size || "—")}
+                    {fieldRow("Total", d.total_cents != null ? fmtMoneyWhole(d.total_cents) : "—")}
+                    {fieldRow("Colour", colour)}
+                    {/* The SAME in-portal handler the record header uses. Deliberately NOT a
+                        link to the public ?id= page: signed-in staff browsing there fire
+                        capture-lead and draft saves and corrupt the very activity this record
+                        reports on. openInDesigner also clamps on the designer area, so a Crew
+                        Leader gets a refusal instead of a button that silently does nothing. */}
+                    {onOpenDesign && (
+                      <button style={{ ...S.btn(), marginTop: 7, padding: "5px 10px", fontSize: 12 }}
+                        onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
+                    )}
+                    {opErr && opErr.where === "deals" && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
                   </div>
-                  <div style={{ fontSize: 11, color: "#64748B", marginLeft: 18 }}>{fmtDate(d.created_at)}</div>
-                </button>
-                <button onClick={() => onNavigate("design", d.short_code)}
-                  title="Open this deal's own record"
-                  style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
-                    padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
+                )}
               </div>
             );
           })}

@@ -4994,7 +4994,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // rails (Carolyn 2026-09-02: "can we make this like hide this if it doesn't have an
         // invoice?"). ⚠️ It is HALF the answer, not the whole one — see the note on the
         // design branch below.
-        .select("short_code, created_at, updated_at, status, selections, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
+        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("contact_id", id).order("created_at", { ascending: false });
       designs = ds ?? [];
       codes = designs.map((d: any) => d.short_code);
@@ -5013,7 +5013,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // OUT BUT UNSIGNED (a state `status` cannot express, because send_invoice
         // deliberately stopped flipping it), and `status` catches the GHL path. Neither
         // half is redundant. crmHasInvoice in portal/02-sales.jsx is the union.
-        .select("short_code, created_at, updated_at, status, selections, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
+        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
         .eq("client_id", clientId).eq("short_code", id).maybeSingle();
       if (!d) return json({ error: "That design no longer exists." }, 404);
       // The design branch of the same rule. A design with contact_id NULL is refused here
