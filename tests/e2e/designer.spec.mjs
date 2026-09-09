@@ -15,6 +15,33 @@ async function clickPlan(page, fx, fy) {
 }
 const toast = (page) => page.locator("text=Can't place here");
 
+// Doors and windows come from the FIXTURES catalog now. The built-in singleDoor/doubleDoor/
+// window layout items were deleted from the master catalog on 2026-09-08, so there is no
+// longer a palette button that places one on click: the "Door" and "Window" tools arm, and
+// the wall click opens a picker modal (DOOR_PICKER_CFG / WINDOW_PICKER_CFG,
+// StructureStudio.jsx:598 and :616). Choosing a style there is what places the item.
+//
+// The style cards are divs, not buttons (StructureStudio.jsx:1281), so they are reached by
+// text. A style with exactly one size auto-selects it (pickStyle), which is why these two
+// fixtures are chosen — anything multi-size would need a second click on the size chip.
+async function placeFixture(page, tool, styleName, confirmLabel, fx, fy) {
+  await arm(page, tool);
+  await clickPlan(page, fx, fy);
+  await page.getByText(styleName, { exact: true }).first().click();
+  await page.getByRole("button", { name: confirmLabel }).click();
+  await page.waitForTimeout(300);
+}
+// ⚠️ These matchers are ANCHORED, and they have to be. `arm` matches the accessible name by
+// case-insensitive SUBSTRING and takes .first(), so a plain "Door" also matches
+// "⬜ Rough Opening (Door) wall" — which sorts FIRST in the DOORS group, so from the day the
+// rough opening split shipped (2026-09-08) a bare "Door" armed a rough opening, the wall click
+// placed one instead of opening the picker, and the failure surfaced as "the style card never
+// appeared". The door picker's name is exactly "Door wall" (its icon is an inline SVG with no
+// text); the window picker's is "🪟 Window wall", so anchoring the END excludes the rough
+// opening, whose name ends ") wall".
+const placeDoor = (page, fx, fy) => placeFixture(page, /^Door wall$/, "Single Barn Door", "Place door", fx, fy);
+const placeWindow = (page, fx, fy) => placeFixture(page, /Window wall$/, "Double Hung Window", "Place window", fx, fy);
+
 test("public designer boots and places every wall item", async ({ page }) => {
   const errors = watchConsole(page);
   await bypassGate(page, CLIENT);
@@ -22,22 +49,58 @@ test("public designer boots and places every wall item", async ({ page }) => {
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
   await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
 
-  await arm(page, /Single Door/); await clickPlan(page, 5, 0);
-  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "singleDoor", wall: "north" })]));
+  await placeDoor(page, 5, 0);
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "fixtureDoor", wall: "north" })]));
 
   // A workbench dropped across the door span is refused with a toast.
   await arm(page, /Workbench/); await clickPlan(page, 2, 0.5);
   await expect(toast(page)).toBeVisible();
   await page.getByRole("button", { name: "✕" }).first().click().catch(() => {});
 
-  await arm(page, /Window/); await clickPlan(page, 10, 6);
-  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "window", wall: "east" })]));
+  // A catalog window is a plain type:"window" item — fixtureItemId is what proves the
+  // catalog path ran rather than the deleted built-in one.
+  await placeWindow(page, 10, 6);
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "window", wall: "east", fixtureItemId: expect.anything() })]));
 
   await arm(page, /Loft Area/); await clickPlan(page, 5, 9);
   await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "loft" })]));
 
   await arm(page, /Ramp/); await clickPlan(page, 5, -0.6);
   await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "ramp", wall: "north" })]));
+
+  expect(errors, "console errors").toEqual([]);
+});
+
+// The rough opening split into a DOOR ro and a WINDOW ro on 2026-09-08 (migration 224). The two
+// differ only in geometry — the door runs to the floor, the window sits on a sill — and the whole
+// of that difference is the field pair stamped onto the item at placement, which openingSpan,
+// openSpanOf and ssItemVBand all read. So this asserts the stamp: it is the one fact those three
+// readers agree about, and a pixel test could not tell a 3 ft opening at 3'6" from a 6'6" one at
+// the floor without rendering WebGL.
+test("door and window rough openings place with their own geometry and labels", async ({ page }) => {
+  const errors = watchConsole(page);
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
+
+  await arm(page, "Rough Opening (Door)"); await clickPlan(page, 5, 0);
+  await arm(page, "Rough Opening (Window)"); await clickPlan(page, 10, 6);
+
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: "roughOpeningDoor", wall: "north", sillFt: 0 }),
+    expect.objectContaining({ type: "roughOpeningWindow", wall: "east" }),
+  ]));
+  const placed = await designerItems(page);
+  const win = placed.find((i) => i.type === "roughOpeningWindow");
+  expect(win.sillFt, "a window rough opening sits off the floor").toBeGreaterThan(0);
+  expect(win.openingHeightFt, "and is shorter than a door opening").toBeLessThan(6.5);
+
+  // Numbered per kind and prefixed, so the two families can never collide on one drawing.
+  const plan = page.locator("svg").filter({ hasText: /ft/ }).first();
+  await expect(plan).toContainText("RO-D1");
+  await expect(plan).toContainText("RO-W1");
 
   expect(errors, "console errors").toEqual([]);
 });
@@ -51,8 +114,12 @@ test("public designer boots and places every wall item", async ({ page }) => {
 // ONE direction, so the order the user happens to click in decides whether the app protects
 // them.
 //
-//     window THEN door -> east wall holds 2: ["window", "singleDoor"]   <-- overlapping
-//     door THEN window -> east wall holds 1: ["singleDoor"]             <-- refused
+//     window THEN door -> east wall holds 2: ["window", "fixtureDoor"]  <-- overlapping
+//     door THEN window -> east wall holds 1: ["fixtureDoor"]            <-- refused
+//
+// (The types changed on 2026-09-08 when the built-in doors/windows were retired in favour of
+// the fixtures catalog. The finding did not: a catalog window is still a type:"window" item,
+// so it hits the same carve-out.)
 //
 // checkDoorCollision (StructureStudio.jsx:192) skips existing windows:
 //     if (!c || !c.wallOnly || it.type === "window") continue;
@@ -75,10 +142,10 @@ test("a door dropped onto an existing window is refused", async ({ page }) => {
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
   await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
 
-  await arm(page, /Window/); await clickPlan(page, 10, 6);
+  await placeWindow(page, 10, 6);
   await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "window", wall: "east" })]));
 
-  await arm(page, /Single Door/); await clickPlan(page, 10, 6);
+  await placeDoor(page, 10, 6);
   const east = (await designerItems(page)).filter((i) => i.wall === "east");
   expect(east.length, "no second opening on the window's spot").toBe(1);
 });

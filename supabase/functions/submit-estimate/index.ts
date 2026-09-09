@@ -1843,21 +1843,31 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // 2c — so an anon caller could POST qty:-100 and turn this line into a $15,000 CREDIT that
   // dragged a $12,000 quote to $0.00 on the PDF, the customer email, the GHL opportunity and
   // the estimate_lines snapshot QuickBooks invoices verbatim. The designer only ever sends 1.
+  //
+  // itemKey per entry (2026-09-08): rough openings split into roughOpeningDoor and
+  // roughOpeningWindow, which are priced and taxed independently. The field is ADDITIVE and the
+  // default below is load-bearing — an old cached browser bundle, and a resubmit of any design
+  // saved before the split, both post entries with no itemKey and must keep pricing as the
+  // generic "roughOpening" they were quoted at. The key is also allow-listed rather than
+  // trusted: this is an anon endpoint, and an arbitrary body-supplied key would let a caller
+  // point the line at any layout rate in the tenant's table.
   if (Array.isArray(roughOpenings)) {
-    const roRate = layoutRates.get("roughOpening")?.rate || 0;
+    const RO_KEYS = new Set(["roughOpening", "roughOpeningDoor", "roughOpeningWindow"]);
+    const roKeyOf = (v: unknown): string => { const k = String(v ?? ""); return RO_KEYS.has(k) ? k : "roughOpening"; };
     const roQty = (v: unknown): number => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : 1; };
     roughOpenings.forEach((ro: any) => {
+      const itemKey = roKeyOf(ro?.itemKey);
       targetItems.push(tagLine({
         name: ro.name || "Rough Opening",
         qty: roQty(ro.qty),
-        amount: roRate,
+        amount: layoutRates.get(itemKey)?.rate || 0,
         priceId: "",
         productId: "",
         attachments: [],
         currency: "USD",
         type: "one_time",
         description: ro.dimensions ? String(ro.dimensions) : "",
-      }, { kind: "layout_item", itemKey: "roughOpening", nonTaxable: layoutTaxable.get("roughOpening") === false }));
+      }, { kind: "layout_item", itemKey, nonTaxable: layoutTaxable.get(itemKey) === false }));
     });
   }
 
@@ -1899,7 +1909,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     if (Array.isArray(summary.shelves) && summary.shelves.length > 0) placedKeys.add("shelf");
     if (Array.isArray(summary.doubleShelves) && summary.doubleShelves.length > 0) placedKeys.add("doubleShelf");
     if (rampCount > 0) placedKeys.add("ramp");
-    if (Array.isArray(roughOpenings) && roughOpenings.length > 0) placedKeys.add("roughOpening");
+    // Each RO kind is its own inclusion key, so a size that includes a door RO is not satisfied
+    // by placing a window one — and the legacy key still settles a legacy design's inclusion.
+    for (const ro of (Array.isArray(roughOpenings) ? roughOpenings : [])) {
+      const k = String(ro?.itemKey ?? "");
+      placedKeys.add(k === "roughOpeningDoor" || k === "roughOpeningWindow" ? k : "roughOpening");
+    }
     // A placed catalog fixture (its id in doors/windows/ramps) is kept, not credited.
     for (const d of (Array.isArray(doors) ? doors : [])) if (d?.fixtureItemId) placedKeys.add(String(d.fixtureItemId));
     for (const w of (Array.isArray(windows) ? windows : [])) if (w?.fixtureItemId) placedKeys.add(String(w.fixtureItemId));

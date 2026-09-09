@@ -75,7 +75,15 @@ export async function designerItems(page) {
         while (h) {
           const v = h.memoizedState;
           if (Array.isArray(v) && v.length && v[0] && typeof v[0] === "object" && "type" in v[0] && ("x" in v[0] || "wall" in v[0])) {
-            return v.map((i) => ({ type: i.type, wall: i.wall, x: Math.round(i.x), y: Math.round(i.y) }));
+            // fixtureItemId is projected because a placed CATALOG window is a plain
+            // type:"window" item (StructureStudio.jsx:611) — the id is the only thing that
+            // tells it apart from the built-in window that used to exist, so without it a
+            // test cannot assert the catalog path was the one that ran.
+            // openingHeightFt / sillFt are projected because they are the ONLY thing that makes a
+            // window rough opening different from a door one — the 3D hole, the drag highlight
+            // and the printed elevation band all derive from that pair, so asserting the stamp is
+            // asserting the geometry without reading a pixel.
+            return v.map((i) => ({ type: i.type, wall: i.wall, x: Math.round(i.x), y: Math.round(i.y), fixtureItemId: i.fixtureItemId, openingHeightFt: i.openingHeightFt, sillFt: i.sillFt }));
           }
           h = h.next;
         }
