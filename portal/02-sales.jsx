@@ -1495,20 +1495,34 @@ const CRM_TABS = [
         ? "This contact has no email address on file."
         : CRM_PICK_HINT("email")),
   },
-  // TWO NAMES THAT SAY WHOSE FILES THEY ARE. Carolyn spent the longest stretch of the
-  // 2026-08-26 call on this (20:08–26:45): "documents is what we create ... customer files
-  // is like customer files", and "I don't want it all mixed together."
+  // TWO NAMES SEPARATED BY WHAT THEY DO, NOT BY WHOSE THEY ARE — and that is a revision.
   //
-  // "Documents" and "Files" are the same word twice — neither tells you which pile you are
-  // looking at. Design Documents is what WE generated (quote PDFs, floor plans, invoices);
-  // Customer Uploads is what THEY sent us. The names now carry the distinction, so the two
-  // can never read as interchangeable tabs.
+  // Carolyn spent the longest stretch of the 2026-08-26 call on this (20:08–26:45):
+  // "documents is what we create ... customer files is like customer files", and "I don't
+  // want it all mixed together." That produced "Design Documents" vs "Customer Uploads",
+  // named by AUTHOR, on the reasoning that "Documents" and "Files" are the same word twice
+  // so neither tells you which pile you are looking at.
+  //
+  // She moved off author on 2026-09-08 (29:05), and gave the reason: "customer uploads,
+  // let's just name this upload, because it may sometimes be not just a customer upload,
+  // like they might revise something and they want to save the file as well." The tab is
+  // where a file goes IN — by anyone, us included — so "Customer" was describing a
+  // restriction the tab never had. It is now "Uploads".
+  //
+  // The History chip is the other half of the same move: it lists everything already
+  // filed, generated and uploaded alike, and it carries images and other non-document
+  // formats, so "Documents" undersold it. It is now "Files".
+  //
+  // The 08-26 worry does not return, because the two words no longer sit in the same row:
+  // "Uploads" is a TAB (a thing you do), "Files" is a HISTORY CHIP (a thing that happened).
+  // If either is ever renamed back toward the other, re-read that call first.
+  //
   // Live since migration 151. The hint it used to carry — "arrives with customer file
   // storage; nothing they send is lost in the meantime, it is still on the email" — was a
   // promise, and this is it kept. Only a contact record has somewhere to put a file: a
   // design's uploads belong to the person, not to one of their quotes.
   {
-    key: "files", label: "Customer Uploads",
+    key: "files", label: "Uploads",
     enabled: (c) => c.canEdit && !!(c.contact && c.contact.id) && !c.needsPick,
     hint: (c) => (!c.crmUnlocked
       ? CRM_LOCKED_HINT
@@ -1547,7 +1561,7 @@ const CRM_CHIPS = [
   // Where the documents live now — ours AND theirs, one list, because "I don't want it all
   // mixed together" was about the two NAMES being interchangeable, not about them being far
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
-  { key: "documents", label: "Documents", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
+  { key: "documents", label: "Files", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
   { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
   // Everything that happened, not three types two of which were never emitted — see the
@@ -2902,7 +2916,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     style={{ display: "none" }} />
                 </label>
                 <span style={{ fontSize: 11.5, color: "#94A3B8", marginLeft: 9 }}>
-                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each. They appear below, under Documents.
+                  Images, PDFs, Word documents or text — up to 25&nbsp;MB each. They appear below, under Files.
                 </span>
                 {upMsg && upMsg.err && <div style={{ ...S.err, marginTop: 7 }}>{upMsg.err}</div>}
                 {upMsg && upMsg.ok && <div style={{ ...S.okMsg, marginTop: 7 }}>{upMsg.ok}</div>}

@@ -6306,12 +6306,41 @@ function buildShed3DModel(THREE, p) {
       const top = box(benchMat, w, 0.22, d);
       top.position.y = D3.BENCH_H - 0.11;
       g.add(top);
+      // FRONT LEGS ONLY ONCE IT IS AGAINST A WALL. Carolyn, 2026-09-08: "the way they build
+      // this because this is up against the wall, we don't need the legs on the back side.
+      // Just legs in the front because it's attached." A bench is fixed to the studs along its
+      // back edge, so a leg there holds up something the wall is already holding — the same
+      // reasoning as the loft's ledger/post split just above, and deliberately the same 0.3 ft
+      // tolerance, so the two can never disagree about what "against a wall" means.
+      //
+      // ONLY THE BACK PAIR GOES, and only the pair on THIS bench's own wall. Testing every
+      // wall instead — the loft's per-corner rule — would leave a bench in a corner standing
+      // on a single leg, which is not what she said and not how one is built. "Just legs in
+      // the front" is two legs, on a corner bench as much as on a mid-wall one. A bench with
+      // no wall recorded keeps all four rather than guessing which side is its back.
+      //
+      // ⚠️ THE LEGS ARE PLACED IN GROUP-LOCAL SPACE AND THE GROUP IS ROTATED AFTERWARDS, so a
+      // local sign is not a world direction — on a rotated bench the "back" pair is a
+      // different local sign, and hard-coding one would strip the FRONT legs on half the
+      // walls. Each corner is therefore carried through the same rotation the group gets and
+      // measured against its own wall's line. ftX/ftZ are plan-feet minus a constant, so plan
+      // and world directions agree and the test can be done in plan space.
+      const benchRot = it.rotation === 90;
+      const bxF = (it.x - mgX) / scale, bzF = (it.y - mgY) / scale;
+      const benchTol = 0.3;
+      const benchWallLine = { north: ["z", 0], south: ["z", bldgH], west: ["x", 0], east: ["x", bldgW] }[it.wall];
       [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach((sgn) => {
+        // three.js rotation.y = +PI/2 maps local (x, z) -> world (z, -x).
+        const ex = sgn[0] * (w / 2), ez = sgn[1] * (d / 2);
+        const px = bxF + (benchRot ? ez : ex), pz = bzF + (benchRot ? -ex : ez);
+        const carried = !!benchWallLine
+          && Math.abs((benchWallLine[0] === "x" ? px : pz) - benchWallLine[1]) < benchTol;
+        if (carried) return;
         const leg = box(benchMat, 0.18, D3.BENCH_H - 0.22, 0.18);
         leg.position.set(sgn[0] * (w / 2 - 0.15), (D3.BENCH_H - 0.22) / 2, sgn[1] * (d / 2 - 0.15));
         g.add(leg);
       });
-      if (it.rotation === 90) g.rotation.y = Math.PI / 2;
+      if (benchRot) g.rotation.y = Math.PI / 2;
       g.position.set(ftX(it.x), 0, ftZ(it.y));
       g.userData = { itemId: it.id, floorItem: true };
       interiorGroup.add(g);
