@@ -1632,7 +1632,16 @@ function ProjectsTab({ sub, onSub }) {
                 const v = (it.values || {})[st.id];
                 if (typeof v === "string") count.set(v, (count.get(v) || 0) + 1);
               }
-              const dateCol = (data.columns || []).find((c) => c.type === "date");
+              // ⚠️ THE DEADLINE COLUMN, NOT MERELY THE FIRST DATE ONE. Every board here seeds
+              // "Created" at position 1024 and "Due" at 5120, so taking the first date column
+              // picks Created — and "created before today" is true of almost every item, so
+              // Overdue would have read like a catastrophe on a healthy board. If a board has
+              // no deadline column at all there is nothing to be late against, and the tile is
+              // omitted rather than invented.
+              const dateCols = (data.columns || []).filter((c) => c.type === "date");
+              const dateCol = dateCols.find((c) => /^\s*(due|target|deadline)\s*$/i.test(c.name || ""))
+                || dateCols.find((c) => !/^\s*created\s*$/i.test(c.name || ""))
+                || null;
               const today = new Date().toISOString().slice(0, 10);
               const overdue = !dateCol ? 0 : all.filter((it) => {
                 const vals = it.values || {};
