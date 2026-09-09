@@ -240,7 +240,20 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
   const [err, setErr] = useState("");
   const [name, setName] = useState(item.name);
   const [compose, setCompose] = useState("");
-  const [toClient, setToClient] = useState(false);
+  // A REPLY ON A CLIENT-REPORTED CARD DEFAULTS TO VISIBLE. It used to default to false
+  // unconditionally, which is the bug: a card filed from a builder's portal and a card an
+  // operator typed themselves behaved identically, so every reply on somebody's own bug
+  // report landed INTERNAL unless the operator remembered the tick box each time. The builder
+  // watching their submission saw silence and concluded nothing was happening.
+  //
+  // `feedback_submission_id` is the only structural difference between the two kinds of card,
+  // and it was already read three times right here — to enable the checkbox, to colour its
+  // label, and to show the CLIENT tag. It just never reached the default.
+  //
+  // ⚠️ This cannot leak on an internal card: the checkbox is disabled without that id, and
+  // add_update refuses clientVisible on an item that has none (portal-projects 400). The
+  // default is a convenience on top of a server rule, not a substitute for one.
+  const [toClient, setToClient] = useState(Boolean(item && item.feedback_submission_id));
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState([]);          // staged for the next post
   const [viewing, setViewing] = useState(null);    // attachment opened in the popup
@@ -267,7 +280,9 @@ function PMItemPanel({ item, canWrite, onClose, onRename, onArchive }) {
       // Files attach to the update that was just created, so a failed upload leaves the
       // note itself intact and says which file did not make it.
       for (const f of files) await pmUploadTo(item.id, d.update.id, f);
-      setCompose(""); setToClient(false); setFiles([]);
+      // Back to the card's own default, NOT to false — resetting to false after each post
+      // re-creates the original bug one reply later, which is exactly how it would come back.
+      setCompose(""); setToClient(Boolean(item && item.feedback_submission_id)); setFiles([]);
       if (fileRef.current) fileRef.current.value = "";
       loadDetail();
     } catch (e) { setErr(e.message); loadDetail(); }
@@ -616,6 +631,27 @@ function PMLabelEditor({ col, run }) {
                 onChange={(e) => commit(patch(i, { client_status: e.target.value || undefined }))}>
                 <option value="">nothing changes</option>
                 {Object.entries(PM_CLIENT_STATUS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </label>
+          )}
+          {/* WHAT THIS LABEL MEANS TO US, as opposed to what the client is told above.
+              `kind` has been in the seed data and on the server whitelist since 144, and
+              until now NOTHING could set it and nothing read it -- so every label created
+              through this editor since then is untagged. It is the only machine-readable
+              answer to "is this item finished", and a working view that has to guess from
+              label TEXT is the Monday rename lesson waiting to happen again.
+              Blank is deliberate and is not "in progress": an untagged label makes no claim,
+              which is the honest state for the ones nobody has classified yet. */}
+          {isStatus && (
+            <label style={{ fontSize: 11, color: "#64748B", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+              means →
+              <select style={{ ...S.input, width: 118, padding: "3px 6px", fontSize: 11.5, fontStyle: l.kind ? "normal" : "italic" }}
+                value={l.kind || ""}
+                onChange={(e) => commit(patch(i, { kind: e.target.value || undefined }))}>
+                <option value="">unclassified</option>
+                <option value="working">being worked on</option>
+                <option value="stuck">stuck</option>
+                <option value="done">finished</option>
               </select>
             </label>
           )}
