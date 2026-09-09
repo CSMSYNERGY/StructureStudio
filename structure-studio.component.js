@@ -1170,6 +1170,31 @@ function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
     if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : ssIsWindowRO(item.type) ? D3.RO_WINDOW_H : D3.DOOR_H;
     let sill = Number(item.sillFt != null ? item.sillFt : def.sillFt);
     if (!isFinite(sill) || sill < 0) sill = 0;
+    // ⚠️ MIRROR openingSpan'S PLATE CLAMP. Carolyn, 2026-09-07 13:39: "I never changed this and
+    // I noticed some of the windows are poking up ... they're almost poking up above the roof."
+    // openingSpan already refuses to draw through the plate — it caps the head and, for a
+    // silled opening, DROPS THE SILL. This function did not, so a tall opening on a short wall
+    // reported the sill the catalog asked for while the 3D drew it lower. Two views, each
+    // plausible alone, disagreeing about the same window: the dormer-window class of bug.
+    //
+    // It matters more since checkWallSlabOverlap started reading this band. Without the clamp
+    // the band sits ABOVE where the opening is really drawn, so a window could clear a shelf
+    // in the collision test and intersect it on screen.
+    //
+    // Only when a wall height is actually supplied. The 3D dimension line passes none and uses
+    // the band to hang a run measurement, where clamping would move a line for no reason.
+    const plate = Number(wallHeightFt);
+    if (isFinite(plate) && plate > 0) {
+      const maxTop = plate - 0.2;
+      if (sill <= 0) {
+        // Floor-anchored (a door, a plain RO): openingSpan caps the HEAD and never lifts it
+        // off the floor. Dropping a sill that is already zero would invent a threshold.
+        if (h > maxTop) h = maxTop;
+      } else {
+        if (h > maxTop - 0.35) h = maxTop - 0.35;
+        if (sill + h > maxTop) sill = Math.max(0.35, maxTop - h);
+      }
+    }
     return { bottomFt: sill, topFt: sill + h };
   }
   const band = ssSlabBand(item, itemTypes);
