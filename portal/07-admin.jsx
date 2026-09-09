@@ -1888,10 +1888,14 @@ function AdmStyles({ clientId, label, cat, setCat, onFlash, act }) {
   const sizes = (cat && cat.buildingSizes) || [];
   const ALLOWED = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
-  const pickImg = (file) => {
+  const pickImg = async (file) => {
     if (!file) { setImg(null); return; }
     if (ALLOWED.indexOf(file.type) === -1) { onFlash({ err: "Use a JPG, PNG, WEBP or GIF image." }); setFileKey((k) => k + 1); return; }
-    if (file.size > 3000000) { onFlash({ err: "Image too large — 3 MB maximum." }); setFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg in 03-catalog.jsx for
+    // the reasoning. ssFitImageForUpload lives in 06-3d.jsx; every portal part is concatenated
+    // into one script, so it is in scope here.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3000000) { onFlash({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => onFlash({ err: "Could not read that image." });
     r.onload = () => setImg({ base64: r.result, contentType: file.type || "image/jpeg" });

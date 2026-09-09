@@ -1841,10 +1841,19 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
   const optionCols = () => optionSections().flatMap((s) => s.cols);
 
   const ALLOWED_IMG = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-  const onStyleImg = (file) => {
+  const onStyleImg = async (file) => {
     if (!file) { setStyleImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setStyleFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setStyleFileKey((k) => k + 1); return; }
+    // A photo straight off a phone is 4-12MB, so "too large" was refusing the normal case and
+    // asking a builder to go find image-editing software before they could add a style. Shrink it
+    // instead — ssFitImageForUpload (06-3d.jsx) is the same helper the fixture and colour uploads
+    // have used since 2026-08: longest edge 1600px, flattened onto white, JPEG quality stepped
+    // 0.9/0.8/0.7 until it fits, and the ORIGINAL handed back untouched if it is already small
+    // enough. It re-encodes to image/jpeg, so file.type stays correct for the upload below.
+    // The check that follows is no longer the common path: it only fires when the file could not
+    // be decoded and re-encoded at all, which is a broken image rather than a big one.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setStyleFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => setMsg({ err: "Could not read that image." });
     r.onload = () => setStyleImg({ base64: r.result, contentType: file.type || "image/jpeg", name: file.name });
@@ -1912,10 +1921,12 @@ function PricingCsv({ viewingLabel = null, onGoToOptions = null }) {
     setStyleBusy(false);
   };
   const openEdit = (s) => { setEditStyle(s); setEditName(s.label || ""); setEditCode(s.code || ""); setEditImg(null); setEditFileKey((k) => k + 1); };
-  const onEditImg = (file) => {
+  const onEditImg = async (file) => {
     if (!file) { setEditImg(null); return; }
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setEditFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setEditFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg for why.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setEditFileKey((k) => k + 1); return; }
     const r = new FileReader();
     r.onerror = () => setMsg({ err: "Could not read that image." });
     r.onload = () => setEditImg({ base64: r.result, contentType: file.type || "image/jpeg" });
@@ -3869,7 +3880,9 @@ function LayoutPricing({ viewingLabel = null, clientId = null }) {
   const onRowImg = async (itemKey, file) => {
     if (!file) return;
     if (!ALLOWED_IMG.includes(file.type)) { setMsg({ err: "Use a JPG, PNG, WEBP or GIF image." }); setImgFileKey((k) => k + 1); return; }
-    if (file.size > 3_000_000) { setMsg({ err: "Image too large (max 3MB)." }); setImgFileKey((k) => k + 1); return; }
+    // Shrink oversized photos rather than refusing them — see onStyleImg for why.
+    file = await ssFitImageForUpload(file);
+    if (file.size > 3_000_000) { setMsg({ err: "That image couldn't be resized small enough — try a JPG or PNG." }); setImgFileKey((k) => k + 1); return; }
     setImgBusyKey(itemKey); setMsg(null);
     try {
       const base64 = await new Promise((res, rej) => {
