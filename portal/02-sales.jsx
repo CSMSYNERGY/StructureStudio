@@ -1937,7 +1937,9 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       // Reload rather than repaint from a remembered value: this panel is one of two screens
       // writing the same column, so the server's answer is the only one worth trusting.
       await load();
-      setOpErr({ where: "deals", msg: e2.message || "That close date did not save." });
+      // Keyed by short_code: a bare where:"deals" showed the failure under EVERY expanded
+      // deal, including ones the reader never touched.
+      setOpErr({ where: "deals", code: shortCode, msg: e2.message || "That close date did not save." });
     } finally {
       setDealBusy(false);
     }
@@ -2340,7 +2342,10 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
               away. The glyph is there because colour alone is not a state indicator. */}
           {(data.designs || []).map((d) => {
             const sel = activeCode === d.short_code;
-            const open = dealOpen === d.short_code;
+            // `!!d.short_code` because dealOpen starts null: without it a row whose code is
+            // missing matches, renders EXPANDED on arrival, and its arrow cannot close it —
+            // clicking sets dealOpen back to null, which still matches.
+            const open = !!d.short_code && dealOpen === d.short_code;
             const s = d.selections || {};
             const pc = s.paint_colors || s.paintColors || {};
             const colour = [pc.body, pc.trim].filter(Boolean).join(" / ") || s.paint || "—";
@@ -2382,7 +2387,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                   <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
                     borderRadius: "0 0 6px 6px", background: "#FFF", padding: "7px 10px 9px" }}>
                     {fieldRow("Expected close", canEdit ? (
-                      <input type="date" value={d.expected_close_date || ""} disabled={dealBusy}
+                      <input type="date" value={String(d.expected_close_date || "").slice(0, 10)} disabled={dealBusy}
                         onChange={(e) => saveDealClose(d.short_code, e.target.value)}
                         style={{ ...S.input, padding: "4px 7px", fontSize: 12.5, width: 158 }} />
                     ) : (d.expected_close_date ? fmtDate(d.expected_close_date) : "—"))}
@@ -2399,7 +2404,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                       <button style={{ ...S.btn(), marginTop: 7, padding: "5px 10px", fontSize: 12 }}
                         onClick={() => onOpenDesign(d.short_code)}>Open in designer</button>
                     )}
-                    {opErr && opErr.where === "deals" && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
+                    {opErr && opErr.where === "deals" && opErr.code === d.short_code && <div style={{ ...S.err, marginTop: 7 }}>{opErr.msg}</div>}
                   </div>
                 )}
               </div>

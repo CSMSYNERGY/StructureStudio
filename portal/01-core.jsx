@@ -903,9 +903,20 @@ const ssWhenMatch = (cond, p, iso, todayIso) => {
   }
 };
 
+// ⚠️ A BARE yyyy-mm-dd IS A CALENDAR DAY, NOT AN INSTANT, and `new Date("2026-11-20")` is
+// specified to parse it as UTC midnight. Formatted in the viewer's own zone that is the DAY
+// BEFORE for everyone west of UTC — which is Carolyn and every builder on this product. A
+// close date of Nov 20 read "Nov 19, 2026" on both the pipeline card and the contact record.
+//
+// A value carrying a time or a zone IS a real instant and must still be converted to local
+// time, so only the bare form is re-anchored to local midnight.
+function ssDateObj(iso) {
+  const m = typeof iso === "string" && iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(iso);
+}
 function fmtDate(iso) {
   if (!iso) return "—";
-  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
+  try { return ssDateObj(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
   catch { return iso; }
 }
 // "Sep 2, 26" — the pipeline card's date, where three of them share one 240px column and
@@ -920,7 +931,7 @@ function fmtDate(iso) {
 // a record showing "Sep 2, 2026" is the kind of drift nobody files a bug about.
 function fmtDateShort(iso) {
   if (!iso) return "—";
-  try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
+  try { return ssDateObj(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }); }
   catch { return iso; }
 }
 // A whole-dollar figure for the pipeline card. Cents are dropped on purpose — the card answers

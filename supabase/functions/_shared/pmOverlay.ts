@@ -79,12 +79,75 @@ export function columnIdMap(srcColumns: PmColumn[], destColumns: PmColumn[]): Ma
   return out;
 }
 
-/** Re-key one item's values through a column map, dropping anything unmappable. */
-export function remapValues(values: Record<string, unknown> | null | undefined, map: Map<string, string>): Record<string, unknown> {
+/**
+ * The choice ids INSIDE a status or dropdown column, mapped src -> dest by LABEL.
+ *
+ * ⚠️ RE-KEYING THE COLUMN IS ONLY HALF THE JOB, and missing this half shipped: every board
+ * seeds its own choice ids too. Bugs' App column offers "Structure Studio" as `o_fa089f90`
+ * and Feature Requests offers the same words as `o_ss`. Carry the value across on the column
+ * id alone and the cell holds an id the destination column has never heard of, so it renders
+ * BLANK, is invisible to that column's filter, and cannot be searched — which is exactly what
+ * fourteen Feature Requests rows did.
+ *
+ * Matching is on the LABEL because that is the only thing two independently seeded boards
+ * share. That is the same reasoning as `columnIdMap`, one level down — and it is why the
+ * destination does NOT need to be seeded with a union of every source's ids, a workaround
+ * that would rot the first time somebody renamed a label (the Monday rename lesson).
+ *
+ * FAILS CLOSED: an unmatched choice keeps its original id and renders blank, which is what it
+ * did before. It is never guessed at, because a wrong status is worse than a missing one.
+ */
+export function choiceIdMap(srcCol: PmColumn | null | undefined, destCol: PmColumn | null | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!srcCol || !destCol) return out;
+  const list = (c: PmColumn) => {
+    const s = c.settings as { labels?: unknown; options?: unknown } | undefined;
+    const arr = (Array.isArray(s?.labels) ? s?.labels : Array.isArray(s?.options) ? s?.options : []) as unknown[];
+    return arr as Array<{ id?: unknown; label?: unknown }>;
+  };
+  const byLabel = new Map<string, string>();
+  for (const o of list(destCol)) {
+    const l = String(o?.label ?? "").trim().toLowerCase();
+    const id = String(o?.id ?? "");
+    if (l && id && !byLabel.has(l)) byLabel.set(l, id);
+  }
+  for (const o of list(srcCol)) {
+    const l = String(o?.label ?? "").trim().toLowerCase();
+    const id = String(o?.id ?? "");
+    const d = l ? byLabel.get(l) : undefined;
+    if (id && d && d !== id) out.set(id, d);
+  }
+  return out;
+}
+
+/**
+ * Re-key one item's values through a column map, dropping anything unmappable — and re-key the
+ * CHOICE ids inside status/dropdown cells too, since those are per-board as well.
+ */
+export function remapValues(
+  values: Record<string, unknown> | null | undefined,
+  map: Map<string, string>,
+  srcColumns?: PmColumn[],
+  destColumns?: PmColumn[],
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  const srcById = new Map((srcColumns || []).map((c) => [c.id, c]));
+  const destById = new Map((destColumns || []).map((c) => [c.id, c]));
   for (const [k, v] of Object.entries(values || {})) {
     const d = map.get(k);
-    if (d) out[d] = v;
+    if (!d) continue;
+    const sc = srcById.get(k), dc = destById.get(d);
+    if (sc && dc && (sc.type === "status" || sc.type === "dropdown")) {
+      const cm = choiceIdMap(sc, dc);
+      if (cm.size) {
+        // A dropdown cell may be multi, so an array is normal here and each entry maps alone.
+        out[d] = Array.isArray(v)
+          ? v.map((x) => cm.get(String(x)) ?? x)
+          : (cm.get(String(v)) ?? v);
+        continue;
+      }
+    }
+    out[d] = v;
   }
   return out;
 }
@@ -105,9 +168,15 @@ export function overlaySlugs(board: { settings?: unknown } | null | undefined): 
  * Build the foreign rows for an overlay board.
  *
  * Each returned row keeps its REAL id and its REAL board_id — the id is what every write is
- * keyed by, and update_item resolves columns from the item's own board_id, so an edit lands
- * on the home board with the home board's columns and cannot be mis-keyed by this remapping.
- * `values` is remapped for DISPLAY only.
+ * keyed by. `values` is remapped for DISPLAY only.
+ *
+ * ⚠️ THIS COMMENT USED TO CLAIM THE REMAP COULD NOT MIS-KEY A WRITE, because update_item
+ * resolves columns from the item's own board_id. That was wrong and it shipped: resolving the
+ * columns correctly says nothing about which ids the BROWSER sends, and the browser sends the
+ * ones it rendered — the destination board's. Not one of them matched, sanitizeValues returned
+ * {}, and every edit on an overlay row was a silent no-op that returned 200 while the screen
+ * showed the new value. update_item now takes a `fromBoardId` and refuses loudly rather than
+ * dropping. Anything reading this file to add a second overlay surface must send it too.
  */
 export function buildOverlayItems(args: {
   destColumns: PmColumn[];
@@ -121,7 +190,7 @@ export function buildOverlayItems(args: {
       if (isItemDone(it, statusCol)) continue;
       out.push({
         ...it,
-        values: remapValues(it.values, map),
+        values: remapValues(it.values, map, src.columns, args.destColumns),
         overlay: true as const,
         home_board_id: src.board.id,
         home_board_slug: src.board.slug,

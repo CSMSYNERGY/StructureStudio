@@ -2,7 +2,7 @@
 // fetch and cannot fail closed on an offline machine. Preflight runs this group.
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  buildOverlayItems, columnIdMap, doneLabelIds, isItemDone, overlaySlugs, remapValues, statusColumnOf,
+  buildOverlayItems, choiceIdMap, columnIdMap, doneLabelIds, isItemDone, overlaySlugs, remapValues, statusColumnOf,
 } from "./pmOverlay.ts";
 
 const statusCol = (id: string, labels: Array<{ id: string; kind?: string }>) =>
@@ -136,4 +136,66 @@ Deno.test("buildOverlayItems keeps items whose board has no done labels at all",
     }],
   });
   assertEquals(rows.length, 1);
+});
+
+
+// ── choice ids ───────────────────────────────────────────────────────────────────────────
+// Re-keying the COLUMN is only half the job. Every board seeds its own choice ids too, so a
+// value carried across on the column id alone lands as an id the destination has never heard
+// of: the cell renders blank and its filter cannot see it. That shipped — fourteen Feature
+// Requests rows showed an empty App column on the working board.
+const dropdownCol = (id: string, name: string, options: Array<{ id: string; label: string }>) =>
+  ({ id, name, type: "dropdown", settings: { options } });
+
+Deno.test("choiceIdMap matches on the LABEL, because ids are per-board", () => {
+  const src = dropdownCol("c1", "App", [{ id: "o_ss", label: "Structure Studio" }, { id: "o_bb", label: "BuildBridge" }]);
+  const dst = dropdownCol("c2", "App", [{ id: "o_fa089f90", label: "Structure Studio" }, { id: "o_bb", label: "BuildBridge" }]);
+  const m = choiceIdMap(src, dst);
+  assertEquals(m.get("o_ss"), "o_fa089f90");
+  // An id that is already correct is not carried in the map — nothing to change.
+  assertEquals(m.has("o_bb"), false);
+});
+
+Deno.test("choiceIdMap is case- and whitespace-insensitive on the label", () => {
+  const src = dropdownCol("c1", "App", [{ id: "a", label: "  csm studio " }]);
+  const dst = dropdownCol("c2", "App", [{ id: "b", label: "CSM Studio" }]);
+  assertEquals(choiceIdMap(src, dst).get("a"), "b");
+});
+
+Deno.test("choiceIdMap FAILS CLOSED — an unmatched label is never guessed", () => {
+  const src = dropdownCol("c1", "App", [{ id: "a", label: "Framed UP" }]);
+  const dst = dropdownCol("c2", "App", [{ id: "b", label: "Structure Studio" }]);
+  assertEquals(choiceIdMap(src, dst).size, 0);
+});
+
+Deno.test("remapValues re-keys the choice inside a dropdown cell", () => {
+  const src = [dropdownCol("c1", "App", [{ id: "o_ss", label: "Structure Studio" }])];
+  const dst = [dropdownCol("c2", "App", [{ id: "o_fa089f90", label: "Structure Studio" }])];
+  const map = columnIdMap(src, dst);
+  assertEquals(remapValues({ c1: "o_ss" }, map, src, dst), { c2: "o_fa089f90" });
+});
+
+Deno.test("remapValues maps every entry of a MULTI dropdown", () => {
+  const src = [dropdownCol("c1", "App", [{ id: "o_ss", label: "Structure Studio" }, { id: "o_fu", label: "Framed UP" }])];
+  const dst = [dropdownCol("c2", "App", [{ id: "x1", label: "Structure Studio" }, { id: "x2", label: "Framed UP" }])];
+  const map = columnIdMap(src, dst);
+  assertEquals(remapValues({ c1: ["o_ss", "o_fu"] }, map, src, dst), { c2: ["x1", "x2"] });
+});
+
+Deno.test("remapValues re-keys a STATUS label too, not only dropdowns", () => {
+  const src = [statusCol("s1", [{ id: "l_readydev" }])];
+  const dst = [statusCol("s2", [{ id: "l_todo" }])];
+  // Labels carry no text in statusCol(), so nothing matches and the value is left alone.
+  assertEquals(remapValues({ s1: "l_readydev" }, columnIdMap(src, dst), src, dst), { s2: "l_readydev" });
+
+  const srcT = [{ id: "s1", name: "Status", type: "status", settings: { labels: [{ id: "l_readydev", label: "Ready for Dev" }] } }];
+  const dstT = [{ id: "s2", name: "Status", type: "status", settings: { labels: [{ id: "l_rd", label: "Ready for Dev" }] } }];
+  assertEquals(remapValues({ s1: "l_readydev" }, columnIdMap(srcT, dstT), srcT, dstT), { s2: "l_rd" });
+});
+
+Deno.test("remapValues without the column lists behaves exactly as before", () => {
+  const src = [dropdownCol("c1", "App", [{ id: "o_ss", label: "Structure Studio" }])];
+  const dst = [dropdownCol("c2", "App", [{ id: "x1", label: "Structure Studio" }])];
+  // The old two-argument shape is still valid; it just cannot re-key the choice.
+  assertEquals(remapValues({ c1: "o_ss" }, columnIdMap(src, dst)), { c2: "o_ss" });
 });

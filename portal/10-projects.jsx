@@ -1266,18 +1266,31 @@ function ProjectsTab({ sub, onSub }) {
     pmCall(body).catch((e) => { setErr(e.message); reload(); });
   };
 
+  // ⚠️ WHICH BOARD THE USER IS LOOKING AT, which on an overlay board is NOT the board the row
+  // lives on. The cell ids rendered here belong to THIS board; the server needs to know that to
+  // translate them onto the row's own board. Omit it and every edit to a pulled-in row is
+  // silently discarded while the screen shows the new value.
+  const fromBoardId = data && data.board && data.board.id;
   const onCellCommit = (item, col, value) => callOrReload(
-    { action: "update_item", id: item.id, values: { [col.id]: value } },
+    { action: "update_item", id: item.id, fromBoardId, values: { [col.id]: value } },
     () => mutateItem(item.id, { values: { ...(item.values || {}), [col.id]: value }, updated_at: new Date().toISOString() }),
   );
   const onRename = (item, name) => callOrReload(
-    { action: "update_item", id: item.id, name },
+    { action: "update_item", id: item.id, fromBoardId, name },
     () => mutateItem(item.id, { name }),
   );
-  const onArchive = (item) => callOrReload(
-    { action: "archive_items", ids: [item.id] },
-    () => setData((d) => d && ({ ...d, items: d.items.filter((it) => it.id !== item.id) })),
-  );
+  const onArchive = (item) => {
+    // Refuse here as well as on the server. The server is the control; this is so the answer
+    // arrives before the row vanishes optimistically and has to be put back.
+    if (item && item.overlay) {
+      setErr(`"${item.name}" lives on ${item.home_board_name || "another board"}. Archive it there — it stays visible to whoever reported it.`);
+      return;
+    }
+    callOrReload(
+      { action: "archive_items", ids: [item.id], fromBoardId },
+      () => setData((d) => d && ({ ...d, items: d.items.filter((it) => it.id !== item.id) })),
+    );
+  };
   const onAddItem = (group, name) => {
     if (view.groupBy !== "groups") return;
     pmCall({ action: "create_item", boardId: data.board.id, groupId: group.key, name })
