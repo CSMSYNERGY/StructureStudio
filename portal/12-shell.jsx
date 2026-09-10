@@ -59,6 +59,77 @@ const ICONS = {
   "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
 };
 
+// ─── A style photo, guaranteed small ────────────────────────────────────────────────────
+// Returns a JPEG at or under `maxBytes`, or THROWS. It never hands back the original, and that
+// single property is the whole point of it existing beside ssFitImageForUpload (06-3d.jsx)
+// rather than calling it.
+//
+// ⚠️ THE BUG THIS EXISTS TO PREVENT, because it is genuinely counter-intuitive. The shared
+// helper returns the ORIGINAL file in two cases: when it is already under the cap, and when its
+// quality loop [0.9, 0.8, 0.7] at a FIXED 1600px cannot get the re-encode under the cap. On
+// 2026-09-10 this path was "improved" from the 2.8MB default to a 900KB cap, on the reasoning
+// that smaller is faster. The opposite happened. At 2.8MB a 1600px re-encode cleared the bar on
+// the first try and a shrunk file went up; at 900KB the same photo missed all three quality
+// steps, fell through to `return file`, and the FULL 4-12MB original was base64-encoded into a
+// JSON body. Lowering the cap made the upload bigger. Ahsan saw it as
+// "1 of 9 uploaded. 8 failed: Failed to send a request to the Edge Function" and then, decisively,
+// "0 of 1 uploaded. 1 failed: That upload timed out after 90 seconds" - one image, one lane, so
+// concurrency was never the cause.
+//
+// The fix is to step the RESOLUTION down as well as the quality. A 1600px q0.85 JPEG of a shed
+// is comfortably under 900KB, so the loop almost always exits on its first iteration; the
+// smaller sizes exist so that "I cannot meet the cap" stops being reachable rather than because
+// they are expected to run.
+//
+// It throws rather than falling back for the same reason: an upload that silently sends 12MB is
+// worse than one that refuses, because the refusal can say what to do about it and the silent
+// send just hangs.
+async function ssShrinkStylePhoto(file, maxBytes = 900_000) {
+  if (!file) throw new Error("No file.");
+  // What upload_style_photo's own EXT table accepts. Anything else has to be re-encoded even if
+  // it is small, which is what catches an iPhone .heic.
+  const passThrough = /^image\/(jpeg|png|webp|gif)$/.test(file.type || "");
+  if (passThrough && file.size <= maxBytes) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error("decode failed"));
+      i.src = url;
+    });
+    for (const px of [1600, 1200, 900, 700]) {
+      const scale = Math.min(1, px / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.round(img.naturalWidth * scale));
+      cv.height = Math.max(1, Math.round(img.naturalHeight * scale));
+      const g = cv.getContext("2d");
+      // Flatten onto white: JPEG has no alpha, and a transparent PNG would otherwise encode its
+      // see-through areas as black.
+      g.fillStyle = "#FFFFFF";
+      g.fillRect(0, 0, cv.width, cv.height);
+      g.drawImage(img, 0, 0, cv.width, cv.height);
+      for (const q of [0.85, 0.7, 0.55]) {
+        const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", q));
+        if (blob && blob.size <= maxBytes) return new File([blob], "photo.jpg", { type: "image/jpeg" });
+      }
+    }
+    throw new Error("still too large after shrinking");
+  } catch (e) {
+    // One message covering both real failure modes, because from here they are the same act:
+    // the browser could not turn this file into a small JPEG. HEIC is named because it is by
+    // far the most common cause - it is the iPhone default and `accept="image/*"` offers it.
+    const kind = (file.type || "").replace("image/", "") || "unknown";
+    throw new Error(
+      (file.name || "That image") + " could not be prepared for upload (" + kind + ", "
+      + Math.round((file.size || 0) / 1048576) + "MB): " + ((e && e.message) || "unknown error")
+      + ". iPhone photos are HEIC by default \u2014 set Camera \u2192 Formats \u2192 Most Compatible, or export it as JPG."
+    );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -939,27 +1010,12 @@ function Dashboard({ session }) {
       return data.url || null;
     },
     onUploadPhoto: async (file) => {
-      // SHRINK HARD, NOT JUST UNDER THE CAP. ssFitImageForUpload's default only re-encodes a file
-      // ALREADY over 2.8MB, so a 2.5MB phone photo went up at full size - about 3.4MB of base64
-      // through an edge function, per photo. Four of those is the "stuck at image upload" Ahsan
-      // hit on 2026-09-10, and the evidence says exactly that: three `fetch_aborted_navigating`
-      // rows, a code only written when the page is UNLOADING with requests in flight. They were
-      // slow, not broken, and he reloaded.
-      //
-      // 900KB at 1600px is well above what anything downstream uses (the 3D texture cache
-      // downsamples to 1024 anyway) and turns a typical phone photo into a few hundred KB. A
-      // walk-around frame, already written at 1280px by the browser, is under it and passes
-      // through untouched.
-      const prepped = await ssFitImageForUpload(file, 900_000, 1600);
-      // WHAT THE SERVER WILL ACTUALLY ACCEPT. upload_style_photo maps the content type through a
-      // four-entry table and 400s on anything else. ssFitImageForUpload hands back the ORIGINAL
-      // when it cannot decode it, which is precisely what happens to an iPhone .heic - so
-      // without this check the builder gets the server's generic "Unsupported image type" and no
-      // idea that their camera format is the reason.
-      const ok = { "image/jpeg": 1, "image/png": 1, "image/webp": 1, "image/gif": 1 };
-      if (!ok[prepped.type]) {
-        throw new Error(`${file.name || "That image"} is a ${(file.type || "format").replace("image/", "")} file this browser cannot re-encode. iPhone photos are HEIC by default \u2014 set Camera \u2192 Formats \u2192 Most Compatible, or export it as JPG.`);
-      }
+      // ssShrinkStylePhoto GUARANTEES a small JPEG or throws. It replaces a call to
+      // ssFitImageForUpload(file, 900_000, 1600), which caused the bug it now fixes - see that
+      // function's header for the full story. The short version: the shared helper returns the
+      // ORIGINAL file when its quality loop cannot reach the cap, so LOWERING the cap made a
+      // 4-12MB phone photo more likely to be sent untouched, not less.
+      const prepped = await ssShrinkStylePhoto(file);
       const imageBase64 = await new Promise((res, rej) => {
         const fr = new FileReader();
         fr.onload = () => res(String(fr.result || "").split(",")[1] || "");

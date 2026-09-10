@@ -36,6 +36,20 @@ function ensureClip() {
   }
 }
 
+// An oversized, INCOMPRESSIBLE photo at a real phone resolution. Noise, not a test pattern: a
+// gradient compresses to a few hundred KB at any size and so never reaches the fallback this
+// fixture exists to catch. Lands around 8.8MB, which is what a 12MP camera actually produces.
+const BIG = 'dev/scan-fixtures/big-photo.jpg'
+function ensureBig() {
+  if (existsSync(BIG)) return true
+  try {
+    mkdirSync('dev/scan-fixtures', { recursive: true })
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'lavfi',
+      '-i', 'nullsrc=size=4032x3024,geq=random(1)*255:128:128', '-frames:v', '1', '-q:v', '1', BIG])
+    return true
+  } catch (_e) { return false }
+}
+
 const BASE = process.env.SS_BASE || 'http://127.0.0.1:8123'
 const REF = 'jzeamjbhdrsbygdnphbm'
 const CLIENT = 'pw-demo-barns'
@@ -102,6 +116,7 @@ const uploads = []
 
 async function main() {
   const hasClip = ensureClip()
+  const bigPhoto = ensureBig()
   // channel: "chrome" for the reason playwright.config.mjs already gives - `npx playwright
   // install chromium` has failed repeatedly on this machine, stalling mid-extract and leaving a
   // stale __dirlock that breaks every LATER install. Use the Chrome that is already here.
@@ -163,7 +178,9 @@ async function main() {
         return json(route, { ok: true, aiReady: true, styles: [STYLE_ROW, STYLE_ROW2], sizes: [], layoutItems: [], fixtures: [], colors: [] })
       }
       if (a === 'upload_style_photo') {
-        uploads.push(body)
+        // The BASE64 LENGTH is the number that matters: it is what actually crosses the wire,
+        // and an upload that times out does so because this is enormous.
+        uploads.push({ b64len: (body.imageBase64 || '').length, type: body.imageContentType })
         if (delay.uploadMs) await new Promise((r) => setTimeout(r, delay.uploadMs))
         return json(route, { ok: true, url: `${BASE}/__stub/img-${uploads.length}.png` })
       }
@@ -279,6 +296,29 @@ async function main() {
       await page.locator('button[title="Remove this image"]').last().click()
     })
     await page.waitForTimeout(600)
+  }
+
+  // ── REGRESSION: an oversized phone photo must be SHRUNK, never sent whole ───────────────
+  // ssFitImageForUpload returns the ORIGINAL when its fixed-1600px quality loop cannot reach the
+  // byte cap, so lowering that cap from 2.8MB to 900KB made a big photo MORE likely to be sent
+  // untouched. Ahsan saw it as "1 of 9 uploaded. 8 failed" and then, decisively, "0 of 1
+  // uploaded. 1 failed: That upload timed out after 90 seconds" — one image, one lane.
+  if (bigPhoto) {
+    const before = uploads.length
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles(BIG)
+    await page.waitForFunction((n) => {
+      const m = document.body.innerText.match(/(\d+) of 12 used/)
+      return m && Number(m[1]) > n
+    }, 4, { timeout: 90000 })
+    const sent = uploads[uploads.length - 1] || {}
+    // 900KB cap, x4/3 for base64. Anything near the 8.8MB original means the shrink fell back.
+    ok('AN 8.8MB PHOTO IS SHRUNK BEFORE SENDING', sent.b64len > 0 && sent.b64len < 1_300_000,
+      `${Math.round((sent.b64len || 0) / 1024)}KB of base64 on the wire (original is 8657KB)`)
+    ok('and it is re-encoded as JPEG', sent.type === 'image/jpeg', String(sent.type))
+    ok('exactly one upload for one file', uploads.length - before === 1, `${uploads.length - before}`)
+    // Back to four so the assertions below still describe what they say.
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(500)
   }
 
   const photoUrlsBefore = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))

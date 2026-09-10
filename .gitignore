@@ -45,3 +45,4 @@ deno.lock
 # committed: dev/ ships in the Workers asset bundle, so a checked-in 113KB video would be a
 # public download on every tenant site to serve one local harness.
 dev/scan-fixtures/walk-around-stub.mp4
+dev/scan-fixtures/big-photo.jpg
