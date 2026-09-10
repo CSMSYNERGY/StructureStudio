@@ -121,22 +121,21 @@ test("door and window rough openings place with their own geometry and labels", 
 // the fixtures catalog. The finding did not: a catalog window is still a type:"window" item,
 // so it hits the same carve-out.)
 //
-// checkDoorCollision (StructureStudio.jsx:192) skips existing windows:
-//     if (!c || !c.wallOnly || it.type === "window") continue;
-// Windows ARE wallOnly:true (line 82), so that type check is a DELIBERATE carve-out, not an
-// oversight of the wallOnly test. Removing it is therefore a product decision, not a bug fix:
-// it would also make windows block each other, and it would change AUTO-PLACEMENT — there are
-// ten call sites, including the auto-layout loops that `continue` past a collision, so
-// auto-placed doors could start failing to place where they currently succeed.
+// ✅ RESOLVED 2026-09-10, and the answer was neither yes nor no. The question this comment
+// used to pose — "may a door and a window share a wall span?" — assumed a policy was needed.
+// It is a MEASUREMENT: the `it.type === "window"` carve-out is gone and checkDoorCollision's
+// vertical-band test decides, in both orders. A transom above a door places, because that is
+// how one is built; a window driven through a door is refused, whichever was clicked first.
 //
-// Needs Carolyn's answer to one question: may a door and a window share a wall span? If no,
-// drop the `it.type === "window"` clause and re-run the whole designer suite for auto-layout
-// regressions.
+// Two things the old comment warned about, both checked before this was flipped:
+//   * windows now block each other — INTENDED. Two identical windows could previously sit
+//     perfectly coincident on one span, both priced.
+//   * auto-placement (reflowItems' seat(), electricalAutoItems) shares this guard, so a
+//     resize could in principle strand an item it used to seat. Driven across repeated
+//     resizes with doors and windows on the same walls: nothing stranded, no toast flood.
+//
+// So this test is no longer expected to fail, and the marker below is deliberately absent.
 test("a door dropped onto an existing window is refused", async ({ page }) => {
-  // INSIDE the body, not at file scope. A bare `test.fail()` between tests marks EVERY
-  // subsequent test in the file expected-to-fail, which silently flipped the phone-viewport
-  // test to "failed" for passing.
-  test.fail();
   await bypassGate(page, CLIENT);
   await page.goto(`/?client=${CLIENT}`);
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");

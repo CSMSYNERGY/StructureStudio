@@ -226,7 +226,23 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
   const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes);
   for (const it of existing) {
     const c = itemTypes[it.type];
-    if (!c || !c.wallOnly || it.type === "window") continue;
+    // ⛔ THE `it.type === "window"` CARVE-OUT IS GONE (2026-09-10, Ahsan's decision after the
+    // 09-08 call left the question open). It skipped every existing WINDOW, so this guard ran
+    // in one direction only and the ORDER OF CLICKS decided whether the app protected you:
+    //
+    //     window THEN door -> both placed, overlapping
+    //     door THEN window -> refused
+    //
+    // The product gave both answers to the same question, which is worse than either answer.
+    // It also let two identical windows sit perfectly coincident, both priced.
+    //
+    // What replaces it is not a policy but a MEASUREMENT: the vertical-band test below already
+    // decides this correctly, and since 2026-09-09 it reads a catalog fixture's own heightIn
+    // rather than a generic default, so the numbers are finally worth trusting. A transom above
+    // a door is normal construction and now places; a window driven through a door does not.
+    // Flush still passes (<=, not <) — a loft door sharing a header with the opening below it
+    // is how they are built.
+    if (!c || !c.wallOnly) continue;
     // Same wall, or they can never touch.
     if (it.wall !== ni.wall) continue;
     const iw = (it.widthFt || c.width) * sc;
