@@ -3432,10 +3432,38 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
+    const observedNotes = shapeFirst ? parseObservedNotes(text) : null;
+
+    // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
+    // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
+    // builder then presses Save it exists NOWHERE ELSE — so on 2026-09-10/11 three generations
+    // ran, none was saved, and every "it is not accurate" report had to be diagnosed from a
+    // screenshot and a description. Now a generation can be read back whatever the builder
+    // does next, which is the difference between diagnosing accuracy and guessing at it.
+    //
+    // BEST-EFFORT, on purpose: this is diagnostics, and a builder who has already been charged
+    // must never lose their draft because a logging write failed. Both values are already
+    // sanitised — sanitizeD3Spec is a whitelist rebuild capped at 4KB, parseObservedNotes keeps
+    // known keys at 240 chars each — so nothing unbounded reaches the table.
+    if (ledgerRow?.id) {
+      const { error: logErr } = await admin.from("ai_style_calls").update({
+        drafted: drafted.d3,
+        observed: observedNotes,
+        frames: photoUrls.length,
+        video_count: videoCount,
+      }).eq("id", ledgerRow.id);
+      if (logErr) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_result_log_failed",
+          message: `Could not record the drafted spec: ${logErr.message}`,
+        });
+      }
+    }
+
     // `frames` makes a silent truncation visible; `observed` is the builder-facing note
     // about doors, windows and vents, which the spec has no field for; `balanceCents` lets
     // the panel show the new balance without a second round trip.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: shapeFirst ? parseObservedNotes(text) : null, balanceCents });
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
