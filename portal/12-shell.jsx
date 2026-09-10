@@ -939,20 +939,42 @@ function Dashboard({ session }) {
       return data.url || null;
     },
     onUploadPhoto: async (file) => {
-      // SHRINK FIRST. This is now the primary way a builder gives us photos of their buildings,
-      // and a photo straight off a phone is 4-12MB against a 3MB server gate - the same refusal
-      // Carolyn hit on 2026-09-09 (47a8075) on the style-image uploads, whose fix was exactly
-      // this helper. ssFitImageForUpload lives in 06-3d.jsx; every portal part is concatenated
-      // into one bundle, so it is in scope here. A file already small enough (every walk-around
-      // frame, which the browser already wrote at 1280px) is handed back untouched.
-      file = await ssFitImageForUpload(file);
+      // SHRINK HARD, NOT JUST UNDER THE CAP. ssFitImageForUpload's default only re-encodes a file
+      // ALREADY over 2.8MB, so a 2.5MB phone photo went up at full size - about 3.4MB of base64
+      // through an edge function, per photo. Four of those is the "stuck at image upload" Ahsan
+      // hit on 2026-09-10, and the evidence says exactly that: three `fetch_aborted_navigating`
+      // rows, a code only written when the page is UNLOADING with requests in flight. They were
+      // slow, not broken, and he reloaded.
+      //
+      // 900KB at 1600px is well above what anything downstream uses (the 3D texture cache
+      // downsamples to 1024 anyway) and turns a typical phone photo into a few hundred KB. A
+      // walk-around frame, already written at 1280px by the browser, is under it and passes
+      // through untouched.
+      const prepped = await ssFitImageForUpload(file, 900_000, 1600);
+      // WHAT THE SERVER WILL ACTUALLY ACCEPT. upload_style_photo maps the content type through a
+      // four-entry table and 400s on anything else. ssFitImageForUpload hands back the ORIGINAL
+      // when it cannot decode it, which is precisely what happens to an iPhone .heic - so
+      // without this check the builder gets the server's generic "Unsupported image type" and no
+      // idea that their camera format is the reason.
+      const ok = { "image/jpeg": 1, "image/png": 1, "image/webp": 1, "image/gif": 1 };
+      if (!ok[prepped.type]) {
+        throw new Error(`${file.name || "That image"} is a ${(file.type || "format").replace("image/", "")} file this browser cannot re-encode. iPhone photos are HEIC by default \u2014 set Camera \u2192 Formats \u2192 Most Compatible, or export it as JPG.`);
+      }
       const imageBase64 = await new Promise((res, rej) => {
         const fr = new FileReader();
         fr.onload = () => res(String(fr.result || "").split(",")[1] || "");
         fr.onerror = () => rej(new Error("Could not read that file."));
-        fr.readAsDataURL(file);
+        fr.readAsDataURL(prepped);
       });
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: file.type || "image/jpeg" } });
+      // A DEADLINE, because there was none. `functions.invoke` has no timeout of its own, so a
+      // stalled request sat there with the button reading "Working..." and no way to tell a slow
+      // upload from a dead one. 90s is generous for a few hundred KB on a bad connection and
+      // still short enough that a builder learns something rather than waiting.
+      const res = await Promise.race([
+        sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: prepped.type || "image/jpeg" } }),
+        new Promise((_r, rej) => setTimeout(() => rej(new Error("That upload timed out after 90 seconds \u2014 check your connection and try again.")), 90000)),
+      ]);
+      const { data, error } = res;
       if (error) throw new Error(error.message || "Upload failed");
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;

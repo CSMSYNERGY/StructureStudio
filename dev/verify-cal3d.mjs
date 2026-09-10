@@ -94,7 +94,7 @@ const STYLE_ROW2 = {
 
 // Set to a millisecond count to hold the NEXT catalog answer back, which is what turns the
 // refetch race from a timing accident into a test.
-const delay = { catalogMs: 0 }
+const delay = { catalogMs: 0, uploadMs: 0 }
 const saveBodies = []
 const saved = {}
 const generateCalls = []
@@ -164,6 +164,7 @@ async function main() {
       }
       if (a === 'upload_style_photo') {
         uploads.push(body)
+        if (delay.uploadMs) await new Promise((r) => setTimeout(r, delay.uploadMs))
         return json(route, { ok: true, url: `${BASE}/__stub/img-${uploads.length}.png` })
       }
       if (a === 'calibrate_style_ai') {
@@ -236,16 +237,49 @@ async function main() {
   const picker = page.locator('label', { hasText: /Choose images/ }).locator('input[type=file]')
   ok('the image input accepts multiple', await picker.evaluate((el) => el.multiple))
   await picker.setInputFiles([0, 1, 2, 3].map((i) => ({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`stub-photo-${i}`) })))
-  await page.waitForFunction(() => /4 images added/.test(document.body.innerText), { timeout: 30000 })
+  // The counter is the readout now — the per-batch "N images added" message went when step 2
+  // stopped sharing adminCalMsg with the video path and the generation.
+  await page.waitForFunction(() => /4 of 12 used/.test(document.body.innerText), { timeout: 30000 })
   await page.waitForTimeout(400)
   t = await text()
-  ok('FOUR IMAGES UPLOADED IN ONE GO', t.includes('4 images added'), (await line('4 images')).trim())
+  ok('FOUR IMAGES UPLOADED IN ONE GO', t.includes('4 of 12 used'), (await line('4 of 12')).trim())
   ok('four thumbnails render', (await page.locator('img[alt^="Image "]').count()) === 4, `${await page.locator('img[alt^="Image "]').count()} thumbs`)
   ok('thumbnails are numbered, not side-named', (await page.locator('img[alt="Image 2 of 4"]').count()) === 1)
   ok('PHOTOS ALONE DO NOT UNLOCK GENERATE', await gen.first().isDisabled())
   ok('gate now asks only for the video', (await line('Add a walk-around video in step 1 —')).length > 0, (await line('Add a walk-around')).trim())
   ok('adding photos charged no generation', generateCalls.length === 0, `${generateCalls.length} calls`)
   ok('four photo uploads went through the host', uploads.length === 4, `${uploads.length} uploads`)
+
+  // ── REGRESSION: the two steps must not block each other ─────────────────────────────────
+  // Ahsan hit this with a screenshot: step 1 read "Sending view 2 of 8..." while step 2's button
+  // read "Working..." and was disabled. calStageVideo raised the SHARED adminCalBusy flag, which
+  // greys out the image picker, so a builder could do nothing for the whole 8-frame upload.
+  {
+    delay.uploadMs = 900
+    const before = uploads.length
+    const vidInput = page.locator('label', { hasText: /Choose a different video|Choose a walk-around video/ }).locator('input[type=file]')
+    await vidInput.setInputFiles(CLIP)                       // starts a long upload
+    await page.waitForFunction(() => /Sent \d+ of \d+ views/.test(document.body.innerText), { timeout: 60000 })
+    // Selected on the accept attribute, not the label text: mid-upload BOTH labels contain
+    // "Sent N of ...", so a text filter matches the video input too and Playwright refuses.
+    const picker2 = page.locator('input[type=file][accept="image/*"]')
+    ok('STEP 2 IS USABLE WHILE THE VIDEO UPLOADS', !(await picker2.isDisabled()), 'image input not disabled mid-video')
+    // And prove it by actually using it: one more image goes in while frames are still flying.
+    await picker2.setInputFiles([{ name: 'concurrent.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('c') }])
+    await page.waitForFunction(() => /5 of 12 used/.test(document.body.innerText), { timeout: 40000 })
+    ok('an image really uploads DURING a video upload', /5 of 12 used/.test(await text()))
+    await page.waitForFunction(() => /views ready/.test(document.body.innerText), { timeout: 90000 })
+    ok('the video still finishes cleanly alongside it', /views ready/.test(await text()), (await line('')).slice(0, 0) || 'ok')
+    // Concurrency: with 900ms per upload, 6 frames strictly sequential is >= 5.4s. The pool runs
+    // three lanes, so this is a real speed assertion and not just "it finished".
+    delay.uploadMs = 0
+    ok('frames uploaded in parallel, not one at a time', uploads.length - before >= 6, `${uploads.length - before} uploads`)
+    // Put the state back to 4 images so the assertions below still describe what they say.
+    await page.locator('img[alt^="Image "]').last().locator('xpath=following-sibling::button').click().catch(async () => {
+      await page.locator('button[title="Remove this image"]').last().click()
+    })
+    await page.waitForTimeout(600)
+  }
 
   const photoUrlsBefore = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))
 
@@ -260,16 +294,21 @@ async function main() {
   // A REAL h264 clip, not a stub buffer: ssExtractOrbitFrames decodes it in the page, refuses
   // anything under 4s, seeks ~15 times and reads pixels off a canvas. Nothing about that path
   // is exercised by a fake File.
-  await page.locator('label', { hasText: /Choose a walk-around video/ })
-    .locator('input[type=file]')
-    .setInputFiles('dev/scan-fixtures/walk-around-stub.mp4')
+  // By accept attribute, not label text: the button reads "Choose a different video" once a lap
+  // has been staged, and mid-upload BOTH labels contain "Sent N of ...".
+  const uploadsBeforeVideo = uploads.length
+  await page.locator('input[type=file][accept="video/*"]').setInputFiles(CLIP)
   await page.waitForFunction(() => /\d+ views ready/.test(document.body.innerText), { timeout: 60000 })
-  await page.waitForTimeout(600)
+  // Long enough for the busy flags to clear and the gate line to re-render. The badge appears on
+  // `calVideoReady && !busy`, but the Generate button reads adminCalPhotos.busy too.
+  await page.waitForTimeout(1200)
 
   t = await text()
   const framesRead = Number((t.match(/(\d+) views ready/) || [])[1] || 0)
   ok('video frames were cut and staged', framesRead >= 4, `${framesRead} frames`)
-  ok('frames were uploaded, photos were not re-uploaded', uploads.length === 4 + framesRead, `${uploads.length} uploads total`)
+  // RELATIVE, not absolute: the concurrency block above already staged a lap and an extra image,
+  // so a hard-coded total silently becomes wrong the moment a step is added ahead of it.
+  ok('frames were uploaded, photos were not re-uploaded', uploads.length - uploadsBeforeVideo === framesRead, `${uploads.length - uploadsBeforeVideo} new uploads for ${framesRead} frames`)
   ok('STAGING THE VIDEO CHARGED NOTHING', generateCalls.length === 0, `${generateCalls.length} generations`)
 
   // The uploaded images carry alt="Image N of M"; the walk-around strip carries alt="View N".

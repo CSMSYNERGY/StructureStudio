@@ -9454,6 +9454,45 @@ const CAL_PHOTO_MAX = 12;
 // sides; below that the walk stops being a walk and the video prompt's "consecutive frames are
 // adjacent viewpoints" stops being true of what was actually sent.
 const CAL_VIDEO_MIN = 4;
+// Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
+//
+// Sequential was the first shape and it was wrong for the reason Ahsan hit immediately: eight
+// walk-around frames is eight round trips end to end, each one a base64 body through an edge
+// function, and the builder watches "Sending view 2 of 8..." for most of a minute. Firing all
+// eight at once is the other extreme and is how a phone on a builder's yard wifi gets some of
+// them refused. Three lanes is the compromise: roughly three times faster, with no more
+// in-flight requests than a browser would open to one host anyway.
+//
+// ORDER IS PRESERVED because results are written to their own index rather than pushed. That is
+// load-bearing for the video: VIDEO_SHAPE_PROMPT tells the model the frames are in walk order,
+// so a set reordered by which upload happened to finish first would make that sentence false.
+//
+// IT NEVER REJECTS. A failed item is recorded and the rest carry on, because throwing out five
+// good uploads because the sixth timed out means the builder re-sends all six over the same
+// connection that just dropped one. The caller decides what a partial result means.
+async function ssUploadPool(items, worker, onProgress, limit) {
+  const out = new Array(items.length);
+  const errs = [];
+  let next = 0, done = 0;
+  const lanes = Math.max(1, Math.min(limit || 3, items.length));
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        const url = await worker(items[i], i);
+        if (!url) throw new Error("Upload returned no URL.");
+        out[i] = url;
+      } catch (e) {
+        errs.push((e && e.message) || "Upload failed");
+      }
+      done++;
+      if (onProgress) onProgress(done, items.length);
+    }
+  }));
+  return { urls: out.filter(Boolean), errs };
+}
+
 // How many images a generation needs before it may be pressed. Ahsan's "four images", now
 // counted rather than named - see calTrimPhotos below for why the names went.
 const CAL_PHOTO_MIN = 4;
@@ -10446,6 +10485,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     onBlur: () => { setCalFocus(null); setCalDraft(""); },
   });
   const [adminCalBusy, setAdminCalBusy] = useState(false);
+  // STEP 2 HAS ITS OWN BUSY FLAG, and that is the whole point of it (2026-09-10). `adminCalBusy`
+  // means "a spec-level operation is running" - a generation, a save, a scan draft - and the
+  // video path used to raise it too. So uploading a walk-around greyed out the image picker
+  // beside it, and a builder who had just started an 8-frame upload could do nothing but wait.
+  // Ahsan, looking at exactly that screen: "why is image one not letting me upload? i want speed
+  // and multi tasking."
+  //
+  // The two uploads are genuinely independent - different state, different columns, neither
+  // reads the other - so nothing was being protected by coupling them.
+  const [adminCalPhotos, setAdminCalPhotos] = useState({ busy: false, step: null, err: null });
   const [adminCalPreview, setAdminCalPreview] = useState(false);
   // Walk-around video → shape. `urls` caches the uploaded frames so a re-draft re-spends
   // the one metered AI call and not eight uploads; `observed` is what the video showed
@@ -12661,36 +12710,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Room left BEFORE anything is uploaded, so a builder who picks twenty is told twenty was
     // too many rather than watching twenty upload and eight quietly vanish.
     const room = Math.max(0, CAL_PHOTO_MAX - (adminCal ? adminCal.photos.filter(Boolean).length : 0));
-    if (!room) { setAdminCalMsg({ ok: false, msg: `That is already ${CAL_PHOTO_MAX} images, which is the most one generation reads. Remove one first.` }); return; }
+    if (!room) { setAdminCalPhotos({ busy: false, step: null, err: `That is already ${CAL_PHOTO_MAX} images, which is the most one generation reads. Remove one first.` }); return; }
     const take = list.slice(0, room);
-    setAdminCalBusy(true); setAdminCalMsg(null);
-    const done = [];
-    try {
-      for (let i = 0; i < take.length; i++) {
-        setAdminCalMsg({ ok: true, msg: take.length > 1 ? `Uploading image ${i + 1} of ${take.length}…` : "Uploading…" });
-        const url = await setup3d.onUploadPhoto(take[i]);
-        if (!url) throw new Error("Upload returned no URL.");
-        done.push(url);
-      }
-      calAddPhotos(done);
-      const over = list.length - take.length;
-      setAdminCalMsg({
-        ok: true,
-        msg: `${done.length} image${done.length === 1 ? "" : "s"} added.`
-          + (over ? ` ${over} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : ""),
-      });
-    } catch (e) {
-      // KEEP WHAT SUCCEEDED. Throwing the whole batch away because the sixth upload failed makes
-      // a builder re-pick and re-send the five that worked, on the connection that just dropped
-      // one. They are already in the bucket either way.
-      if (done.length) calAddPhotos(done);
-      setAdminCalMsg({ ok: false, msg: (done.length ? `${done.length} uploaded, then it failed: ` : "") + (e.message || "Upload failed") });
-    } finally { setAdminCalBusy(false); }
+    // adminCalPhotos, NOT adminCalBusy: raising the shared flag here would grey out the video
+    // picker beside it, which is the same coupling being removed in the other direction.
+    setAdminCalPhotos({ busy: true, step: take.length > 1 ? `Sent 0 of ${take.length}…` : "Uploading…", err: null });
+    // KEEPS WHAT SUCCEEDED. ssUploadPool never rejects, so a batch where the sixth timed out
+    // still adds the other five rather than making the builder re-pick all six.
+    const { urls, errs } = await ssUploadPool(
+      take,
+      (f) => setup3d.onUploadPhoto(f),
+      (n, total) => setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })),
+      3,
+    );
+    if (urls.length) calAddPhotos(urls);
+    const over = list.length - take.length;
+    setAdminCalPhotos({
+      busy: false,
+      step: null,
+      err: errs.length
+        ? `${urls.length} of ${take.length} uploaded. ${errs.length} failed: ${errs[0]}`
+        : (over ? `${over} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : null),
+    });
   };
   // The public ?admin=1 path: no session, so a URL is pasted rather than a file uploaded.
   const calAddPhotoUrl = (v) => {
     const u = String(v || "").trim();
-    if (!/^https?:\/\//.test(u)) { setAdminCalMsg({ ok: false, msg: "That needs to be a full http(s) image URL." }); return false; }
+    if (!/^https?:\/\//.test(u)) { setAdminCalPhotos({ busy: false, step: null, err: "That needs to be a full http(s) image URL." }); return false; }
     calAddPhotos([u]);
     return true;
   };
@@ -12761,6 +12807,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The gate, in words a builder can act on. A disabled button with no explanation is how this
   // repo has shipped dead-looking features before: it throws no error and reads as breakage.
   const calGenerateWhy = !adminCal ? ""
+    : (adminCalVideo.busy || adminCalPhotos.busy) ? "Still uploading — the button unlocks when both are done."
     : scan.status === "locked" ? "This style's 3D setup is locked. Unlock it above before generating."
     : (!calVideoReady && !calPhotosReady) ? `Add a walk-around video in step 1, and at least ${CAL_PHOTO_MIN} images in step 2 (${calPhotoCount} so far).`
     : !calVideoReady ? "Add a walk-around video in step 1 — one lap is what shows the building from every side."
@@ -12787,7 +12834,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // reset to plain each time. The success message has claimed "Colours and cladding are
   // untouched" since the day it shipped; it is true now.
   const calGenerate = async () => {
-    if (adminCalBusy || adminCalVideo.busy) return;
+    // The ONE place that still waits on all three: it reads the frames AND the images, so
+    // pressing it mid-upload would spend $20 on a partial set.
+    if (adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy) return;
     if (!(setup3d && setup3d.onDraftFromCombined)) return;
     if (!calCanGenerate) { setAdminCalMsg({ ok: false, msg: calGenerateWhy }); return; }
     const { urls, videoCount, held } = calGenerateSet();
@@ -12834,6 +12883,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // staged there and left the two sources indistinguishable from one another afterwards.
   const calStageVideo = async (file) => {
     if (!(setup3d && setup3d.onUploadPhoto)) return;
+    // Deliberately does NOT check adminCalPhotos.busy: a builder may pick a video while their
+    // images are still uploading, which is the multitasking the 09-10 change is for.
     if (adminCalVideo.busy || adminCalBusy) return;
     if (!file) return;
     // THE OLD FRAMES SURVIVE UNTIL NEW ONES EXIST. This used to null `urls` here, which meant
@@ -12842,25 +12893,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // style, with no way back but re-filming. Nothing is read alongside the old frames either:
     // the success line below replaces the whole list rather than appending to it, so the only
     // thing this preserves is the state that was already true.
+    // NO setAdminCalBusy HERE ANY MORE. This is the fix Ahsan asked for: the shared flag greys
+    // out step 2's picker, so staging a video made the images unclickable for the whole upload.
+    // adminCalVideo.busy already stops a second video, and calGenerate checks BOTH flags, so
+    // nothing that mattered was being protected.
     setAdminCalVideo((p) => ({ ...p, busy: true, step: "Opening the video…", err: null, observed: null, read: 0 }));
-    setAdminCalBusy(true);
-    setAdminCalMsg(null);
     try {
       const frames = await ssExtractOrbitFrames(file, (s) => setAdminCalVideo((p) => ({ ...p, step: s })));
-      const urls = [];
-      for (let i = 0; i < frames.length; i++) {
-        setAdminCalVideo((p) => ({ ...p, step: `Sending view ${i + 1} of ${frames.length}…` }));
-        const f = new File([dataUrlToBytes(frames[i].dataUrl)], `walk-${i + 1}.jpg`, { type: "image/jpeg" });
-        const url = await setup3d.onUploadPhoto(f);
-        if (!url) throw new Error("Upload returned no URL.");
-        urls.push(url);
+      const files = frames.map((fr, i) => new File([dataUrlToBytes(fr.dataUrl)], `walk-${i + 1}.jpg`, { type: "image/jpeg" }));
+      // Three lanes rather than one at a time — see ssUploadPool. Order survives, which the
+      // video prompt depends on.
+      const { urls, errs } = await ssUploadPool(
+        files,
+        (f) => setup3d.onUploadPhoto(f),
+        (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` })),
+        3,
+      );
+      // A PARTIAL WALK IS STILL A WALK, above the floor. Four frames is what covers four sides
+      // (CAL_VIDEO_MIN), so a dropped frame or two no longer throws the whole upload away — but
+      // below the floor there is not enough of a lap left to be worth keeping, and the old
+      // frames are still on file, so refusing is the safe direction.
+      if (urls.length < CAL_VIDEO_MIN) {
+        throw new Error(errs.length
+          ? `Only ${urls.length} of ${files.length} views uploaded — ${errs[0]}`
+          : "Not enough usable views came out of that video.");
       }
-      setAdminCalVideo((p) => ({ ...p, busy: false, step: null, urls, count: urls.length }));
-      setAdminCalMsg({ ok: true, msg: `${urls.length} views cut out of your walk-around — nothing has been read yet. Add the four photos below, then press Generate.` });
+      setAdminCalVideo((p) => ({
+        ...p, busy: false, urls, count: urls.length,
+        step: null,
+        err: errs.length ? `${errs.length} view${errs.length === 1 ? "" : "s"} did not upload — ${urls.length} were kept.` : null,
+      }));
     } catch (e) {
       setAdminCalVideo((p) => ({ ...p, busy: false, step: null, err: (e && e.message) || "Could not read that video." }));
-    } finally {
-      setAdminCalBusy(false);
     }
   };
   // Forgetting the frames is a LOCAL forget, not a delete: the uploaded JPEGs stay in the
@@ -14082,6 +14146,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalVideo.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
                       {adminCalVideo.busy ? (adminCalVideo.step || "Working…") : (calVideoReady ? "Choose a different video" : "Choose a walk-around video")}
+                      {/* adminCalPhotos.busy is deliberately absent: uploading images must not
+                          grey out the video picker, which is the same coupling in reverse. */}
                       <input type="file" accept="video/*" disabled={adminCalVideo.busy || adminCalBusy || scan.status === "locked"}
                         onChange={(e) => {
                           const f = e.target.files && e.target.files[0];
@@ -14159,11 +14225,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     because it tells the model a photo shows a side it never shows. */}
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
                   {setup3d && setup3d.onUploadPhoto ? (
-                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer", opacity: adminCalBusy ? 0.6 : 1, marginBottom: 0 }}>
-                      {adminCalBusy ? "Working…" : (calPhotoCount ? "Add more images" : "Choose images")}
+                    /* Disabled on adminCalPhotos.busy (its OWN work) and adminCalBusy (a generation
+                       or a save, which would be writing the same spec) — but NOT on
+                       adminCalVideo.busy, so images can be picked while a lap uploads.
+
+                       A PLAIN BLOCK COMMENT, not a braced JSX one: this sits inside a ternary
+                       branch, which must be ONE expression, so a JSX comment node beside the
+                       element parses as a second child and fails with "Unexpected token, expected
+                       comma". In children position the braced form is the correct one. */
+                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalPhotos.busy || adminCalBusy ? "wait" : "pointer", opacity: adminCalPhotos.busy || adminCalBusy ? 0.6 : 1, marginBottom: 0 }}>
+                      {adminCalPhotos.busy ? (adminCalPhotos.step || "Uploading…") : (calPhotoCount ? "Add more images" : "Choose images")}
                       {/* `multiple` is the whole ask. accept="image/*" keeps the picker on images;
                           the shrink and the server's type gate do the real enforcing. */}
-                      <input type="file" accept="image/*" multiple disabled={adminCalBusy} style={{ display: "none" }}
+                      <input type="file" accept="image/*" multiple disabled={adminCalPhotos.busy || adminCalBusy} style={{ display: "none" }}
                         onChange={(e) => {
                           // COPIED BEFORE THE RESET, and that order is the whole bug this line
                           // once had. `e.target.files` is a LIVE FileList, not a snapshot, so
@@ -14205,6 +14279,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       : `Pick several at once. ${CAL_PHOTO_MIN} minimum, ${CAL_PHOTO_MAX} maximum.`}
                   </span>
                 </div>
+                {/* Step 2's own error line. It used to share adminCalMsg with the video path and
+                    the generation, so two concurrent uploads overwrote each other's news. */}
+                {adminCalPhotos.err && <div style={{ marginBottom: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{adminCalPhotos.err}</div>}
                 {calPhotoCount > 0 && (
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
                     {adminCal.photos.filter(Boolean).map((url, i) => (
@@ -14216,7 +14293,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             leaves no blanks, so `.filter(Boolean)` returns the array itself — but
                             that is an invariant held somewhere else, and an off-by-one here deletes
                             the wrong photo silently. */}
-                        <button type="button" onClick={() => calRemovePhoto(url)} disabled={adminCalBusy}
+                        <button type="button" onClick={() => calRemovePhoto(url)} disabled={adminCalPhotos.busy || adminCalBusy}
                           title="Remove this image"
                           style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "1px solid #FCD34D", background: "#FFF", color: "#B45309", fontWeight: 800, fontSize: 12, lineHeight: 1, padding: 0, cursor: adminCalBusy ? "wait" : "pointer" }}>×</button>
                       </div>
@@ -14241,7 +14318,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     that thought it knew the price would be a second opinion about money. */}
                 {setup3d && setup3d.onDraftFromCombined && scan.aiReady !== false && (
                   <div style={{ marginTop: 10, borderTop: "1px solid #FEF3C7", paddingTop: 10 }}>
-                    <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || !calCanGenerate}
+                    <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
                       title={calCanGenerate
                         ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
                         : "Add a walk-around video and all four photos first"}
