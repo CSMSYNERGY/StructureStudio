@@ -88,13 +88,25 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
   // teaches get_config to emit it; the validation now lives in _shared/styleD3.ts so
   // this and portal-settings' builder-facing twin cannot drift apart.
   if (action === "save_style_d3") {
-    const { styleValue, d3, d3Photos } = payload || {};
+    const { styleValue, d3, d3Photos, d3VideoFrames } = payload || {};
     if (!styleValue || typeof styleValue !== "string") {
       return json({ error: "styleValue is required." }, 400);
     }
     const clean = sanitizeD3Spec(d3);
     if (!clean.ok) return json({ error: clean.error }, 400);
-    const photos = sanitizePhotoUrls(d3Photos);
+    // 12, not the default 4 - the same truncation portal-settings' twin had. The operator page
+    // renders the same editor, with the same "+ Another angle" button and the same 12-photo
+    // ceiling, so a 4-cap here silently threw away two thirds of a full set on save.
+    const photos = sanitizePhotoUrls(d3Photos, 12);
+    // The walk-around's frames, kept in their own column beside the photos rather than mixed
+    // into them (2026-09-10) - see portal-settings' twin for why the two must stay separable.
+    //
+    // ⚠️ THIS PATH ALMOST NEVER SENDS THEM, and must not write the column when it does not. The
+    // ?admin=1 operator page renders no Step 1 card (it has no setup3d and so no way to upload),
+    // so it cannot know whether a style has a walk-around - and an unconditional write from here
+    // would mean an operator tuning a pitch silently erased the builder's video.
+    const hasVideoFrames = Array.isArray(d3VideoFrames);
+    const videoFrames = sanitizePhotoUrls(d3VideoFrames, 8);
 
     // Honour the phone-scan LOCK, exactly as portal-settings' builder-facing twin does
     // (same message, same 409). "locked" means the spec was tuned against a real scanned
@@ -111,7 +123,12 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // (client_id, key) is unique, so this touches exactly one row.
     const { error: upErr, count } = await supabase
       .from("building_styles")
-      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
+      .update(
+        hasVideoFrames
+          ? { d3: clean.d3, d3_photos: photos, d3_video_frames: videoFrames, updated_at: new Date().toISOString() }
+          : { d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() },
+        { count: "exact" },
+      )
       .eq("client_id", clientId.trim())
       .eq("key", styleValue);
     if (upErr) return json({ error: `Config save failed: ${upErr.message}` }, 500);

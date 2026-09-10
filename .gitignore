@@ -40,3 +40,8 @@ package-lock.json
 # the functions are deployed by the Supabase CLI, which resolves independently, and
 # there is no build step for this lock to make reproducible.
 deno.lock
+
+# The walk-around clip dev/verify-cal3d.mjs generates with ffmpeg on first run. Not
+# committed: dev/ ships in the Workers asset bundle, so a checked-in 113KB video would be a
+# public download on every tenant site to serve one local harness.
+dev/scan-fixtures/walk-around-stub.mp4

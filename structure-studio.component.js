@@ -10392,6 +10392,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the one metered AI call and not eight uploads; `observed` is what the video showed
   // about doors, windows and vents, which the spec has no field for.
   const [adminCalVideo, setAdminCalVideo] = useState({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+  // WHICH STYLE THE OPEN EDITOR IS FOR, readable from an async callback. openCalEditor fires an
+  // unabortable read (portal-settings `catalog`) and the builder can click another style chip
+  // while it is in flight, so a slow answer for style A can land on style B. The photo restore
+  // has always been safe because it applies inside setAdminCal, where it can compare
+  // `p.styleValue`; the video restore and the scan status have no such vantage point - a
+  // 5-second read on Deluxe was reproduced writing Deluxe's frames into an open Utility, whose
+  // photo count correctly stayed at 0 of 4. That asymmetry is the tell.
+  //
+  // A REF, and deliberately not a piece of state: nothing renders from it, and a re-render on
+  // every style click is a WebGL preview rebuild. It sits here beside the state it arbitrates,
+  // far above every early return in this component - a hook added down beside its handlers is
+  // React #310, and this file has shipped that.
+  const calLoadRef = useRef(null);
   // Building scan (094): { busy, step, err, measured, file, status } for the selected style.
   const [scan, setScan] = useState({ busy: false, step: null, err: null, measured: null, file: null, status: "none", aiReady: null });
   // Prevents the size-change effect from clearing items when we're rehydrating
@@ -12449,9 +12462,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // One authenticated read gives everything the customer config deliberately does not carry:
     // the reference photos (a builder's own buildings — see 093), this style's scan status, and
     // whether AI drafting is even configured on the server.
+    // Stamped synchronously, in the same tick as the reset above, so the comparison in the
+    // callback is against the style that is open WHEN IT LANDS rather than the one that was
+    // open when it was issued.
+    calLoadRef.current = s.value;
     if (setup3d && setup3d.onLoadStyle3D) {
       setup3d.onLoadStyle3D(s.value).then((meta) => {
-        if (!meta) return;
+        // ONE guard, covering all three writes below. Guarding only the photo line (which is
+        // what shipped) is worse than guarding none: two of the three still land on the wrong
+        // style, and the one that holds makes the mismatch look like a rendering glitch.
+        if (!meta || calLoadRef.current !== s.value) return;
         // `.slice(0, 4)` used to live on this line and TRUNCATED a stored set back down to
         // four the moment this async read landed on top of the synchronous seed above - so the
         // extra angles Carolyn asked for on 09-04 survived a Save and then vanished on the next
@@ -12463,8 +12483,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // The walk-around's own frames, restored. Without this the Generate gate would tell a
         // builder to film a lap they already filmed, because "is there a video" is answered by
         // state openCalEditor deliberately clears a few lines above.
+        // ALWAYS SET, even to an empty list, because `null` means "we have not looked yet" and
+        // that distinction is what stops a Save writing over frames it never loaded. `if
+        // (vf.length)` left `urls` at null for a style with no walk-around, which reads
+        // identically to a style whose walk-around simply had not arrived.
         const vf = Array.isArray(meta.videoFrames) ? meta.videoFrames.filter(Boolean) : [];
-        if (vf.length) setAdminCalVideo((p) => ({ ...p, urls: vf, count: vf.length }));
+        setAdminCalVideo((p) => ({ ...p, urls: vf, count: vf.length }));
         setScan((p) => ({ ...p, status: meta.modelStatus || "none", aiReady: meta.aiReady !== false }));
       }).catch(() => { /* a convenience read; never block the editor */ });
     }
@@ -12709,9 +12733,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!(setup3d && setup3d.onUploadPhoto)) return;
     if (adminCalVideo.busy || adminCalBusy) return;
     if (!file) return;
-    // A FULL RESET, not a merge: a new file must never be read alongside the previous one's
-    // frames. The same trap scanPick avoids by clearing renderUrls.
-    setAdminCalVideo({ busy: true, step: "Opening the video…", err: null, count: 0, urls: null, observed: null, read: 0 });
+    // THE OLD FRAMES SURVIVE UNTIL NEW ONES EXIST. This used to null `urls` here, which meant
+    // a builder who picked a second video and had it rejected - an iPhone HEVC clip, a file
+    // under four seconds, a dropped upload - lost the walk-around already saved against the
+    // style, with no way back but re-filming. Nothing is read alongside the old frames either:
+    // the success line below replaces the whole list rather than appending to it, so the only
+    // thing this preserves is the state that was already true.
+    setAdminCalVideo((p) => ({ ...p, busy: true, step: "Opening the video…", err: null, observed: null, read: 0 }));
     setAdminCalBusy(true);
     setAdminCalMsg(null);
     try {
@@ -12736,7 +12764,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // bucket until the next Save writes the new list over d3_video_frames. Deleting bucket
   // objects from here would need a second authenticated capability for no gain — the URLs are
   // unguessable, and a replacement video overwrites the row that points at the old ones.
-  const calClearVideo = () => setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+  // `urls: []`, NOT null. Null is this state's "not looked yet" and is the one value Save
+  // refuses to write, so clearing to null would make Remove the video a button that appears to
+  // work and silently never persists.
+  const calClearVideo = () => setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: [], observed: null, read: 0 });
 
   // ─── Building scan: read it, measure it, then drive the parametric model from the numbers ──
   // Measuring happens BEFORE any upload, on purpose: nothing is stored until we know the file
@@ -12979,7 +13010,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (setup3d && setup3d.onSaveSpec) {
       setAdminCalBusy(true); setAdminCalMsg(null);
       try {
-        await setup3d.onSaveSpec(adminCal.styleValue, adminCal.spec, adminCal.photos.filter(Boolean), calVideoFrames);
+        // `undefined` when the frames have not loaded yet, which the server reads as "leave
+        // that column alone". Passing calVideoFrames unconditionally meant a Save in the window
+        // before the authenticated refetch lands - or on any surface that never issues it -
+        // wrote [] over a walk-around already on file. There is no UI anywhere that accepts
+        // frame URLs, so recovery from that is re-filming.
+        await setup3d.onSaveSpec(adminCal.styleValue, adminCal.spec, adminCal.photos.filter(Boolean),
+          adminCalVideo.urls === null ? undefined : calVideoFrames);
         setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
       } catch (e) {
         setAdminCalMsg({ ok: false, msg: e.message || "Save failed" });
@@ -12990,7 +13027,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     setAdminCalBusy(true); setAdminCalMsg(null);
     try {
       const { data, error } = await supabase.functions.invoke("admin-save-settings", {
-        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), d3VideoFrames: calVideoFrames },
+        // NO d3VideoFrames ON THIS PATH, EVER. The public ?admin=1 page has no setup3d, so it
+        // renders no Step 1 card, never stages frames and never issues the refetch that would
+        // load them - `calVideoFrames` there is structurally [], and sending it would have made
+        // every operator "Save to config" wipe the builder's walk-around. Omitting the key is
+        // what tells the server to leave the column as it found it.
+        body: { adminPassword: adminPwd, clientId: C.clientId, action: "save_style_d3", styleValue: adminCal.styleValue, d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean) },
       });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");

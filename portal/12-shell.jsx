@@ -817,8 +817,15 @@ function Dashboard({ session }) {
   // (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
   // Boolean(setup3d)` and isAdmin short-circuits it -- so that flow is untouched.
   const setup3d = useMemo(() => (!canAdmin || !view3dUnlocked ? null : {
-    onSaveSpec: async (styleValue, d3, d3Photos) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_style_d3", styleValue, d3, d3Photos } });
+    // d3VideoFrames rides along from 2026-09-10: the walk-around's frames are persisted beside
+    // the photos, not inside them, so reopening a style can still answer "has this got a video".
+    onSaveSpec: async (styleValue, d3, d3Photos, d3VideoFrames) => {
+      // The key is OMITTED, not sent as null, when the caller does not know the frames: the
+      // server distinguishes absence ("leave the column alone") from an empty array ("the
+      // builder removed the video"), and JSON.stringify drops an undefined property for us.
+      const body = { action: "save_style_d3", styleValue, d3, d3Photos };
+      if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
       if (error) throw new Error(error.message || "Save failed");
       if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
       return data;
@@ -876,6 +883,7 @@ function Dashboard({ session }) {
       const st = (data.styles || []).find((x) => x.key === styleValue);
       return {
         photos: (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [],
+        videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
         modelStatus: (st && st.model_status) || "none",
         aiReady: data.aiReady !== false,
       };
@@ -899,8 +907,11 @@ function Dashboard({ session }) {
        walk-around and that prompt is the one that knows the roof was only ever seen from the
        ground — the single most important fact about this input. Cap is 12, Carolyn's own
        "three from each side". */
-    onDraftFromCombined: async (photoUrls, styleValue) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined" } });
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount) => {
+      // videoCount says how many of the LEADING urls are walk-around frames, so the server can
+      // hand the model a prompt that describes the set it is actually being given rather than
+      // asserting the whole array is one continuous lap.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined", videoCount: videoCount || 0 } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
       return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
@@ -928,6 +939,13 @@ function Dashboard({ session }) {
       return data.url || null;
     },
     onUploadPhoto: async (file) => {
+      // SHRINK FIRST. This is now the primary way a builder gives us photos of their buildings,
+      // and a photo straight off a phone is 4-12MB against a 3MB server gate - the same refusal
+      // Carolyn hit on 2026-09-09 (47a8075) on the style-image uploads, whose fix was exactly
+      // this helper. ssFitImageForUpload lives in 06-3d.jsx; every portal part is concatenated
+      // into one bundle, so it is in scope here. A file already small enough (every walk-around
+      // frame, which the browser already wrote at 1280px) is handed back untouched.
+      file = await ssFitImageForUpload(file);
       const imageBase64 = await new Promise((res, rej) => {
         const fr = new FileReader();
         fr.onload = () => res(String(fr.result || "").split(",")[1] || "");

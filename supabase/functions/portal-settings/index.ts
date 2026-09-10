@@ -40,7 +40,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
@@ -1765,7 +1765,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
+      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, d3_video_frames, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable, depth_in, height_off_floor_in").eq("client_id", clientId).order("sort_order"),
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
@@ -2953,16 +2953,44 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
     const clean = sanitizeD3Spec(payload.d3);
     if (!clean.ok) return json({ error: clean.error }, 400);
-    const photos = sanitizePhotoUrls(payload.d3Photos);
+    // ⚠️ THE `max` ARGUMENT IS THE WHOLE FIX HERE. This call used the DEFAULT of 4, so the
+    // extra angles Carolyn asked for on 2026-09-04 ("they may just add more") were accepted by
+    // the editor, read by the generator, and then silently dropped by the save - HTTP 200, no
+    // warning, and gone on the next open. The editor's own ceiling is CAL_PHOTO_MAX (12) and
+    // sanitizePhotoUrls' hard ceiling is 12, so 12 is the honest number for the column too.
+    const photos = sanitizePhotoUrls(payload.d3Photos, 12);
+    // The walk-around's frames, kept beside the photos rather than mixed into them (2026-09-10).
+    // They are a SEPARATE column because the two are answers to different questions: "what has
+    // this builder photographed" and "has this style got a walk-around at all". Mixed into one
+    // array, as they were until today, the second question has no answer after a reload - so the
+    // Generate gate would demand a video the builder had already filmed. Cap 8: SS_VID_FRAMES.
+    //
+    // ⚠️ ABSENCE IS NOT EMPTINESS, and this column is the first one here where the difference
+    // bites. sanitizePhotoUrls answers [] for undefined exactly as it does for [], so writing it
+    // unconditionally meant every caller that does not KNOW the frames - the operator ?admin=1
+    // page, which has no Step 1 card at all, and the portal in the window before its
+    // authenticated refetch lands - silently wiped a walk-around already on file. Only a caller
+    // that actually sent an array gets to touch it; everyone else leaves it as they found it.
+    const hasVideoFrames = Array.isArray(payload.d3VideoFrames);
+    const videoFrames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
     const { error, count } = await admin.from("building_styles")
-      .update({ d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() }, { count: "exact" })
+      .update(
+        hasVideoFrames
+          ? { d3: clean.d3, d3_photos: photos, d3_video_frames: videoFrames, updated_at: new Date().toISOString() }
+          : { d3: clean.d3, d3_photos: photos, updated_at: new Date().toISOString() },
+        { count: "exact" },
+      )
       .eq("client_id", clientId).eq("id", found.style!.id);
     if (error) return json({ error: error.message }, 500);
     if (!count) return json({ error: "Style not found (or not yours)." }, 404);
-    return json({ ok: true, d3: clean.d3, d3Photos: photos });
+    // Only reports what it wrote. Echoing `videoFrames` on a save that deliberately left the
+    // column alone would tell the caller their frames are now [] and invite them to believe it.
+    return json(hasVideoFrames
+      ? { ok: true, d3: clean.d3, d3Photos: photos, d3VideoFrames: videoFrames }
+      : { ok: true, d3: clean.d3, d3Photos: photos });
   }
 
   // ─── Building scan (094) ───────────────────────────────────────────────────────────────
@@ -3119,6 +3147,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const combined = payload.source === "combined";
     const shapeFirst = fromVideo || combined;
     const photoUrls = sanitizePhotoUrls(payload.photoUrls, combined ? 12 : fromVideo ? 8 : 4);
+    // How many of the leading URLs are walk-around frames. Clamped to what actually survived the
+    // sanitiser: a caller claiming ten frames out of a set the cap cut to eight would otherwise
+    // have the prompt describe two photographs that are not there.
+    const videoCount = Math.max(0, Math.min(photoUrls.length, Math.floor(Number(payload.videoCount) || 0)));
     if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
     // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
     // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
@@ -3307,7 +3339,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               // URL sources: the photos live in public buckets, so Anthropic can fetch them
               // and we never proxy the bytes through this function.
               ...photoUrls.map((url) => ({ type: "image", source: { type: "url", url } })),
-              { type: "text", text: shapeFirst ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT },
+              // A combined set gets a prompt that says which images are walk frames and which are
+              // staged photographs. Until 2026-09-10 it got VIDEO_SHAPE_PROMPT verbatim, whose
+              // first sentence claims every image is a consecutive frame of one lap - false the
+              // moment a builder's own photos are appended, and false in a way that changes how
+              // the model reconciles the views it is shown.
+              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount) : (fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT) },
             ],
           }],
         }),

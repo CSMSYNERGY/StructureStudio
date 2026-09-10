@@ -239,12 +239,21 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 // Reference photos for a spec: http(s) only, capped in both count and length. These are
 // handed to the vision model AND rendered as thumbnails in the editor.
 //
-// `max` defaults to 4, which is what `d3_photos` stores and what every existing caller
-// wants. The walk-around-video path passes more, because eight frames of one orbit is
-// what covers four elevations AND four corners when the pace of the walk is unknown.
-// It is a parameter rather than a bigger constant because this same function guards the
-// PERSISTED column: raising the floor for everyone would quietly let a save write twelve
-// URLs into a jsonb column the editor renders as exactly four slots.
+// `max` defaults to 4, which is now only a DEFENSIVE FALLBACK - no production caller relies
+// on it any more, and the reasoning that used to be written here is retired rather than
+// deleted, because it explains what changed. It read: "the default is what `d3_photos` stores
+// ... raising the floor for everyone would quietly let a save write twelve URLs into a jsonb
+// column the editor renders as exactly four slots."
+//
+// That last clause stopped being true on 2026-09-04, when "+ Another angle" shipped and the
+// editor grew to CAL_PHOTO_MAX (12) slots - but the two persisted writers kept the 4-default,
+// so a builder could add eight photos, watch a generation read all of them, press Save, and
+// lose four with an HTTP 200 and no warning. Both `save_style_d3` writers now pass 12
+// explicitly, matching the editor: four LABELLED views as a floor, twelve as the ceiling.
+// The walk-around path passes 8 (SS_VID_FRAMES) into its own column.
+//
+// The 12 in the slice below is a hard ceiling on top of `max` and is pinned by styleD3.test.ts:
+// no caller can raise it, whatever it asks for.
 export function sanitizePhotoUrls(raw: unknown, max = 4): string[] {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -374,6 +383,33 @@ FOUNDATION: look at the very bottom of the building. "skids" means it is raised 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
 
 Estimate conservatively. Where the frames genuinely do not settle something, use a typical value and set observed.confidence accordingly.`;
+
+// A combined set is NOT what VIDEO_SHAPE_PROMPT describes, and saying so matters. That prompt
+// opens by asserting every image is a consecutive frame of one lap; a combined generation appends
+// the builder's own staged photographs, which are neither consecutive nor in walk order. Sending
+// the video prompt unchanged - which is what shipped on 2026-09-07 - tells the model that four
+// deliberately-aimed photographs are four more views of the same orbit, so a photo of the back
+// reads as "the walk continued" and the shape gets reconciled against a lap that never happened.
+//
+// ONLY THE FIRST PARAGRAPH IS REPLACED. Everything after the first blank line - the JSON shape,
+// the ground-level roof warning, the `observed` block - is reused verbatim, because the JOB is
+// identical and a second copy of that spec is a second thing to keep in step. Split on the blank
+// line rather than matching the sentence: a wording change to the first paragraph would otherwise
+// silently turn this into a no-op that still returns a valid-looking prompt.
+export function combinedShapePrompt(videoCount: number, photoCount: number): string {
+  const v = Math.max(0, Math.floor(videoCount || 0));
+  const p = Math.max(0, Math.floor(photoCount || 0));
+  if (!v) return VIDEO_SHAPE_PROMPT;
+  const cut = VIDEO_SHAPE_PROMPT.indexOf("\n\n");
+  if (cut < 0) return VIDEO_SHAPE_PROMPT;
+  const rest = VIDEO_SHAPE_PROMPT.slice(cut);
+  const frames = v === 1 ? "image is a frame" : "images are frames";
+  const shots = p === 1 ? "image is a photograph" : "images are photographs";
+  const tail = p
+    ? ` The REMAINING ${p} ${shots} the builder took deliberately, standing back from one side at a time. They are sharper and better framed than the video frames, so prefer them wherever the two disagree - but they are NOT part of the walk and are not in walk order.`
+    : "";
+  return `These images are all of ONE portable building (a shed or barn), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
+}
 
 // Tolerant parse of a model reply: pull the first {...} out of whatever wrapping the
 // model chose, then hold it to the same rules a hand-typed spec must satisfy.
