@@ -350,8 +350,8 @@ function ssCandBandIn(cand, itemTypes) {
   if (!v || !isFinite(v.bottomFt) || !isFinite(v.topFt)) return [0, 1e4];
   return [v.bottomFt * 12, v.topFt * 12];
 }
-function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
-  if (!sn.wall) return false;
+function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand) {
+  if (!sn.wall) return null;
   const candBand = ssCandBandIn(cand, itemTypes);
   const isH = sn.wall === "north" || sn.wall === "south";
   const candPos = isH ? sn.x : sn.y;
@@ -361,9 +361,33 @@ function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
     if (!ssBandsOverlap(candBand, ssSlabBand(ob, itemTypes))) continue;
     const obHalf = ((ob.widthFt || (itemTypes[ob.type] && itemTypes[ob.type].width)) * sc) / 2;
     const obPos = isH ? ob.x : ob.y;
-    if (Math.abs(candPos - obPos) < candHalf + obHalf - 2) return true;
+    if (Math.abs(candPos - obPos) < candHalf + obHalf - 2) return ob;
   }
-  return false;
+  return null;
+}
+function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
+  return !!wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand);
+}
+
+// SAY WHICH THING IS IN THE WAY. Every click-to-place refusal used to read "A workbench is on
+// that wall" whatever had actually blocked it, so a single shelf and a double shelf both
+// reported a workbench that was nowhere on the plan — and the reader's next move is to go
+// looking for it. Only the drag paths got this right, via SS_REFUSE_SLAB's "workbench or
+// shelf", which is honest but still does not say WHICH.
+//
+// The name comes from the tenant's own catalog label, so it matches the button they placed it
+// with. Labels are tenant-editable, so an odd one ("Shelving") produces slightly odd grammar
+// — that is a fair trade against confidently naming the wrong object, and the fallback is the
+// neutral "Something" rather than a guess.
+//
+// Re-walks the obstacle list rather than threading a value out of the check above: it runs
+// only on the refusal path, over a handful of items, and it keeps all eight call sites to a
+// one-line change with no new binding in a function body that already has many.
+function ssSlabInWay(sn, widthFtPx, existing, itemTypes, sc, cand, tail) {
+  const ob = wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand);
+  const c = ob && itemTypes && itemTypes[ob.type];
+  const name = String((c && (c.label || c.shortLabel)) || "").trim();
+  return (name ? "A " + name.toLowerCase() : "Something") + " is on that wall — " + tail;
 }
 
 function parseSize(s) {
@@ -1154,19 +1178,28 @@ function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
     // line and never a figure.
     if (isVentItem(item)) { const s = ssVentSpan(item, wallHeightFt); return { bottomFt: s[0], topFt: s[1] }; }
     const def = d3OpeningDefaults(item.type) || {};
-    let h = Number(item.openingHeightFt != null ? item.openingHeightFt : def.openingHeightFt);
     // ⚠️ A CATALOG FIXTURE'S OWN heightIn, added 2026-09-04. It carries its real size there and
-    // no Phase 5 stamp, so the line below used to hand every one of them the GENERIC default:
-    // openingSpan cut a 7 ft roll-up's hole at 7 ft while this printed 6'6", and a 24" catalog
-    // window read 3 ft. The two have disagreed since catalog fixtures existed — quietly,
-    // because both numbers are plausible and neither view shows the other's.
+    // no Phase 5 stamp, so it used to be handed the GENERIC default instead: openingSpan cut a
+    // 7 ft roll-up's hole at 7 ft while this printed 6'6", and a 24" catalog window read 3 ft.
+    // The two disagreed quietly, because both numbers are plausible and neither view shows the
+    // other's.
     //
-    // This is now the same fallback ORDER openingSpan uses (stamp, then heightIn, then the
-    // default), which is what this function's header means by the printed height and the cut
-    // hole agreeing. It also makes the band load-bearing rather than decorative:
-    // checkDoorCollision reads it, and a roll-up understated by half a foot would let a loft
-    // door be placed into the top of it.
+    // ⛔ THE ORDER BELOW WAS DOCUMENTED BEFORE IT WAS TRUE, and the comment here said so for
+    // five days: "the same fallback ORDER openingSpan uses (stamp, then heightIn, then the
+    // default)". The code read `openingHeightFt != null ? openingHeightFt : def.openingHeightFt`
+    // on the FIRST line, so the type default was consumed before heightIn was ever reached —
+    // and d3OpeningDefaults answers for window, both rough openings and both doors, so the
+    // heightIn branch was DEAD for every one of them. Only fixtureDoor, whose defaults are {},
+    // could get there. Every catalog window's collision band was 3 ft tall whatever the window
+    // measured. A documented guard that does not exist is worse than an admitted gap.
+    //
+    // It is the real order now: stamp, then the fixture's own heightIn, then the type default,
+    // then the constant — exactly what openingSpan does. That matters beyond the printed
+    // number: checkDoorCollision and checkWallSlabOverlap both read this band, so an
+    // understated roll-up would let a loft door be placed into the top of it.
+    let h = Number(item.openingHeightFt);
     if (!isFinite(h) || h <= 0) { const hi = Number(item.heightIn); if (hi > 0) h = hi / 12; }
+    if (!isFinite(h) || h <= 0) h = Number(def.openingHeightFt);
     if (!isFinite(h) || h <= 0) h = item.type === "window" ? D3.WINDOW_H : ssIsWindowRO(item.type) ? D3.RO_WINDOW_H : D3.DOOR_H;
     let sill = Number(item.sillFt != null ? item.sillFt : def.sillFt);
     if (!isFinite(sill) || sill < 0) sill = 0;
@@ -7443,7 +7476,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // in-viewer picker / included chip could drop its door or window straight onto one.
         // Same refusal the 2D placement paths gained in the 2026-08-20 audit.
         if (checkWallSlabOverlap(sn, widthFt * scale, liveItems, itemTypes, scale, ni)) {
-          flash3("A workbench is on that wall — place this somewhere else on the wall.");
+          flash3(ssSlabInWay(sn, widthFt * scale, liveItems, itemTypes, scale, ni, "place this somewhere else on the wall."));
           return false;
         }
         commitPlaced3(ni);
@@ -7579,7 +7612,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return;
         }
         if (checkWallSlabOverlap(sn, cfg.width * scale, liveItems, itemTypes, scale, cand)) {
-          flash3("A workbench is on that wall — place this somewhere else on the wall.");
+          flash3(ssSlabInWay(sn, cfg.width * scale, liveItems, itemTypes, scale, cand, "place this somewhere else on the wall."));
           return;
         }
         commitPlaced3({ id: idCounter++, type: tool, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(tool) });
@@ -11070,7 +11103,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // skips workbenches, so an included chip could drop its door/window straight onto one
       // (audit 2026-08-20).
       if (checkWallSlabOverlap(sn, iwPx2, items, ITEMS, scale, ni)) {
-        setToast("A workbench is on that wall — place this somewhere else on the wall."); setTimeout(() => setToast(null), 4000); return;
+        setToast(ssSlabInWay(sn, iwPx2, items, ITEMS, scale, ni, "place this somewhere else on the wall.")); setTimeout(() => setToast(null), 4000); return;
       }
       setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
       return;
@@ -11237,7 +11270,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
       if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, cand)) {
-        setToast("A workbench is on that wall — place this somewhere else on the wall.");
+        setToast(ssSlabInWay(sn, iwPx, items, ITEMS, scale, cand, "place this somewhere else on the wall."));
         setTimeout(() => setToast(null), 4000);
         return;
       }
@@ -11295,7 +11328,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
       if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale, swapDoorCand)) {
-        setToast("A workbench is on that wall — the wider door would overlap it.");
+        setToast(ssSlabInWay(sn, wFt * scale, others, ITEMS, scale, swapDoorCand, "the wider door would overlap it."));
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setDoorPick(null);
         return;
@@ -11373,7 +11406,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // on a workbench — the exact layout checkWallSlabOverlap exists to prevent
     // (audit 2026-08-20).
     if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, ni)) {
-      setToast("A workbench is on that wall — place this somewhere else on the wall.");
+      setToast(ssSlabInWay(sn, iwPx, items, ITEMS, scale, ni, "place this somewhere else on the wall."));
       setTimeout(() => setToast(null), 4000);
       setDoorPick(null);
       return;
@@ -11411,7 +11444,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return;
       }
       if (checkWallSlabOverlap(sn, wFt * scale, others, ITEMS, scale, swapWinCand)) {
-        setToast("A workbench is on that wall — the wider window would overlap it.");
+        setToast(ssSlabInWay(sn, wFt * scale, others, ITEMS, scale, swapWinCand, "the wider window would overlap it."));
         setTimeout(() => setToast(null), 4000);
         setSwapId(null); setWindowPick(null);
         return;
@@ -11462,7 +11495,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Workbench check too, as the built-in wall placement runs — checkDoorCollision skips
     // workbenches, so a picked catalog window landed straight on one (audit 2026-08-20).
     if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, ni)) {
-      setToast("A workbench is on that wall — place this somewhere else on the wall.");
+      setToast(ssSlabInWay(sn, iwPx, items, ITEMS, scale, ni, "place this somewhere else on the wall."));
       setTimeout(() => setToast(null), 4000);
       setWindowPick(null);
       return;
