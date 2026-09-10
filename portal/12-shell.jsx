@@ -1016,6 +1016,33 @@ function Dashboard({ session }) {
       // ORIGINAL file when its quality loop cannot reach the cap, so LOWERING the cap made a
       // 4-12MB phone photo more likely to be sent untouched, not less.
       const prepped = await ssShrinkStylePhoto(file);
+      // ── THE FAST PATH: straight into the bucket on a signed URL ────────────────────────
+      // No base64 (4/3 fewer bytes on the wire), no edge-function request budget, and the
+      // storage endpoint is far more forgiving of a slow uplink than an invoke is. This is what
+      // onUploadModel's comment has called "the real fix" since August.
+      //
+      // The FALLBACK is deliberate and is not belt-and-braces for its own sake: minting the URL
+      // is itself an invoke, so on a connection bad enough to lose that call the old path is no
+      // worse off, and a bucket or policy problem that only affects signed uploads must not take
+      // the feature down. Both routes end at the same object in the same bucket.
+      try {
+        const { data: sig, error: sigErr } = await sb.functions.invoke("portal-settings", {
+          body: { action: "style_photo_upload_url", contentType: prepped.type || "image/jpeg" },
+        });
+        if (sigErr) throw new Error(sigErr.message || "Could not start that upload");
+        if (!sig || !sig.ok || !sig.path || !sig.token || !sig.url) throw new Error((sig && sig.error) || "Could not start that upload");
+        const put = await sb.storage.from("branding")
+          .uploadToSignedUrl(sig.path, sig.token, prepped, { contentType: prepped.type || "image/jpeg" });
+        if (put.error) throw new Error(put.error.message || "Upload failed");
+        return sig.url;
+      } catch (e) {
+        // Tagged transport-class so ssUploadPool retries it, then falls back below on the last
+        // attempt. A signed-URL failure is almost always the connection, not the image.
+        if (e && !e.name) e.name = "FunctionsFetchError";
+        ssLogError("portal", (e && e.message) || "signed style-photo upload failed",
+          "style_photo_signed_fallback", { fn: "portal-settings" }, "info");
+      }
+      // ── THE OLD PATH, unchanged ────────────────────────────────────────────────────────
       const imageBase64 = await new Promise((res, rej) => {
         const fr = new FileReader();
         fr.onload = () => res(String(fr.result || "").split(",")[1] || "");

@@ -113,6 +113,7 @@ const GATES: GateTable = {
   save_style_d3:             { area: "settings_structures", level: "edit" },
   calibrate_style_ai:        { area: "settings_structures", level: "edit" },
   upload_style_photo:        { area: "settings_structures", level: "edit" },
+  style_photo_upload_url:    { area: "settings_structures", level: "edit" },
   save_style_model:          { area: "settings_structures", level: "edit" },
   set_style_model_status:    { area: "settings_structures", level: "edit" },
   style_model_url:           { area: "settings_structures", level: "edit" },
@@ -3115,6 +3116,39 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (up.error) return json({ error: `Image upload failed: ${up.error.message}` }, 500);
     const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
     return json({ ok: true, url: pub.publicUrl });
+  }
+
+  // Mint a signed URL so the BROWSER writes the image straight into the bucket (2026-09-11).
+  //
+  // `upload_style_photo` above still works and is still the fallback, but it is the slow path:
+  // it takes the image as base64 in a JSON body, which inflates every byte by 4/3, spends the
+  // function's own memory decoding it, and gives the caller one all-or-nothing POST with no
+  // resume. On a slow or lossy uplink that is the difference between an upload that lands and
+  // one that does not — a builder on ~42KB/s had six of nine photos fail.
+  //
+  // A SIGNED URL RATHER THAN A DIRECT BUCKET WRITE, and the distinction is load-bearing. Storage
+  // RLS confines a browser write to the folder named by the CALLER's own client_users row, which
+  // is right up until an operator uses view-as: their row names their own tenant, so the path
+  // built from the viewed tenant can never match and every upload is refused with a raw "new row
+  // violates row-level security policy". 094 and onUploadModel both document that trap. Here
+  // `resolveTenant` decides the prefix, so view-as works and the browser needs no bucket grant
+  // at all.
+  //
+  // The URL is single-use and short-lived, and it names a path this function chose — a caller
+  // cannot aim it at another tenant's folder.
+  if (action === "style_photo_upload_url") {
+    const ct = String(payload.contentType || "image/jpeg");
+    const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
+    const ext = EXT[ct];
+    if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
+    // Same shape as upload_style_photo's path, for the same reason: randomUUID makes the public
+    // URL an unguessable capability, which is what 093 relies on now that d3_photos is out of
+    // the anonymous get_config payload.
+    const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
+    const { data: signed, error } = await admin.storage.from("branding").createSignedUploadUrl(path);
+    if (error) return dbFail(req, clientId, "start that upload", error);
+    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+    return json({ ok: true, path, token: signed?.token, url: pub.publicUrl });
   }
 
   // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the
