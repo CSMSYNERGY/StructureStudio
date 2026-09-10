@@ -9441,19 +9441,32 @@ const CAL_PHOTO_MAX = 12;
 // sides; below that the walk stops being a walk and the video prompt's "consecutive frames are
 // adjacent viewpoints" stops being true of what was actually sent.
 const CAL_VIDEO_MIN = 4;
-// The four views a builder is TOLD to shoot. Carolyn 2026-09-04 @16:05: "we put a thing in here
+// How many images a generation needs before it may be pressed. Ahsan's "four images", now
+// counted rather than named - see calTrimPhotos below for why the names went.
+const CAL_PHOTO_MIN = 4;
+// The photo array's shape rule, in one place: a plain list of real URLs, capped at
+// CAL_PHOTO_MAX. No padding, no empty placeholders, no positional meaning.
+//
+// ⚠️ THIS IS THE THIRD SHAPE THIS SURFACE HAS HAD, and the history is the reason the comment is
+// this long. Four MANUAL slots (Front/Left side/Right side/Back) were removed on 2026-08-25 on
+// Ahsan's instruction when the walk-around video became the one way in; Carolyn brought them
+// back on 09-04 explicitly so a builder is TOLD what to photograph - "we put a thing in here
 // that says, you know, front side, left side, right side. And it tells them to get a photo of
-// that." Module scope because the Generate gate names the ones still missing, and that gate is
-// computed a long way above the JSX that renders them.
-const CAL_PHOTO_LABELS = ["Front", "Left side", "Right side", "Back"];
-// The photo array's shape rule, in one place: the four labelled views are a FLOOR (always
-// rendered, empty or not, because a builder has to be told what to shoot) and CAL_PHOTO_MAX is
-// the ceiling. Both the synchronous seed and the authenticated refetch go through this, which
-// is what stopped the two disagreeing - the refetch used to hard-code .slice(0, 4) and so
-// destroyed a stored set of 5-12 photos the moment it landed on top of the seed.
-function calPadPhotos(list) {
-  const p = (list || []).filter((u) => typeof u === "string" && u);
-  return p.concat(["", "", "", ""]).slice(0, Math.max(4, Math.min(CAL_PHOTO_MAX, p.length)));
+// that"; and Ahsan removed them again on 09-10: "remove the option of left right front and back,
+// just use upload images where user can upload different images."
+//
+// WHAT CAROLYN WANTED IS NOT LOST, only moved. Her point was that four numbered boxes told a
+// builder how many photos to take and not which ones - so the instruction now lives in the
+// card's copy, where it can say more than a box label ever could, and the count is the only
+// thing the gate enforces. What genuinely goes is the CLAIM that slot 2 is the left side: with
+// a multi-select upload nobody can promise what order a file picker hands back, and a label
+// that is wrong is worse than no label, because the model is told the photo is of a side it
+// never shows.
+function calTrimPhotos(list) {
+  const seen = {};
+  return (list || [])
+    .filter((u) => typeof u === "string" && u && !Object.prototype.hasOwnProperty.call(seen, u) && (seen[u] = 1))
+    .slice(0, CAL_PHOTO_MAX);
 }
 function StructureStudioInner({ config, embedded = false, onSaved = null, openDesign = null, setup3d = null, view3d = false, calibrationOnly = false, onOpenOrder = null, canPushInvoice = false }) {
   const C = config;
@@ -12477,7 +12490,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // able to remove. The one that, oh, no, that one is not working." A fixed four could
       // express neither. The first four keep their walk-around meaning; anything past them is
       // a deliberate extra.
-      photos: calPadPhotos(s.d3Photos),
+      photos: calTrimPhotos(s.d3Photos),
     });
     // Put the preview on a representative building instead of the component's 10x12 default
     // (sel.size starts "", so the [sel.size] effect has never fired on this surface and
@@ -12508,10 +12521,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // `.slice(0, 4)` used to live on this line and TRUNCATED a stored set back down to
         // four the moment this async read landed on top of the synchronous seed above - so the
         // extra angles Carolyn asked for on 09-04 survived a Save and then vanished on the next
-        // open. calPadPhotos keeps four as the floor and CAL_PHOTO_MAX as the ceiling, which is
-        // what the editor and the generator already both believe.
+        // open. calTrimPhotos keeps CAL_PHOTO_MAX as the ceiling, which is what the editor and
+        // the generator already both believe.
         setAdminCal((p) => (p && p.styleValue === s.value && Array.isArray(meta.photos) && meta.photos.length
-          ? { ...p, photos: calPadPhotos(meta.photos) }
+          ? { ...p, photos: calTrimPhotos(meta.photos) }
           : p));
         // The walk-around's own frames, restored. Without this the Generate gate would tell a
         // builder to film a lap they already filmed, because "is there a video" is answered by
@@ -12529,18 +12542,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSet = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, ...patch } }));
   const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
   const calSetColor = (k, v) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, colors: { ...p.spec.colors, [k]: v } } }));
-  const calSetPhoto = (i, v) => setAdminCal((p) => { const ph = p.photos.slice(); ph[i] = v; return { ...p, photos: ph }; });
   // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
-  // also just remove one."
+  // also just remove one." Both are simple now that no position carries a meaning: append, and
+  // splice. The old calRemovePhoto had to BLANK the first four in place rather than splice them,
+  // because splicing slot 1 of 4 renumbered "Left side" into "Front" under the builder - a rule
+  // that existed only to defend labels that no longer exist.
   //
-  // REMOVE SPLICES PAST THE FOURTH, AND BLANKS WITHIN IT. Splicing slot 1 of 4 would renumber
-  // Left side into Front under the builder; blanking an EXTRA would leave a hole that reads as
-  // "this view is missing" forever, when the whole point of an extra is that it is optional.
-  const calAddPhoto = () => setAdminCal((p) => (p.photos.length >= CAL_PHOTO_MAX ? p : { ...p, photos: p.photos.concat("") }));
-  const calRemovePhoto = (i) => setAdminCal((p) => {
-    if (i < 4) { const ph = p.photos.slice(); ph[i] = ""; return { ...p, photos: ph }; }
-    return { ...p, photos: p.photos.filter((_, n) => n !== i) };
-  });
+  // De-duplicated through calTrimPhotos on the way in: a multi-select picker is easy to run
+  // twice over the same folder, and twelve is a cap on what the MODEL reads, so a duplicate does
+  // not just clutter the grid, it silently spends one of the twelve views on a photo already
+  // sent. Dropping the extras past the cap is deliberate too - see calAddPhotos' caller for the
+  // message that says how many did not fit, because a silent truncation reads as "it took them
+  // all" and the builder then blames the drafting.
+  const calAddPhotos = (urls) => setAdminCal((p) => (p ? { ...p, photos: calTrimPhotos(p.photos.concat(urls || [])) } : p));
+  // BY VALUE, not by index: the grid renders a filtered copy, and an index into that copy is
+  // only the same index into the source while calTrimPhotos' no-blanks invariant holds. URLs are
+  // unique (calTrimPhotos de-duplicates), so this cannot delete the wrong one.
+  const calRemovePhoto = (url) => setAdminCal((p) => ({ ...p, photos: p.photos.filter((u) => u !== url) }));
   // A drafted spec MERGES into the draft rather than replacing it: the model reports only
   // what the photos actually show, so anything it leaves out keeps the value the editor
   // (or the style default) already had.
@@ -12604,10 +12622,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdminCalMsg({ ok: false, msg: "Clipboard blocked — JSON: " + out });
     }
   };
-  // Photo slots can take an upload in the portal (the host owns the authed call); the
-  // public page keeps pasting URLs, since it has no session to upload with.
-  const calUploadPhoto = async (i, file) => {
-    if (!file || !(setup3d && setup3d.onUploadPhoto)) return;
+  // MANY AT ONCE (2026-09-10). Ahsan: "I want to be able to upload multiple pictures at a single
+  // time." The old handler took one file for one numbered slot; this takes whatever the picker
+  // returned and appends the lot, reporting progress per file because a builder selecting eight
+  // phone photos is waiting through eight shrink-and-upload round trips and a button that only
+  // says "Working…" for half a minute reads as a hang.
+  //
+  // Uploads are SEQUENTIAL, not Promise.all: each one is a base64 body through an edge function,
+  // and firing eight at once is how a phone on a builder's yard wifi gets some of them refused.
+  //
+  // The portal owns the authed call; the public ?admin=1 page has no session and pastes URLs
+  // instead (calAddPhotoUrl below).
+  const calUploadPhotos = async (files) => {
+    const list = Array.prototype.slice.call(files || []).filter(Boolean);
+    if (!list.length || !(setup3d && setup3d.onUploadPhoto)) return;
     // NO SIZE REFUSAL HERE. A photo straight off a phone is 4-12MB, so the old
     // `file.size > 3_000_000` check fired on the NORMAL case and told a builder to go and find
     // image-editing software - the same refusal Carolyn hit on 2026-09-09 (47a8075) on the
@@ -12616,15 +12644,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // already small enough handed back untouched), and the server's own 3MB gate stays as the
     // backstop. This path is now the PRIMARY way a builder gives us photos, so refusing the
     // common case here would be worse than it was there.
+    // Room left BEFORE anything is uploaded, so a builder who picks twenty is told twenty was
+    // too many rather than watching twenty upload and eight quietly vanish.
+    const room = Math.max(0, CAL_PHOTO_MAX - (adminCal ? adminCal.photos.filter(Boolean).length : 0));
+    if (!room) { setAdminCalMsg({ ok: false, msg: `That is already ${CAL_PHOTO_MAX} images, which is the most one generation reads. Remove one first.` }); return; }
+    const take = list.slice(0, room);
     setAdminCalBusy(true); setAdminCalMsg(null);
+    const done = [];
     try {
-      const url = await setup3d.onUploadPhoto(file);
-      if (!url) throw new Error("Upload returned no URL.");
-      calSetPhoto(i, url);
-      setAdminCalMsg({ ok: true, msg: "Photo uploaded." });
+      for (let i = 0; i < take.length; i++) {
+        setAdminCalMsg({ ok: true, msg: take.length > 1 ? `Uploading image ${i + 1} of ${take.length}…` : "Uploading…" });
+        const url = await setup3d.onUploadPhoto(take[i]);
+        if (!url) throw new Error("Upload returned no URL.");
+        done.push(url);
+      }
+      calAddPhotos(done);
+      const over = list.length - take.length;
+      setAdminCalMsg({
+        ok: true,
+        msg: `${done.length} image${done.length === 1 ? "" : "s"} added.`
+          + (over ? ` ${over} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : ""),
+      });
     } catch (e) {
-      setAdminCalMsg({ ok: false, msg: e.message || "Upload failed" });
+      // KEEP WHAT SUCCEEDED. Throwing the whole batch away because the sixth upload failed makes
+      // a builder re-pick and re-send the five that worked, on the connection that just dropped
+      // one. They are already in the bucket either way.
+      if (done.length) calAddPhotos(done);
+      setAdminCalMsg({ ok: false, msg: (done.length ? `${done.length} uploaded, then it failed: ` : "") + (e.message || "Upload failed") });
     } finally { setAdminCalBusy(false); }
+  };
+  // The public ?admin=1 path: no session, so a URL is pasted rather than a file uploaded.
+  const calAddPhotoUrl = (v) => {
+    const u = String(v || "").trim();
+    if (!/^https?:\/\//.test(u)) { setAdminCalMsg({ ok: false, msg: "That needs to be a full http(s) image URL." }); return false; }
+    calAddPhotos([u]);
+    return true;
   };
 
   // ─── Is there a video? Are there four photos? ─────────────────────────────────────────
@@ -12637,14 +12691,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // array is at most twelve short strings, so there is nothing to memoise anyway.
   const calVideoFrames = (adminCalVideo.urls || []).filter(Boolean);
   const calVideoReady = calVideoFrames.length > 0;
-  // The four NAMED views only. An extra angle is a bonus, never a substitute for the side it
-  // sits beside — "four photos" that are four shots of the front is precisely the input the
-  // labels were added to prevent (Carolyn 2026-09-04 @16:05).
-  const calNamedMissing = adminCal
-    ? CAL_PHOTO_LABELS.filter((_lbl, i) => !adminCal.photos[i])
-    : CAL_PHOTO_LABELS.slice();
-  const calNamedCount = CAL_PHOTO_LABELS.length - calNamedMissing.length;
-  const calPhotosReady = calNamedMissing.length === 0;
+  // A COUNT, not a checklist of named sides (2026-09-10). The labels are gone, so "four photos"
+  // is now four images of anything.
+  //
+  // ⚠️ WHAT THIS GIVES UP, said plainly because nothing else records it: four photos of the FRONT
+  // now passes the gate, and the labelled slots existed to stop exactly that. The card's copy
+  // asks for one per side and the walk-around covers every side regardless - a video is still
+  // required - so the input a careless builder can produce is degraded, not useless. If drafts
+  // start coming back wrong, this is the first thing to suspect.
+  const calPhotoCount = adminCal ? adminCal.photos.filter(Boolean).length : 0;
+  const calPhotosReady = calPhotoCount >= CAL_PHOTO_MIN;
   // A locked style is in the gate on purpose. `save_style_d3` answers 409 for one, so
   // generating against it would spend $20 on a spec that cannot be saved — the worst possible
   // order for a paid action.
@@ -12692,9 +12748,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // repo has shipped dead-looking features before: it throws no error and reads as breakage.
   const calGenerateWhy = !adminCal ? ""
     : scan.status === "locked" ? "This style's 3D setup is locked. Unlock it above before generating."
-    : (!calVideoReady && !calPhotosReady) ? `Add a walk-around video in step 1, and all four photos in step 2 (${calNamedCount} of 4 so far).`
+    : (!calVideoReady && !calPhotosReady) ? `Add a walk-around video in step 1, and at least ${CAL_PHOTO_MIN} images in step 2 (${calPhotoCount} so far).`
     : !calVideoReady ? "Add a walk-around video in step 1 — one lap is what shows the building from every side."
-    : !calPhotosReady ? `Still to add in step 2: ${calNamedMissing.join(", ")}.`
+    : !calPhotosReady ? `${CAL_PHOTO_MIN - calPhotoCount} more image${CAL_PHOTO_MIN - calPhotoCount === 1 ? "" : "s"} needed in step 2 — one of each side is what to aim for.`
     : `Ready — one generation, reading ${calGenerateSet().urls.length} views.`;
 
   // ─── Generate the shape from the video AND the photos ─────────────────────────────────
@@ -12929,8 +12985,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const url = await setup3d.onUploadPhoto(f);
           if (!url) throw new Error("Upload returned no URL.");
           urls.push(url);
-          calSetPhoto(i, url);
         }
+        // APPENDED after the loop, not written into slots 0-3 one at a time as they arrive.
+        // There are no slots to claim any more, and one setState beats four.
+        calAddPhotos(urls);
         setScan((p) => ({ ...p, renderUrls: urls }));
       }
       setScan((p) => ({ ...p, step: "Reading the look with AI…" }));
@@ -13947,7 +14005,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // A builder shooting their own building needs to be told WHAT to shoot; four numbered boxes
   // told them only how many. The first four are the walk-around's own four views, which is why
   // an imported video still lands in them.
-  const calPhotoLabel = (i) => CAL_PHOTO_LABELS[i] || ("Extra " + (i - 3));
+  // calPhotoLabel is gone with the four named slots. A flat list numbers itself, and the alt
+  // text below says "Image N of M" rather than claiming which side of the building it shows.
   const cal3dPanel = showCal3D && (
         <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FCD34D", padding: "12px 20px" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
@@ -14052,83 +14111,104 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
                   This card is NOT gated on setup3d: the public ?admin=1 operator page has no
                   session to upload with, so each slot falls back to pasting a URL there — the
-                  same split calUploadPhoto already makes. Only the Generate button inside it
+                  same split calUploadPhotos / calAddPhotoUrl already make. Only the Generate button inside it
                   needs the portal's authenticated callbacks. ── */}
               <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 Step 2 — Photos of the same building</span>
                   {calPhotosReady
-                    ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ all four added</span>
-                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>{calNamedCount} of 4 added</span>}
+                    ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calPhotoCount} image{calPhotoCount === 1 ? "" : "s"}</span>
+                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>{calPhotoCount} of {CAL_PHOTO_MIN} added</span>}
                 </div>
                 <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                  Stand back and take one photo of each side of the <b>same building you filmed</b> — straight on, whole
-                  building in frame, in daylight. These are sharper than anything a moving phone can give us, so they are
-                  what the roof pitch and the eave get read off. Add extra angles for anything the four miss.
+                  Stand back and photograph the <b>same building you filmed</b> — straight on, whole building in
+                  frame, in daylight. <b>One of each side</b> is what to aim for: front, left, right, back. Pick them all at
+                  once. These are sharper than anything a moving phone can give us, so they are what the roof pitch and the
+                  eave get read off — add extra angles for anything that did not come out.
                 </p>
-                <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginBottom: 8 }}>
-                  {/* THE FOUR NAMED SLOTS ARE THE BUILDER'S OWN PHOTOS, AND ONLY THEIRS
-                      (2026-09-10). They used to be shared with the walk-around: an imported
-                      video stride-filled slots 0-3, so filling Front/Left/Right/Back and then
-                      filming a lap silently destroyed all four, and "do I have a video" was
-                      unanswerable from this array. The frames now live in their own strip in
-                      step 1 and this list is untouched by them.
+                {/* ONE UPLOAD, MANY FILES, NO NAMED SLOTS (2026-09-10). Ahsan: "I want to be
+                    able to upload multiple pictures at a single time, remove the option of left
+                    right front and back, just use upload images where user can upload different
+                    images."
 
-                      This grid was itself a reversal, and that history is worth keeping. On
-                      2026-08-25 the four manual slots were REMOVED on Ahsan's own instruction
-                      from the 08-24 call ("No, I'll remove it because now we have added the
-                      video option now") and the video became the one way in. Carolyn reopened
-                      it on 09-04 (15:27-17:22) after seeing what a customer's video actually
-                      produces: labelled slots a builder is TOLD to fill, the ability to add
-                      another photo for an angle that came out wrong, the ability to remove one
-                      that is not helping, and a Generate button. The old reasoning was not
-                      wrong about staging four photographs — it is that "one way in" cost
-                      accuracy she is not willing to trade: "I want to give them as accurate of
-                      a building as possible."
+                    This is the THIRD shape this surface has had and the second reversal, so the
+                    reasoning it overturns is kept rather than deleted. Carolyn asked for the four
+                    labelled boxes on 09-04 (@16:05) for a reason that was right: "we put a thing
+                    in here that says, you know, front side, left side, right side. And it tells
+                    them to get a photo of that" — four numbered boxes told a builder how many
+                    photos to take and not which ones. That instruction now lives in the copy
+                    above, which can say more than a box label ever could.
 
-                      FOUR IS A FLOOR, NOT A CEILING. The first four keep their names; anything
-                      past them is a deliberate extra, up to CAL_PHOTO_MAX. */}
-                  {adminCal.photos.map((url, i) => (
-                    <div key={"cal-photo-" + i} style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
-                        <span>{calPhotoLabel(i)}</span>
-                        {(url || i >= 4) && (
-                          <button type="button" onClick={() => calRemovePhoto(i)} disabled={adminCalBusy}
-                            title={i < 4 ? "Clear this view" : "Remove this photo"}
-                            style={{ background: "none", border: "none", padding: 0, cursor: adminCalBusy ? "wait" : "pointer", color: "#B45309", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>×</button>
-                        )}
-                      </div>
-                      <div style={{ marginTop: 3 }}>
-                        {url ? (
-                          <img src={url} alt={calPhotoLabel(i)} style={{ width: "100%", maxWidth: 120, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D" }} />
-                        ) : (
-                          <div style={{ width: "100%", maxWidth: 120, height: 72, borderRadius: 4, border: "1px dashed #FCD34D", background: "#FFFBEB", display: "flex", alignItems: "center", justifyContent: "center", color: "#B45309", fontSize: 10.5, fontWeight: 600, textAlign: "center", padding: 4, boxSizing: "border-box" }}>
-                            Straight on, whole building in frame
-                          </div>
-                        )}
-                      </div>
-                      {/* Upload needs the host's authenticated session; the public ?admin=1 page
-                          has none, so it keeps pasting a URL. Same split calUploadPhoto makes. */}
-                      {setup3d && setup3d.onUploadPhoto ? (
-                        <label style={{ display: "inline-block", marginTop: 4, fontSize: 11, fontWeight: 700, color: adminCalBusy ? "#CBD5E1" : "#92400E", cursor: adminCalBusy ? "wait" : "pointer" }}>
-                          {url ? "Replace" : "Add photo"}
-                          <input type="file" accept="image/*" disabled={adminCalBusy} style={{ display: "none" }}
-                            onChange={(e) => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) calUploadPhoto(i, f); }} />
-                        </label>
-                      ) : (
-                        <input value={url || ""} placeholder="https://…/photo.jpg" onChange={(e) => calSetPhoto(i, e.target.value)}
-                          style={{ ...S.input, marginTop: 4, fontSize: 11, padding: "4px 6px" }} />
-                      )}
-                    </div>
-                  ))}
-                  {adminCal.photos.length < CAL_PHOTO_MAX && (
-                    <button type="button" onClick={calAddPhoto} disabled={adminCalBusy}
-                      title="Add another angle — use this when a part of the building did not come out right"
-                      style={{ border: "1px dashed #FCD34D", background: "#FFFBEB", color: "#92400E", borderRadius: 4, fontWeight: 700, fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer", minHeight: 96, fontFamily: "inherit" }}>
-                      + Another angle
-                    </button>
+                    What actually goes is the CLAIM that the second photo is the left side. A
+                    multi-select picker returns files in whatever order the OS gives them, so a
+                    positional label would be a guess — and a wrong label is worse than none,
+                    because it tells the model a photo shows a side it never shows. */}
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                  {setup3d && setup3d.onUploadPhoto ? (
+                    <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalBusy ? "wait" : "pointer", opacity: adminCalBusy ? 0.6 : 1, marginBottom: 0 }}>
+                      {adminCalBusy ? "Working…" : (calPhotoCount ? "Add more images" : "Choose images")}
+                      {/* `multiple` is the whole ask. accept="image/*" keeps the picker on images;
+                          the shrink and the server's type gate do the real enforcing. */}
+                      <input type="file" accept="image/*" multiple disabled={adminCalBusy} style={{ display: "none" }}
+                        onChange={(e) => {
+                          // COPIED BEFORE THE RESET, and that order is the whole bug this line
+                          // once had. `e.target.files` is a LIVE FileList, not a snapshot, so
+                          // `e.target.value = ""` empties the very object the handler is holding:
+                          // `fs.length` read 0 immediately afterwards and nothing uploaded, with no
+                          // error anywhere. The single-file version got away with it because it
+                          // pulled `files[0]` out first. The reset itself has to stay, or picking
+                          // the same file twice fires no change event at all.
+                          const fs = Array.prototype.slice.call(e.target.files || []);
+                          e.target.value = "";
+                          if (fs.length) calUploadPhotos(fs);
+                        }} />
+                    </label>
+                  ) : (
+                    /* No session on the public ?admin=1 page, so a URL is pasted. One box that
+                       appends, rather than one box per slot — there are no slots left to sit in.
+                       Enter submits, because a form field that only works via a button beside it
+                       is the kind of thing people report as broken. */
+                    <>
+                      {/* S.sel, not S.input. There IS no S.input — the block this replaces spread
+                          it anyway, and `{...undefined}` is a silent no-op, so that field had been
+                          rendering unstyled since the day it shipped. */}
+                      <input id="cal-photo-url" placeholder="https://…/photo.jpg" style={{ ...S.sel, minWidth: 260, fontSize: 12, fontWeight: 400 }}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter") return;
+                          e.preventDefault();
+                          if (calAddPhotoUrl(e.currentTarget.value)) e.currentTarget.value = "";
+                        }} />
+                      <button type="button" style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}
+                        onClick={() => {
+                          const el = document.getElementById("cal-photo-url");
+                          if (el && calAddPhotoUrl(el.value)) el.value = "";
+                        }}>Add image</button>
+                    </>
                   )}
+                  <span style={{ fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
+                    {calPhotoCount
+                      ? `${calPhotoCount} of ${CAL_PHOTO_MAX} used${calPhotoCount < CAL_PHOTO_MIN ? ` — ${CAL_PHOTO_MIN} is the minimum` : ""}`
+                      : `Pick several at once. ${CAL_PHOTO_MIN} minimum, ${CAL_PHOTO_MAX} maximum.`}
+                  </span>
                 </div>
+                {calPhotoCount > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                    {adminCal.photos.filter(Boolean).map((url, i) => (
+                      <div key={"cal-photo-" + url} style={{ position: "relative" }}>
+                        {/* "Image N of M", never a side name — see the block comment above. */}
+                        <img src={url} alt={`Image ${i + 1} of ${calPhotoCount}`} title={`Image ${i + 1} of ${calPhotoCount}`}
+                          style={{ width: 108, height: 72, objectFit: "cover", borderRadius: 4, border: "1px solid #FCD34D", display: "block" }} />
+                        {/* Removed by URL, not by index. The two agree today because calTrimPhotos
+                            leaves no blanks, so `.filter(Boolean)` returns the array itself — but
+                            that is an invariant held somewhere else, and an off-by-one here deletes
+                            the wrong photo silently. */}
+                        <button type="button" onClick={() => calRemovePhoto(url)} disabled={adminCalBusy}
+                          title="Remove this image"
+                          style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 9, border: "1px solid #FCD34D", background: "#FFF", color: "#B45309", fontWeight: 800, fontSize: 12, lineHeight: 1, padding: 0, cursor: adminCalBusy ? "wait" : "pointer" }}>×</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {/* THE ONE PAID BUTTON, and the gate Ahsan asked for on 2026-09-10: "once they
                     have uploaded both a video and four images, then they can generate the 3D
                     model of the building." It moved here from the action row beside Save,

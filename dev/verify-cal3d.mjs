@@ -223,27 +223,31 @@ async function main() {
   ok('step 2 is a SEPARATE images section', t.includes('Step 2') && t.includes('Photos of the same building'))
   ok('video reads as not yet supplied', t.includes('needed'))
   ok('photo counter starts empty', t.includes('0 of 4 added'), (await line('0 of 4')).trim())
+  ok('the four named slots are GONE', !t.includes('Left side') && !t.includes('Right side'), 'no Front/Left side/Right side/Back labels')
 
   const gen = page.getByRole('button', { name: /Generate the 3D model/ })
   ok('generate button is RENDERED, never hidden', (await gen.count()) === 1)
   ok('generate disabled with nothing supplied', await gen.first().isDisabled())
-  ok('gate names BOTH missing inputs', (await line('Add a walk-around video in step 1, and all four')).length > 0, (await line('Add a walk-around')).trim())
+  ok('gate names BOTH missing inputs', (await line('Add a walk-around video in step 1, and at least')).length > 0, (await line('Add a walk-around')).trim())
 
   // ── four photos, still no video ───────────────────────────────────────────────────────
-  for (let i = 0; i < 4; i++) {
-    await page.locator('label', { hasText: /^Add photo$/ }).first()
-      .locator('input[type=file]')
-      .setInputFiles({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from('stub-photo') })
-    await page.waitForTimeout(450)
-  }
+  // ONE picker interaction, FOUR files -- the whole point of the 2026-09-10 change. Setting
+  // four files on one input is exactly what a builder shift-selecting four photos produces.
+  const picker = page.locator('label', { hasText: /Choose images/ }).locator('input[type=file]')
+  ok('the image input accepts multiple', await picker.evaluate((el) => el.multiple))
+  await picker.setInputFiles([0, 1, 2, 3].map((i) => ({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`stub-photo-${i}`) })))
+  await page.waitForFunction(() => /4 images added/.test(document.body.innerText), { timeout: 30000 })
+  await page.waitForTimeout(400)
   t = await text()
-  ok('four photos register in step 2', t.includes('all four added'), (await line('Step 2')).trim().slice(0, 60))
+  ok('FOUR IMAGES UPLOADED IN ONE GO', t.includes('4 images added'), (await line('4 images')).trim())
+  ok('four thumbnails render', (await page.locator('img[alt^="Image "]').count()) === 4, `${await page.locator('img[alt^="Image "]').count()} thumbs`)
+  ok('thumbnails are numbered, not side-named', (await page.locator('img[alt="Image 2 of 4"]').count()) === 1)
   ok('PHOTOS ALONE DO NOT UNLOCK GENERATE', await gen.first().isDisabled())
   ok('gate now asks only for the video', (await line('Add a walk-around video in step 1 —')).length > 0, (await line('Add a walk-around')).trim())
   ok('adding photos charged no generation', generateCalls.length === 0, `${generateCalls.length} calls`)
   ok('four photo uploads went through the host', uploads.length === 4, `${uploads.length} uploads`)
 
-  const photoUrlsBefore = await page.evaluate(() => Array.from(document.querySelectorAll('img')).map((i) => i.getAttribute('src')).filter((s) => s && s.includes('__stub')))
+  const photoUrlsBefore = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))
 
   // ── the walk-around ───────────────────────────────────────────────────────────────────
   if (!hasClip) {
@@ -268,10 +272,10 @@ async function main() {
   ok('frames were uploaded, photos were not re-uploaded', uploads.length === 4 + framesRead, `${uploads.length} uploads total`)
   ok('STAGING THE VIDEO CHARGED NOTHING', generateCalls.length === 0, `${generateCalls.length} generations`)
 
-  const photoUrlsAfter = await page.evaluate(() => {
-    // Only the four named slots, which render at 120px wide; the walk strip renders at 78px.
-    return Array.from(document.querySelectorAll('img')).filter((i) => (i.style.maxWidth === '120px')).map((i) => i.getAttribute('src'))
-  })
+  // The uploaded images carry alt="Image N of M"; the walk-around strip carries alt="View N".
+  // Selecting on that rather than on a pixel width means a style tweak cannot quietly turn this
+  // assertion into a no-op.
+  const photoUrlsAfter = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))
   ok('THE VIDEO DID NOT OVERWRITE THE FOUR PHOTOS',
     photoUrlsAfter.length === 4 && photoUrlsAfter.every((u) => photoUrlsBefore.includes(u)),
     photoUrlsAfter.join(',').slice(0, 90))
@@ -307,7 +311,7 @@ async function main() {
   await page.getByRole('button', { name: 'Barn', exact: true }).first().click()
   await page.waitForTimeout(2000)
   t = await text()
-  ok('reopen restores the photos', t.includes('all four added'))
+  ok('reopen restores the photos', /✓ 4 images/.test(t), (t.match(/✓ \d+ images?/) || ['none'])[0])
   ok('REOPEN RESTORES THE VIDEO - no re-filming', /\d+ views ready/.test(t), (await line('')).trim().slice(0, 40))
   ok('generate is still unlocked after a reopen', !(await gen.first().isDisabled()))
 
