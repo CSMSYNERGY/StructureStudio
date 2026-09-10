@@ -1028,10 +1028,15 @@ function Dashboard({ session }) {
       // still short enough that a builder learns something rather than waiting.
       const res = await Promise.race([
         sb.functions.invoke("portal-settings", { body: { action: "upload_style_photo", imageBase64, imageContentType: prepped.type || "image/jpeg" } }),
-        new Promise((_r, rej) => setTimeout(() => rej(new Error("That upload timed out after 90 seconds \u2014 check your connection and try again.")), 90000)),
+        // 120s, and the pool retries a timeout twice. On a 42KB/s uplink a 400KB body is about
+        // ten seconds, so a request that passes two minutes is not slow, it is stuck.
+        new Promise((_r, rej) => setTimeout(() => { const e = new Error("That upload timed out after 2 minutes \u2014 your connection may be too slow or unstable."); e.name = "FunctionsFetchError"; rej(e); }, 120000)),
       ]);
       const { data, error } = res;
-      if (error) throw new Error(error.message || "Upload failed");
+      // THE NAME IS CARRIED ACROSS THE RETHROW. `new Error(msg)` discards `error.name`, and the
+      // pool's retry decision is made ON that name - a FunctionsFetchError arriving as a plain
+      // "Error" is indistinguishable from a server refusal, so it would never be retried.
+      if (error) { const e = new Error(error.message || "Upload failed"); e.name = error.name || "Error"; throw e; }
       if (!data || !data.ok || !data.url) throw new Error((data && data.error) || "Upload failed");
       return data.url;
     },

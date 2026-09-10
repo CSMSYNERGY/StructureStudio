@@ -108,7 +108,11 @@ const STYLE_ROW2 = {
 
 // Set to a millisecond count to hold the NEXT catalog answer back, which is what turns the
 // refetch race from a timing accident into a test.
-const delay = { catalogMs: 0, uploadMs: 0 }
+// `failNext` makes the NEXT n upload attempts reject at the transport layer (a dropped
+// connection, not a status), which is what FunctionsFetchError means and what a bad uplink
+// actually does. `attempts` counts every attempt including retries.
+const delay = { catalogMs: 0, uploadMs: 0, failNext: 0 }
+const attempts = { upload: 0 }
 const saveBodies = []
 const saved = {}
 const generateCalls = []
@@ -178,6 +182,14 @@ async function main() {
         return json(route, { ok: true, aiReady: true, styles: [STYLE_ROW, STYLE_ROW2], sizes: [], layoutItems: [], fixtures: [], colors: [] })
       }
       if (a === 'upload_style_photo') {
+        attempts.upload++
+        if (delay.failNext > 0) {
+          delay.failNext--
+          // route.abort() rejects the fetch, which is exactly how supabase-js produces
+          // FunctionsFetchError. Returning a 500 would produce FunctionsHttpError instead and
+          // would NOT exercise the retry path.
+          return route.abort('connectionfailed')
+        }
         // The BASE64 LENGTH is the number that matters: it is what actually crosses the wire,
         // and an upload that times out does so because this is enormous.
         uploads.push({ b64len: (body.imageBase64 || '').length, type: body.imageContentType })
@@ -296,6 +308,29 @@ async function main() {
       await page.locator('button[title="Remove this image"]').last().click()
     })
     await page.waitForTimeout(600)
+  }
+
+  // ── REGRESSION: a flaky uplink must be retried, not surfaced as a failure ───────────────
+  // THE BUG THIS GUARDS. `FunctionsFetchError` means the fetch REJECTED — the request never
+  // reached the function — so nothing was done twice and retrying is free. Ahsan's link measured
+  // about 42KB/s and dropped requests; the pool reported every drop as a permanent failure
+  // ("1 of 9 uploaded. 8 failed"), when the old sequential loop had simply STOPPED at the first
+  // one and so only ever reported a single failure. The failures were always there; the pool
+  // made them visible and then gave up on them.
+  {
+    const before = uploads.length
+    attempts.upload = 0
+    delay.failNext = 2                       // drop the first two attempts, then let it through
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'flaky.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('flaky-photo') }])
+    await page.waitForFunction((n) => {
+      const m = document.body.innerText.match(/(\d+) of 12 used/)
+      return m && Number(m[1]) > n
+    }, 4, { timeout: 60000 })
+    ok('A DROPPED UPLOAD IS RETRIED, NOT REPORTED AS FAILED', uploads.length - before === 1, `${uploads.length - before} stored`)
+    ok('it took three attempts to get there', attempts.upload === 3, `${attempts.upload} attempts`)
+    ok('and no error was shown to the builder', !(await text()).includes('failed:'), (await line('0 of')) || 'clean')
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(500)
   }
 
   // ── REGRESSION: an oversized phone photo must be SHRUNK, never sent whole ───────────────

@@ -9459,12 +9459,20 @@ const CAL_PHOTO_MAX = 12;
 const CAL_VIDEO_MIN = 4;
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
-// Sequential was the first shape and it was wrong for the reason Ahsan hit immediately: eight
-// walk-around frames is eight round trips end to end, each one a base64 body through an edge
-// function, and the builder watches "Sending view 2 of 8..." for most of a minute. Firing all
-// eight at once is the other extreme and is how a phone on a builder's yard wifi gets some of
-// them refused. Three lanes is the compromise: roughly three times faster, with no more
-// in-flight requests than a browser would open to one host anyway.
+// ⚠️ THE DEFAULT IS ONE LANE, AND THAT IS A CORRECTION OF MY OWN WORK. This shipped on
+// 2026-09-10 with three lanes, on the reasoning that eight sequential round trips is slow. The
+// reasoning was wrong because it ignored the binding constraint: on a constrained UPLINK the
+// total time is (total bytes / uplink) whatever the scheduling, so concurrency buys nothing and
+// costs a great deal - each request's wall time multiplies by the lane count, which pushes every
+// one of them toward the per-request deadline in onUploadPhoto. Ahsan's link measured about
+// 42KB/s: nine 380KB bodies take ~82 seconds on one lane or three, but on three lanes each
+// INDIVIDUAL request takes three times as long and starts failing a 90-second timeout.
+//
+// Parallelism here only helps when the uplink is NOT the constraint. It never was.
+//
+// The multitasking Ahsan actually asked for is untouched by this: step 1 and step 2 have
+// separate busy flags and separate pools, so a video and a batch of images still upload at the
+// same time. That was never the lane count.
 //
 // ORDER IS PRESERVED because results are written to their own index rather than pushed. That is
 // load-bearing for the video: VIDEO_SHAPE_PROMPT tells the model the frames are in walk order,
@@ -9477,17 +9485,31 @@ async function ssUploadPool(items, worker, onProgress, limit) {
   const out = new Array(items.length);
   const errs = [];
   let next = 0, done = 0;
-  const lanes = Math.max(1, Math.min(limit || 3, items.length));
+  const lanes = Math.max(1, Math.min(limit || 1, items.length));
   await Promise.all(Array.from({ length: lanes }, async () => {
     for (;;) {
       const i = next++;
       if (i >= items.length) return;
-      try {
-        const url = await worker(items[i], i);
-        if (!url) throw new Error("Upload returned no URL.");
-        out[i] = url;
-      } catch (e) {
-        errs.push((e && e.message) || "Upload failed");
+      // RETRY A TRANSPORT FAILURE, NOTHING ELSE. `FunctionsFetchError` means the fetch itself
+      // rejected - the request never reached the function - so nothing has been done twice by
+      // trying again. A server REFUSAL (a 4xx: wrong type, too large, cap reached) is a decision,
+      // and retrying a decision is just three identical refusals and a slower error message.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const url = await worker(items[i], i);
+          if (!url) throw new Error("Upload returned no URL.");
+          out[i] = url;
+          break;
+        } catch (e) {
+          const transport = e && (e.name === "FunctionsFetchError"
+            || /Failed to send a request|Failed to fetch|NetworkError|timed out/i.test(e.message || ""));
+          if (transport && attempt < 2) {
+            await new Promise((r) => setTimeout(r, attempt === 0 ? 2000 : 5000));
+            continue;
+          }
+          errs.push((e && e.message) || "Upload failed");
+          break;
+        }
       }
       done++;
       if (onProgress) onProgress(done, items.length);
@@ -12723,7 +12745,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       take,
       (f) => setup3d.onUploadPhoto(f),
       (n, total) => setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })),
-      3,
+      // ONE lane. See ssUploadPool's header: on a constrained uplink concurrency cannot add
+      // throughput and multiplies each request's wall time, which is what pushed them into the
+      // per-request timeout.
+      1,
     );
     if (urls.length) calAddPhotos(urls);
     const over = list.length - take.length;
@@ -12909,7 +12934,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         files,
         (f) => setup3d.onUploadPhoto(f),
         (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` })),
-        3,
+        1,
       );
       // A PARTIAL WALK IS STILL A WALK, above the floor. Four frames is what covers four sides
       // (CAL_VIDEO_MIN), so a dropped frame or two no longer throws the whole upload away — but
