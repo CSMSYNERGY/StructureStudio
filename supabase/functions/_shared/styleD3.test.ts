@@ -437,3 +437,45 @@ Deno.test("combinedShapePrompt: singulars, and a walk with no photos beside it",
   assert(!none.includes("REMAINING"), "no staged photos means no clause about them");
   assert(none.includes("The FIRST 8 images are frames"), "the walk is still described");
 });
+
+// ─── the porch the renderer could always draw ───────────────────────────────────────────
+// A recessed gable-end porch has been in D3_NUM_RANGES, sanitizeD3Spec, buildShed3DModel and
+// the calibration form since the appendages shipped. The PROMPT never asked for it, so the AI
+// path could not produce one: Ahsan filmed a porch shed on 2026-09-10 and got a plain gable box
+// back. Nothing was broken; the model simply had no field to report it in.
+
+Deno.test("the shape-first prompt ASKS for a porch, not just a lean-to", () => {
+  for (const [name, p] of [["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT], ["combinedShapePrompt", combinedShapePrompt(8, 4)]] as const) {
+    assert(p.includes('"porchDepthFt"'), `${name} must ask for porchDepthFt`);
+    assert(p.includes('"porchEnd"'), `${name} must ask for porchEnd`);
+    assert(/PORCH:/.test(p), `${name} must explain what a porch is`);
+    // The distinction that makes it usable. A lean-to projects OUT from a long side; a porch is
+    // recessed INTO a gable end under the same ridge. Told only about the lean-to, a model
+    // reports a porch shed as a lump on the wrong side of the wrong wall.
+    assert(/GABLE END/.test(p), `${name} must say a porch is at the gable end`);
+    assert(p.includes("that is not a lean-to"), `${name} must tell the model NOT to call a gable-end porch a lean-to`);
+  }
+});
+
+Deno.test("a porch survives the sanitiser, and its bounds hold", () => {
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.4, "porchDepthFt": 8, "porchEnd": "front" },
+    "colors": {}, "wallHeightFt": 8
+  }`);
+  assert(r.ok, "a porch reply must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.porchDepthFt, 8);
+  assertEquals(r.d3.roof.porchEnd, "front");
+  // Clamped, not rejected — the renderer clamps again against the real building, so an
+  // over-deep porch must not throw the whole draft away.
+  const big = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 40, porchEnd: "back" } });
+  assert(big.ok, "an over-deep porch is clamped, not refused");
+  if (big.ok) {
+    assertEquals(big.d3.roof.porchDepthFt, 12);
+    assertEquals(big.d3.roof.porchEnd, "back");
+  }
+  // Absent stays absent: an enclosed building must not gain a porch by default.
+  const plain = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(plain.ok, "a plain gable still parses");
+  if (plain.ok) assert(!("porchDepthFt" in (plain.d3.roof as Record<string, unknown>)), "no porch unless one was reported");
+});
