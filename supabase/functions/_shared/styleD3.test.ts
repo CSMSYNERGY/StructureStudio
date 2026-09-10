@@ -12,8 +12,13 @@
 //    model prose on its way into a builder's browser, and it is not geometry.
 //  * sanitizeD3Spec always emits `siding`. That is the trap applyDraftedShape exists for:
 //    a video draft that said nothing about cladding must not reset the builder's choice.
+//  * combinedShapePrompt must actually REPLACE the opening paragraph, not merely prepend to
+//    it. Its failure mode is the quietest one in this file: a prompt that still reads well,
+//    still returns a parseable spec, and still asserts that the builder's four staged
+//    photographs are consecutive frames of one lap. Nothing downstream can notice — the only
+//    symptom is a shape reconciled against a walk that never happened.
 
-import { sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec } from "./styleD3.ts";
+import { sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -379,4 +384,56 @@ Deno.test("roofMaterial and the appendages survive a video reply", () => {
   const bare = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
   assert(bare.ok, "minimal spec accepted");
   if (bare.ok) assert(!("roofMaterial" in (bare.d3 as Record<string, unknown>)), "absent stays absent");
+});
+
+// ─── combinedShapePrompt ────────────────────────────────────────────────────────────────
+// The claim being defended: a combined generation (2026-09-10) sends walk-around frames FIRST
+// and the builder's staged photographs after them, and the model has to be told which is
+// which. Before this function existed, `combined` was handed VIDEO_SHAPE_PROMPT verbatim,
+// whose first sentence says every image is a consecutive frame of one orbit.
+
+Deno.test("combinedShapePrompt: no frames means the video prompt is left exactly alone", () => {
+  // The whole point of the videoCount===0 branch: a photos-only set has no walk to describe,
+  // so inventing a two-source preamble for it would be its own lie.
+  assertEquals(combinedShapePrompt(0, 4), VIDEO_SHAPE_PROMPT);
+  assertEquals(combinedShapePrompt(-3, 4), VIDEO_SHAPE_PROMPT, "a negative count is not a walk");
+  assertEquals(combinedShapePrompt(NaN, 4), VIDEO_SHAPE_PROMPT, "an unparseable count is not a walk");
+});
+
+Deno.test("combinedShapePrompt: the FALSE opening sentence is gone, not merely preceded", () => {
+  // ⚠️ THE ONE THAT MATTERS. combinedShapePrompt splits on the first blank line and keeps the
+  // remainder; if a future edit puts a blank line inside the opening paragraph, the split
+  // lands early and the old claim survives INSIDE a prompt that also carries the new one —
+  // strictly worse than not having fixed it, and completely invisible from the outside.
+  const p = combinedShapePrompt(8, 4);
+  assert(
+    !p.includes("These images are frames from ONE continuous walk-around video"),
+    "the old single-source claim must not survive anywhere in a combined prompt",
+  );
+  assert(p.startsWith("These images are all of ONE portable building"), "combined prompts open by naming two sources");
+});
+
+Deno.test("combinedShapePrompt: both counts are stated, and the body is carried over whole", () => {
+  const p = combinedShapePrompt(8, 4);
+  assert(p.includes("The FIRST 8 images are frames"), "the frame count is stated");
+  assert(p.includes("The REMAINING 4 images are photographs"), "the photo count is stated");
+  assert(p.includes("prefer them wherever the two disagree"), "staged photos are named as the tie-break");
+  // Carried over from VIDEO_SHAPE_PROMPT rather than re-copied. If any of these go missing the
+  // split ate part of the spec, and the model would be asked for a shape it was never shown.
+  assert(p.includes('"roof": {'), "the JSON shape survives the splice");
+  assert(p.includes("How to read it:"), "the reading instructions survive the splice");
+  assert(p.includes('"observed"'), "the observed block survives the splice");
+  assert(p.includes("Estimate conservatively."), "the closing instruction survives the splice");
+  assert(p.length > VIDEO_SHAPE_PROMPT.length - 400, "a splice that shortened the prompt by a lot ate something");
+});
+
+Deno.test("combinedShapePrompt: singulars, and a walk with no photos beside it", () => {
+  const one = combinedShapePrompt(1, 1);
+  assert(one.includes("The FIRST 1 image is a frame"), "one frame reads as singular");
+  assert(one.includes("The REMAINING 1 image is a photograph"), "one photo reads as singular");
+  // videoCount>0 with photoCount 0 is reachable: the client budgets 12 and a builder could in
+  // principle generate from frames alone. It must not promise photographs that are not there.
+  const none = combinedShapePrompt(8, 0);
+  assert(!none.includes("REMAINING"), "no staged photos means no clause about them");
+  assert(none.includes("The FIRST 8 images are frames"), "the walk is still described");
 });
