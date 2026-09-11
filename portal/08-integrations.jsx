@@ -2832,6 +2832,47 @@ function OptionsGroup({ title, hint, children }) {
 // The bar is the underline strip Settings itself used to wear before the rail replaced it —
 // kept here because within ONE page it is a sub-navigation, which is exactly what it is good
 // at, and dropped from Settings because across fourteen pages it was a wall.
+// The underline strip Settings itself used to wear before the rail replaced it. Kept, and now
+// shared by both hubs: within ONE page it is a sub-navigation, which is what it is good at;
+// across fourteen pages it was a wall, which is why the rail exists.
+function SubTabs({ tabs, sub, onSub }) {
+  const active = tabs.find((t) => t[0] === sub) || tabs[0];
+  return (<>
+    <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+      {tabs.map(([id, label]) => (
+        <button key={id} type="button" onClick={() => onSub(id)}
+          aria-current={sub === id ? "page" : undefined}
+          style={{
+            background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+            padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+            color: sub === id ? ACCENT : "#64748B",
+            borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+            marginBottom: -2,
+          }}>
+          {label}
+        </button>
+      ))}
+    </div>
+    <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+  </>);
+}
+
+// ── Colors: one rail item, three tabs ────────────────────────────────────────────────────
+// ⚠️ ONE <ColorsView>, with the section as a PROP. Not three mounts behind {sub === ...}
+// branches: the component holds every category in one unsaved-edit buffer and saves the lot,
+// so remounting on a tab switch would discard edits without a word. Same element, same
+// position, so React keeps the instance.
+function ColorsShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  const section = sub === "shingles" ? "shingle" : sub === "metal" ? "metal" : "paint";
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <ColorsView viewingLabel={viewingLabel} section={section} />
+    </div>
+  );
+}
+
 function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
@@ -2839,25 +2880,9 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
   // This is the belt to that braces: an unclamped `company` would match no branch below and
   // render an empty page under a caption that confidently named a different tab.
   const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
-  const active = tabs.find((t) => t[0] === sub) || tabs[0];
   return (
     <div>
-      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
-        {tabs.map(([id, label]) => (
-          <button key={id} type="button" onClick={() => onSub(id)}
-            aria-current={sub === id ? "page" : undefined}
-            style={{
-              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-              padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
-              color: sub === id ? ACCENT : "#64748B",
-              borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-              marginBottom: -2,
-            }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
       {/* Business Details and Branding are the SAME component in two sections. Its form state
           covers every field whichever section renders and its save is global, so the two tabs
           cannot save half a form between them — see the note at the top of SettingsView. */}
@@ -2881,7 +2906,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /portal/settings/branding, a link people hold, would fall back to Structures.
-  const companyTabs = ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked });
+  const hubs = ssSettingsHubs({ isOwner, isAdmin, access, schedUnlocked });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -2891,7 +2916,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // Clamp the slug itself so the fallback is real, and so Dashboard's URL-normalise effect (which
   // compares p.sub against this value) rewrites the bad slug out of the address bar too.
   const rawSub = (onSub ? subProp : subState) || TABS[0][0];
-  const knownSub = (x) => TABS.some((t) => t[0] === x) || companyTabs.some((t) => t[0] === x);
+  const knownSub = (x) => TABS.some((t) => t[0] === x) || Object.values(hubs).some((ts) => ts.some((t) => t[0] === x));
   const sub = knownSub(rawSub) ? rawSub : TABS[0][0];
   return (
     <div>
@@ -2936,15 +2961,17 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           <Insulation viewingLabel={viewingLabel} clientId={clientId} />
         </OptionsGroup>
       </>)}
-      {sub === "colors" && <ColorsView viewingLabel={viewingLabel} />}
+      {hubs.colors.some((t) => t[0] === sub) && (
+        <ColorsShell sub={sub} onSub={setSub} tabs={hubs.colors} viewingLabel={viewingLabel} />
+      )}
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
       {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
           Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
           Client Setup links that point at branding and team are untouched. */}
-      {companyTabs.some((t) => t[0] === sub) && (
-        <CompanyShell sub={sub} onSub={setSub} tabs={companyTabs} clientId={clientId}
+      {hubs.company.some((t) => t[0] === sub) && (
+        <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
           viewingLabel={viewingLabel} />
       )}
       {sub === "connection" && <SettingsView section="connection" />}

@@ -635,6 +635,10 @@ const SETTINGS_TAB_AREA = {
   designer: "settings_structures",
   options: "settings_options",
   colors: "settings_options",
+  // The two tabs Colors was split into on 2026-09-11. Same catalog, same area — a split of
+  // one screen into three, not a new permission surface.
+  shingles: "settings_options",
+  metal: "settings_options",
   branding: "settings_branding",
   // Company (2026-09-04) is the Business Details card lifted out of Branding into its own
   // sub-tab. It writes the SAME client_settings.business_* columns through the SAME global
@@ -807,6 +811,35 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;
   });
+}
+
+// ── Inside Colors ────────────────────────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "in colors I want to split out the paint, shingles and metal colors to
+// their own tab/nav". Same shape as Company — one rail item, a top nav inside.
+//
+// `colors` stays the first tab so /portal/settings/colors, the link that exists today, lands
+// on Paint, which is the section it always opened on. No per-tab gating: all three are the
+// same catalog under settings_options, which is the area that already guarded the rail item.
+//
+// ⚠️ These three tabs share ONE component instance and one unsaved-edit buffer — see the
+// `section` prop on ColorsView. Do not render them as three separate mounts.
+function ssColorTabs() {
+  return [
+    ["colors", "Paint", "Siding, trim and door colors your customers pick from"],
+    ["shingles", "Shingles", "Roof colors for a shingle roof"],
+    ["metal", "Metal", "Roof colors for a metal roof"],
+  ];
+}
+
+// The two settings pages that are HUBS: one rail item each, several tabs inside, every tab a
+// real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
+// clamp) need to know the whole set, and a hub that only one of them knew about would either
+// light nothing in the rail or fall back to Structures on a valid URL.
+function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
+  return {
+    company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
+    colors: ssColorTabs(),
+  };
 }
 
 // Which top-level pages show the SETTINGS rail instead of the workspace one. Accounts and

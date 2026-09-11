@@ -5374,7 +5374,17 @@ function WindowsView({ viewingLabel = null, clientId = null }) {
   );
 }
 
-function ColorsView({ viewingLabel = null }) {
+// SPLIT INTO THREE TABS on 2026-09-11 (Carolyn: "in colors I want to split out the paint,
+// shingles and metal colors to their own tab/nav"). `section` chooses which card renders.
+//
+// ⚠️ ONE component, one mount, one `rows` buffer — ColorsShell passes `section` to a SINGLE
+// <ColorsView> rather than rendering three of them behind {sub === ...} branches, and that is
+// load-bearing. `rows` is ONE flat list across all three categories and `save` submits the
+// whole list, so three mounts would remount on every tab switch: edits made in Paint would be
+// silently thrown away by a click on Shingles, and the Save button in each card — which
+// already saves all three categories — would submit a list that had just been re-fetched.
+// Keep the element in one stable position so React preserves this state.
+function ColorsView({ viewingLabel = null, section = "all" }) {
   const [cat, setCat] = useState(null);
   // One flat list across all categories; a row's category is set by its flags:
   // paint = siding/trim (and not shingle/metal), shingle = shingle, metal = metal.
@@ -5670,9 +5680,9 @@ Anything not shown here will be removed from their account.`)) return;
         </div>
       ) : (
         <>
-          {renderSection("paint", "Paint colors", paintDesc, true)}
-          {renderSection("shingle", "Shingle colors", shingleDesc, false)}
-          {renderSection("metal", "Metal colors", metalDesc, false)}
+          {(section === "all" || section === "paint") && renderSection("paint", "Paint colors", paintDesc, true)}
+          {(section === "all" || section === "shingle") && renderSection("shingle", "Shingle colors", shingleDesc, false)}
+          {(section === "all" || section === "metal") && renderSection("metal", "Metal colors", metalDesc, false)}
           {msg && msg.skipped && msg.skipped.length > 0 && (
             <div style={{ ...S.card, marginTop: 0, fontSize: 13 }}>
               <div style={{ color: "#B91C1C", fontWeight: 700 }}>{msg.skipped.length} color(s) skipped:</div>
