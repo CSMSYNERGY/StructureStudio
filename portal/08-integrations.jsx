@@ -2864,6 +2864,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {sub === "company" && <SettingsView section="company" />}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
+      {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {sub === "locations" && <LocationsCard />}
       {/* Crews and Drivers are two sections of one component — it holds them together because
           they arrive in one call and reference each other. The tabs only exist when the
@@ -2880,7 +2881,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
   // Company's six tabs are valid settings slugs too — the clamp below has to know them or
   // /portal/settings/branding, a link people hold, would fall back to Structures.
-  const companyTabs = ssCompanyTabs({ isAdmin, access, schedUnlocked });
+  const companyTabs = ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -2959,7 +2960,6 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {sub === "commissions" && <CommissionStructure clientId={clientId} />}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
       {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
     </div>

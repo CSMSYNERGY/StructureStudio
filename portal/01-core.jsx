@@ -733,7 +733,6 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", "Connections"],
     ["email", "Email Sending", "Send estimates and invoices from your own email domain", "Connections"],
     ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", "Connections"],
-    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule", "Billing"]] : []),
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
@@ -789,11 +788,17 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
 // nobody's access changes shape: a person who could reach Team can reach exactly the same
 // three cards, now as tabs. Crews and Drivers additionally keep their scheduling entitlement
 // gate — they were behind `schedUnlocked` in Team and they are behind it here.
-function ssCompanyTabs({ isAdmin = false, access = null, schedUnlocked = false } = {}) {
+function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedUnlocked = false } = {}) {
   return [
     ["company", "Business Details", "Your legal business details, address, and the terms printed on estimates"],
     ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
     ["team", "Team", "People, access, and commission rates"],
+    // COMMISSIONS joined Company on 2026-09-11 (Carolyn: "commissions also needs to go to
+    // company"), and sits next to Team because that is what it is about — Team is "people,
+    // access, and commission RATES" and this is the structure those rates pay out under.
+    // Still owner-only, the gate it carried as a rail item: portal-commissions refuses an
+    // operator outright and grants are owner-only, so this is not merely a UI courtesy.
+    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
     ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
     ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
     ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),

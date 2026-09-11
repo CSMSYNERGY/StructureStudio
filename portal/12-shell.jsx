@@ -1403,7 +1403,7 @@ function Dashboard({ session }) {
   // them — /portal/settings/branding must light COMPANY and leave the caption alone, not fall
   // through the clamp to Structures. The same list the page itself renders, same gates.
   const companyTabs = settingsMode
-    ? ssCompanyTabs({ isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
+    ? ssCompanyTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
     : null;
   const companyTab = onSettingsPage ? companyTabs.find((t) => t[0] === (sub || "")) : null;
   const settingsSub = onSettingsPage
