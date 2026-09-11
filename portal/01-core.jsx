@@ -736,10 +736,25 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
     ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team"))
       ? [["company", "Company", "Your business details, branding, team, locations, crews and drivers", null]] : []),
-    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", "Connections"],
-    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", "Connections"],
-    ["email", "Email Sending", "Send estimates and invoices from your own email domain", "Connections"],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", "Connections"],
+    // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
+    // to move the subscriptions and the wallet in there"). Subscription and Wallet are its
+    // tabs — see ssBillingTabs.
+    //
+    // Directly under Company, and ungrouped, at her request on the same day ("move billing up
+    // under company and remove the connections heading"). The "Billing" group heading went
+    // when the hub took the name: a heading over a hub of the same name said the word twice,
+    // and Commissions leaving for Company had already left it standing over a single item.
+    ["billing", "Billing", "Your subscription, and the wallet that pays for usage", null],
+    // NO "Connections" HEADING any more (Carolyn 2026-09-11: "remove the connections
+    // heading"). These four read as what they are without one, and with Billing lifted up to
+    // Company the rail is mostly one flat list now — which is the shape she has been steering
+    // it towards since she said the catalog four "aren't grouped ... they have their own nav
+    // on the side". Only My View still carries a heading, because it is the one item on this
+    // rail that configures the PERSON rather than the business.
+    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
+    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
+    ["email", "Email Sending", "Send estimates and invoices from your own email domain", null],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
     // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
@@ -747,12 +762,6 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
     // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
     // silently, since an unknown slug clamps to the first tab rather than erroring.
-    // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
-    // to move the subscriptions and the wallet in there, as we are prepping for logging every
-    // charge for the wallet"). Subscription and Wallet are its tabs — see ssBillingTabs. The
-    // "Billing" GROUP HEADING went with this: a heading over a hub of the same name said the
-    // word twice, and Commissions leaving for Company had already left it standing alone.
-    ["billing", "Billing", "Your subscription, and the wallet that pays for usage", null],
     // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
     // "all of these settings for contact cards, the pipeline cards, and the default one, I
     // think should add, in settings, add another tab ... for structure studio settings."
