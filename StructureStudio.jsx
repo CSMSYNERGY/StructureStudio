@@ -5752,6 +5752,59 @@ function buildShed3DModel(THREE, p) {
     const phdr = box(trimMat, S, 0.5, 0.4);
     phdr.position.set(0, H - 0.25, pzIn);
     rg.add(phdr);
+
+    // ── THE KING-POST TRUSS (2026-09-11) ──────────────────────────────────────────────
+    // Ahsan, with a close-up of the timber frame over his porch: "i ment this design not
+    // windows or door". Every generation of that building had already described it —
+    // "a decorative king-post/truss style timber frame filling the gable above a recessed
+    // corner porch" — and there was nowhere in the spec to put it.
+    //
+    // A STYLE ATTRIBUTE, not a customer choice, which is why it lives in d3 and is stored:
+    // a porch shed either has the truss or it does not, and no shopper picks one. That is
+    // exactly the line that keeps doors and windows OUT of the spec — those the customer
+    // places, so baking them in would override a choice that is theirs.
+    //
+    // GABLE ONLY. A gambrel's porch gable is a different polygon and a shed roof has no
+    // gable above the porch at all, so drawing a triangular frame on either would be wrong
+    // rather than merely approximate. `trimMat` is deliberate: the posts below it already
+    // use it, and on a real porch shed the truss and the posts are the same timber.
+    if (roofCfg.porchTruss && (roofCfg.type || "gable") === "gable") {
+      const tRise = (S / 2) * (roofCfg.pitch || 0.4);
+      // Same ridge shift the roof profile applies, or a saltbox would grow a truss pointing
+      // at where the peak is not.
+      const tRu = S * Math.max(-0.35, Math.min(0.35, roofCfg.ridgeOffset || 0));
+      // 0.5 ft = a 6x6 timber, which is what a real porch truss is built from. The first
+      // attempt used 0.34 (a 4x4) and was invisible at any sane zoom — it WAS drawing, it just
+      // could not be seen, which is the most expensive kind of "not working".
+      const TB = 0.5, TD = 0.42;
+      // PROUD OF THE GABLE FACE, not inside it. The gable above the porch is a SOLID wall
+      // (siding, usually with the vent in it), so the first attempt — offset from pzIn, which
+      // is already 0.21 ft INTO the building — put the whole truss behind that wall and drew
+      // it perfectly, invisibly. On a real porch shed the timbers are applied ON the gable and
+      // stand out from it, so the offset has to go the other way: pzFace is the wall plane and
+      // the MINUS direction is outward, because pzIn adds to reach the interior.
+      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (TD / 2 + 0.03);
+      const kpH = Math.max(0.2, tRise - 0.25);       // stop just under the ridge
+      const kp = box(trimMat, TB, kpH, TD);
+      kp.position.set(tRu, H + kpH / 2, zT);
+      rg.add(kp);
+      // Two braces from the header out near the posts, angling up to meet the king post a
+      // little over halfway. Positioned at their midpoint and rotated, because a box is
+      // built on the x axis.
+      const meet = H + kpH * 0.58;
+      for (const s of [-1, 1]) {
+        // Pulled in from the eave so the brace ends stay UNDER the roof slope. At the eave
+        // itself a timber this thick pokes through the slab, which has no CSG to cut it.
+        const x0 = tRu + s * Math.max(0.6, S / 2 - 0.95);
+        const dx = tRu - x0, dy = meet - H;
+        const len = Math.hypot(dx, dy);
+        if (len < 0.3) continue;                     // a porch too small to frame
+        const br = box(trimMat, len, TB, TD);
+        br.position.set((x0 + tRu) / 2, (H + meet) / 2, zT);
+        br.rotation.z = Math.atan2(dy, dx);
+        rg.add(br);
+      }
+    }
   }
 
   // ── DORMER (2026-08-25) ──────────────────────────────────────────────────────────
@@ -14687,6 +14740,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       <option value="front">Front gable end</option>
                       <option value="back">Back gable end</option>
                     </select>
+                  </label>
+                )}
+                {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
+                    <input type="checkbox" checked={!!adminCal.spec.roof.porchTruss}
+                      onChange={(e) => calSetRoof({ porchTruss: e.target.checked })} />
+                    Timber truss in the porch gable
                   </label>
                 )}
               </div>

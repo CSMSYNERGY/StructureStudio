@@ -479,3 +479,41 @@ Deno.test("a porch survives the sanitiser, and its bounds hold", () => {
   assert(plain.ok, "a plain gable still parses");
   if (plain.ok) assert(!("porchDepthFt" in (plain.d3.roof as Record<string, unknown>)), "no porch unless one was reported");
 });
+
+Deno.test("the porch truss round-trips, and absent stays absent", () => {
+  // The decorative king-post frame over the porch. A BOOLEAN, which is why it is handled beside
+  // porchEnd rather than in the numeric loop — clamped() destructures CLAMPS[key] and throws on
+  // a key with no entry, so putting it in that list would take the whole sanitiser down.
+  const r = parseModelSpec(`{
+    "roof": { "type": "gable", "pitch": 0.42, "porchDepthFt": 6, "porchEnd": "front", "porchTruss": true },
+    "colors": {}, "wallHeightFt": 7
+  }`);
+  assert(r.ok, "a truss reply must parse");
+  if (r.ok) assertEquals(r.d3.roof.porchTruss, true);
+
+  // ABSENT MEANS NO TRUSS, and that is what keeps every style saved before today rendering
+  // exactly as it did — the renderer tests the value as truthy.
+  const plain = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6 } });
+  assert(plain.ok, "a porch with no truss key still parses");
+  if (plain.ok) assert(!("porchTruss" in (plain.d3.roof as Record<string, unknown>)), "no truss unless one was reported");
+
+  // Junk is dropped rather than coerced: "true" the string must not become true the boolean,
+  // or a model that answers in prose silently grows timber on every building.
+  const junk = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchTruss: "yes" } });
+  assert(junk.ok, "junk does not fail the whole spec");
+  if (junk.ok) assert(!("porchTruss" in (junk.d3.roof as Record<string, unknown>)), "only a real boolean is stored");
+
+  // And false is STORED, not dropped, so a builder who unticks it is remembered.
+  const off = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchTruss: false } });
+  assert(off.ok, "false parses");
+  if (off.ok) assertEquals(off.d3.roof.porchTruss, false);
+});
+
+Deno.test("the shape-first prompt asks about the porch truss", () => {
+  for (const [name, p] of [["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT], ["combinedShapePrompt", combinedShapePrompt(4, 8)]] as const) {
+    assert(p.includes('"porchTruss"'), `${name} must ask for porchTruss`);
+    assert(/PORCH TRUSS:/.test(p), `${name} must explain what one looks like`);
+    // The distinguishing detail. Without it a model reports any gable above a porch as framed.
+    assert(p.includes("porchTruss false"), `${name} must say a plain gable is false`);
+  }
+});

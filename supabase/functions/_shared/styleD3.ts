@@ -63,6 +63,8 @@ const CLAMPS: Record<string, [number, number]> = {
   dormerWidthFt: [0, 12],     // along the ridge
   dormerRiseFt: [0, 6],       // above the slope it sits on
   dormerOffsetU: [-1, 1],     // where along the span, as a fraction of the half-span
+  // porchTruss has no range: it is a boolean, handled beside porchEnd rather than in the
+  // numeric loop, because clamped() destructures CLAMPS[key] and throws on a key with no entry.
   // How far a recessed porch eats INTO the building, at a gable end. Not a projection: the
   // roof and the footprint do not move, the wall sets back. Same "0 is the off switch" rule
   // as the two above. 12 ft is past any shed porch anyone sells; the renderer clamps again
@@ -151,6 +153,17 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // would throw on a key with no entry.
   if ((D3_PORCH_ENDS as readonly string[]).includes(String(rawRoof.porchEnd))) {
     roof.porchEnd = String(rawRoof.porchEnd);
+  }
+  // The decorative king-post frame filling the porch gable. A BOOLEAN, so it sits here with
+  // porchEnd rather than in the numeric loop above — clamped() would throw on a key with no
+  // CLAMPS entry. Stored whether or not there is currently a porch, like porchEnd, so turning
+  // the depth back up remembers it.
+  //
+  // ABSENT MEANS NO TRUSS, which is what keeps every style saved before today rendering exactly
+  // as it did: the renderer tests the value as truthy, so a row that has never heard of this
+  // field draws the plain gable it always drew.
+  if (typeof rawRoof.porchTruss === "boolean") {
+    roof.porchTruss = rawRoof.porchTruss;
   }
   // Eave finish. "open" = exposed rafter tails and no fascia — the signature of the
   // Urban style, read off a walk-around video; "fascia" = the painted trim board the
@@ -343,7 +356,8 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "dormerRiseFt": <how far the dormer stands above the slope, in feet>,
     "dormerOffsetU": <-0.85..0.85: how far the dormer sits from the ridge line toward one eave, as a fraction of the half-span. This is a SIDEWAYS position across the roof, not a distance up the slope: 0 puts it on the ridge, 0.5 halfway out to the eave, and the sign picks the side (negative = left, positive = right, seen from outside facing the doors)>,
     "porchDepthFt": <only if a covered porch is recessed into one GABLE END under the main roof: how many feet of the building's length it takes up>,
-    "porchEnd": "front" | "back"
+    "porchEnd": "front" | "back",
+    "porchTruss": <true only if decorative timber beams fill the gable ABOVE the porch opening>
   },
   "gableVent": { "widthFrac": <vent width as a fraction of the wall width, e.g. 0.25 for a 2 ft vent on an 8 ft wall> },
   "foundation": "skids" | "slab",
@@ -377,6 +391,8 @@ GABLE VENT: a louvered opening set in the gable triangle, above the top of the w
 ROOF MATERIAL: asphalt shingles are laid in overlapping courses, so the slope carries a horizontal line every few inches and the surface looks granular. Metal is long continuous panels running UP the slope with raised ribs a foot or so apart, and it catches light in hard streaks rather than evenly. Judge it from the frame where the roof fills most of the picture; on an overcast day the giveaway is the direction of the lines — across the slope means shingle, up it means metal.
 
 LEAN-TO: an open roofed section running along one LONG side, its outer edge carried on posts rather than a wall — an equipment bay, or a porch down the side. Only report one if the posts are actually there; a deep eave overhang is not a lean-to. Give how far it projects from the wall in feet, how far its outer edge drops below the main eave, and which side it is on as seen by someone standing outside facing the doors. ⚠️ A lean-to PROJECTS OUT from a long wall and its roof is a separate, lower slope. If what you are looking at is a porch at the SHORT end of the building, tucked under the main roof with the ridge carrying straight over it, that is not a lean-to — it is a PORCH, and it has its own field below. Reporting a gable-end porch as a lean-to draws a lump on the wrong side of the wrong wall.
+
+PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the porch opening. If heavy timber beams are fixed across it in a decorative pattern — typically an upright post running from the horizontal header up to the peak, with two diagonal braces angling up to meet it, so the triangle reads as a timber frame rather than as flat siding — set porchTruss true. It is usually raw or stained wood against a painted gable, so it stands out clearly. A plain gable above the porch, even one with a vent in it, is porchTruss false.
 
 PORCH: a covered area recessed into one GABLE END — the short end, the one with the triangle. The main roof does not change at all: the same ridge and the same two slopes simply carry on over the porch, and the outer corners are held up by posts instead of walls, usually with a decorative timber truss filling the gable above them. Look for the floor deck continuing past the front wall to the posts, and for the wall with the door standing BACK from the end of the roof rather than flush with it. Give porchDepthFt as how far the porch eats INTO the building's length — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. Say which end it opens at: "front" is the end you would walk up to, which is the end the door is on. Omit both keys if the building is enclosed to both ends, which is the common case.
 
