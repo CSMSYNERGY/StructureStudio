@@ -127,6 +127,7 @@ let signedSeq = 0
 // path landed, and two of them did exactly that before this line existed.
 const uploadCount = () => attempts.upload + attempts.signedMint
 const saveBodies = []
+const mediaSaves = []
 const saved = {}
 const generateCalls = []
 const uploads = []
@@ -225,6 +226,15 @@ async function main() {
           observed: { roofNote: 'Gambrel, read from the ground.', eave: 'open rafter tails', doors: 'one double, gable end', windows: 'two', vents: 'gable vents', confidence: 'medium' },
           balanceCents: 18000,
         })
+      }
+      if (a === 'save_style_media') {
+        // Mirrors the real action: writes ONLY the media columns, leaves d3 alone, and treats an
+        // ABSENT key as "leave that column" rather than as an empty array.
+        mediaSaves.push(body)
+        const row = body.styleValue === 'shed' ? STYLE_ROW2 : STYLE_ROW
+        if (Array.isArray(body.d3Photos)) row.d3_photos = body.d3Photos
+        if (Array.isArray(body.d3VideoFrames)) row.d3_video_frames = body.d3VideoFrames
+        return json(route, { ok: true })
       }
       if (a === 'save_style_d3') {
         saveBodies.push(body)
@@ -346,6 +356,31 @@ async function main() {
       await page.locator('button[title="Remove this image"]').last().click()
     })
     await page.waitForTimeout(600)
+  }
+
+  // ── REGRESSION: uploads survive a style switch ──────────────────────────────────────────
+  // Ahsan: "if i change the tab it losses the progress". openCalEditor re-seeds from the SAVED
+  // row, so anything uploaded before the deliberate Save used to be thrown away by one click on
+  // another style. Media is persisted as it is added now — WITHOUT committing the d3 spec, which
+  // during uploading is a draft nobody has approved.
+  {
+    const before = mediaSaves.length
+    const startCount = await imgCount()
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'keepme.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('keep') }])
+    await waitForImages(startCount + 1)
+    await page.waitForTimeout(900)
+    ok('an upload persists its media immediately', mediaSaves.length > before, `${mediaSaves.length - before} media saves`)
+    const last = mediaSaves[mediaSaves.length - 1] || {}
+    ok('and it writes ONLY the media, never the spec', !('d3' in last), Object.keys(last).join(','))
+    const kept = startCount + 1
+    // Switch away and back. The draft is discarded on both hops; only what was persisted returns.
+    await page.getByRole('button', { name: 'Shed', exact: true }).first().click()
+    await page.waitForTimeout(1200)
+    await page.getByRole('button', { name: 'Barn', exact: true }).first().click()
+    await page.waitForTimeout(1800)
+    ok('THE IMAGES SURVIVE A STYLE SWITCH', (await imgCount()) === kept, `${kept} before, ${await imgCount()} after`)
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(900)
   }
 
   // ── REGRESSION: the FAST path is the one actually used ──────────────────────────────────

@@ -948,6 +948,18 @@ function Dashboard({ session }) {
       if (!data || !data.ok) throw new Error((data && data.error) || "Could not change that");
       return data;
     },
+    // Records WHICH images belong to a style without touching its d3 spec. Called as photos and
+    // frames are added or removed, so a style switch or a reload cannot lose them; the spec is
+    // still only written by the deliberate Save.
+    onSaveMedia: async (styleValue, d3Photos, d3VideoFrames) => {
+      const body = { action: "save_style_media", styleValue };
+      if (Array.isArray(d3Photos)) body.d3Photos = d3Photos;
+      if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+      const { data, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error) throw new Error(error.message || "Could not save those photos");
+      if (!data || !data.ok) throw new Error((data && data.error) || "Could not save those photos");
+      return data;
+    },
     onLoadStyle3D: async (styleValue) => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
       if (error || !data || !data.ok) return null;

@@ -12698,7 +12698,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // BY VALUE, not by index: the grid renders a filtered copy, and an index into that copy is
   // only the same index into the source while calTrimPhotos' no-blanks invariant holds. URLs are
   // unique (calTrimPhotos de-duplicates), so this cannot delete the wrong one.
-  const calRemovePhoto = (url) => setAdminCal((p) => ({ ...p, photos: p.photos.filter((u) => u !== url) }));
+  const calRemovePhoto = (url) => setAdminCal((p) => {
+    const next = p.photos.filter((u) => u !== url);
+    // Removals persist too, or a deleted photo would come back on the next style switch.
+    calPersistMedia(p.styleValue, next, undefined);
+    return { ...p, photos: next };
+  });
   // A drafted spec MERGES into the draft rather than replacing it: the model reports only
   // what the photos actually show, so anything it leaves out keeps the value the editor
   // (or the style default) already had.
@@ -12824,7 +12829,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // per-request timeout.
       1,
     );
-    if (urls.length) calAddPhotos(urls);
+    if (urls.length) {
+      calAddPhotos(urls);
+      // Persisted from the value computed here rather than read back from state: setAdminCal is
+      // asynchronous, so reading adminCal.photos on the next line would save the list as it was
+      // BEFORE this batch.
+      const next = calTrimPhotos((adminCal ? adminCal.photos : []).concat(urls));
+      calPersistMedia(adminCal && adminCal.styleValue, next, undefined);
+    }
     const over = list.length - take.length;
     setAdminCalPhotos({
       busy: false,
@@ -12834,6 +12846,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         : (over ? `${over} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : null),
     });
   };
+  // ─── Keep the reference media, without committing the spec ────────────────────────────
+  // Ahsan, 2026-09-11: "if i change the tab it losses the progress to save the progress of them
+  // also". Switching style tabs runs openCalEditor, which re-seeds from the SAVED row — so every
+  // photo and frame uploaded before the deliberate Save was thrown away by a single click.
+  //
+  // BEST-EFFORT AND SILENT ON FAILURE. The images are already in the bucket and still on screen;
+  // a failed bookkeeping write must not interrupt somebody mid-upload with an error about
+  // something they did not ask for. The cost of it failing is exactly what the behaviour was
+  // before this existed.
+  //
+  // It writes ONLY d3_photos / d3_video_frames — never `d3`. The spec on screen during uploading
+  // is a draft nobody has approved, and committing a half-tuned pitch to every customer's 3D
+  // because somebody added a photo would be a far worse bug than the one this fixes.
+  const calPersistMedia = (styleValue, photos, frames) => {
+    if (!(setup3d && setup3d.onSaveMedia) || !styleValue) return;
+    try {
+      const p = setup3d.onSaveMedia(styleValue, photos, frames);
+      if (p && p.catch) p.catch(() => { /* bookkeeping only — see above */ });
+    } catch (_e) { /* same */ }
+  };
+
   // The public ?admin=1 path: no session, so a URL is pasted rather than a file uploaded.
   const calAddPhotoUrl = (v) => {
     const u = String(v || "").trim();
@@ -13024,6 +13057,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         step: null,
         err: errs.length ? `${errs.length} view${errs.length === 1 ? "" : "s"} did not upload — ${urls.length} were kept.` : null,
       }));
+      calPersistMedia(adminCal && adminCal.styleValue, undefined, urls);
     } catch (e) {
       setAdminCalVideo((p) => ({ ...p, busy: false, step: null, err: (e && e.message) || "Could not read that video." }));
     }
@@ -13035,7 +13069,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // `urls: []`, NOT null. Null is this state's "not looked yet" and is the one value Save
   // refuses to write, so clearing to null would make Remove the video a button that appears to
   // work and silently never persists.
-  const calClearVideo = () => setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: [], observed: null, read: 0 });
+  const calClearVideo = () => {
+    calPersistMedia(adminCal && adminCal.styleValue, undefined, []);
+    setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: [], observed: null, read: 0 });
+  };
 
   // ─── Building scan: read it, measure it, then drive the parametric model from the numbers ──
   // Measuring happens BEFORE any upload, on purpose: nothing is stored until we know the file

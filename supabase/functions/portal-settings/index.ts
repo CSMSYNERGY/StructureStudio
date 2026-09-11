@@ -114,6 +114,7 @@ const GATES: GateTable = {
   calibrate_style_ai:        { area: "settings_structures", level: "edit" },
   upload_style_photo:        { area: "settings_structures", level: "edit" },
   style_photo_upload_url:    { area: "settings_structures", level: "edit" },
+  save_style_media:          { area: "settings_structures", level: "edit" },
   save_style_model:          { area: "settings_structures", level: "edit" },
   set_style_model_status:    { area: "settings_structures", level: "edit" },
   style_model_url:           { area: "settings_structures", level: "edit" },
@@ -2994,6 +2995,43 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       : { ok: true, d3: clean.d3, d3Photos: photos });
   }
 
+  // Persist ONLY the reference media — the photos and the walk-around frames — leaving the d3
+  // spec exactly as it is (2026-09-11).
+  //
+  // WHY A SEPARATE ACTION rather than reusing save_style_d3: that one writes `d3` too, and the
+  // spec in the editor at upload time is a DRAFT nobody has approved. Uploading a photo must not
+  // commit a half-tuned roof pitch to every customer's 3D. These are two different decisions and
+  // they deserve two different endpoints.
+  //
+  // WHY AT ALL: switching style tabs re-seeds the editor from the SAVED row, so until now
+  // everything uploaded before pressing Save was lost by clicking another style. Save is
+  // deliberately the last act of tuning, which left the entire upload phase unprotected. The
+  // images are already in the bucket by this point — this only records which ones belong to the
+  // style, so it is cheap and idempotent.
+  //
+  // Honours the lock for the same reason save_style_d3 does: a locked style's 3D setup is frozen,
+  // and its reference set is part of that setup.
+  if (action === "save_style_media") {
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const styleId = String(payload.styleId ?? "").trim();
+    if (!styleValue && !styleId) return json({ error: "styleValue (or styleId) is required." }, 400);
+    const found = await findStyleFor3D(styleValue, styleId);
+    if (found.err) return found.err;
+    if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    // Absence still means "leave that column alone", exactly as in save_style_d3 — a caller that
+    // only knows about photos must not blank the frames.
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (Array.isArray(payload.d3Photos)) patch.d3_photos = sanitizePhotoUrls(payload.d3Photos, 12);
+    if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
+    if (Object.keys(patch).length === 1) return json({ ok: true, skipped: true });
+    const { error, count } = await admin.from("building_styles")
+      .update(patch, { count: "exact" })
+      .eq("client_id", clientId).eq("id", found.style!.id);
+    if (error) return dbFail(req, clientId, "save those photos", error);
+    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    return json({ ok: true });
+  }
+
   // ─── Building scan (094) ───────────────────────────────────────────────────────────────
   // The browser uploads the .glb straight into the PRIVATE `models` bucket with its own
   // session (the same route portal.html already uses for feedback attachments) — a 10-40 MB
@@ -3196,20 +3234,52 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
     if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
 
-    const DAILY_CAP = 10;
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const { count: used, error: capErr } = await admin.from("ai_style_calls")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", clientId).gt("called_at", since);
-    // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
-    // not brick calibration, and the per-call cost is cents.
-    if (capErr) {
+    // PER-TENANT SINCE 227. The 10 was hard-coded from 086 and is the right shape for a real
+    // builder — nobody calibrates one style eleven times in a day by accident — and the wrong
+    // shape for the tenant we DEVELOP on, which burned all ten in an afternoon building this
+    // very feature and then refused the eleventh press while the meter was disarmed, so the cap
+    // was protecting nothing. Ahsan, 2026-09-11: "unlimited limit for only structure studio".
+    //
+    // ⛔ The tenant is NOT named here. `client_settings` is where per-tenant policy lives and is
+    // SERVICE-ROLE ONLY, so a tenant can neither read nor raise their own cap — the same posture
+    // as `billing_exempt`. A client id in an `if` branch would make one tenant special inside
+    // code every tenant runs, and the second exemption would add a second branch.
+    //
+    // NULL = the default below. 0 = UNLIMITED. n = that many per rolling 24 hours.
+    //
+    // ⚠️ AN UNLIMITED CAP IS NOT A FREE PASS: `wallet_hold` below is untouched, so an unlimited
+    // tenant with an armed meter still pays $20 a generation. Raising the cap moves the spend
+    // limit onto the WALLET BALANCE and nothing else.
+    const DEFAULT_DAILY_CAP = 10;
+    const { data: capRow, error: capCfgErr } = await admin.from("client_settings")
+      .select("ai_style_daily_cap").eq("client_id", clientId).maybeSingle();
+    if (capCfgErr) {
+      // Fail to the DEFAULT, not to unlimited: an unreadable setting must never widen a spend
+      // cap. This is the opposite posture to the count below, and deliberately so — that one
+      // failing open costs cents, this one failing open costs whatever the wallet holds.
       await logEdgeError({
-        fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
-        message: `AI calibration cap count failed, allowing the call: ${capErr.message}`,
+        fn: "portal-settings", req, clientId, code: "ai_style_cap_config_failed",
+        message: `Could not read ai_style_daily_cap, using the default: ${capCfgErr.message}`,
       });
-    } else if ((used ?? 0) >= DAILY_CAP) {
-      return json({ error: `Daily limit reached (${DAILY_CAP} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+    }
+    const rawCap = capRow?.ai_style_daily_cap;
+    const dailyCap = (typeof rawCap === "number" && rawCap >= 0) ? rawCap : DEFAULT_DAILY_CAP;
+    // Unlimited skips the COUNT entirely rather than running a query whose answer cannot matter.
+    if (dailyCap > 0) {
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { count: used, error: capErr } = await admin.from("ai_style_calls")
+        .select("id", { count: "exact", head: true })
+        .eq("client_id", clientId).gt("called_at", since);
+      // Fail OPEN on a broken count (capture-lead's posture): a cap that cannot be read must
+      // not brick calibration, and the per-call cost is cents.
+      if (capErr) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_cap_count_failed",
+          message: `AI calibration cap count failed, allowing the call: ${capErr.message}`,
+        });
+      } else if ((used ?? 0) >= dailyCap) {
+        return json({ error: `Daily limit reached (${dailyCap} AI drafts). Tune the sliders by hand, or try again tomorrow.` }, 429);
+      }
     }
     // CHECKED on purpose: this row IS the spend cap. Unchecked, a failed insert (table
     // drift, RLS change) still let the model call proceed -- unmetered spend on exactly the
