@@ -9511,16 +9511,24 @@ const CAL_PHOTO_MAX = 12;
 const CAL_VIDEO_MIN = 4;
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
-// ⚠️ THE DEFAULT IS ONE LANE, AND THAT IS A CORRECTION OF MY OWN WORK. This shipped on
-// 2026-09-10 with three lanes, on the reasoning that eight sequential round trips is slow. The
-// reasoning was wrong because it ignored the binding constraint: on a constrained UPLINK the
-// total time is (total bytes / uplink) whatever the scheduling, so concurrency buys nothing and
-// costs a great deal - each request's wall time multiplies by the lane count, which pushes every
-// one of them toward the per-request deadline in onUploadPhoto. Ahsan's link measured about
-// 42KB/s: nine 380KB bodies take ~82 seconds on one lane or three, but on three lanes each
-// INDIVIDUAL request takes three times as long and starts failing a 90-second timeout.
+// ⚠️ THREE LANES, AND THIS HAS NOW BEEN WRONG IN BOTH DIRECTIONS. The history is short and worth
+// keeping, because each correction was right about the world it was written in.
 //
-// Parallelism here only helps when the uplink is NOT the constraint. It never was.
+//   3 lanes  (2026-09-10)  "eight sequential round trips is slow". True, but it ignored that a
+//                          saturated UPLINK makes total time (bytes / uplink) whatever the
+//                          scheduling, and each request's wall time multiplied by the lane count,
+//                          pushing every one toward the per-request deadline.
+//   1 lane   (2026-09-10)  Correct WHILE the body was base64 through an edge function: one fat
+//                          round trip per image, bandwidth-bound, nothing for concurrency to win.
+//   3 lanes  (2026-09-11)  The ground moved. Uploads go straight to storage now, so each image
+//                          costs TWO round trips (mint a signed URL, then PUT) and the bodies are
+//                          a third smaller. That flips the binding constraint from BANDWIDTH to
+//                          LATENCY, and serialising sixteen round trips for eight images is
+//                          exactly what latency punishes. Ahsan watched "Sent 5 of 8 views..."
+//                          crawl for half an hour.
+//
+// The lesson is not a number. It is that this choice depends on which resource is scarce, and
+// moving the upload off the edge function changed the answer. Measure before changing it again.
 //
 // The multitasking Ahsan actually asked for is untouched by this: step 1 and step 2 have
 // separate busy flags and separate pools, so a video and a batch of images still upload at the
@@ -9537,7 +9545,7 @@ async function ssUploadPool(items, worker, onProgress, limit) {
   const out = new Array(items.length);
   const errs = [];
   let next = 0, done = 0;
-  const lanes = Math.max(1, Math.min(limit || 1, items.length));
+  const lanes = Math.max(1, Math.min(limit || 3, items.length));
   await Promise.all(Array.from({ length: lanes }, async () => {
     for (;;) {
       const i = next++;
@@ -12824,10 +12832,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       take,
       (f) => setup3d.onUploadPhoto(f),
       (n, total) => setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })),
-      // ONE lane. See ssUploadPool's header: on a constrained uplink concurrency cannot add
-      // throughput and multiplies each request's wall time, which is what pushed them into the
-      // per-request timeout.
-      1,
+      // THREE lanes - see ssUploadPool's header. Each image is now a mint plus a PUT, so the
+      // cost is latency rather than bandwidth, and serialising it is what made eight images take
+      // half an hour.
+      3,
     );
     if (urls.length) {
       calAddPhotos(urls);
@@ -13041,7 +13049,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         files,
         (f) => setup3d.onUploadPhoto(f),
         (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` })),
-        1,
+        3,
       );
       // A PARTIAL WALK IS STILL A WALK, above the floor. Four frames is what covers four sides
       // (CAL_VIDEO_MIN), so a dropped frame or two no longer throws the whole upload away — but
