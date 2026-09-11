@@ -81,7 +81,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    ⚠️ The rail's 12px BOTTOM PADDING moved onto this element (.ss-side is `16px 14px 0` now).
    A sticky element cannot be pushed past its containing block's padding edge, so with the
    padding still on .ss-side there was a 12px strip underneath the footer that scrolling nav
-   items slid through — a sliver of "My View" under the signed-in user's name. Same 12px, same
+   items slid through — a sliver of the last nav row under the signed-in user's name. Same 12px, same
    look, but now it belongs to the opaque box. */
 .ss-foot{position:sticky;bottom:0;background:#FFF;z-index:60;border-top:1px solid #F1F5F9;padding:12px 0}
 .ss-newlink{display:flex;align-items:center;gap:6px;font-size:12px;color:#64748B;text-decoration:underline;text-underline-offset:2px;cursor:pointer;margin-bottom:12px;padding:0 4px;white-space:nowrap;background:none;border:none;font-family:inherit;width:100%;text-align:left}
@@ -237,7 +237,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=a5f388d0"></script>
-<script defer src="/portal.app.compiled.js?v=72e728df" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=4379a967" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

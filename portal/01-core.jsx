@@ -536,6 +536,14 @@ const TAB_META = {
 // static server ignores _redirects, so deep links only work on beta/production — locally
 // the app still runs, it just always boots at /portal.html.
 const SS_TAB_ALIASES = { leads: "contacts", releases: "support" };
+// The same idea one level down, for SETTINGS sub-tabs that get renamed. Kept separate from
+// SS_TAB_ALIASES and applied only on the settings page, because a sub slug means nothing on
+// its own — the same word under another page is another page's business.
+//
+// Why it is worth the four lines: an unknown sub does not 404, it CLAMPS to the first tab. So
+// a renamed slug does not announce itself, it silently lands the reader on Structures, which
+// is the one failure mode nobody reports because it looks like they mis-clicked.
+const SS_SETTINGS_SUB_ALIASES = { myview: "myprofile" };
 function ssParsePath() {
   const parts = String(window.location.pathname || "").split("/").filter(Boolean);
   // ["portal"] | ["portal","settings"] | ["portal","settings","colors"]
@@ -552,7 +560,9 @@ function ssParsePath() {
   // land silently on Pipeline and a record link would lose its `sub` entirely. The shell's
   // existing replaceState then rewrites the address bar to the new path, with no history entry.
   const page = parts[1] || null;
-  return { page: (page && SS_TAB_ALIASES[page]) || page, sub: parts[2] || null };
+  const resolved = (page && SS_TAB_ALIASES[page]) || page;
+  const sub = parts[2] || null;
+  return { page: resolved, sub: (resolved === "settings" && sub && SS_SETTINGS_SUB_ALIASES[sub]) || sub };
 }
 
 // Is this deployment a beta/preview surface? Decides whether the "Coming Soon" sidebar
@@ -731,7 +741,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // ⚠️ Gated as a HUB — visible if ANY of its six tabs is readable — and NOT by
     // SETTINGS_TAB_AREA.company, which is settings_branding. Team used to be its own rail
     // item on settings_team; folding it in here under the branding area alone would have left
-    // someone granted only Team with no way to reach it: the rail would show them My View and
+    // someone granted only Team with no way to reach it: the rail would show them My Profile and
     // nothing else, while /portal/settings/team still rendered perfectly for anyone who
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
     ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team"))
@@ -749,7 +759,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // heading"). These four read as what they are without one, and with Billing lifted up to
     // Company the rail is mostly one flat list now — which is the shape she has been steering
     // it towards since she said the catalog four "aren't grouped ... they have their own nav
-    // on the side". Only My View still carries a heading, because it is the one item on this
+    // on the side". Only My Profile still carries a heading, because it is the one item on this
     // rail that configures the PERSON rather than the business.
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
@@ -770,7 +780,10 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
     // sensibly withhold someone's own default view from them, and a sales rep who cannot see
     // Structures still gets to choose how their own Pipeline tab opens.
-    ["myview", "My View", "How the portal opens for you — your settings, not the business's", "You"],
+    // Renamed from "My View" / `myview` on 2026-09-11 (Carolyn: "my view should be called my
+    // profile in the nav tab and the url"). The old slug still resolves — see
+    // SS_SETTINGS_SUB_ALIASES.
+    ["myprofile", "My Profile", "How the portal opens for you — your settings, not the business's", "You"],
   ]
   // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
   // an owner shut out of their own Settings by a permission bug is the failure this feature
@@ -783,7 +796,7 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
     // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
     // settings_team holder had the entry added by the spread and taken straight back out —
-    // rail showed My View alone, and Team was unreachable for the one person it was granted to.
+    // rail showed My Profile alone, and Team was unreachable for the one person it was granted to.
     if (id === "company") return true;
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;

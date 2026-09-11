@@ -2637,7 +2637,7 @@ function CommissionsReport({ clientId }) {
 // `replyToEmail` is accepted and discarded until the server edit in
 // .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
 // deliberately shipped first so the two can land independently.
-function MyViewSettings({ prefs, onSaved }) {
+function MyProfileSettings({ prefs, onSaved }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -2722,11 +2722,15 @@ function MyViewSettings({ prefs, onSaved }) {
           to go in and say, when somebody replies to an email, send it here. But that should
           be in their profile."
 
-          Her word was "profile", and this card is in My View rather than the profile dialog.
-          Both are per-person and both save through a "self"-gated action; My View is the
-          screen that already exists for "settings that configure the person, not the
-          business", which is what this is. Worth revisiting with her -- noted in
-          .temp/HANDOFF-reply-to-prefs.md rather than decided here.
+          Her word was "profile", and this card sat in a tab called "My View" — which is why
+          the note here said it was worth revisiting with her. ✅ SETTLED 2026-09-11: she
+          renamed the tab itself ("my view should be called my profile in the nav tab and the
+          url"), so the card is in My Profile and the wording matches what she asked for.
+
+          Still TWO per-person surfaces, and the distinction is worth keeping straight: this
+          tab, and the "Your details" DIALOG off the sidebar identity menu. Both save through
+          a "self"-gated action. The dialog is name/phone/password — who you are; this tab is
+          how the portal behaves for you. Do not merge them without asking.
 
           ⚠️ WHAT THE COPY MUST NOT PROMISE. This does not REDIRECT replies, it ADDS a second
           address: the customer's reply reaches this address AND the customer's record in
@@ -3004,7 +3008,7 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
-      {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
+      {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved} />}
     </div>
   );
 }
