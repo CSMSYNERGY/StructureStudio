@@ -5788,10 +5788,12 @@ function buildShed3DModel(THREE, p) {
       const kp = box(trimMat, TB, kpH, TD);
       kp.position.set(tRu, H + kpH / 2, zT);
       rg.add(kp);
-      // Two braces from the header out near the posts, angling up to meet the king post a
-      // little over halfway. Positioned at their midpoint and rotated, because a box is
-      // built on the x axis.
-      const meet = H + kpH * 0.58;
+      // Two braces from the header out near the posts, angling up to meet the king post HIGH
+      // — around three quarters of the way, not halfway. A shallow brace reads as a flat
+      // chevron; on a real porch truss the diagonals are steep and the node sits close under
+      // the peak, which is what makes the frame look like structure rather than trim.
+      // Positioned at their midpoint and rotated, because a box is built on the x axis.
+      const meet = H + kpH * 0.76;
       for (const s of [-1, 1]) {
         // Pulled in from the eave so the brace ends stay UNDER the roof slope. At the eave
         // itself a timber this thick pokes through the slab, which has no CSG to cut it.
