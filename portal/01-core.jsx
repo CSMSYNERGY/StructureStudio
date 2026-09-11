@@ -690,6 +690,102 @@ function ssCanWrite(access, area) {
   return v === "edit" || (v === "own" && OWN_WRITE_AREAS.has(area));
 }
 
+// ── The Settings sub-pages ───────────────────────────────────────────────────────────────
+// ONE list, read by TWO renderers: the Settings sidebar in 12-shell.jsx and SettingsShell's
+// own body dispatch in 08-integrations.jsx. It lived inside SettingsShell until the sidebar
+// existed; the moment a second reader appeared, two independently-derived lists became the
+// way an owner gets Commissions in the rail and not in the body. Lifted here rather than
+// exported from 08-, because this is where SETTINGS_TAB_AREA, SETTINGS_AREAS and ssCanRead
+// already live — the whole settings-permission story in one place.
+//
+// Each entry is [id, label, description, group]. `group` may be NULL: a heading renders only
+// where the group CHANGES to a non-null value, so the leading run has no heading over it at
+// all. Carolyn 2026-09-11: Structures / Options / Colors / Designer "aren't grouped … they
+// have their own nav on the side" — they are top-level items, like Designer and Contacts are
+// in the workspace rail. One ordering model and no second sort: the array order IS the rail.
+function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}) {
+  return [
+    ["structures", "Structures", "Building styles, sizes, and base prices", null],
+    ["options", "Options", "Add-on items and rates", null],
+    ["colors", "Colors", "Paint, shingle, and metal palettes", null],
+    ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],
+    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced", "Business"],
+    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
+    // client: "we need to have everything about the company ... the EIN, all that stuff needs
+    // to be in here. Their terms and conditions, company, branding, company information").
+    // Her structure is Branding / Company / Team, and Team already exists below.
+    ["company", "Company", "Your legal business details, address, and the terms printed on estimates", "Business"],
+    // Team joins Branding and Company under Business — Carolyn's own grouping, said in that
+    // same breath. It keeps the admin/settings_team gate it has always had.
+    ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates", "Business"]] : []),
+    ["connection", "CRM Connection", "CRM credentials and pipeline mapping", "Connections"],
+    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", "Connections"],
+    ["email", "Email Sending", "Send estimates and invoices from your own email domain", "Connections"],
+    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", "Connections"],
+    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule", "Billing"]] : []),
+    // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
+    // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
+    // mistake. Roughly eight callers do navigate("settings", "billing") — the transition and
+    // grace banners, the CRM and scheduling upsells, QuickBooksLocked, the Orders page, and
+    // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
+    // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
+    // silently, since an unknown slug clamps to the first tab rather than erroring.
+    ["billing", "Subscription", "Your plan, payment method, and invoices", "Billing"],
+    // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
+    // "all of these settings for contact cards, the pipeline cards, and the default one, I
+    // think should add, in settings, add another tab ... for structure studio settings."
+    //
+    // Everything above configures the BUSINESS; this configures the person looking at the
+    // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
+    // sensibly withhold someone's own default view from them, and a sales rep who cannot see
+    // Structures still gets to choose how their own Pipeline tab opens.
+    ["myview", "My View", "How the portal opens for you — your settings, not the business's", "You"],
+  ]
+  // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
+  // an owner shut out of their own Settings by a permission bug is the failure this feature
+  // must not have. For everyone else each card appears only if they can read its area, which
+  // is what makes granting one person Structures actually produce a usable Settings page
+  // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
+  // the server refuses is still refused — this only decides what is worth showing.
+  .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
+}
+
+// Which top-level pages show the SETTINGS rail instead of the workspace one. Accounts and
+// Admin are in that rail now (Carolyn 2026-09-11), so the rail has to stay up while you are
+// on them or clicking one would throw you back to the nav you just left.
+//
+// PROJECTS IS DELIBERATELY ABSENT. It appears in BOTH rails — Carolyn asked for that — but it
+// is day-to-day internal work (the bug board, the roadmap), not configuration, so landing on
+// it returns you to the workspace rail. The rule is "the rail follows the page", with no
+// exceptions: a page that kept whichever rail you arrived from would need a second piece of
+// state that a deep link could not reconstruct.
+const SS_SETTINGS_CONTEXT = ["settings", "accounts", "admin"];
+
+// ── Nav links are REAL links ─────────────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "on any and all of the nav buttons I want to be able to right click and
+// open in a new tab or click the wheel of the mouse to open in a new tab."
+//
+// So every nav item is an <a href> whose left click is intercepted into same-document
+// navigation, and whose every OTHER click is left to the browser. This guard is what makes
+// that split: bail out for a middle click, any modifier, or an already-handled event, and the
+// anchor behaves like the plain link it is.
+//
+// ⚠️ The href only opens correctly where `_redirects` is in force — `/portal/* /portal.html
+// 200` is what makes /portal/settings/colors a real address. A plain static server ignores
+// that file, so a middle click 404s LOCALLY while left click still works. Beta and production
+// are the places to test this.
+function ssNavClick(fn) {
+  return (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    fn();
+  };
+}
+
 // ── ROW SCOPE: which ROWS, not which TABS ────────────────────────────────────────────────
 //
 // TAB_AREA above answers "may this person open this page". This answers a question the

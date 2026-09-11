@@ -59,6 +59,34 @@ const ICONS = {
   "reports": <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></svg>,
 };
 
+// ── Settings rail glyphs ──────────────────────────────────────────────────────────────
+// A SEPARATE map from ICONS above, keyed by SETTINGS sub-tab id. Several of those ids
+// collide with top-level tab ids meaning a different thing — "designer" is the drawing
+// canvas up there and "how your styles look" down here, "commissions" is the rep's own
+// payout page up there and the rate STRUCTURE down here — so merging the two maps would
+// make every future edit ask which one it was touching.
+//
+// Eight entries deliberately REUSE a glyph from ICONS by reference rather than copying the
+// markup: the two rails are never on screen at the same time, so there is no collision to
+// design around, and a shared reference cannot drift. Same module-scope, built-once
+// reasoning as ICONS — see its comment.
+const SETTINGS_ICONS = {
+  structures: ICONS.pricing,                 // the house — building styles and sizes
+  options: ICONS["layout-pricing"],          // the slider rows — add-ons and rates
+  colors: ICONS.colors,
+  designer: ICONS.designer,
+  branding: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>,
+  company: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/></svg>,
+  team: ICONS.contacts,                      // two people — the same idea, one rail apart
+  connection: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
+  quickbooks: ICONS.quickbooks,
+  email: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/></svg>,
+  sms: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"/></svg>,
+  commissions: ICONS.commissions,
+  billing: ICONS.billing,                    // the card — labelled "Subscription" in the rail
+  myview: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>,
+};
+
 // ─── A style photo, guaranteed small ────────────────────────────────────────────────────
 // Returns a JPEG at or under `maxBytes`, or THROWS. It never hands back the original, and that
 // single property is the whole point of it existing beside ssFitImageForUpload (06-3d.jsx)
@@ -156,10 +184,23 @@ function Dashboard({ session }) {
   // app_operators hasn't come back — and silently rewrites /portal/admin to designs before
   // the answer arrives. Cleared the moment it is honoured or provably refused.
   const wanted = useRef((() => { const p = ssParsePath(); return p.page && TAB_META[p.page] ? p.page : null; })());
+  // Where "Back to Workspace" goes. Latched at RENDER time below, on every page that is not
+  // part of the Settings context, so entering Settings from Orders returns you to Orders.
+  //
+  // MUST be declared up here with the other hooks: Dashboard has conditional early returns
+  // further down (tenant loading / no tenant) and a hook after them changes the hook count
+  // between renders — React error #310, blank screen. The designerOpened comment above tells
+  // that story; this is the third time it applies.
+  //
+  // Null until you have been somewhere else, which is the cold-deep-link case
+  // (/portal/settings/colors pasted into the address bar): the reader falls back to
+  // ssFallbackTab, the same landing page a bare /portal login gets.
+  const beforeSettings = useRef(null);
 
-  // Same-document navigation. Anchors and location.assign are deliberately NOT used: the
-  // designer and the operator console are keep-mounted, and a real navigation would
-  // discard an in-progress design or a half-filled admin form.
+  // Same-document navigation. location.assign is deliberately NOT used: the designer and the
+  // operator console are keep-mounted, and a real navigation would discard an in-progress
+  // design or a half-filled admin form. The rail's anchors call THIS from their left-click
+  // handler and leave every other click to the browser — see ssNavClick in 01-core.jsx.
   const navigate = useCallback((page, nextSub = null, replace = false) => {
     wanted.current = null;                 // an explicit click supersedes the boot intent
     setTab(page);
@@ -1157,6 +1198,13 @@ function Dashboard({ session }) {
   // that array is the role escape hatch and would hand the operator console to every team
   // member. Content renders are ALSO gated (and the server re-checks regardless).
   const activeTab = ssClampTab(tab, isOperator, canAdmin, myAccess, supportView, canProjects);
+  // Remember the last WORKSPACE page, for Back to Workspace. Assigned during render, not in
+  // an effect, and deliberately: it must already be correct on the very first render in which
+  // the Settings rail appears, and an effect runs after that render has painted. Idempotent
+  // and touches no state, so it cannot loop — the same pattern as ssTargetClientId and
+  // ssSetRowScope below. Reads activeTab (the CLAMPED tab), so a page the clamp refused can
+  // never become the back target.
+  if (!SS_SETTINGS_CONTEXT.includes(activeTab)) beforeSettings.current = activeTab;
 
 
   // ── Sidebar layout (fluid, full-width; collapses to an icon rail <900px) ──
@@ -1276,44 +1324,127 @@ function Dashboard({ session }) {
   const showNudge = !viewing && !nudgeHidden && !!profile && profile.needsDetails;
   const fmtRate = (c) => c == null ? null : "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: c % 100 ? 2 : 0 });
 
-  // Real <button>s (not href-less anchors) so the nav stays keyboard- and
-  // screen-reader-operable like the old tab bar; .ss-nav styles both alike.
+  // REAL LINKS since 2026-09-11 (Carolyn: "on any and all of the nav buttons I want to be
+  // able to right click and open in a new tab or click the wheel of the mouse to open in a
+  // new tab"). ⚠️ This reverses a note that stood here for months — "real <button>s, not
+  // href-less anchors, so the nav stays keyboard- and screen-reader-operable". That objection
+  // was to anchors with NO href, which are neither focusable nor announced as links. An
+  // anchor with a real href is both, so these satisfy the old requirement and the new one at
+  // once; .ss-nav styles a and button alike, so nothing moved visually. ssNavClick keeps left
+  // click same-document and hands every other click to the browser.
+  //
   // Hidden, not padlocked: a padlock means "yours when you upgrade" (the billing gate).
   // A page your access does not include is not something you can buy your way into, so
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
   const navHidden = (id) =>
     id !== "accounts" && id !== "admin" && id !== "projects" && !canAdmin && !ssCanSeeTab(id, myAccess);
   const navItem = (id, label, badge) => navHidden(id) ? null : (
-    <button type="button" className={activeTab === id ? "active" : ""}
+    <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
+      aria-current={activeTab === id ? "page" : undefined}
       title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
-      onClick={() => navigate(id)}>
+      onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
       {badge && <span className="soon">{badge}</span>}
       {gateLocked && (
         <svg className="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-label="locked"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
       )}
-    </button>
+    </a>
   );
   // Same as navItem but with a status pill — "Soon" by default, or a custom badge
   // (e.g. "In Development") for tabs that are further along than the teaser ones.
   const soonItem = (id, label, badge) => navHidden(id) ? null : (
-    <button type="button" className={activeTab === id ? "active" : ""} title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")} onClick={() => navigate(id)}>
+    <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
+      aria-current={activeTab === id ? "page" : undefined}
+      title={label + " — " + (badge ? badge.toLowerCase() : "coming soon")}
+      onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
       <span className="soon">{badge || "Soon"}</span>
-    </button>
+    </a>
   );
+
+  // ── The Settings rail ─────────────────────────────────────────────────────────────────
+  // Carolyn 2026-09-11: clicking Settings should ENTER Settings — the workspace nav goes
+  // away and the fourteen sub-pages become the rail, with a way back.
+  //
+  // These three flags used to be computed inline in SettingsShell's JSX props further down.
+  // They are hoisted because the rail needs the SAME answers: two independently-derived lists
+  // is how an owner gets Commissions in one and not the other, and settingsIsOwner in
+  // particular is what withholds Commissions in view-as, pairing with portal-commissions'
+  // hard 403. Derive once, pass to both.
+  const settingsIsOwner = !viewing && tenant.role === "owner";
+  const settingsIsAdmin = !viewing && (tenant.role === "owner" || tenant.role === "admin");
+  const settingsAccess = viewing ? null : myAccess;
+  // Accounts and Admin moved INTO this rail, so it has to stay up on their pages too or
+  // clicking one would throw you straight back to the nav you just left. The settings half is
+  // the IDENTICAL predicate the body render uses — copy it if you change either.
+  //
+  // !gateLocked is load-bearing: a billing-locked tenant clicking Settings gets BillingGate,
+  // not SettingsShell, so swapping the rail there would hand them a sub-nav whose every item
+  // is inert AND hide the padlocked workspace items that explain why.
+  const settingsMode = !gateLocked && (
+    (activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))))
+    || activeTab === "accounts" || activeTab === "admin");
+  const settingsTabs = settingsMode
+    ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess })
+    : null;
+  // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
+  // can be a slug this build has never heard of — a bookmark to a renamed sub-tab, or a
+  // Client Setup step whose link_page an operator typed by hand. Both must highlight the tab
+  // the BODY is actually showing, which is the first one, rather than highlighting nothing.
+  //
+  // ⚠️ Gated on activeTab === "settings", not merely on settingsMode. Accounts and Admin put
+  // this rail up too, and without the guard the fallback-to-first-tab would light Structures
+  // while navItem separately lit Accounts — two highlighted rows, neither of them wrong on
+  // its own terms, and no way for a reader to tell which one they are on.
+  const onSettingsPage = settingsTabs && activeTab === "settings";
+  const settingsSub = onSettingsPage
+    ? (settingsTabs.some((t) => t[0] === (sub || "")) ? sub : settingsTabs[0][0])
+    : null;
+  const settingsActive = onSettingsPage ? (settingsTabs.find((t) => t[0] === settingsSub) || settingsTabs[0]) : null;
+  // Where Back goes: the last workspace page you were on, else the same landing page a bare
+  // /portal login gets. Never history.back() — a pasted deep link has no previous entry, and
+  // the ?view= reconciliation in the popstate handler would have to be reasoned about for it.
+  const backTab = beforeSettings.current || ssFallbackTab(myAccess);
+  const setItem = ([id, label]) => (
+    <a key={id} href={ssPagePath("settings", id)} className={settingsSub === id ? "active" : ""}
+      aria-current={settingsSub === id ? "page" : undefined} title={label}
+      onClick={ssNavClick(() => navigate("settings", id))}>
+      {SETTINGS_ICONS[id]}
+      <span className="lbl">{label}</span>
+    </a>
+  );
+  // One pass over the list, emitting a heading wherever the group CHANGES to a non-null
+  // value. Structures/Options/Colors/Designer carry a null group and so head the rail with no
+  // label over them at all — Carolyn: they "aren't grouped … they have their own nav on the
+  // side". Each run is its own <nav> so the groups keep the rail's existing spacing.
+  const settingsGroups = [];
+  (settingsTabs || []).forEach((t) => {
+    const last = settingsGroups[settingsGroups.length - 1];
+    if (!last || last.group !== t[3]) settingsGroups.push({ group: t[3], items: [t] });
+    else last.items.push(t);
+  });
 
   return (
     <div className="ss-shell">
-      <aside className="ss-side">
+      {/* ONE rail, two sets of contents. Both are always in the markup and CSS picks which is
+          shown (.ss-side-settings), so there is no resize listener, no second render path,
+          and the <900px icon-rail media query applies to whichever is up without knowing
+          anything about modes. .ss-brand and .ss-foot are OUTSIDE both sets: the logo, the
+          account switcher, Support and Sign Out belong to the app, not to a section — and an
+          operator mid-view-as must never lose the Exit control by walking into Settings. */}
+      <aside className={"ss-side" + (settingsMode ? " ss-side-settings" : "")}>
         {/* The real lockup, at full colour on white — which is why the rail is white. The
             wordmark IS the product name, so the name is no longer typed out beside it. */}
         <div className="ss-brand">
           <img className="ss-logo" src="/assets/logo.png" alt="Structure Studio" />
         </div>
 
+        {/* ── WORKSPACE RAIL ─────────────────────────────────────────────────────────
+            display:contents, so every group below stays a DIRECT flex child of .ss-side and
+            the rail's spacing (and the .ss-spacer push-down) is unchanged by the wrapper. */}
+        <div className="ss-ws-nav">
         <div className="ss-navlabel">Workspace</div>
         <nav className="ss-nav">
           {navItem("designer", "Designer")}
@@ -1364,20 +1495,22 @@ function Dashboard({ session }) {
         </nav>
         </>)}
 
-        {(isOperator || canProjects) && (<>
+        {/* ACCOUNTS AND ADMIN LEFT THIS GROUP on 2026-09-11 (Carolyn) — they are operator
+            CONSOLES, configuration rather than day-to-day work, and they live in the Settings
+            rail now under its own Operator heading. PROJECTS IS IN BOTH RAILS, which she
+            asked for by name: it is the internal bug board and roadmap, work you do between
+            other work, so it stays here AND appears there as a shortcut.
+            Gating is untouched — the same three expressions, in both places. */}
+        {canProjects && !supportView && (<>
         {/* Labelled for whoever is reading it: a CSM team member with Projects and nothing
             else is not an "Operator", and calling the group that would tell them they hold
             access to every builder's account, which they do not. */}
         <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
         <nav className="ss-nav">
-          {/* Accounts is the switcher and support needs it — it is how they reach the next
-              builder. Admin and Projects are OUR consoles (delete_client lives in one, our
-              internal bug board is the other) and a support account standing in a builder's
-              shoes has no business in either. ssClampTab refuses the routes too, so a typed
-              URL lands on a real page rather than a hidden-but-reachable one. */}
-          {isOperator && navItem("accounts", "Accounts")}
-          {isOperator && !supportView && navItem("admin", "Admin")}
-          {canProjects && !supportView && navItem("projects", "Projects")}
+          {/* Projects is OUR console (the internal bug board), so a support account standing
+              in a builder's shoes has no business in it. ssClampTab refuses the route too, so
+              a typed URL lands on a real page rather than a hidden-but-reachable one. */}
+          {navItem("projects", "Projects")}
         </nav>
         </>)}
 
@@ -1392,6 +1525,40 @@ function Dashboard({ session }) {
             {navItem("settings", "Settings")}
           </nav>
         )}
+        </div>{/* /.ss-ws-nav */}
+
+        {/* ── SETTINGS RAIL ──────────────────────────────────────────────────────────────
+            Rendered ALWAYS and hidden by CSS, never conditionally: with both sets in the
+            markup the mode is one class on the <aside> rather than a branch, and the
+            collapsed icon-rail media query needs to know nothing about any of this. */}
+        <div className="ss-set-nav">
+          <a className="ss-back" href={ssPagePath(backTab, null)}
+            title={`Back to ${(TAB_META[backTab] || [backTab])[0]}`}
+            onClick={ssNavClick(() => navigate(backTab))}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+            <span>Back to Workspace</span>
+          </a>
+          {settingsGroups.map((g) => (
+            <React.Fragment key={g.group || "_top"}>
+              {g.group && <div className="ss-navlabel">{g.group}</div>}
+              <nav className="ss-nav">{g.items.map(setItem)}</nav>
+            </React.Fragment>
+          ))}
+          {/* The operator consoles, moved here from the workspace rail. SAME three gates as
+              before — Accounts is the switcher and support needs it (it is how they reach the
+              next builder), while Admin holds delete_client and Projects is our bug board, so
+              a support account standing in a builder's shoes gets neither. ssClampTab refuses
+              those routes independently; this only decides what is drawn. */}
+          {(isOperator || (canProjects && !supportView)) && (<>
+            <div className="ss-navlabel">{isOperator ? "Operator" : "Internal"}</div>
+            <nav className="ss-nav">
+              {isOperator && navItem("accounts", "Accounts")}
+              {isOperator && !supportView && navItem("admin", "Admin")}
+              {canProjects && !supportView && navItem("projects", "Projects")}
+            </nav>
+          </>)}
+          <div className="ss-spacer"></div>
+        </div>
 
         <div className="ss-foot">
           {/* Operator account switcher — see the pickerOpen hooks above for the design
@@ -1446,10 +1613,10 @@ function Dashboard({ session }) {
           )}
           {/* ⚠️ Not to be confused with `supportView` in this file, which is a support
               OPERATOR viewing a tenant — a role, not this page. Same word, unrelated. */}
-          <button type="button" className="ss-newlink" onClick={() => navigate("support")} title="Support">
+          <a className="ss-newlink" href={ssPagePath("support", null)} onClick={ssNavClick(() => navigate("support"))} title="Support">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2l2.35 6.76H21l-5.32 4.02L17.7 20 12 15.6 6.3 20l2.02-7.22L3 8.76h6.65z"/></svg>
             <span>Support</span>
-          </button>
+          </a>
           {/* Hovering (or focusing/tapping) the identity row reveals a small
               flyout menu above it with Sign Out — no standalone button. */}
           <div className="ss-user-wrap">
@@ -1509,8 +1676,18 @@ function Dashboard({ session }) {
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there
-              is nothing below repeating it. */}
-          <div className="ttl">{(TAB_META[activeTab] || [activeTab])[0]}<span>{(TAB_META[activeTab] || [])[1]}</span></div>
+              is nothing below repeating it.
+
+              In Settings it names the SUB-PAGE, not "Settings": the rail already says which
+              section you are in, and the header's job is to say where you actually are. So
+              this reads "Colors — Paint, shingle, and metal palettes" where it used to read
+              "Settings — Structures, options, colors, …" over a gradient banner saying the
+              same thing again over a caption line saying it a third time. Accounts and Admin
+              are in the Settings rail but are ordinary pages, so they keep TAB_META. */}
+          <div className="ttl">
+            {settingsActive ? settingsActive[1] : (TAB_META[activeTab] || [activeTab])[0]}
+            <span>{settingsActive ? settingsActive[2] : (TAB_META[activeTab] || [])[1]}</span>
+          </div>
           {viewing && (
             <div title="You are acting as this builder. Changes you make here are live in THEIR account. Design statuses show the last cached value — the live GHL refresh only runs for the tenant's own login."
               style={{ display: "flex", alignItems: "center", gap: 10, background: "#FEE2E2", border: "1px solid #DC2626", borderRadius: 9, padding: "6px 12px", fontSize: 12.5, fontWeight: 700, color: "#991B1B", whiteSpace: "nowrap" }}>
@@ -1855,9 +2032,14 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))) && (
               <SettingsShell key={"t-" + effClientId} clientId={effClientId}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
-                isOwner={!viewing && tenant.role === "owner"}
-                isAdmin={!viewing && (tenant.role === "owner" || tenant.role === "admin")}
-                access={viewing ? null : myAccess}
+                /* The SAME three values the rail's tab list is built from — see
+                   settingsIsOwner above. They were computed inline here until the rail
+                   existed; leaving them inline would have meant two derivations of "is this
+                   an owner", and the first time they disagreed an owner would see Commissions
+                   in the rail and an empty body when they clicked it. */
+                isOwner={settingsIsOwner}
+                isAdmin={settingsIsAdmin}
+                access={settingsAccess}
                 /* MY VIEW settings are the OPERATOR's own even in view-as: they are the
                    person looking at the screen, and borrowing the viewed builder's owner's
                    layout would be both wrong and a small information leak. So this is NOT

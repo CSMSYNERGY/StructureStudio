@@ -2822,45 +2822,7 @@ function OptionsGroup({ title, hint, children }) {
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
-  const TABS = [
-    ["structures", "Structures", "Building styles, sizes, and base prices"],
-    ["options", "Options", "Add-on items and rates"],
-    ["colors", "Colors", "Paint, shingle, and metal palettes"],
-    ["designer", "Designer", "How your styles look in the designer — including their 3D shape"],
-    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
-    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
-    // client: "we need to have everything about the company ... the EIN, all that stuff needs
-    // to be in here. Their terms and conditions, company, branding, company information").
-    // Her structure is Branding / Company / Team, and Team already exists below.
-    ["company", "Company", "Your legal business details, address, and the terms printed on estimates"],
-    ["connection", "CRM Connection", "CRM credentials and pipeline mapping"],
-    ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings"],
-    ["email", "Email Sending", "Send estimates and invoices from your own email domain"],
-    ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business"],
-    ...(isOwner ? [["commissions", "Commissions", "How reps earn — structure, earned-on date, and payout schedule"]] : []),
-    ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates"]] : []),
-    ["billing", "Billing", "Your StructureStudio subscription"],
-    // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
-    // "all of these settings for contact cards, the pipeline cards, and the default one, I
-    // think should add, in settings, add another tab ... for structure studio settings."
-    //
-    // Everything above configures the BUSINESS; this configures the person looking at the
-    // screen, which is why it has no SETTINGS_TAB_AREA entry -- there is no area that could
-    // sensibly withhold someone's own default view from them, and a sales rep who cannot see
-    // Structures still gets to choose how their own Pipeline tab opens.
-    ["myview", "My View", "How the portal opens for you — your settings, not the business's"],
-  ]
-  // Per-area sub-tabs (migration 100). Owners, admins and operators are never filtered —
-  // an owner shut out of their own Settings by a permission bug is the failure this feature
-  // must not have. For everyone else each card appears only if they can read its area, which
-  // is what makes granting one person Structures actually produce a usable Settings page
-  // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
-  // the server refuses is still refused — this only decides what is worth showing.
-  .filter(([id]) => {
-    if (isAdmin || !access) return true;
-    const area = SETTINGS_TAB_AREA[id];
-    return area ? ssCanRead(access, area) : true;
-  });
+  const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -2871,37 +2833,21 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // compares p.sub against this value) rewrites the bad slug out of the address bar too.
   const rawSub = (onSub ? subProp : subState) || TABS[0][0];
   const sub = TABS.some((t) => t[0] === rawSub) ? rawSub : TABS[0][0];
-  const active = TABS.find((t) => t[0] === sub) || TABS[0];
   return (
     <div>
-      {/* Banner — everything below it is Settings */}
-      <div style={{ background: "linear-gradient(135deg, #3D3672 0%, #1B7895 100%)", borderRadius: 14, padding: "20px 22px", color: "#FFF", marginBottom: 4 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 44, height: 44, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.28)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#FFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </div>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.15 }}>Settings</div>
-            <div style={{ fontSize: 12.5, color: "#D6E4F0", marginTop: 2 }}>Everything that configures your business — structures, options, colors, branding &amp; estimate details, your CRM connection, and billing.</div>
-          </div>
-        </div>
-      </div>
-      {/* Sub-navigation — underline tabs on the white area (navigation feel, not buttons) */}
-      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
-        {TABS.map(([id, label]) => (
-          <button key={id} type="button" onClick={() => setSub(id)}
-            style={{
-              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-              padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
-              color: sub === id ? ACCENT : "#64748B",
-              borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-              marginBottom: -2,
-            }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+      {/* NO banner and NO tab strip here any more (2026-09-11). The fourteen sub-pages ARE
+          the left rail now, and the topbar names the one you are on — so this component is
+          purely the body of the selected sub-page.
+
+          Three things used to say "Settings" on this screen at once: the topbar, a gradient
+          banner repeating it word for word, and a caption line under the tabs. The rail
+          replaced the tabs, the topbar absorbed the caption, and the banner had nothing left
+          to add.
+
+          The `active` tuple this component used to hold went with the caption. The topbar
+          derives its own from the SAME list and the SAME clamp — see settingsTabs/settingsSub
+          in 12-shell.jsx, mirrored deliberately so the rail and the body can never disagree
+          about which sub-page is open. */}
       {/* Real-Time Pricing renders UNDER the pricing card (Carolyn 2026-08-27: "will you
           build another block down here … underneath here that has the real time pricing in
           it"). The component gates itself on rtpUnlocked — not-entitled renders a compact
