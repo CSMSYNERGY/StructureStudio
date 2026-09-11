@@ -643,6 +643,13 @@ const SETTINGS_TAB_AREA = {
   // new row in _shared/access.ts AND its hand-maintained SQL twin `area_level_for()`, for a
   // split that grants nothing new.
   company: "settings_branding",
+  // The three tabs Company absorbed from Team on 2026-09-11. They keep settings_team, which
+  // is the area that guarded them when they were cards INSIDE the Team page — so this is a
+  // relocation in the UI and not a change of access. Crews and Drivers are additionally
+  // entitlement-gated on scheduling, in ssCompanyTabs, exactly as they were.
+  locations: "settings_team",
+  crews: "settings_team",
+  drivers: "settings_team",
   connection: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
@@ -709,15 +716,19 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     ["options", "Options", "Add-on items and rates", null],
     ["colors", "Colors", "Paint, shingle, and metal palettes", null],
     ["designer", "Designer", "How your styles look in the designer — including their 3D shape", null],
-    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced", "Business"],
-    // COMPANY, split out of Branding 2026-09-04 (Carolyn @28:55, mid-onboarding of a real
-    // client: "we need to have everything about the company ... the EIN, all that stuff needs
-    // to be in here. Their terms and conditions, company, branding, company information").
-    // Her structure is Branding / Company / Team, and Team already exists below.
-    ["company", "Company", "Your legal business details, address, and the terms printed on estimates", "Business"],
-    // Team joins Branding and Company under Business — Carolyn's own grouping, said in that
-    // same breath. It keeps the admin/settings_team gate it has always had.
-    ...(isAdmin || ssCanRead(access, "settings_team") ? [["team", "Team", "People, access, and commission rates", "Business"]] : []),
+    // COMPANY is a HUB, not a page (Carolyn 2026-09-11). Branding and Team used to be rail
+    // items of their own; they are top tabs inside Company now, along with Locations, Crews
+    // and Drivers — see ssCompanyTabs below, which is the list that renders in there. So this
+    // one rail entry stands for six sub-pages, and it sits in the leading ungrouped run
+    // rather than under a "Business" heading, because a heading over a single item is noise.
+    // ⚠️ Gated as a HUB — visible if ANY of its six tabs is readable — and NOT by
+    // SETTINGS_TAB_AREA.company, which is settings_branding. Team used to be its own rail
+    // item on settings_team; folding it in here under the branding area alone would have left
+    // someone granted only Team with no way to reach it: the rail would show them My View and
+    // nothing else, while /portal/settings/team still rendered perfectly for anyone who
+    // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
+    ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team"))
+      ? [["company", "Company", "Your business details, branding, team, locations, crews and drivers", null]] : []),
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping", "Connections"],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", "Connections"],
     ["email", "Email Sending", "Send estimates and invoices from your own email domain", "Connections"],
@@ -748,6 +759,45 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
   // instead of an empty shell. `access` is null until the status call lands, and a sub-tab
   // the server refuses is still refused — this only decides what is worth showing.
   .filter(([id]) => {
+    if (isAdmin || !access) return true;
+    // COMPANY gated itself above, as a hub over six areas. It must be exempt here or this
+    // line silently undoes that: SETTINGS_TAB_AREA.company is settings_branding, so a
+    // settings_team holder had the entry added by the spread and taken straight back out —
+    // rail showed My View alone, and Team was unreachable for the one person it was granted to.
+    if (id === "company") return true;
+    const area = SETTINGS_TAB_AREA[id];
+    return area ? ssCanRead(access, area) : true;
+  });
+}
+
+// ── Inside Company ───────────────────────────────────────────────────────────────────────
+// Company's own TOP navigation (Carolyn 2026-09-11, reworking the rail she had just seen:
+// "I didn't mean to move ALL of them in their own navs ... I want to create some top
+// navigation inside company"). Her order, verbatim: Business Details, Branding, Team,
+// Locations, Crews, Drivers.
+//
+// ⚠️ THESE ARE REAL SETTINGS SLUGS, not a nested route. /portal/settings/branding and
+// /portal/settings/team are links people hold — the Client Setup checklist points at them —
+// and ssParsePath only reads two path segments anyway, so nesting them would have meant both
+// a router change and a pile of dead bookmarks. They stay flat: the RAIL draws one item
+// (Company) and highlights it for any of these, while this list draws the tabs inside.
+//
+// `company` is in both lists on purpose — it is the rail's label ("Company") and this list's
+// first tab ("Business Details"), which is the page it has always been.
+//
+// Locations, Crews and Drivers were all INSIDE the old Team page and all keep its area, so
+// nobody's access changes shape: a person who could reach Team can reach exactly the same
+// three cards, now as tabs. Crews and Drivers additionally keep their scheduling entitlement
+// gate — they were behind `schedUnlocked` in Team and they are behind it here.
+function ssCompanyTabs({ isAdmin = false, access = null, schedUnlocked = false } = {}) {
+  return [
+    ["company", "Business Details", "Your legal business details, address, and the terms printed on estimates"],
+    ["branding", "Branding", "Your customer link's look & feel, and what customers see priced"],
+    ["team", "Team", "People, access, and commission rates"],
+    ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
+    ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
+    ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),
+  ].filter(([id]) => {
     if (isAdmin || !access) return true;
     const area = SETTINGS_TAB_AREA[id];
     return area ? ssCanRead(access, area) : true;

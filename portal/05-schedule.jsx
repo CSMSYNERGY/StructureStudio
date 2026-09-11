@@ -3591,7 +3591,15 @@ function SchedLoadHeaderEditor({ l, drivers, nameOf, busy, onSave, onCancel }) {
 // and covers one or more TERRITORIES: broad corridors described in words ("Hwy 50 west of
 // Linn to Kansas City, north to the Iowa line"), never city lists. driver_profiles is
 // service-role only, so everything goes through portal-schedule (admin-gated server-side).
-function DriversTerritoriesCard() {
+// SPLIT INTO TWO TABS on 2026-09-11 (Carolyn): Company -> Crews and Company -> Drivers.
+// ONE component still, with a `section` prop, rather than two — the same shape SettingsView
+// uses for branding/company. Every piece of state here is shared (crews, drivers, territories
+// and the team roster all arrive in ONE list_drivers call, and the driver rows reference the
+// territory rows), so splitting the component would mean two components making the same call
+// and a driver edit not seeing a territory added seconds earlier in the other tab.
+function DriversTerritoriesCard({ section = "all" }) {
+  const showCrews = section === "all" || section === "crews";
+  const showDrivers = section === "all" || section === "drivers";
   const [data, setData] = useState(null);      // { team, drivers, territories, crews }
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -3700,17 +3708,19 @@ function DriversTerritoriesCard() {
 
   return (
     <div style={S.card}>
-      <CardHead title="Crews, drivers & territories" count={null}
+      <CardHead title={showCrews && showDrivers ? "Crews, drivers & territories" : (showCrews ? "Build crews" : "Drivers & territories")} count={null}
         right={<button type="button" onClick={load} style={S.btn("#F1F5F9", "#334155")}>↻ Refresh</button>} />
       <p style={{ fontSize: 12, color: "#64748B", fontWeight: 600, lineHeight: 1.5, margin: "0 0 12px" }}>
-        <strong>Crews</strong> are who builds — the Build Schedule calendar flips between them.
-        <strong> Drivers</strong> power the Delivery Schedule: deck length sets what fits on their loads, max width caps what they can haul, territories route the right deliveries to them.
+        {showCrews && <><strong>Crews</strong> are who builds — the Build Schedule calendar flips between them.</>}
+        {showCrews && showDrivers && " "}
+        {showDrivers && <><strong>Drivers</strong> power the Delivery Schedule: deck length sets what fits on their loads, max width caps what they can haul, territories route the right deliveries to them.</>}
       </p>
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {data === null && <p style={{ fontSize: 13, color: "#64748B", padding: 8 }}>Loading…</p>}
 
       {data && (<>
+        {showCrews && (<>
         {/* ── Build crews (094) — one line each; Edit expands in place ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 8px" }}>
           <span style={{ ...S.lbl, marginBottom: 0 }}>Build crews</span>
@@ -3762,6 +3772,8 @@ function DriversTerritoriesCard() {
           </div>
         )}
 
+        </>)}
+        {showDrivers && (<>
         {/* ── Territories ── */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "2px 0 8px" }}>
           <span style={{ ...S.lbl, marginBottom: 0 }}>Delivery territories</span>
@@ -3912,6 +3924,7 @@ function DriversTerritoriesCard() {
             ))}
           </div>
         )}
+        </>)}
       </>)}
     </div>
   );

@@ -1399,18 +1399,34 @@ function Dashboard({ session }) {
   // while navItem separately lit Accounts — two highlighted rows, neither of them wrong on
   // its own terms, and no way for a reader to tell which one they are on.
   const onSettingsPage = settingsTabs && activeTab === "settings";
-  const settingsSub = onSettingsPage
-    ? (settingsTabs.some((t) => t[0] === (sub || "")) ? sub : settingsTabs[0][0])
+  // Company's six tabs are settings slugs in their own right, so the rail has to recognise
+  // them — /portal/settings/branding must light COMPANY and leave the caption alone, not fall
+  // through the clamp to Structures. The same list the page itself renders, same gates.
+  const companyTabs = settingsMode
+    ? ssCompanyTabs({ isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
     : null;
-  const settingsActive = onSettingsPage ? (settingsTabs.find((t) => t[0] === settingsSub) || settingsTabs[0]) : null;
+  const companyTab = onSettingsPage ? companyTabs.find((t) => t[0] === (sub || "")) : null;
+  const settingsSub = onSettingsPage
+    ? (companyTab ? "company"
+      : (settingsTabs.some((t) => t[0] === (sub || "")) ? sub : settingsTabs[0][0]))
+    : null;
+  // The topbar names the page you are actually on, so inside Company it names the TAB —
+  // "Branding", "Crews" — rather than repeating "Company" over all six.
+  const settingsActive = onSettingsPage
+    ? (companyTab || settingsTabs.find((t) => t[0] === settingsSub) || settingsTabs[0])
+    : null;
   // Where Back goes: the last workspace page you were on, else the same landing page a bare
   // /portal login gets. Never history.back() — a pasted deep link has no previous entry, and
   // the ?view= reconciliation in the popstate handler would have to be reasoned about for it.
   const backTab = beforeSettings.current || ssFallbackTab(myAccess);
+  // Company opens on the first tab the READER can see, not on a hardcoded "company": someone
+  // granted only settings_team has no Business Details tab, and sending them to that slug
+  // would land them on a page with no matching branch. Everything else targets its own slug.
+  const setTarget = (id) => (id === "company" && companyTabs && companyTabs.length ? companyTabs[0][0] : id);
   const setItem = ([id, label]) => (
-    <a key={id} href={ssPagePath("settings", id)} className={settingsSub === id ? "active" : ""}
+    <a key={id} href={ssPagePath("settings", setTarget(id))} className={settingsSub === id ? "active" : ""}
       aria-current={settingsSub === id ? "page" : undefined} title={label}
-      onClick={ssNavClick(() => navigate("settings", id))}>
+      onClick={ssNavClick(() => navigate("settings", setTarget(id)))}>
       {SETTINGS_ICONS[id]}
       <span className="lbl">{label}</span>
     </a>

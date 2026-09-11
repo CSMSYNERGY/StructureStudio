@@ -2819,10 +2819,68 @@ function OptionsGroup({ title, hint, children }) {
   );
 }
 
+// ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
+// Carolyn 2026-09-11: "I want to create some top navigation inside company. The first tab is
+// business details, next branding, then we want team, then Locations and move the locations
+// from Team to that tab, then next is Crews and move the crews there, then Drivers with
+// delivery territories and drivers."
+//
+// So Branding and Team stopped being rail items, and Team gave up three of the four cards it
+// was carrying: Locations, Crews and Drivers each became a tab. What is left under Team is
+// the people-and-rates grid, which is what the name always meant.
+//
+// The bar is the underline strip Settings itself used to wear before the rail replaced it —
+// kept here because within ONE page it is a sub-navigation, which is exactly what it is good
+// at, and dropped from Settings because across fourteen pages it was a wall.
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
+  // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
+  // settings_team has no Business Details tab, so the rail's Company link cannot be the
+  // `company` slug for them — it points at their first visible tab instead (see 12-shell).
+  // This is the belt to that braces: an unclamped `company` would match no branch below and
+  // render an empty page under a caption that confidently named a different tab.
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  const active = tabs.find((t) => t[0] === sub) || tabs[0];
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+        {tabs.map(([id, label]) => (
+          <button key={id} type="button" onClick={() => onSub(id)}
+            aria-current={sub === id ? "page" : undefined}
+            style={{
+              background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+              padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+              color: sub === id ? ACCENT : "#64748B",
+              borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+              marginBottom: -2,
+            }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
+      {/* Business Details and Branding are the SAME component in two sections. Its form state
+          covers every field whichever section renders and its save is global, so the two tabs
+          cannot save half a form between them — see the note at the top of SettingsView. */}
+      {sub === "company" && <SettingsView section="company" />}
+      {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
+      {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
+      {sub === "locations" && <LocationsCard />}
+      {/* Crews and Drivers are two sections of one component — it holds them together because
+          they arrive in one call and reference each other. The tabs only exist when the
+          scheduling entitlement is on (ssCompanyTabs), which is the gate they had in Team. */}
+      {sub === "crews" && <DriversTerritoriesCard section="crews" />}
+      {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
+    </div>
+  );
+}
+
 function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
+  // Company's six tabs are valid settings slugs too — the clamp below has to know them or
+  // /portal/settings/branding, a link people hold, would fall back to Structures.
+  const companyTabs = ssCompanyTabs({ isAdmin, access, schedUnlocked });
   // An unknown slug in the URL falls back to the first tab rather than rendering nothing.
   // `|| TABS[0][0]` only catches null/empty — a truthy-but-unknown slug (a typo, or a bookmark to
   // a renamed sub-tab like /portal/settings/color) survived as-is, and since every content branch
@@ -2832,7 +2890,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
   // Clamp the slug itself so the fallback is real, and so Dashboard's URL-normalise effect (which
   // compares p.sub against this value) rewrites the bad slug out of the address bar too.
   const rawSub = (onSub ? subProp : subState) || TABS[0][0];
-  const sub = TABS.some((t) => t[0] === rawSub) ? rawSub : TABS[0][0];
+  const knownSub = (x) => TABS.some((t) => t[0] === x) || companyTabs.some((t) => t[0] === x);
+  const sub = knownSub(rawSub) ? rawSub : TABS[0][0];
   return (
     <div>
       {/* NO banner and NO tab strip here any more (2026-09-11). The fourteen sub-pages ARE
@@ -2880,11 +2939,13 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {/* 3D Style Calibration used to sit at the top of the Designer TAB. It is setup, not
           design work, so it lives here now; the tab itself no longer receives setup3d. */}
       {sub === "designer" && <DesignerSettings clientId={clientId} setup3d={setup3d} />}
-      {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
-      {/* Same component, different section. SettingsView's form state covers every field
-          whichever section renders and its save is global, so the two tabs cannot save
-          half a form between them — see the note at the top of SettingsView. */}
-      {sub === "company" && <SettingsView section="company" />}
+      {/* COMPANY is a hub with its own top navigation — six sub-pages behind one rail item.
+          Every one of them is still a real /portal/settings/<slug>, so the bookmarks and the
+          Client Setup links that point at branding and team are untouched. */}
+      {companyTabs.some((t) => t[0] === sub) && (
+        <CompanyShell sub={sub} onSub={setSub} tabs={companyTabs} clientId={clientId}
+          viewingLabel={viewingLabel} />
+      )}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
           open, and /portal/settings/quickbooks is a link people actually have. */}
@@ -2899,9 +2960,6 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {/* Drivers & territories feed the Delivery Schedule — same entitlement gate as the
-          schedule tabs (operator, or the tenant's schedule_builds subscription). */}
-      {sub === "team" && (<><LocationsCard />{schedUnlocked && <DriversTerritoriesCard />}<CommissionTeam viewingLabel={viewingLabel} /></>)}
       {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
       {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
     </div>
