@@ -870,25 +870,36 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
         </div>
       )}
 
-      {/* ── pending / failed: DNS records + verification ── */}
+      {/* ── pending / failed: DNS records + verification ──
+          BRAND COLOURS, not amber (Carolyn 2026-09-11: "Does this need to be yellow? I'd like
+          it to follow the brand colors"). #EEF2FF / #C7D2FE / ACCENT is the pairing the portal
+          already uses wherever it wants a brand-toned panel — STATUS_COLORS.sent,
+          INV_SALE_COLORS, the "checkout isn't switched on yet" notice, every selected row.
+
+          Three things deliberately did NOT go purple with the body copy. A `failed` lastError
+          is a real failure and reads RED now, where before it was amber text on an amber card
+          — the one thing on this screen that should not blend in. The ★ marker, the MX
+          priority and the verification result keep a contrasting tone (#1B7895, the brand's
+          teal-blue) so they still stand off the panel; the MX priority in particular is a
+          number somebody has to retype, not decoration. */}
       {platformReady && (st === "pending" || st === "failed") && (
-        <div style={{ ...S.card, background: "#FFFBEB", border: "1px solid #FDE68A" }}>
-          <div style={{ ...S.h2, color: "#92400E" }}>Add these records at your DNS host</div>
+        <div style={{ ...S.card, background: "#EEF2FF", border: "1px solid #C7D2FE" }}>
+          <div style={{ ...S.h2, color: ACCENT }}>Add these records at your DNS host</div>
           {st === "failed" && status.lastError && (
-            <div style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>{status.lastError}</div>
+            <div style={{ fontSize: 12.5, color: "#B91C1C", fontWeight: 600, marginBottom: 10 }}>{status.lastError}</div>
           )}
-          <p style={{ fontSize: 12.5, color: "#92400E", marginBottom: 12, lineHeight: 1.5 }}>
+          <p style={{ fontSize: 12.5, color: ACCENT, marginBottom: 12, lineHeight: 1.5 }}>
             These records prove to inbox providers that {status.domain || "your domain"} really is
             yours. Add them wherever your DNS is managed (Cloudflare, GoDaddy, your web host),
             then check verification below.
           </p>
           {dns.length === 0 && (
-            <p style={{ fontSize: 12.5, color: "#92400E", fontWeight: 600 }}>
+            <p style={{ fontSize: 12.5, color: ACCENT, fontWeight: 600 }}>
               The records are being prepared — check again in a moment.
             </p>
           )}
           {dnsAdvisory.length > 0 && (
-            <p style={{ fontSize: 12, color: "#92400E", marginTop: 10, marginBottom: 0, lineHeight: 1.55 }}>
+            <p style={{ fontSize: 12, color: ACCENT, marginTop: 10, marginBottom: 0, lineHeight: 1.55 }}>
               ★ The <strong>_dmarc</strong> record is strongly recommended but not required to
               verify. Without it many inboxes — Gmail especially — send mail from a new domain
               straight to spam. <strong>p=none</strong> only asks for reports; it never blocks
@@ -896,7 +907,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
             </p>
           )}
           {dnsRows.length > 0 && (
-            <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #FDE68A", borderRadius: 8 }}>
+            <div style={{ overflowX: "auto", background: "#FFF", border: "1px solid #C7D2FE", borderRadius: 8 }}>
               <table style={{ borderCollapse: "collapse", width: "100%" }}>
                 <thead>
                   <tr>
@@ -912,7 +923,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                     <tr key={i}>
                       <td style={{ ...S.td, textAlign: "center" }}>
                         {r.advisory
-                          ? <span title="Recommended, not checked by us" style={{ color: "#B45309", fontWeight: 800 }}>★</span>
+                          ? <span title="Recommended, not checked by us" style={{ color: "#1B7895", fontWeight: 800 }}>★</span>
                           : r.verified
                           ? <span title="Verified" style={{ color: "#16A34A", fontWeight: 800 }}>✓</span>
                           : <span title="Not verified yet" style={{ color: "#CBD5E1" }}>•</span>}
@@ -922,7 +933,7 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                         {/* An MX WITHOUT its priority cannot be created — the tenant DNS panel refuses
                             it, so the number has to sit on screen next to the type. */}
                         {r.priority != null && (
-                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#B45309" }}>
+                          <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#1B7895" }}>
                             priority {r.priority}
                           </span>
                         )}
@@ -943,30 +954,30 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
             <button type="button" onClick={verify} disabled={busy}
-              style={{ ...S.btn("#92400E", "#FFF"), opacity: busy ? 0.6 : 1 }}>
+              style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.6 : 1 }}>
               {busy ? "Checking…" : "Check verification"}
             </button>
             {webmasterMailto && (
               <a href={webmasterMailto}
                 title="Opens your email program with the records already written out"
-                style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", textDecoration: "none", display: "inline-block" }}>
+                style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #C7D2FE", textDecoration: "none", display: "inline-block" }}>
                 ✉️ Email this to my webmaster
               </a>
             )}
-            {checkNote && <span style={{ fontSize: 12.5, color: "#B45309", fontWeight: 600 }}>{checkNote}</span>}
+            {checkNote && <span style={{ fontSize: 12.5, color: "#1B7895", fontWeight: 600 }}>{checkNote}</span>}
           </div>
           {webmasterMailto && (
-            <p style={{ fontSize: 12, color: "#92400E", marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 12, color: ACCENT, marginTop: 8, marginBottom: 0, lineHeight: 1.5 }}>
               Not the person who manages your website? The button above opens your email program with
               every record written out, ready to send to whoever does.
             </p>
           )}
-          <p style={{ fontSize: 12, color: "#92400E", marginTop: 12, marginBottom: 0 }}>
+          <p style={{ fontSize: 12, color: ACCENT, marginTop: 12, marginBottom: 0 }}>
             DNS changes can take up to an hour to appear — keep this tab open and check again.
           </p>
           <div style={{ marginTop: 10 }}>
             <button type="button" onClick={disconnect} disabled={busy}
-              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#B45309", textDecoration: "underline" }}>
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, color: "#475569", textDecoration: "underline" }}>
               Start over with a different domain
             </button>
           </div>
