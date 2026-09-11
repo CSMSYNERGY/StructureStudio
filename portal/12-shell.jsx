@@ -1558,8 +1558,13 @@ function Dashboard({ session }) {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
             <span>Back to Workspace</span>
           </a>
+          {/* Keyed by the run's FIRST SLUG, not by its group name. There is more than one
+              ungrouped run now — the leading Structures/Options/Colors/Designer/Company block
+              and Billing further down — so keying on `g.group || "_top"` gave two siblings the
+              same key, which React treats as a duplicate and reconciles wrongly. A slug is
+              unique by construction. */}
           {settingsGroups.map((g) => (
-            <React.Fragment key={g.group || "_top"}>
+            <React.Fragment key={g.items[0][0]}>
               {g.group && <div className="ss-navlabel">{g.group}</div>}
               <nav className="ss-nav">{g.items.map(setItem)}</nav>
             </React.Fragment>

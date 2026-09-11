@@ -2873,6 +2873,20 @@ function ColorsShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   );
 }
 
+// ── Billing: one rail item, two tabs ─────────────────────────────────────────────────────
+// ⚠️ ONE <BillingView>, section as a PROP — see the note on that component. Its single status
+// call carries the plans, the subscriptions AND the wallet, so three of anything here would
+// be two wasted round trips and a tab switch that re-fetched for nothing.
+function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      <BillingView viewingLabel={viewingLabel} section={sub === "wallet" ? "wallet" : "subscription"} />
+    </div>
+  );
+}
+
 function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
@@ -2987,7 +3001,9 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           rather than vanishing — a rep should be able to see that texting is coming. */}
       {sub === "sms" && <SmsMessagingView clientId={clientId} viewingLabel={viewingLabel}
         canEdit={isAdmin || ssCanWrite(access, "settings_billing")} />}
-      {sub === "billing" && <BillingView viewingLabel={viewingLabel} />}
+      {hubs.billing.some((t) => t[0] === sub) && (
+        <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
+      )}
       {sub === "myview" && <MyViewSettings prefs={prefs} onSaved={onPrefsSaved} />}
     </div>
   );

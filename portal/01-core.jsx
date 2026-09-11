@@ -639,6 +639,9 @@ const SETTINGS_TAB_AREA = {
   // one screen into three, not a new permission surface.
   shingles: "settings_options",
   metal: "settings_options",
+  // The wallet half of Billing (2026-09-11). Same area as the subscription half — it is the
+  // same money and the same page, split in two for room, not a new permission surface.
+  wallet: "settings_billing",
   branding: "settings_branding",
   // Company (2026-09-04) is the Business Details card lifted out of Branding into its own
   // sub-tab. It writes the SAME client_settings.business_* columns through the SAME global
@@ -744,7 +747,12 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // RealTimePricing's onSeeBilling — plus /portal/settings/billing is a link people hold
     // and SETTINGS_TAB_AREA keys on it. Renaming the id would break every one of them
     // silently, since an unknown slug clamps to the first tab rather than erroring.
-    ["billing", "Subscription", "Your plan, payment method, and invoices", "Billing"],
+    // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
+    // to move the subscriptions and the wallet in there, as we are prepping for logging every
+    // charge for the wallet"). Subscription and Wallet are its tabs — see ssBillingTabs. The
+    // "Billing" GROUP HEADING went with this: a heading over a hub of the same name said the
+    // word twice, and Commissions leaving for Company had already left it standing alone.
+    ["billing", "Billing", "Your subscription, and the wallet that pays for usage", null],
     // MY VIEW is deliberately last and deliberately ungated. Ahsan, 2026-08-28 @42:28:
     // "all of these settings for contact cards, the pipeline cards, and the default one, I
     // think should add, in settings, add another tab ... for structure studio settings."
@@ -831,7 +839,23 @@ function ssColorTabs() {
   ];
 }
 
-// The two settings pages that are HUBS: one rail item each, several tabs inside, every tab a
+// ── Inside Billing ───────────────────────────────────────────────────────────────────────
+// Two tabs, deliberately separate rather than one long page: the wallet is about to grow a
+// charge LEDGER ("we are prepping for logging every charge for the wallet"), which is a table
+// that will fill a screen on its own, and it has nothing to do with which plans are on.
+//
+// `billing` stays the first tab, so /portal/settings/billing — the slug roughly eight CTAs
+// deep-link to, and the one the billing gate sends people at — still lands on Subscription,
+// exactly the page it has always opened. The wallet card moved off that page, but it was
+// never what those links were pointing at.
+function ssBillingTabs() {
+  return [
+    ["billing", "Subscription", "Your plan, payment method, and invoices"],
+    ["wallet", "Wallet", "Prepaid credit for usage — top-ups, auto top-up, and what has been charged"],
+  ];
+}
+
+// The settings pages that are HUBS: one rail item each, several tabs inside, every tab a
 // real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
 // light nothing in the rail or fall back to Structures on a valid URL.
@@ -839,6 +863,7 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
   return {
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
     colors: ssColorTabs(),
+    billing: ssBillingTabs(),
   };
 }
 

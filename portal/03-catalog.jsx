@@ -968,7 +968,20 @@ const TOPUP_PRESETS = [10000, 25000, 50000];
 // from the gateway with the PUBLIC tokenization key) — card data never touches the
 // portal or Supabase; a returning tenant's card on file (gateway vault) is reused
 // so the lightbox only shows the first time.
-function BillingView({ viewingLabel = null }) {
+// SPLIT INTO TWO TABS on 2026-09-11 (Carolyn: "create a new nav called billing then I want to
+// move the subscriptions and the wallet in there, as we are prepping for logging every charge
+// for the wallet" / "I want the subscriptions on their own tab and wallet on another").
+//
+// ⚠️ ONE component, one mount, one `data` read — BillingShell passes `section` to a SINGLE
+// <BillingView>. portal-billing's `status` is the only backend leg here and it carries the
+// plans, the live subscriptions, the discount AND the wallet in one response, so two mounts
+// would mean two identical calls and a tab switch that re-fetched for nothing.
+//
+// The founding-price banner and the "checkout isn't switched on yet" notices ride with
+// SUBSCRIPTION: both are about the plan grid directly beneath them.
+function BillingView({ viewingLabel = null, section = "all" }) {
+  const showWallet = section === "all" || section === "wallet";
+  const showSub = section === "all" || section === "subscription";
   const [data, setData] = useState(null);   // status response; null = loading
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);   // subscribe/cancel in flight
@@ -1341,6 +1354,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
+      {showSub && (<>
       {/* Founding-price banner — scarcity marker above all the pricing. */}
       <div style={{ background: "linear-gradient(90deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <span style={{ fontSize: 20, lineHeight: 1 }}>⭐</span>
@@ -1364,6 +1378,8 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         </div>
       )}
 
+      </>)}
+      {showWallet && (<>
       {/* WALLET — prepaid credit for metered usage. Carolyn, 2026-08-24: "like GHL has a
           wallet on there ... put it in the billing, in the billing portion. A wallet for
           usage cases."
@@ -1524,6 +1540,8 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
         );
       })()}
 
+      </>)}
+      {showSub && (<>
       {/* At-a-glance subscription summary — total spend, status, and next renewal, above the
           per-feature detail. Derived from the same live subscriptions; no extra backend call. */}
       {data && liveSubs.length > 0 && (() => {
@@ -1767,6 +1785,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           Sign up for Synergy CRM →
         </a>
       </div>
+      </>)}
     </div>
   );
 }
