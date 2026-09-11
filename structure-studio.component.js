@@ -12672,9 +12672,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // shape-only feature that quietly wipes cladding is exactly the kind of bug that ships
   // unnoticed, because the roof it was asked to fix does get better.
   //
-  // Colours are left alone for the same reason plus a better one: the customer repaints the
-  // building in the configurator anyway, so a colour averaged off one overcast clip is not
-  // worth overwriting a deliberate choice with.
+  // ⚠️ COLOURS ARE APPLIED NOW, AND THAT REVERSES THIS FUNCTION'S ORIGINAL RULE. What stood
+  // here was: "Colours are left alone for the same reason plus a better one: the customer
+  // repaints the building in the configurator anyway, so a colour averaged off one overcast clip
+  // is not worth overwriting a deliberate choice with."
+  //
+  // That reasoning was about the CUSTOMER, and it is still right about them — a shopper picks
+  // their own colours and nothing here should pre-empt that. But this panel is not the customer.
+  // It is a BUILDER calibrating a style to look like the buildings they actually sell, and
+  // matching them is the entire point of the exercise. Ahsan filmed a brown building with tan
+  // trim and a dark metal roof, and got back near-black walls with white trim, because the model
+  // read the colours, the server returned them, and this line discarded them.
+  //
+  // SAFE TO MERGE, which siding is not, and the difference is the whole reason one is here and
+  // the other still is not: sanitizeD3Spec builds `colors` by copying only keys that pass a HEX
+  // test (styleD3.ts ~176-181), so a colour the model did not report is ABSENT rather than null
+  // and the spread leaves the builder's own value standing. `siding` is the opposite — the
+  // sanitiser always emits it, collapsing anything unrecognised to null, so applying it would
+  // silently reset cladding to plain on every draft.
+  //
+  // Nothing is committed by this: it lands in the editor's DRAFT, the colour fields sit right
+  // below it, and Save is a separate press.
   // 2026-08-25: this no longer carries a siding line at all. VIDEO_SHAPE_PROMPT stopped
   // ASKING for siding, which is a stronger guarantee than a caller remembering not to
   // apply it: a prompt that never mentions cladding cannot return a guess about it. The
@@ -12686,6 +12704,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     spec: {
       ...p.spec,
       roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
+      // Only the keys the model actually read — see the header. An unreported colour is absent
+      // from `d3.colors`, so this cannot blank one the builder set.
+      colors: { ...p.spec.colors, ...((d3 && d3.colors) || {}) },
       wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
       // gableVent and foundation are TOP-LEVEL, so a `roof`-only merge silently drops
       // them and the video draft looks like it read nothing about vents or skids. Each
@@ -12887,7 +12908,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         ok: true,
         msg: `Read ${used} view${used === 1 ? "" : "s"} — ${videoCount} from your walk-around and ${fromPhotos} of your own photos`
           + (back ? `. ${back} more were held back; twelve views is the most one generation reads` : "")
-          + `. Colours and cladding are untouched — preview it, adjust anything, then Save.`,
+          + `. Colours are set from the photos where they read clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
       });
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });

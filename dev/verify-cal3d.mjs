@@ -487,6 +487,21 @@ async function main() {
     (call.photoUrls || []).slice(0, call.videoCount).every((u) => !photoUrlsBefore.includes(u))
     && (call.photoUrls || []).slice(call.videoCount).every((u) => photoUrlsBefore.includes(u)))
   ok('the observed notes render', t.includes('What the model saw') && t.includes('Gambrel, read from the ground.'))
+  // ── REGRESSION: the read COLOURS reach the building, the read SIDING does not ────────────
+  // The stub replies with colors.body #ff0000 and siding: null — exactly the shape the real
+  // sanitiser produces, because it copies only colour keys that pass a hex test but ALWAYS
+  // emits siding, collapsing anything unrecognised to null. So applying colours is safe and
+  // applying siding would silently reset every builder's cladding to plain.
+  //
+  // Ahsan filmed a brown building with tan trim and got back near-black with white trim: the
+  // model read the colours, the server returned them, and applyDraftedShape discarded them.
+  const specColors = await page.evaluate(() => {
+    const hex = (el) => (el && el.value) || ''
+    const boxes = Array.from(document.querySelectorAll('input[placeholder="#hex or blank"]'))
+    return boxes.map(hex)
+  })
+  ok('A COLOUR THE MODEL READ REACHES THE SPEC', specColors.some((c) => (c || '').toLowerCase() === '#ff0000'), specColors.filter(Boolean).join(',') || 'none set')
+  ok('and the message says colours came from the photos', t.includes('Colours are set from the photos'), (await line('Read ')).slice(0, 120))
   ok('the result says what came from where', /\d+ from your walk-around and \d+ of your own photos/.test(t), (await line('Read ')).trim().slice(0, 110))
 
   // ── save, then reopen ────────────────────────────────────────────────────────────────
