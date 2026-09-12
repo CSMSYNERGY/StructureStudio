@@ -15716,9 +15716,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </>);
           })()}
-          {/* Sibling of the wall-height block above, never inside it: that one returns null
-              for a style with no height increases, and Note/Line must not vanish with it. */}
-          {!planLocked && ANNOTATE_KEYS.filter((k) => ITEMS[k]).map((k) => ssToolBtn([k, ITEMS[k]]))}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
@@ -15768,7 +15765,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
             </>
           )}
-          {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>}
+          {/* Note and Line sit right beside Clear floorplan, in the right-hand group (Carolyn
+              2026-09-12) — they used to open the row on the left. Still a sibling of the
+              wall-height block, never inside it: that one returns null for a style with no
+              height increases, and Note/Line must not vanish with it. */}
+          {!planLocked && ANNOTATE_KEYS.filter((k) => ITEMS[k]).map((k) => ssToolBtn([k, ITEMS[k]]))}
+          {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear floorplan</button>}
           {/* 3D is gated by the lock too: the 3D modal edits items through its own handlers,
               so opening it on an inventory unit would bypass planLocked. A view-only 3D for
               locked plans is a planned follow-up. (Beta's "coming soon" 3D teaser is
