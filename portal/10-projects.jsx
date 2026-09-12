@@ -1197,6 +1197,13 @@ function ProjectsTab({ sub, onSub }) {
   const [canWrite, setCanWrite] = useState(false);
   const [data, setData] = useState(null);          // { board, columns, groups, items, operators }
   const [err, setErr] = useState("");
+  // A short "Added X to <group>" after a create. It matters because the toolbar's ＋ Add item
+  // files into the intake group, and a live search or facet can hide the new row — the
+  // message says where it went so a vanished item isn't read as a failed one.
+  const [ok, setOk] = useState("");
+  const okTimer = useRef(null);
+  const flashOk = (m) => { setOk(m); clearTimeout(okTimer.current); okTimer.current = setTimeout(() => setOk(""), 3500); };
+  const [topAdd, setTopAdd] = useState(null);      // null = button shown; string = inline name input open
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
   const [facets, setFacets] = useState({});        // colId -> value key
@@ -1291,11 +1298,51 @@ function ProjectsTab({ sub, onSub }) {
       () => setData((d) => d && ({ ...d, items: d.items.filter((it) => it.id !== item.id) })),
     );
   };
-  const onAddItem = (group, name) => {
-    if (view.groupBy !== "groups") return;
-    pmCall({ action: "create_item", boardId: data.board.id, groupId: group.key, name })
-      .then((d) => setData((cur) => cur && ({ ...cur, items: [...cur.items, d.item] })))
+  // Where a new item lands follows how the board is arranged (Carolyn 2026-09-12: "we need
+  // that feature available regardless of the filtered view"):
+  //   native groups        → the group whose row was clicked (its pm_groups id);
+  //   grouped by a column  → NO group id, so the server files it into the board's INTAKE
+  //                          group (migration 152) — and the bucket's VALUE rides along, so
+  //                          the row appears under the bucket the user was looking at rather
+  //                          than in "No status";
+  //   the "__none" bucket  → intake, no value, in either mode.
+  // create_item's defaultValues fills gaps only, so a sent value is never overwritten. The
+  // old `if (view.groupBy !== "groups") return;` here was the second of two gates that made
+  // adding impossible under any column grouping (the first was the add row not rendering).
+  const addItem = (name, group, extraValues) => {
+    const body = { action: "create_item", boardId: data.board.id, name };
+    const values = { ...(extraValues || {}) };
+    if (group && group.key !== "__none") {
+      if (view.groupBy === "groups") body.groupId = group.key;
+      else {
+        const col = data.columns.find((c) => c.id === view.groupBy);
+        const t = col && pmType(col);
+        if (t && t.valueForBucket) values[col.id] = t.valueForBucket(group.key, col);
+      }
+    }
+    if (Object.keys(values).length) body.values = values;
+    return pmCall(body)
+      .then((d) => {
+        setData((cur) => cur && ({ ...cur, items: [...cur.items, d.item] }));
+        const g = (data.groups || []).find((x) => x.id === d.item.group_id);
+        flashOk(`Added “${name}” to ${g ? g.name : "the board"}.`);
+      })
       .catch((e) => { setErr(e.message); reload(); });
+  };
+  const onAddItem = (group, name) => addItem(name, group);
+  // The toolbar button has no bucket. So that the new row is not hidden by whatever is
+  // filtering the board, every active facet whose column can express a value (status,
+  // dropdown, people) is applied to the item — it lands where you're looking.
+  const onAddTop = (name) => {
+    const values = {};
+    Object.keys(facets).forEach((cid) => {
+      const v = facets[cid];
+      if (v == null || v === "") return;
+      const col = data.columns.find((c) => c.id === cid);
+      const t = col && pmType(col);
+      if (t && t.valueForBucket) values[cid] = t.valueForBucket(v, col);
+    });
+    return addItem(name, null, values);
   };
   const onDropToGroup = (item, g) => {
     if (view.groupBy === "groups") {
@@ -1437,8 +1484,13 @@ function ProjectsTab({ sub, onSub }) {
   const pill = (on) => ({ border: "1px solid", borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", borderRadius: 999, padding: "6px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer" });
 
   return (
-    <div>
-      <div style={S.card}>
+    /* Fills the viewport-height shell (.ss-projects-active, portal.html) as a flex column so
+       the board tabs, views, toolbar and status tiles stay put and ONLY the table scrolls —
+       the same shape the Designer tab uses, for the same reason: a page that also scrolls
+       double-scrolls under the sticky topbar. Carolyn 2026-09-12: "the entire page below the
+       headers should scroll on its own … seamless, not clunky or iframed". */
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <div style={{ ...S.card, flex: 1, minHeight: 0, display: "flex", flexDirection: "column", marginBottom: 0 }}>
         {/* Boards are real TABS (Carolyn 2026-08-27): the active one joins the panel
             below it rather than floating as a pill, so the board you are in reads as the
             page you are on. The strip's bottom border IS the top edge of the content. */}
@@ -1496,7 +1548,11 @@ function ProjectsTab({ sub, onSub }) {
           )}
         </div>
         {err && <div style={S.err}>{err}</div>}
-        {setupMode && <PMSetupAdmin canWrite={canWrite} />}
+        {ok && <div style={S.okMsg}>{ok}</div>}
+        {/* The card is a fixed-height flex column on this tab (.ss-projects-active), so
+            anything that is not the table has to sit in a child that can scroll itself, or the
+            shell clips it. */}
+        {setupMode && <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}><PMSetupAdmin canWrite={canWrite} /></div>}
         {!setupMode && !boards && !err && <div style={{ color: "#94A3B8", fontSize: 13 }}>Loading boards…</div>}
         {/* The board body has its own wait: the first open after new roadmap entries also
             runs the sync, and a silent blank panel reads as a broken screen. */}
@@ -1612,6 +1668,22 @@ function ProjectsTab({ sub, onSub }) {
               </span>
 
               <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap" }}>
+                {/* Always-available add, regardless of grouping or filters (Carolyn 2026-09-12).
+                    Same inline name input as the group rows; files into the intake group and
+                    inherits any active facet values so it doesn't vanish behind the filter. */}
+                {canWrite && (topAdd == null ? (
+                  <button type="button" onClick={() => setTopAdd("")}
+                    style={{ ...S.btn(ACCENT, "#FFF"), height: 32, padding: "0 14px", fontSize: 12.5, fontFamily: "inherit" }}>＋ Add item</button>
+                ) : (
+                  <input autoFocus value={topAdd} placeholder="Item name — Enter to add, Esc to cancel"
+                    onChange={(e) => setTopAdd(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && topAdd.trim()) { onAddTop(topAdd.trim()); setTopAdd(null); }
+                      if (e.key === "Escape") setTopAdd(null);
+                    }}
+                    onBlur={() => setTopAdd(null)}
+                    style={{ ...PM_CTL, padding: "0 10px", width: 280, fontWeight: 600, color: "#1E293B", outline: "none", fontFamily: "inherit" }} />
+                ))}
                 Showing {filtered.length} of {data.items.length}
                 {filtersOn && (
                   <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: "inherit" }}

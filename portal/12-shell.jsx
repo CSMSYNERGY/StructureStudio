@@ -1822,6 +1822,9 @@ function Dashboard({ session }) {
           condition as the host so the gate falls back to a normal scrolling body. */}
       <section className={"ss-main"
         + (activeTab === "designer" && !gateLocked ? " ss-designer-active" : "")
+        /* Projects owns its scroll the way the designer does: the shell takes the viewport
+           height and the board's table scrolls inside it under a pinned header. */
+        + (activeTab === "projects" ? " ss-projects-active" : "")
         + (viewing ? " ss-viewing" : "")}>
         <div className="ss-topbar">
           {/* Title AND description, both on the gradient — this is the one header, so there

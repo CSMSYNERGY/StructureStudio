@@ -51,13 +51,18 @@ const pmChipStyle = (bg) => ({ display: "inline-block", fontSize: 11, fontWeight
 // ── The type registry ─────────────────────────────────────────────────────────
 // Per type: renderCell(value, col, ctx) → node · sortVal(value, col, ctx) → comparable ·
 // groupsFor(col, ctx) → [{key,label,rank,color}] | null (null = not groupable) ·
-// groupKeyOf(value) → key · facet (does this type get a toolbar FacetSelect).
+// groupKeyOf(value) → key · facet (does this type get a toolbar FacetSelect) ·
+// valueForBucket(key, col) → the STORED value that groupKeyOf maps back to that key — the
+// inverse of groupKeyOf, kept beside it so the two cannot drift. It is what lets "＋ Add item"
+// under a Status/People/Dropdown/Checkbox bucket create the row IN that bucket (the value
+// rides on create_item) rather than in "No status". Only groupable types need one.
 const PM_TYPES = {
   status: {
     renderCell: (v, col) => { const l = pmStatusLabel(col, v); return l ? <span style={pmChipStyle(l.color)}>{l.label}</span> : <span style={{ color: "#94A3B8" }}>—</span>; },
     sortVal: (v, col) => { const ls = col.settings?.labels || []; const i = ls.findIndex((l) => l.id === v); return i === -1 ? "" : String(i).padStart(3, "0"); },
     groupsFor: (col) => (col.settings?.labels || []).map((l, i) => ({ key: l.id, label: l.label, rank: i, color: l.color })),
     groupKeyOf: (v) => v || null,
+    valueForBucket: (key) => key,
     facet: true,
   },
   dropdown: {
@@ -69,6 +74,7 @@ const PM_TYPES = {
     sortVal: (v, col) => { const ids = Array.isArray(v) ? v : (v ? [v] : []); if (!ids.length) return ""; const os = col.settings?.options || []; const i = os.findIndex((o) => o.id === ids[0]); return i === -1 ? "" : String(i).padStart(3, "0"); },
     groupsFor: (col) => (col.settings?.options || []).map((o, i) => ({ key: o.id, label: o.label, rank: i, color: o.color })),
     groupKeyOf: (v) => { const ids = Array.isArray(v) ? v : (v ? [v] : []); return ids[0] || null; },
+    valueForBucket: (key, col) => (col.settings?.multi ? [key] : key),
     facet: true,
   },
   people: {
@@ -87,6 +93,7 @@ const PM_TYPES = {
     sortVal: (v, col, ctx) => pmPeopleNames(v, ctx).join(",").toLowerCase(),
     groupsFor: (col, ctx) => ctx.people.map((o, i) => ({ key: o.id, label: pmPersonName(o), rank: i, color: pmAvatarColor(o.id) })),
     groupKeyOf: (v) => (Array.isArray(v) && v.length ? v[0] : null),
+    valueForBucket: (key) => [key],
     facet: true,
   },
   date: {
@@ -104,6 +111,7 @@ const PM_TYPES = {
     sortVal: (v) => (v === true ? "1" : "0"),
     groupsFor: () => [{ key: "yes", label: "Checked", rank: 0, color: "#0E9F6E" }, { key: "no", label: "Unchecked", rank: 1, color: "#94A3B8" }],
     groupKeyOf: (v) => (v === true ? "yes" : "no"),
+    valueForBucket: (key) => key === "yes",
     facet: false,
   },
   number: {
@@ -232,6 +240,22 @@ function PMCellInput({ col, value, onCommit, onClose }) {
 // column's groupKeyOf. Enumerable buckets are padded in even when empty (so drops have
 // somewhere to land); the "—" bucket collects rows without a value and is only shown when
 // occupied. Rank orders the buckets; the caller's sort orders rows INSIDE each bucket.
+// Which buckets take a new item: every native group AND every column bucket (the handler
+// decides what to send — the group id, or the bucket's value via valueForBucket). Never the
+// unlabeled "__all" catch-all, and never a synthetic overlay group: those carry an
+// "overlay:<slug>" id that create_item refuses as "not on this board". Before 2026-09-12 this
+// was `g.isRealGroup`, which only native groups carry — so grouping by Status removed every
+// "＋ Add item…" row, and because groupBy is remembered per board it stayed gone.
+const pmBucketAddable = (g) => g.key !== "__all" && !String(g.key).startsWith("overlay:");
+
+// The pinned column header. Sticky against the table's own scroller (the wrapper below is
+// overflow:auto in BOTH axes — one scroll box, so the header pins vertically and still
+// travels sideways with its columns on a wide board). Needs border-collapse:separate on the
+// table or the cell's bottom rule is painted by the table and stays behind when the cell pins.
+// z 5 sits above body cells (position:relative for their menus) and under PMChoiceMenu (70),
+// the Columns popover (60) and the item drawer (1200).
+const PM_STICKY_TH = { position: "sticky", top: 0, zIndex: 5, background: "#FFF" };
+
 function pmComputeGroups(mode, rows, boardGroups, columns, ctx) {
   if (mode === "groups") {
     const byId = new Map(boardGroups.map((g, i) => [g.id, { key: g.id, label: g.name, rank: i, color: g.color || ACCENT, rows: [], isRealGroup: true }]));
@@ -272,6 +296,21 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
   const [editCell, setEditCell] = useState(null);       // itemId + ":" + colId
   const [newItemGroup, setNewItemGroup] = useState(null);
   const [newItemName, setNewItemName] = useState("");
+
+  // Group bands pin just UNDER the column header (Monday's behaviour, Carolyn 2026-09-12), so
+  // they need its rendered height — measured, not assumed: a long column name wraps the row.
+  const theadRef = useRef(null);
+  const [headerH, setHeaderH] = useState(0);
+  useEffect(() => {
+    const el = theadRef.current;
+    if (!el) return;
+    const measure = () => setHeaderH(Math.round(el.getBoundingClientRect().height));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const visCols = columns.filter((c) => !hiddenCols.has(c.id));
   const colCount = visCols.length + 2; // grip + name
@@ -344,12 +383,20 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
   };
 
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ borderCollapse: "collapse", width: "100%", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10 }}>
-        <thead>
+    /* THE SCROLLER (2026-09-12). This wrapper used to be overflowX:auto and nothing else —
+       and that alone defeated any pinned header: overflow-x:auto makes overflow-y auto too,
+       so the div became the nearest scrollport for a sticky <th> while never scrolling
+       vertically itself (the page did). Same trap 06-3d.jsx documents for its calibration
+       panel. Now the Projects shell gives the card the viewport height (.ss-projects-active)
+       and THIS box is the one thing that scrolls, both axes, so the header pins against it and
+       still moves sideways with its columns. The frame moved here from the table so the
+       rounded border is the scroll box's edge. */
+    <div style={{ flex: 1, minHeight: 0, overflow: "auto", border: "1px solid #E2E8F0", borderRadius: 10, background: "#FFF" }}>
+      <table style={{ borderCollapse: "separate", borderSpacing: 0, width: "100%", background: "#FFF" }}>
+        <thead ref={theadRef}>
           <tr>
-            <th style={{ ...S.th, width: 28 }}></th>
-            <SortTh label="Item" col="name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            <th style={{ ...S.th, ...PM_STICKY_TH, width: 28 }}></th>
+            <SortTh label="Item" col="name" sortKey={sortKey} sortDir={sortDir} onSort={onSort} style={PM_STICKY_TH} />
             {/* Column headers DRAG to reorder (Carolyn 2026-08-29) — the Monday gesture,
                 alongside the ▲/▼ in Board settings. Gated on dragColId exactly the way
                 row DnD gates on dragId, so the two drags can never cross: a header over
@@ -358,7 +405,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                 column in the FULL list (hidden columns keep their slots). */}
             {visCols.map((c) => (
               <SortTh key={c.id} label={c.name} col={c.id} sortKey={sortKey} sortDir={sortDir} onSort={onSort}
-                style={c.width ? { width: c.width } : undefined}
+                style={{ ...PM_STICKY_TH, ...(c.width ? { width: c.width } : {}) }}
                 thProps={canEdit && onReorderCols ? {
                   draggable: true,
                   onDragStart: (e) => { setDragColId(c.id); e.dataTransfer.effectAllowed = "move"; },
@@ -383,9 +430,17 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
             <React.Fragment key={g.key}>
               {g.label !== "" && (
                 <tr {...groupDropProps(g)}>
-                  <td colSpan={colCount} style={{ background: dropTarget === g.key ? "#E0E7FF" : "#EEF2FF", borderBottom: "1px solid #E0E5F5", padding: "7px 10px" }}>
-                    <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: g.color || ACCENT }}>{g.label}</span>
-                    <span style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 999, padding: "1px 8px", marginLeft: 8 }}>{g.rows.length}</span>
+                  {/* Pinned under the header (top = its measured height) so a long group keeps
+                      its name in view and hands off to the next band as you scroll past it.
+                      Sticky has to be on the td — a sticky tr does nothing in a table. */}
+                  <td colSpan={colCount} style={{ position: "sticky", top: headerH, zIndex: 4, background: dropTarget === g.key ? "#E0E7FF" : "#EEF2FF", borderBottom: "1px solid #E0E5F5", padding: "7px 10px" }}>
+                    {/* The band spans every column, so on a wide board its label would scroll
+                        off to the left with the first column and leave an empty coloured strip.
+                        A sticky-left wrapper keeps the name in view however far you scroll. */}
+                    <span style={{ position: "sticky", left: 10, display: "inline-flex", alignItems: "center" }}>
+                      <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.6, textTransform: "uppercase", color: g.color || ACCENT }}>{g.label}</span>
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: "#64748B", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 999, padding: "1px 8px", marginLeft: 8 }}>{g.rows.length}</span>
+                    </span>
                   </td>
                 </tr>
               )}
@@ -417,7 +472,7 @@ function PMTable({ columns, rows, boardGroups, ctx, groupBy, hiddenCols, sortKey
                   ))}
                 </tr>
               ))}
-              {canEdit && g.isRealGroup && (
+              {canEdit && pmBucketAddable(g) && (
                 <tr>
                   <td></td>
                   <td colSpan={colCount - 1} style={{ ...S.td, borderBottom: "1px solid #E2E8F0" }}>
