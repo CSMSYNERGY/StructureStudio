@@ -103,8 +103,10 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
    keeps the wrap hovered. Taller than the gap on purpose — a 6px bridge against a 6px gap
    loses to sub-pixel rounding at fractional zoom levels. */
 .ss-user-menu::before{content:"";position:absolute;left:0;right:0;top:100%;height:10px}
-.ss-user-menu button{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
-.ss-user-menu button:hover{background:#FEF2F2;color:#DC2626}
+.ss-user-menu button,.ss-user-menu a{display:flex;text-decoration:none;align-items:center;gap:8px;width:100%;background:none;border:none;color:#334155;font-size:13px;font-weight:700;padding:9px 12px;border-radius:7px;cursor:pointer;white-space:nowrap;font-family:inherit;text-align:left}
+/* Sign Out owns the red hover; My Profile is an <a> (it navigates rather than acting) and
+   opts out via .neutral, same as Contact support. */
+.ss-user-menu button:hover,.ss-user-menu a:hover{background:#FEF2F2;color:#DC2626}
 /* Operator account switcher — click-toggled (NOT hover: the hover menu popping over
    content is what Carolyn flagged), opens UPWARD like .ss-user-menu. Its initials tile
    restyles .ss-clogo for the white rail (the original is white-on-dark for the topbar). */
@@ -129,8 +131,8 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 .ss-switch-exit{display:block;width:100%;margin-top:5px;background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;font-size:12.5px;font-weight:800;padding:8px 10px;border-radius:7px;cursor:pointer;font-family:inherit;text-align:left}
 .ss-switch-exit:hover{background:#FFEDD5}
 /* Sign Out owns the red hover; a neutral item must not look destructive. */
-.ss-user-menu button.neutral:hover{background:#F1F5F9;color:#1E293B}
-.ss-user-menu button svg{width:15px;height:15px;flex-shrink:0}
+.ss-user-menu button.neutral:hover,.ss-user-menu a.neutral:hover{background:#F1F5F9;color:#1E293B}
+.ss-user-menu button svg,.ss-user-menu a svg{width:15px;height:15px;flex-shrink:0}
 .ss-avatar{width:34px;height:34px;border-radius:50%;background:#DBEAFF;border:1px solid #C3D9F7;color:#3D3672;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:800;flex-shrink:0}
 .ss-user .uname{font-size:13px;font-weight:700;color:#1E293B;line-height:1.15;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
 .ss-user .umail{font-size:11px;color:#94A3B8;margin-top:1px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -171,7 +173,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
   .ss-newlink{justify-content:center;padding:0}
   .ss-user{justify-content:center}
   .ss-foot{width:100%}
-  .ss-user-menu button{justify-content:center;padding:10px 0}
+  .ss-user-menu button,.ss-user-menu a{justify-content:center;padding:10px 0}
 }
 @media (max-width:560px){
   .ss-topbar{padding:12px 14px}
@@ -237,7 +239,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
 <script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=a5f388d0"></script>
-<script defer src="/portal.app.compiled.js?v=5c9fd490" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/portal.app.compiled.js?v=b61277aa" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
 // beta still deploy instantly). Registered at root scope so the offline

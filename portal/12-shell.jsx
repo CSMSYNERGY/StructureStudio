@@ -832,7 +832,6 @@ function Dashboard({ session }) {
   // every user predating migration 060 has no name, and until they enter one the portal has
   // been showing their email local-part as their name.
   const [profile, setProfile] = useState(null);
-  const [profileOpen, setProfileOpen] = useState(false);
   const [nudgeHidden, setNudgeHidden] = useState(false);
   const [editUser, setEditUser] = useState(null);        // operator editing someone else
   const [usersRefreshKey, setUsersRefreshKey] = useState(0);
@@ -1654,12 +1653,15 @@ function Dashboard({ session }) {
               <svg className="uchev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m18 15-6-6-6 6"/></svg>
             </div>
             <div className="ss-user-menu" role="menu">
-              {/* Reachable by EVERY role. The Settings tab is owner/admin only, so a
-                  "user"-role account would have nowhere else to edit their own details. */}
-              <button type="button" className="neutral" onClick={() => setProfileOpen(true)} role="menuitem">
+              {/* Reachable by EVERY role, which is why My Profile is deliberately the one
+                  Settings sub-tab with NO permission area: a "user"-role account would
+                  otherwise have nowhere to edit their own details. Carolyn 2026-09-11 asked
+                  for this entry to BE My Profile rather than a modal beside it. */}
+              <a className="neutral" href={ssPagePath("settings", "myprofile")} role="menuitem"
+                onClick={ssNavClick(() => navigate("settings", "myprofile"))}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                <span className="mtext">Your details</span>
-              </button>
+                <span className="mtext">My Profile</span>
+              </a>
               {/* Carolyn, 2026-07-23: a direct contact option ALONGSIDE the feedback widget.
                   Deliberately worded to route bugs to the widget, because that path is tracked
                   in monday.com and an untracked mailto would quietly drain its volume — which
@@ -1756,7 +1758,7 @@ function Dashboard({ session }) {
                 <span style={{ fontSize: 12.5, fontWeight: 700, color: "#4C1D95" }}>
                   Add your name and phone number so your team knows who's who.
                 </span>
-                <button type="button" onClick={() => setProfileOpen(true)}
+                <button type="button" onClick={() => navigate("settings", "myprofile")}
                   style={{ ...S.btn("#6D28D9", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Add details</button>
                 <button type="button" onClick={() => setNudgeHidden(true)} title="Dismiss"
                   style={{ background: "none", border: "none", color: "#7C3AED", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "6px 2px" }}>Later</button>
@@ -2071,6 +2073,13 @@ function Dashboard({ session }) {
                    nulled under `viewing`, unlike `access` above. */
                 prefs={tenant && tenant !== "none" ? tenant.prefs : null}
                 onPrefsSaved={(p) => setTenant((t) => (t && t !== "none" ? { ...t, prefs: p } : t))}
+                /* Your details, for the card at the top of My Profile. Always the SIGNED-IN
+                   person's own row, never the viewed tenant's — same reasoning as prefs
+                   above, and save_profile keys off the verified session's user id anyway, so
+                   the browser could not write someone else's row if it tried. */
+                profile={profile}
+                profileEmail={session.user.email}
+                onProfileSaved={(p) => setProfile((prev) => ({ ...(prev || {}), fullName: p.fullName, phone: p.phone, needsDetails: false }))}
                 schedUnlocked={schedUnlocked}
                 qboUnlocked={qboUnlocked}
                 rtpUnlocked={rtpUnlocked}
@@ -2272,20 +2281,6 @@ function Dashboard({ session }) {
           cannot use it — the same reason `featureOn` treats a null entitlement as loading. */}
       {canProjects && !supportView && <PMQuickAdd viewingClientId={viewing ? viewing.clientId : null} />}
 
-      {/* Your own name and phone. Writes via portal-settings save_profile, which keys off the
-          verified session's user id — the browser never says whose row to update. */}
-      {profileOpen && (
-        <ProfileDialog
-          initial={profile}
-          email={session.user.email}
-          onClose={() => setProfileOpen(false)}
-          onSaved={(p) => {
-            setProfile((prev) => ({ ...(prev || {}), fullName: p.fullName, phone: p.phone, needsDetails: false }));
-            setProfileOpen(false);
-          }}
-        />
-      )}
-
       {/* Operator filling in someone else's details from the Accounts tab. Contact fields
           only — role and tenant are not editable here, since either would move access. */}
       {editUser && (
@@ -2341,6 +2336,78 @@ function formatPhone(input) {
 // self-service portal-settings action) and an operator editing someone else's (save injected
 // by the caller). Email is shown read-only — changing a login's email is an auth operation,
 // not a contact-detail edit, and belongs with the deliberate owner-linking flow.
+// ─── Your details, as a CARD (Settings → My Profile) ───
+// Carolyn 2026-09-11: "Move My profile here / move the information in Your details to the top
+// of my profile". The identity menu used to open a modal for this; it now links to the tab and
+// the form lives at the top of it, so a person's own settings are one place instead of two.
+//
+// ⚠️ ProfileDialog BELOW IS NOT DEAD. It still serves the OPERATOR path — editing somebody
+// else's name and phone from the Accounts tab — which is a different person's row, reached
+// from a table, and has no business being a page. This card and that dialog share the same
+// three fields and the same save deliberately; keep them in step.
+function YourDetailsCard({ profile, email, onSaved }) {
+  const [fullName, setFullName] = useState((profile && profile.fullName) || "");
+  // Format what is already stored too, so an operator-typed or legacy value renders the same
+  // as a freshly entered one rather than only tidying up once someone edits it.
+  const [phone, setPhone] = useState(formatPhone((profile && profile.phone) || ""));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  // Seeded once, then left alone: re-syncing from `profile` would wipe what someone is part
+  // way through typing the moment the shell refreshes it underneath them.
+  const submit = async () => {
+    const n = fullName.trim();
+    if (!n) { setMsg({ err: "Please enter a name." }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "save_profile", fullName: n, phone: phone.trim() },
+      });
+      if (error) {
+        let m = error.message;
+        try { const ctx = await error.context.json(); if (ctx && ctx.error) m = ctx.error; } catch (_e) {}
+        throw new Error(m || "Could not save.");
+      }
+      if (data && data.error) throw new Error(data.error);
+      if (onSaved) onSaved({ fullName: n, phone: phone.trim() });
+      setMsg({ ok: "Saved." });
+    } catch (e) {
+      setMsg({ err: e.message || "Could not save." });
+    }
+    setBusy(false);
+  };
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Your details</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", lineHeight: 1.5 }}>
+        Used so your team knows who&rsquo;s who. Your phone number is visible to admins on this
+        account and to StructureStudio support — it is never shown to your customers.
+      </p>
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginBottom: 12 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginBottom: 12 }}>{msg.err}</div>}
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Name</span>
+          <input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Jane Yoder"
+            style={{ ...S.input, marginBottom: 12 }} />
+        </div>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Phone</span>
+          <input value={phone} onChange={(e) => setPhone(formatPhone(e.target.value))} placeholder="(555) 123-4567"
+            inputMode="tel" autoComplete="tel" style={{ ...S.input, marginBottom: 12 }} />
+        </div>
+        <div style={{ flex: "1 1 200px", minWidth: 0 }}>
+          <span style={S.lbl}>Email</span>
+          <input value={email || ""} readOnly title="Contact StructureStudio to change the email on a login"
+            style={{ ...S.input, marginBottom: 12, background: "#F8FAFC", color: "#94A3B8" }} />
+        </div>
+      </div>
+      <button type="button" onClick={submit} disabled={busy} style={S.btn(busy ? "#9CA3AF" : ACCENT, "#FFF")}>
+        {busy ? "Saving…" : "Save"}
+      </button>
+    </div>
+  );
+}
+
 function ProfileDialog({ initial, email, onClose, onSaved, title, save }) {
   const [fullName, setFullName] = useState((initial && initial.fullName) || "");
   // Format what is already stored too, so an operator-typed or legacy value renders the same

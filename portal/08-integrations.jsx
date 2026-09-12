@@ -2648,7 +2648,7 @@ function CommissionsReport({ clientId }) {
 // `replyToEmail` is accepted and discarded until the server edit in
 // .temp/HANDOFF-reply-to-prefs.md lands. That file is owned by someone else; this half was
 // deliberately shipped first so the two can land independently.
-function MyProfileSettings({ prefs, onSaved }) {
+function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onProfileSaved = null }) {
   const [val, setVal] = useState((prefs && prefs.designsView) === "pipeline" ? "pipeline" : "list");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -2711,6 +2711,10 @@ function MyProfileSettings({ prefs, onSaved }) {
 
   return (
     <div>
+      {/* YOUR DETAILS FIRST (Carolyn 2026-09-11: "move the information in Your details to the
+          top of my profile"). Who you are, then how the portal behaves for you — and it is the
+          card the name-and-phone nudge sends people to, so it should be the one they land on. */}
+      <YourDetailsCard profile={profile} email={email} onSaved={onProfileSaved} />
       <div style={S.card}>
         <div style={S.h2}>How the Pipeline tab opens</div>
         <p style={{ fontSize: 13, color: "#64748B", marginBottom: 14, lineHeight: 1.5 }}>
@@ -2931,7 +2935,7 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
   );
 }
 
-function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null }) {
+function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onSub = null, isOwner = false, isAdmin = false, schedUnlocked = false, qboUnlocked = false, rtpUnlocked = false, access = null, setup3d = null, prefs = null, onPrefsSaved = null, profile = null, profileEmail = null, onProfileSaved = null }) {
   const [subState, setSubState] = useState("structures");
   const setSub = onSub || setSubState;
   const TABS = ssSettingsTabs({ isOwner, isAdmin, access });
@@ -3021,7 +3025,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {hubs.billing.some((t) => t[0] === sub) && (
         <BillingShell sub={sub} onSub={setSub} tabs={hubs.billing} viewingLabel={viewingLabel} />
       )}
-      {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved} />}
+      {sub === "myprofile" && <MyProfileSettings prefs={prefs} onSaved={onPrefsSaved}
+        profile={profile} email={profileEmail} onProfileSaved={onProfileSaved} />}
     </div>
   );
 }
