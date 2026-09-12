@@ -182,7 +182,7 @@ function SmsErrorList({ errors }) {
  *  gate nothing here: they add a line to the confirmation on the paid press. Advice, bought with
  *  three seconds, not a gate.
  *
- *  The three-way verdict cell is lifted from the Email Sending DNS table, where an advisory row
+ *  The three-way verdict cell is lifted from the Email Settings DNS table, where an advisory row
  *  already had to be visibly different from a failing one. */
 const SMS_CHECK_MARK = {
   pass: { glyph: "✓", color: "#16A34A", title: "Looks right" },

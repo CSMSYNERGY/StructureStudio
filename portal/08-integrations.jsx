@@ -513,7 +513,7 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
   );
 }
 
-// ─── Email Sending (Settings → Email Sending) ───
+// ─── Email sending (Settings → Email Settings) ───
 // Own-domain estimate/invoice email (Postmark-backed, but the provider never appears in
 // tenant-facing copy). Follows QuickBooksView's shape: one status call drives everything,
 // every action re-pulls status afterwards, and the server (portal-settings, area

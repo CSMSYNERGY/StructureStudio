@@ -763,7 +763,9 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // rail that configures the PERSON rather than the business.
     ["connection", "CRM Connection", "CRM credentials and pipeline mapping", null],
     ["quickbooks", "QuickBooks", "QuickBooks Online connection and invoice item mappings", null],
-    ["email", "Email Sending", "Send estimates and invoices from your own email domain", null],
+    // "Email Settings", not "Email Sending" (Carolyn 2026-09-11). The slug stays `email` —
+    // it was already the generic word, so no link moved.
+    ["email", "Email Settings", "Send estimates and invoices from your own email domain", null],
     ["sms", "Text Messaging", "Text customers from your own number, once the carriers approve your business", null],
     // ⚠️ The SLUG STAYS `billing`. Only the LABEL changed, to "Subscription" (Carolyn
     // 2026-09-11) — the group above it is called Billing, and Billing > Billing reads as a
