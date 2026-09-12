@@ -196,6 +196,15 @@ function Dashboard({ session }) {
   // (/portal/settings/colors pasted into the address bar): the reader falls back to
   // ssFallbackTab, the same landing page a bare /portal login gets.
   const beforeSettings = useRef(null);
+  // Which rail was up the last time a page actually DECIDED one. My Profile deliberately does
+  // not decide (see settingsMode below), so it needs somewhere to inherit from. Up here with
+  // the other hooks for the usual reason — Dashboard has early returns further down and a hook
+  // after them changes the hook count between renders (React #310).
+  //
+  // Starts false, which is also the answer for a cold deep link straight to
+  // /portal/settings/myprofile: nobody arriving from outside has a context to preserve, and
+  // the workspace rail is the one that can reach everything.
+  const railSettings = useRef(false);
 
   // Same-document navigation. location.assign is deliberately NOT used: the designer and the
   // operator console are keep-mounted, and a real navigation would discard an in-progress
@@ -1382,10 +1391,35 @@ function Dashboard({ session }) {
   // !gateLocked is load-bearing: a billing-locked tenant clicking Settings gets BillingGate,
   // not SettingsShell, so swapping the rail there would hand them a sub-nav whose every item
   // is inert AND hide the padlocked workspace items that explain why.
-  const settingsMode = !gateLocked && (
-    (activeTab === "settings" && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a))))
-    || activeTab === "accounts" || activeTab === "admin");
-  const settingsTabs = settingsMode
+  // TWO different questions, and conflating them is what made My Profile jarring.
+  //   settingsPage — are we RENDERING a settings page? (drives the topbar and the sub-tab clamp)
+  //   settingsMode — is the settings RAIL up? (drives the chrome)
+  // They agree everywhere except one page.
+  const settingsPage = !gateLocked && activeTab === "settings"
+    && (canAdmin || SETTINGS_AREAS.some((a) => ssCanRead(myAccess, a)));
+  // ── MY PROFILE DOES NOT DECIDE THE RAIL ───────────────────────────────────────────────
+  // Carolyn 2026-09-11, on clicking it from a workspace page: "it switches you to the
+  // settings and I feel like people will be confused .... but then the same is true the other
+  // way." Exactly — which is the tell that it belongs to NEITHER context. It is the one thing
+  // on this rail that configures the PERSON, it is reached from the identity menu, and that
+  // menu is in the footer, which renders in both rails. A global control must not change the
+  // global chrome, so this page inherits whichever rail was already up and changes nothing.
+  //
+  // The identity row lights up instead — see .ss-user's `active` class below. Without that,
+  // opening it from the workspace rail would leave nothing in the nav marked and no way to
+  // tell where you were.
+  const onMyProfile = settingsPage && (sub || "") === "myprofile";
+  // Every other page decides. Accounts and Admin are in this rail now, so they put it up.
+  //
+  // !gateLocked is load-bearing: a billing-locked tenant clicking Settings gets BillingGate,
+  // not SettingsShell, so swapping the rail there would hand them a sub-nav whose every item
+  // is inert AND hide the padlocked workspace items that explain why.
+  const railDecided = !gateLocked && (settingsPage || activeTab === "accounts" || activeTab === "admin");
+  if (!onMyProfile) railSettings.current = railDecided;
+  const settingsMode = onMyProfile ? railSettings.current : railDecided;
+  // Needed whenever we are ON a settings page (the topbar reads them) OR the rail is up (it
+  // draws them) — which are no longer the same condition.
+  const settingsTabs = (settingsPage || settingsMode)
     ? ssSettingsTabs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess })
     : null;
   // Mirrors SettingsShell's own clamp exactly. `sub` is null on a bare /portal/settings, and
@@ -1397,12 +1431,12 @@ function Dashboard({ session }) {
   // this rail up too, and without the guard the fallback-to-first-tab would light Structures
   // while navItem separately lit Accounts — two highlighted rows, neither of them wrong on
   // its own terms, and no way for a reader to tell which one they are on.
-  const onSettingsPage = settingsTabs && activeTab === "settings";
+  const onSettingsPage = settingsTabs && settingsPage;
   // Company and Colors are HUBS: one rail item, several tabs inside, every tab a settings
   // slug in its own right. The rail has to recognise those slugs — /portal/settings/branding
   // must light COMPANY and /portal/settings/shingles must light COLORS, rather than falling
   // through the clamp to Structures. Same lists the pages themselves render, same gates.
-  const hubs = settingsMode
+  const hubs = (settingsPage || settingsMode)
     ? ssSettingsHubs({ isOwner: settingsIsOwner, isAdmin: settingsIsAdmin, access: settingsAccess, schedUnlocked })
     : null;
   // Which hub owns the slug in the URL, if any: [rail id, that tab's tuple].
@@ -1644,7 +1678,12 @@ function Dashboard({ session }) {
           {/* Hovering (or focusing/tapping) the identity row reveals a small
               flyout menu above it with Sign Out — no standalone button. */}
           <div className="ss-user-wrap">
-            <div className="ss-user" title={session.user.email} tabIndex={0} role="button" aria-haspopup="menu" aria-label={`Account menu for ${displayName}`}>
+            {/* Lit while My Profile is open, because that page deliberately does not light
+                anything in the rail — the control you clicked is the one that shows where you
+                are. Not lit when the SETTINGS rail is up, where My Profile is a nav item and
+                already marks itself; two highlights for one page reads as a bug. */}
+            <div className={"ss-user" + (onMyProfile && !settingsMode ? " active" : "")}
+              title={session.user.email} tabIndex={0} role="button" aria-haspopup="menu" aria-label={`Account menu for ${displayName}`}>
               <div className="ss-avatar">{initials}</div>
               <div className="utext">
                 <div className="uname">{displayName}</div>
