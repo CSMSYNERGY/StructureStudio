@@ -1104,9 +1104,20 @@ function Dashboard({ session }) {
       const slots = sig.uploads.slice(0, prepped.length);
       const urls = new Array(slots.length);
       let done = 0, next = 0;
-      // Three lanes over the PUTs — the same reasoning as ssUploadPool's header: the bodies are
-      // small now, so what is left to hide is latency.
-      await Promise.all(Array.from({ length: Math.min(3, slots.length) }, async () => {
+      // SIX LANES, AND IT IS AN EXPERIMENT RATHER THAN A CONCLUSION. The count has been wrong in
+      // both directions already (see ssUploadPool's header), both times because it was reasoned
+      // about instead of measured. Six is the classic browser per-origin limit and a safe upper
+      // bound; whether it beats three depends on something nobody here has measured yet —
+      // TOTAL-bandwidth-bound links gain nothing from extra lanes, PER-CONNECTION-bound ones gain
+      // a lot. The telemetry below is what settles it.
+      //
+      // ⚠️ AND IT MAY WELL NOT HELP AT ALL, for a reason worth knowing before reading the number:
+      // Supabase storage speaks HTTP/2, so these requests MULTIPLEX OVER ONE TCP CONNECTION and
+      // share its congestion window. On HTTP/1.1 six lanes would be six sockets; here they are six
+      // streams on one, which removes most of the per-connection argument for widening at all.
+      const t0 = Date.now();
+      let sentBytes = 0;
+      await Promise.all(Array.from({ length: Math.min(6, slots.length) }, async () => {
         for (;;) {
           const i = next++;
           if (i >= slots.length) return;
@@ -1117,6 +1128,7 @@ function Dashboard({ session }) {
                 .uploadToSignedUrl(s.path, s.token, prepped[i], { contentType: prepped[i].type || "image/jpeg" });
               if (put.error) throw new Error(put.error.message || "Upload failed");
               urls[i] = s.url;
+              sentBytes += (prepped[i] && prepped[i].size) || 0;
               break;
             } catch (e) {
               // A signed PUT that never reached storage is safe to repeat — nothing was written.
@@ -1129,7 +1141,17 @@ function Dashboard({ session }) {
           if (onProgress) onProgress(done, slots.length);
         }
       }));
-      return { urls: urls.filter(Boolean), errs };
+      // WHAT IT ACTUALLY ACHIEVED, on screen and in app_errors. Every upload improvement so far
+      // has been verified as round-trip counts and byte sizes on a fast development machine; the
+      // link that hurts is the builder's, and this is the only way to see it. Filed as `info`
+      // because it is a measurement, not a fault — it must not land in the triage queue.
+      const ms = Math.max(1, Date.now() - t0);
+      const kbs = Math.round((sentBytes / 1024) / (ms / 1000));
+      try {
+        ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 6 lanes`,
+          "style_upload_throughput", { fn: "storage", action: "upload_batch" }, "info");
+      } catch (_t) { /* a measurement must never break the thing it measures */ }
+      return { urls: urls.filter(Boolean), errs, ms, bytes: sentBytes, kbs };
     },
     onUploadPhoto: async (file) => {
       // ssShrinkStylePhoto GUARANTEES a small JPEG or throws. It replaces a call to

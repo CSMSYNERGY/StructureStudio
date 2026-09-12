@@ -12841,11 +12841,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           calPersistMedia(adminCal && adminCal.styleValue, next2, undefined);
         }
         const over2 = list.length - take.length;
+        // The measured rate, said out loud. A builder waiting on a slow upload deserves to know
+        // whether it is the app or their connection, and it is the number that decides whether
+        // widening the lanes was worth anything — see onUploadPhotoBatch.
+        const rate = (r && r.kbs) ? ` ${Math.round(r.bytes / 1024)}KB in ${Math.round(r.ms / 100) / 10}s (${r.kbs}KB/s).` : "";
         setAdminCalPhotos({
           busy: false, step: null,
           err: (r && r.errs && r.errs.length)
             ? `${(r.urls || []).length} of ${take.length} uploaded. ${r.errs.length} failed: ${r.errs[0]}`
-            : (over2 ? `${over2} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : null),
+            : (over2 ? `${over2} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.${rate}` : (rate ? rate.trim() : null)),
         });
         return;
       } catch (e) {
