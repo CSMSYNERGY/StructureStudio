@@ -2915,7 +2915,9 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {/* Business Details and Branding are the SAME component in two sections. Its form state
           covers every field whichever section renders and its save is global, so the two tabs
           cannot save half a form between them — see the note at the top of SettingsView. */}
-      {sub === "company" && <SettingsView section="company" />}
+      {/* Building serial numbers ride with Business Details (Carolyn 2026-09-11). They are a
+          shop-wide counter, not a property of any one lot, which is why they left Locations. */}
+      {sub === "company" && (<><SettingsView section="company" /><SerialNumbersCard /></>)}
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}

@@ -3930,12 +3930,13 @@ function DriversTerritoriesCard({ section = "all" }) {
   );
 }
 
-// ─── Sales locations + building serial numbers (Settings → Team) ───
-// Locations are where inventory buildings sit on display; the serial block sets the ONE
-// shared per-builder sequence (inventory now, orders when Build Scheduling ships).
+// ─── Sales locations (Settings → Company → Locations) ───
+// Where inventory buildings sit on display. The building-serial block used to sit at the
+// bottom of this card; it moved to Company → Business Details on 2026-09-11 (Carolyn: "move
+// building serial numbers to business details") — a shop-wide counter belongs with the
+// business, not with the lots. It is SerialNumbersCard, directly below.
 function LocationsCard() {
   const [locs, setLocs] = useState(null);        // null = loading
-  const [nextSerial, setNextSerial] = useState("");
   const [form, setForm] = useState(null);        // { id?, name, street, city, state, zip } | null
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -3943,7 +3944,6 @@ function LocationsCard() {
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "list_locations" } });
     if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load locations." }); setLocs([]); return; }
     setLocs(data.locations || []);
-    setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
   }, []);
   useEffect(() => { load(); }, [load]);
   const saveLoc = async () => {
@@ -3961,13 +3961,6 @@ function LocationsCard() {
     setBusy(false);
     if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Delete failed." }); return; }
     load();
-  };
-  const saveSerial = async () => {
-    setBusy(true); setMsg(null);
-    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
-    setBusy(false);
-    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
-    setMsg({ ok: `Next building will be #${data.nextSerial}.` });
   };
   const F = form || {};
   return (
@@ -4010,7 +4003,49 @@ function LocationsCard() {
           <button type="button" onClick={() => setForm({ name: "", street: "", city: "", state: "", zip: "" })} style={S.btn(ACCENT, "#FFF")}>+ Add location</button>
         </div>
       )}
-      <div style={{ borderTop: "1px solid #EDF1F6", margin: "18px 0 14px" }}></div>
+      {/* Says what these locations DO, not what they will one day do. The previous copy
+          promised "assigning team members to locations arrives with Build & Delivery
+          Scheduling" — scheduling shipped 2026-08-04 and renders on this very tab, while
+          member↔location assignment was never built, so the banner read as a delivered
+          feature the owner could not find. */}
+      <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
+        📍 Locations are where your buildings live: each inventory building sits at one, and
+        the Delivery Schedule uses it as the pickup point when that building sells.
+      </div>
+    </div>
+  );
+}
+
+// ─── Building serial numbers (Settings → Company → Business Details) ───
+// ONE shared per-builder sequence: every inventory building and every customer order that
+// reaches the build board takes the next number, in creation order.
+//
+// Reads the number from `list_locations`, which returns it alongside the lots — that action is
+// named for its main payload, not its only one, and a second endpoint for one integer was not
+// worth it. That shared read is also why this card and LocationsCard can be on different tabs
+// without either knowing about the other.
+function SerialNumbersCard() {
+  const [nextSerial, setNextSerial] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }).then(({ data, error }) => {
+      if (!alive) return;
+      if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Could not load the serial number." }); return; }
+      setNextSerial(data.nextSerial == null ? "" : String(data.nextSerial));
+    });
+    return () => { alive = false; };
+  }, []);
+  const saveSerial = async () => {
+    setBusy(true); setMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "save_serial_start", nextSerial: Number(nextSerial) } });
+    setBusy(false);
+    if (error || !data || data.error) { setMsg({ err: (data && data.error) || "Save failed." }); return; }
+    setMsg({ ok: `Next building will be #${data.nextSerial}.` });
+  };
+  return (
+    <div style={S.card}>
       <div style={S.h2}>Building Serial Numbers</div>
       <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5 }}>
         Every inventory building — and every customer order that reaches your build board — takes
@@ -4029,15 +4064,8 @@ function LocationsCard() {
           It advances on its own and can never go backwards past a used number.
         </span>
       </div>
-      {/* Says what these locations DO, not what they will one day do. The previous copy
-          promised "assigning team members to locations arrives with Build & Delivery
-          Scheduling" — scheduling shipped 2026-08-04 and renders on this very tab, while
-          member↔location assignment was never built, so the banner read as a delivered
-          feature the owner could not find. */}
-      <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 10, padding: "10px 14px", fontSize: 12.5, fontWeight: 600, marginTop: 14, lineHeight: 1.5 }}>
-        📍 Locations are where your buildings live: each inventory building sits at one, and
-        the Delivery Schedule uses it as the pickup point when that building sells.
-      </div>
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginTop: 12 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 12 }}>{msg.err}</div>}
     </div>
   );
 }
