@@ -649,6 +649,16 @@ const SETTINGS_TAB_AREA = {
   // one screen into three, not a new permission surface.
   shingles: "settings_options",
   metal: "settings_options",
+  // The eight tabs Options was split into on 2026-09-11 (`options` itself is above). Same area
+  // as the page they came from — nine cards that were already on one screen, now one per tab.
+  doors: "settings_options",
+  windows: "settings_options",
+  vents: "settings_options",
+  ramps: "settings_options",
+  cladding: "settings_options",
+  interior: "settings_options",
+  electrical: "settings_options",
+  insulation: "settings_options",
   // The wallet half of Billing (2026-09-11). Same area as the subscription half — it is the
   // same money and the same page, split in two for room, not a new permission surface.
   wallet: "settings_billing",
@@ -879,6 +889,40 @@ function ssBillingTabs() {
   ];
 }
 
+// ── Inside Options ───────────────────────────────────────────────────────────────────────
+// Nine catalog editors that used to stack down one scrolling column, banded into three colour
+// groups by OptionsGroup. Carolyn 2026-09-11: "I want to have each segment on their own tab,
+// but I want above that sort of a header of building, exterior and interior" — and, shown two
+// mockups, chose the one where every segment is a tab in ONE row, clustered under its group
+// label, rather than making the group a second click.
+//
+// The 4th element is the GROUP, the same shape the rail's own list uses, so SubTabs can share
+// the rail's clustering loop instead of growing a second one. A null group means no label.
+//
+// ⚠️ `options` STAYS THE FIRST TAB and stays the Wall heights card. It is the rail's slug, it
+// is in bookmarks, and it is where PricingCsv's "go to Options" button points — so the page
+// still opens on exactly the card it opened on before. Carolyn picked that default over Doors
+// so the tabs read in the same order the page used to.
+//
+// All nine are settings_options, the area that already guarded the page: a split of one screen
+// into nine, not a new permission surface.
+function ssOptionTabs() {
+  return [
+    ["options", "Wall heights", "Taller walls, priced per building style", "Building"],
+    ["doors", "Doors", "The doors a customer can place, and what each one adds", "Exterior"],
+    ["windows", "Windows", "The windows a customer can place, and what each one adds", "Exterior"],
+    ["vents", "Vents", "Gable and ridge venting, and what each one adds", "Exterior"],
+    ["ramps", "Ramps", "Ramps a customer can add to a door", "Exterior"],
+    // Cladding is the outside of the building by definition. It sits last in this group
+    // because it is the one card here that is not a catalog of things a customer places on
+    // the plan — it is what the walls are made of.
+    ["cladding", "Cladding", "Which sidings you offer on each style, and how each is priced", "Exterior"],
+    ["interior", "Interior items", "Lofts, workbenches, shelving — anything placed inside", "Interior"],
+    ["electrical", "Electrical", "Outlets, switches, lights and panels, and what each adds", "Interior"],
+    ["insulation", "Insulation", "Insulation options and how they are priced", "Interior"],
+  ];
+}
+
 // The settings pages that are HUBS: one rail item each, several tabs inside, every tab a
 // real /portal/settings/<slug>. Both the rail (for the highlight) and SettingsShell (for the
 // clamp) need to know the whole set, and a hub that only one of them knew about would either
@@ -888,6 +932,7 @@ function ssSettingsHubs({ isOwner = false, isAdmin = false, access = null, sched
     company: ssCompanyTabs({ isOwner, isAdmin, access, schedUnlocked }),
     colors: ssColorTabs(),
     billing: ssBillingTabs(),
+    options: ssOptionTabs(),
   };
 }
 

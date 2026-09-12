@@ -2782,61 +2782,9 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
   );
 }
 
-// ─── Options tab section headers (Carolyn 2026-09-04 @27:32) ───
-// She drew these on the shared screen: "right here is a header that this says exterior.
-// Stuff that goes on the exterior of the building ... that is doors, that is windows, that
-// is vents ... I've kind of done on all of this other, the insulation, the electrical ...
-// so I think we need to separate exterior, interior."
-//
-// ⚠️ THIS IS THE HALF SHE COULD NOT DO HERSELF. She took "the options page" as her task,
-// but the Options tab was a flat stack of seven components with no grouping layer, so the
-// headers are code and only the CONTENT inside each card was ever hers to reorganise.
-//
-// THREE groups, not the two she named, and the third is not padding: Wall Heights is
-// structural, which is neither an inside nor an outside thing.
-//
-// ⚠️ THIS PARAGRAPH USED TO ARGUE THE OPPOSITE of what the code now does, so read the reason
-// before moving anything back. It said Layout Pricing had to stay in BUILDING because its rows
-// spanned both sides — lofts and workbenches inside, shutters and flower boxes outside. That
-// was true when it was written and is not true now: doors, windows, vents, ramps and the three
-// electrical devices have each since left for their own card, and what remains is loft,
-// workbench, the two shelves and rough opening. So it moved to Interior and was renamed
-// "Interior items" (Carolyn 2026-09-07).
-//
-// Rough opening is the one row that does not fit — it is a hole in an exterior wall. It stays
-// anyway, by her explicit call: "I plan to change things on it later." Do not split it out on
-// tidiness grounds; she is going to change what that row IS.
-//
-// Presentation only. No data moves, no saved design changes, no price changes.
-
-// One tone per group, so a builder can see which section they are scrolling through. Every hex
-// here is ALREADY in the portal — INV_SALE_COLORS and two rows of INV_GROUP_COLORS in
-// 01-core.jsx — so the Options tab reads as the same system as the inventory chips rather than
-// introducing a fourth palette. ⛔ Not SYNERGY_TEAL: its own comment reserves it.
-const OPTIONS_GROUP_TONES = {
-  Building: { bg: "#EEF2FF", fg: "#3D3672", hint: "#6B6595" },  // brand purple — structural
-  Exterior: { bg: "#ECFEFF", fg: "#0E7490", hint: "#3F8A9E" },  // cyan  — the outside
-  Interior: { bg: "#F0FDF4", fg: "#15803D", hint: "#3F8A5C" },  // green — the inside
-};
-const OPTIONS_GROUP_FALLBACK = { bg: "#F1F5F9", fg: "#334155", hint: "#94A3B8" };
-
-function OptionsGroup({ title, hint, children }) {
-  const tone = OPTIONS_GROUP_TONES[title] || OPTIONS_GROUP_FALLBACK;
-  return (
-    // The bar runs the FULL HEIGHT of the group, not just the header — that is what makes the
-    // boundary readable while scrolling past several cards. borderRadius stays 0 on the barred
-    // edge: a rounded corner on a single-sided border detaches the bar from the band above it.
-    <div style={{ marginTop: 18, marginBottom: 6, borderLeft: `4px solid ${tone.fg}`, borderRadius: 0, paddingLeft: 12 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, background: tone.bg, borderRadius: "0 8px 8px 0", padding: "7px 12px", marginBottom: 10 }}>
-        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: 1.1, textTransform: "uppercase", color: tone.fg, whiteSpace: "nowrap" }}>{title}</div>
-        {/* Kept truncating rather than wrapping: the band is one line tall by design, and a
-            narrow window should shorten the hint, not push the cards down. */}
-        <div style={{ fontSize: 12, color: tone.hint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>{hint}</div>
-      </div>
-      {children}
-    </div>
-  );
-}
+// (OptionsGroup lived here until 2026-09-11. It drew the coloured full-height bands that
+// separated Building / Exterior / Interior on the one long Options page. The groups are the
+// tab clusters in SubTabs now — see ssOptionTabs — so the component had no caller left.)
 
 // ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
 // Carolyn 2026-09-11: "I want to create some top navigation inside company. The first tab is
@@ -2856,24 +2804,72 @@ function OptionsGroup({ title, hint, children }) {
 // across fourteen pages it was a wall, which is why the rail exists.
 function SubTabs({ tabs, sub, onSub }) {
   const active = tabs.find((t) => t[0] === sub) || tabs[0];
+  // GROUPED when the tabs carry a 4th element, flat when they do not — Company, Colors and
+  // Billing pass three-element tuples and render exactly as before. The clustering rule is the
+  // one the rail uses for its own groups (settingsGroups in 12-shell.jsx): start a new run
+  // whenever the group CHANGES, and label it only when it is non-null. One rule, one shape,
+  // two renderers — a second rule here would drift from the rail's the first time either moved.
+  const groups = [];
+  tabs.forEach((t) => {
+    const last = groups[groups.length - 1];
+    if (!last || last.group !== (t[3] || null)) groups.push({ group: t[3] || null, items: [t] });
+    else last.items.push(t);
+  });
+  const tab = ([id, label]) => (
+    <button key={id} type="button" onClick={() => onSub(id)}
+      aria-current={sub === id ? "page" : undefined}
+      style={{
+        background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+        padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
+        color: sub === id ? ACCENT : "#64748B",
+        borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+        marginBottom: -2,
+      }}>
+      {label}
+    </button>
+  );
+  const labelled = groups.some((g) => g.group);
   return (<>
-    <div style={{ display: "flex", gap: 2, flexWrap: "wrap", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
-      {tabs.map(([id, label]) => (
-        <button key={id} type="button" onClick={() => onSub(id)}
-          aria-current={sub === id ? "page" : undefined}
-          style={{
-            background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-            padding: "12px 14px 10px", fontSize: 13, fontWeight: 700, letterSpacing: 0.2,
-            color: sub === id ? ACCENT : "#64748B",
-            borderBottom: sub === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-            marginBottom: -2,
-          }}>
-          {label}
-        </button>
+    {/* One shared bottom rule under the whole bar either way, so the active tab's underline
+        still reads as part of a single strip rather than of its own cluster. */}
+    <div style={{ display: "flex", gap: labelled ? 22 : 2, flexWrap: "wrap", alignItems: "flex-end", borderBottom: "2px solid #E2E8F0", marginBottom: 14 }}>
+      {groups.map((g) => (
+        <div key={g.items[0][0]} style={{ display: "flex", flexDirection: "column" }}>
+          {g.group && (
+            <div style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.13em", textTransform: "uppercase", color: "#94A3B8", padding: "2px 2px 0", whiteSpace: "nowrap" }}>{g.group}</div>
+          )}
+          <div style={{ display: "flex", gap: 2, flexWrap: "wrap" }}>{g.items.map(tab)}</div>
+        </div>
       ))}
     </div>
     <div style={{ fontSize: 12, color: "#64748B", margin: "0 0 12px 2px", fontWeight: 600 }}>{active[1]} — {active[2]}</div>
   </>);
+}
+
+// ── Options: one rail item, nine tabs in three groups ────────────────────────────────────
+// ⚠️ NINE SEPARATE MOUNTS here, unlike ColorsShell and BillingShell. Those two hand a `section`
+// prop to ONE component because their tabs share a single fetch and a single unsaved-edit
+// buffer, and remounting would throw someone's typing away. These nine are independent
+// components with independent loads, so mounting only the visible one is both correct and a
+// real improvement: opening Options used to fire all nine cards' reads before you had looked
+// at anything.
+function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
+  const sub = tabs.some((t) => t[0] === rawSub) ? rawSub : tabs[0][0];
+  const p = { viewingLabel, clientId };
+  return (
+    <div>
+      <SubTabs tabs={tabs} sub={sub} onSub={onSub} />
+      {sub === "options" && <WallHeights {...p} />}
+      {sub === "doors" && <DoorsView {...p} />}
+      {sub === "windows" && <WindowsView {...p} />}
+      {sub === "vents" && <VentsView {...p} />}
+      {sub === "ramps" && <RampsView {...p} />}
+      {sub === "cladding" && <CladdingView {...p} />}
+      {sub === "interior" && <LayoutPricing {...p} />}
+      {sub === "electrical" && <Electrical {...p} />}
+      {sub === "insulation" && <Insulation {...p} />}
+    </div>
+  );
 }
 
 // ── Colors: one rail item, three tabs ────────────────────────────────────────────────────
@@ -2976,26 +2972,10 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
         <PricingCsv viewingLabel={viewingLabel} onGoToOptions={() => setSub("options")} />
         <RealTimePricing viewingLabel={viewingLabel} clientId={clientId} unlocked={rtpUnlocked} canAdmin={isAdmin} onSeeBilling={() => setSub("billing")} />
       </>)}
-      {sub === "options" && (<>
-        <OptionsGroup title="Building" hint="Structural upgrades to the building itself">
-          <WallHeights viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-        <OptionsGroup title="Exterior" hint="Anything that goes on the outside of the building">
-          <DoorsView viewingLabel={viewingLabel} clientId={clientId} />
-          <WindowsView viewingLabel={viewingLabel} clientId={clientId} />
-          <VentsView viewingLabel={viewingLabel} clientId={clientId} />
-          <RampsView viewingLabel={viewingLabel} clientId={clientId} />
-          {/* Cladding is the outside of the building by definition, so it belongs to this
-              group's own hint. It sits last because it is the one card here that is not a
-              catalog of things a customer places on the plan. */}
-          <CladdingView viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-        <OptionsGroup title="Interior" hint="Anything that goes on the inside">
-          <LayoutPricing viewingLabel={viewingLabel} clientId={clientId} />
-          <Electrical viewingLabel={viewingLabel} clientId={clientId} />
-          <Insulation viewingLabel={viewingLabel} clientId={clientId} />
-        </OptionsGroup>
-      </>)}
+      {hubs.options.some((t) => t[0] === sub) && (
+        <OptionsShell sub={sub} onSub={setSub} tabs={hubs.options} clientId={clientId}
+          viewingLabel={viewingLabel} />
+      )}
       {hubs.colors.some((t) => t[0] === sub) && (
         <ColorsShell sub={sub} onSub={setSub} tabs={hubs.colors} viewingLabel={viewingLabel} />
       )}
