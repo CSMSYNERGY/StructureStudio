@@ -3499,6 +3499,15 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   const renderSection = (st) => {
     const rows = byStyle[st.id] || [];
     const widths = widthsOf(st.id);
+    // Local overrides for this table only (Carolyn 2026-09-12). S.th is nowrap, so the two narrow
+    // columns collided ("INTERNAL ONLYBUILT ON SITE") — those two wrap onto two lines and every
+    // header sits on the bottom so the baselines agree. S.td is top-aligned, which parked the
+    // checkboxes above the taller inputs — the main row is middle-aligned. The number inputs keep
+    // S.input's width:100% so they fit their column instead of crossing into the widths.
+    const thB = { ...S.th, verticalAlign: "bottom" };
+    const thC = { ...thB, textAlign: "center" };
+    const thWrap = { ...thC, whiteSpace: "normal", lineHeight: 1.2 };
+    const tdMid = { ...S.td, verticalAlign: "middle" };
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
         {/* The style's STANDARD wall height, right behind its name (Carolyn 2026-09-12). Read
@@ -3527,21 +3536,21 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
           <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
             <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
             <thead><tr>
-              <th style={S.th} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
-              <th style={S.th} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
-              <th style={S.th} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
-              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
-              <th style={{ ...S.th, textAlign: "center" }}>Active</th>
-              <th style={S.th}></th>
+              <th style={thB} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
+              <th style={thB} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
+              <th style={thB} title="Which building widths this increase is offered on. Taller walls raise the haul height, and a wider building already has a taller roof — so a narrow building can take more. A width added to this style later arrives unticked, never offered by default.">Offered on widths</th>
+              <th style={thWrap} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected increase still prices normally.">Internal only</th>
+              <th style={thWrap} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
+              <th style={thC} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
+              <th style={thC}>Active</th>
+              <th style={thB}></th>
             </tr></thead>
             <tbody>
               {rows.map((r, i) => [
                 <tr key={(r.id || ("new-" + i)) + "-main"}>
-                  <td style={S.td}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={{ ...S.input, width: 96 }} /></td>
-                  <td style={S.td}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={{ ...S.input, width: 110 }} /></td>
-                  <td style={S.td}>
+                  <td style={tdMid}><input type="number" min="1" max="48" step="1" value={r.deltaIn} onChange={(e) => setRow(st.id, i, "deltaIn", e.target.value)} style={S.input} /></td>
+                  <td style={tdMid}><input type="number" min="0" step="0.01" value={r.ratePerLf} placeholder="not offered" onChange={(e) => setRow(st.id, i, "ratePerLf", e.target.value)} style={S.input} /></td>
+                  <td style={tdMid}>
                     {widths.length === 0 ? <span style={{ color: "#94A3B8", fontSize: 12 }}>no sizes yet</span> : (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                         {widths.map((w) => {
@@ -3556,11 +3565,11 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                       </div>
                     )}
                   </td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
-                  <td style={{ ...S.td, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.internalOnly} onChange={(e) => setRow(st.id, i, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  <td style={{ ...tdMid, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
                 </tr>,
                 r.buildOnSite ? (
                   <tr key={(r.id || ("new-" + i)) + "-bos"}>
