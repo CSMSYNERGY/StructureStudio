@@ -443,6 +443,10 @@ const SS_DOCK_MIN_ROW_W = 960;
 // THE EMBED CONTRACT. `?open3d=1` on a public designer link asks for the 3D panel to be
 // docked beside the plan on arrival, instead of waiting behind the toolbar button.
 //
+// REDUNDANT SINCE 2026-09-12 (Carolyn: "3D View should always load automatically") — the
+// panel now docks on arrival on every surface that can dock, param or not. Kept because the
+// Settings embed snippet still emits it and an old link must not start reading as an error.
+//
 // It exists for the iframe snippet in Settings (Carolyn 2026-09-03, about a builder whose
 // site is built on ShedPro): "I like this where they can see it. But the 3d needs to be
 // open." Ahsan on the same call: "in the iframe code, we can prioritize 3D."
@@ -10464,12 +10468,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // parameter in their own iframe, so a plain ?client= link is byte-for-byte unchanged.
   // A plain const, not a hook — the search string cannot change without a reload, and this
   // file has a documented React #310 hazard around hooks added beside handlers.
-  const open3dParam = ssOpen3DRequested();
-  const dockOn = dockCapable && (embedded || open3dParam);
+  // The dock is available wherever the row is wide enough and the pointer is fine — it used
+  // to be a portal/embed privilege (`embedded || ?open3d=1`) until Carolyn 2026-09-12: "3D
+  // View should always load automatically on designer tab". Phones and tablets still never
+  // dock (dockCapable refuses coarse pointers), so the narrow path still opens the modal.
+  const dockOn = dockCapable;
   useEffect(() => { if (!dockOn && dock3D) setDock3D(false); }, [dockOn, dock3D]);
-  // Open it on arrival when the embed asked for it. ONCE — a ref, not the effect's deps,
-  // because the customer closing the panel with ✕ must stay closed; re-running on the next
-  // dockCapable flip (a window resize) would fight them for it.
+  // Open it on arrival, everywhere it can dock. ONCE — a ref, not the effect's deps,
+  // because the customer closing the panel with ✕ (or the Hide 3D button) must stay closed;
+  // re-running on the next dockCapable flip (a window resize) would fight them for it.
   //
   // The DOCK, never the modal, and that distinction is the whole reason this is safe: the
   // panel registers no interaction handlers, so it cannot place or drag anything. Opening
@@ -10477,10 +10484,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // passing the contact gate, which is the one thing that gate exists to prevent.
   const autoDocked3DRef = useRef(false);
   useEffect(() => {
-    if (autoDocked3DRef.current || !open3dParam || !view3dOn || !dockOn) return;
+    if (autoDocked3DRef.current || !view3dOn || !dockOn) return;
     autoDocked3DRef.current = true;
     setDock3D(true);
-  }, [open3dParam, view3dOn, dockOn]);
+  }, [view3dOn, dockOn]);
   // Losing the grant mid-session must close the dock, not leave it rendering. The portal
   // refetches entitlements on every session-token refresh, so view3dOn genuinely can flip
   // true -> false with the designer still mounted — an operator revoking view_3d, or a
@@ -15761,7 +15768,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
             </>
           )}
-          {/* Export survives the lock — printing the plan changes nothing about it. */}
           {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear</button>}
           {/* 3D is gated by the lock too: the 3D modal edits items through its own handlers,
               so opening it on an inventory unit would bypass planLocked. A view-only 3D for
@@ -15786,7 +15792,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {/* No ✓ badge in docked mode: the snapshot is cleared on every
                   items/sel/paint/size change, so a tick beside a live panel would
                   flicker off on every keystroke and read as a bug. */}
-              {dock3D ? "🧊 Hide 3D" : dockOn ? "🧊 3D View" : (has3DSnapshot ? "🧊 3D ✓" : "🧊 3D View")}
+              {dock3D ? "🧊 Hide 3D" : dockOn ? "🧊 Show 3D" : (has3DSnapshot ? "🧊 3D ✓" : "🧊 Show 3D")}
             </button>
           )}
           {/* Not granted 3D: NOTHING renders here. There used to be a disabled "3D — Coming
@@ -15795,8 +15801,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               they haven't paid for 3D, it says 3D View is coming soon, and I don't want
               that." A builder who has not bought 3D is not running a Structure Studio advert
               on their own storefront — their customers should never learn the feature exists.
-              So: paid, the real button above; unpaid, no button and no gap where one was. */}
-          <button onClick={exportPNG} style={S.btn("#059669", "#FFF")}>📷 Export</button>
+              So: paid, the real button above; unpaid, no button and no gap where one was.
+              The 📷 Export button that used to close this row is now "Floorplan PDF" in the
+              Submit Bar, beside Get Quote (Carolyn 2026-09-12). */}
         </div>
         </div>
       </div>
@@ -16903,6 +16910,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </button>
               </div>
             )}
+            {/* Floorplan PDF — was the toolbar's 📷 Export (Carolyn 2026-09-12: "move the Export
+                button down to the left of the Get quote and label Floorplan PDF"). Opens the
+                same preview (Download PDF / PNG / Copy). Not gated by the plan lock — printing
+                the plan changes nothing about it. */}
+            <button type="button" onClick={exportPNG}
+              style={{ background: "#FFF", color: "#334155", border: "2px solid #E2E8F0", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+              📄 Floorplan PDF
+            </button>
             {/* Get Quote is a customer action — hidden while building/editing an inventory unit
                 (a lot building is quoted later via "Send estimate" on the Inventory tab). */}
             {!(inventoryNew || inventoryMaster) && (
@@ -16982,6 +16997,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
                 : `Thank you, ${contact.name || ""}! We've received your building configuration and layout. A team member will prepare your detailed estimate and reach out shortly.`)}
           </p>
+          {/* The Submit Bar (and its Floorplan PDF button) is gone once submitted; Carolyn
+              2026-09-12 wants the plan still printable from here. One row, every branch. */}
+          <div style={{ marginTop: 14 }}>
+            <button type="button" onClick={exportPNG}
+              style={{ background: "#FFF", color: "#334155", border: "2px solid #BBF7D0", borderRadius: 10, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              📄 Floorplan PDF
+            </button>
+          </div>
           {savedDesign && savedDesign.changeOrder && !savedDesign.changeOrder.draft && (
             /* This revision changed a SIGNED order (migration 126): the customer must
                acknowledge it before the order can be invoiced. */
@@ -17319,7 +17342,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }} onClick={() => { setShowExport(false); setExportUrl(null); }}>
           <div style={{ background: "#FFF", borderRadius: 16, padding: 24, maxWidth: 580, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} Export</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "#1E293B" }}>{(C.branding.companyName || "Design Studio")} — Floorplan PDF</h3>
               <button onClick={() => { setShowExport(false); setExportUrl(null); }} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#94A3B8" }}>✕</button>
             </div>
             {exportUrl && (
