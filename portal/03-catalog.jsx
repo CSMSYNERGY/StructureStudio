@@ -3501,7 +3501,24 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
     const widths = widthsOf(st.id);
     return (
       <div key={st.id} style={{ ...S.card, marginBottom: 12 }}>
-        <div style={S.h2}>{st.label}</div>
+        {/* The style's STANDARD wall height, right behind its name (Carolyn 2026-09-12). Read
+            from the same catalog payload the 3D calibration writes (building_styles.d3), so it
+            is always what the designer will actually draw. 8 ft is the designer's own fallback
+            for an uncalibrated style (`|| 8` in structure-studio.component.js), so an unset
+            style says so instead of showing a number as if someone had chosen it. */}
+        <div style={{ ...S.h2, display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+          <span>{st.label}</span>
+          {(() => {
+            const h = st.d3 && Number(st.d3.wallHeightFt);
+            const calibrated = Number.isFinite(h) && h > 0;
+            return (
+              <span title={calibrated ? "Standard wall height, from 3D Style Calibration" : "No wall height calibrated yet — the designer assumes 8 ft. Set it under Settings → Designer → 3D Style Calibration."}
+                style={{ fontSize: 12, fontWeight: 600, color: calibrated ? "#1B7895" : "#94A3B8" }}>
+                standard wall {calibrated ? h : 8} ft{calibrated ? "" : " (not set — using the default)"}
+              </span>
+            );
+          })()}
+        </div>
         {rows.length === 0 ? (
           <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 10px" }}>
             No taller-wall option offered on this style — customers see no wall-height choice.
@@ -3579,8 +3596,15 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
   return (
     <div style={S.card}>
       <div style={S.h2}>Wall Height Upgrades</div>
-      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 660 }}>
-        Taller walls, offered per building style — hauling limits differ per building, so each
+      {/* Full width, no maxWidth (Carolyn 2026-09-12: "the description/instructions should run
+          across the entire page"). It opens by saying where the STANDARD height lives, because
+          this card only ever sets the INCREASES on top of it — the base is a 3D calibration
+          value, and that was not obvious from here. */}
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", lineHeight: 1.55 }}>
+        Each style's <b>standard wall height</b> is set in the 3D designer: go to <b>Settings → Designer → 3D Style Calibration</b>,
+        pick the style, and set its wall height there — that number shows beside each style below. This card adds the
+        <b> taller-wall increases</b> a customer can choose on top of it.
+        Increases are offered per building style — hauling limits differ per building, so each
         style carries its own list. The customer picks <b>one</b> increase for the whole building
         and it is charged <b>per lineal foot of the building's perimeter</b>: a 12&times;24 has 72
         lineal feet, so +6 in at $2.00/ft adds $144.00. Leave a rate blank to keep a row without
