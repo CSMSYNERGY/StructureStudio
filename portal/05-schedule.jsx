@@ -1290,7 +1290,7 @@ function BuildScheduleTab({ clientId, canAdmin, access = null, onOpenDesign }) {
           })}
           {activeCrews.length === 0 && (
             <span style={{ fontSize: 11.5, fontWeight: 700, color: "#B45309" }}>
-              No crews yet — add them in Settings → Team.
+              No crews yet — add them under Settings → Company → Crews.
             </span>
           )}
           {view !== "calendar" && (<>
@@ -3017,7 +3017,7 @@ function DeliveryScheduleTab({ clientId, canAdmin, access = null }) {
               <option value="">— Pick later —</option>
               {drivers.filter((p) => p.is_driver && p.active).map((p) => <option key={p.id} value={p.id}>{driverLabel(p)}</option>)}
             </select>
-            {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add trucks in Settings → Team.</div>}
+            {drivers.filter((p) => p.is_driver).length === 0 && <div style={{ fontSize: 10.5, color: "#B45309", fontWeight: 700, marginTop: 3 }}>No drivers set up yet — add them under Settings → Company → Drivers.</div>}
           </div>
           <div><span style={lbl}>Date</span><input type="date" style={inp} value={newLoad.loadDate} onChange={(e) => setNewLoad({ ...newLoad, loadDate: e.target.value })} /></div>
           <div style={{ flex: 1, minWidth: 160 }}><span style={lbl}>Route</span><input style={inp} value={newLoad.routeLabel} onChange={(e) => setNewLoad({ ...newLoad, routeLabel: e.target.value })} placeholder='e.g. "Shop → Sedalia → Warrensburg · Hwy 50 W"' /></div>

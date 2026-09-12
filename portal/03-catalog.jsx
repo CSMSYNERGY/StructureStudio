@@ -508,7 +508,7 @@ function SettingsView({ section }) {
              happens (a working send under our name) rather than a failure that no longer
              occurs. Do not restore the old wording without closing that opening too. */
           <div style={{ marginTop: 10, background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
-            Heads up: your own sending domain isn't verified yet (Settings → Email), so quotes
+            Heads up: your own sending domain isn't verified yet (Settings → Email Settings), so quotes
             and invoices go out from our address on your behalf, with your business name as the
             sender. Verify your domain to send from your own address instead.
           </div>
