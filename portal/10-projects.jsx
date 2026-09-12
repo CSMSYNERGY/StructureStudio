@@ -41,6 +41,18 @@ const PM_CTL_SEL = { border: "none", outline: "none", background: "none", fontSi
   color: "#1E293B", fontFamily: "inherit", cursor: "pointer", maxWidth: 170 };
 const PM_VIEW_CHIP = { border: "1px solid #CBD5E1", borderRadius: 999, background: "#FFF", color: "#334155",
   padding: "5px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" };
+// Popover under a toolbar pill (Columns, Views, the date filter). One shape, so the three
+// open the same way and the toolbar stays a single 32px row no matter what is inside them.
+const PM_POP = { position: "absolute", top: "110%", left: 0, zIndex: 60, background: "#FFF", border: "1px solid #CBD5E1",
+  borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,.18)", padding: 8, minWidth: 200, display: "flex", flexDirection: "column", gap: 2 };
+const PM_POP_ROW = (on) => ({ background: on ? "#EEF2FF" : "none", border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+  fontSize: 12.5, fontWeight: 700, color: on ? ACCENT : "#334155", padding: "6px 10px", borderRadius: 7, whiteSpace: "nowrap" });
+const PM_POP_LBL = { display: "flex", flexDirection: "column", gap: 3, fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4, textTransform: "uppercase" };
+const PM_POP_SEL = { ...PM_CTL_SEL, border: "1px solid #CBD5E1", borderRadius: 7, padding: "5px 8px", maxWidth: "none", fontSize: 12.5, textTransform: "none", letterSpacing: 0 };
+// The pill's small uppercase prefix ("VIEW", "DUE") — the label sits INSIDE the control so
+// every pill shares one height and baseline (PMCtl does the same for the facet selects).
+const PM_PILL_TAG = { fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4 };
+
 function PMCtl({ label, children }) {
   return (
     <span style={{ ...PM_CTL, padding: "0 8px", gap: 5 }}>
@@ -1213,6 +1225,8 @@ function ProjectsTab({ sub, onSub }) {
   const [whenColId, setWhenColId] = useState(null);
   const [view, setView] = useState({ sortKey: "name", sortDir: "asc", groupBy: "groups", hiddenCols: [] });
   const [colsOpen, setColsOpen] = useState(false);
+  const [viewsOpen, setViewsOpen] = useState(false);  // saved-views popover
+  const [dateOpen, setDateOpen] = useState(false);    // WHEN date-filter popover
   const [savedViews, setSavedViews] = useState([]);
   const [openItemId, setOpenItemId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1560,45 +1574,46 @@ function ProjectsTab({ sub, onSub }) {
 
         {!setupMode && data && (
           <>
-            {/* Saved views sit ABOVE the filters they restore, so the row reads
-                "which view am I in" then "how is it filtered". */}
-            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4, marginRight: 2 }}>Views</span>
-              <button type="button" onClick={resetToDefault}
-                style={{ ...PM_VIEW_CHIP, background: !viewDirty && !activeView ? ACCENT : "#FFF", color: !viewDirty && !activeView ? "#FFF" : "#334155", borderColor: !viewDirty && !activeView ? ACCENT : "#CBD5E1" }}>
-                All items
-              </button>
-              {savedViews.map((v) => {
-                const on = activeView === v.id;
-                return (
-                  <span key={v.id} style={{ ...PM_VIEW_CHIP, padding: 0, borderColor: on ? ACCENT : "#CBD5E1", background: on ? ACCENT : "#FFF", display: "inline-flex", alignItems: "center", overflow: "hidden" }}>
-                    <button type="button" onClick={() => applyView(v)}
-                      title={v.created_by_email ? `${v.name} — saved by ${String(v.created_by_email).split("@")[0]}` : v.name}
-                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, color: on ? "#FFF" : "#334155", padding: "5px 4px 5px 12px", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {v.name}
-                    </button>
-                    <button type="button" title={`Delete the "${v.name}" view`}
-                      onClick={() => { if (window.confirm(`Delete the saved view "${v.name}" for everyone? (Only the view — no items are touched.)`)) deleteView(v); }}
-                      style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: on ? "rgba(255,255,255,.75)" : "#94A3B8", padding: "5px 9px 5px 4px" }}>✕</button>
-                  </span>
-                );
-              })}
-              {/* Only offered when there is something to save, and never a duplicate of
-                  the view you are already looking at. */}
-              {viewDirty && !activeView && (
-                <button type="button" onClick={saveCurrentView}
-                  style={{ ...PM_VIEW_CHIP, borderStyle: "dashed", color: ACCENT, fontWeight: 700 }}>＋ Save this view</button>
-              )}
-            </div>
+            {/* ONE ROW, and it stays one row (Carolyn 2026-09-12: "condense the top… fit the
+                filter options into one single row"). What used to wrap — a separate saved-views
+                chip row, and a WHEN date filter that inlined up to four controls — is now a
+                popover pill each, so nothing here is taller than 32px. nowrap + overflowX:auto:
+                on a normal screen no scrollbar ever appears; on a narrow one the row scrolls
+                sideways rather than stacking, which is what keeps the table area's height
+                stable. The add button is NOT here any more — it sits above the table headers. */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "nowrap", overflowX: "auto", marginBottom: 10, paddingBottom: 2 }}>
+              <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                <button type="button" title="Saved views"
+                  onClick={() => { setViewsOpen((o) => !o); setDateOpen(false); setColsOpen(false); }}
+                  style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+                    color: activeView || viewDirty ? ACCENT : "#334155", borderColor: activeView ? ACCENT : "#CBD5E1" }}>
+                  <span style={PM_PILL_TAG}>VIEW</span>
+                  {activeView ? ((savedViews.find((v) => v.id === activeView) || {}).name || "Saved view") : "All items"}{viewDirty && !activeView ? " •" : ""} ▾
+                </button>
+                {viewsOpen && (
+                  <div style={PM_POP}>
+                    <button type="button" onClick={() => { resetToDefault(); setViewsOpen(false); }} style={PM_POP_ROW(!viewDirty && !activeView)}>All items</button>
+                    {savedViews.map((v) => (
+                      <span key={v.id} style={{ display: "flex", alignItems: "center" }}>
+                        <button type="button" onClick={() => { applyView(v); setViewsOpen(false); }}
+                          title={v.created_by_email ? `${v.name} — saved by ${String(v.created_by_email).split("@")[0]}` : v.name}
+                          style={{ ...PM_POP_ROW(activeView === v.id), flex: 1 }}>{v.name}</button>
+                        <button type="button" title={`Delete the "${v.name}" view`}
+                          onClick={() => { if (window.confirm(`Delete the saved view "${v.name}" for everyone? (Only the view — no items are touched.)`)) deleteView(v); }}
+                          style={{ background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontSize: 12, color: "#94A3B8", padding: "4px 8px" }}>✕</button>
+                      </span>
+                    ))}
+                    {/* Only offered when there is something to save, and never a duplicate of
+                        the view you are already looking at. */}
+                    {viewDirty && !activeView && (
+                      <button type="button" onClick={() => { saveCurrentView(); setViewsOpen(false); }}
+                        style={{ ...PM_POP_ROW(false), color: ACCENT, borderTop: "1px solid #F1F5F9", borderRadius: 0, marginTop: 4, paddingTop: 8 }}>＋ Save this view</button>
+                    )}
+                  </div>
+                )}
+              </span>
 
-            {/* ONE neat row of same-height controls (Carolyn 2026-08-27). The shared
-                FacetSelect stacks an uppercase label ABOVE its select, which put three
-                controls at a different height and baseline from the rest of the row —
-                so the filters are built here from PMCtl instead. (It also passed "all"
-                as the all-value while the filter treats "" as all, so choosing All
-                after a filter emptied the board.) */}
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-              <span style={{ ...PM_CTL, padding: "0 10px", gap: 6, minWidth: 190 }}>
+              <span style={{ ...PM_CTL, padding: "0 10px", gap: 6, flex: "1 1 120px", minWidth: 100, maxWidth: 320 }}>
                 <span style={{ color: "#94A3B8" }}>⌕</span>
                 <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search items…"
                   style={{ border: "none", outline: "none", background: "none", fontSize: 12.5, fontWeight: 600, color: "#1E293B", flex: 1, minWidth: 0, fontFamily: "inherit", height: "100%" }} />
@@ -1607,57 +1622,86 @@ function ProjectsTab({ sub, onSub }) {
               </span>
 
               {facetCols.map((c) => (
-                <PMCtl key={c.id} label={c.name}>
-                  <select value={facets[c.id] || ""} onChange={(e) => setFacets((f) => ({ ...f, [c.id]: e.target.value || null }))}
-                    style={PM_CTL_SEL}>
-                    <option value="">All</option>
-                    {(pmType(c).groupsFor(c, ctx) || []).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
-                  </select>
-                </PMCtl>
+                <span key={c.id} style={{ flex: "0 0 auto", display: "inline-flex" }}>
+                  <PMCtl label={c.name}>
+                    <select value={facets[c.id] || ""} onChange={(e) => setFacets((f) => ({ ...f, [c.id]: e.target.value || null }))}
+                      style={PM_CTL_SEL}>
+                      <option value="">All</option>
+                      {(pmType(c).groupsFor(c, ctx) || []).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
+                    </select>
+                  </PMCtl>
+                </span>
               ))}
 
-              {dateCols.length > 0 && (
-                <PMCtl label={dateCols.length > 1 ? null : dateCols[0].name}>
-                  {dateCols.length > 1 && (
-                    <select value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)} style={PM_CTL_SEL}>
-                      {dateCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                  )}
-                  <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} style={PM_CTL_SEL}>
-                    {SS_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              {/* The WHEN filter as one pill. Its column select, condition select and one or
+                  two parameter inputs used to sit inline and were the single biggest reason
+                  the row wrapped; the pill now reads the current condition and opens them. */}
+              {dateCols.length > 0 && (() => {
+                const dc = (dateCols.length > 1 ? dateCols.find((c) => c.id === whenColId) : null) || dateCols[0];
+                const condLabel = (SS_WHEN.find(([k]) => k === whenCond) || [])[1] || "";
+                const on = whenCond !== "any";
+                return (
+                  <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                    <button type="button" title="Filter by date"
+                      onClick={() => { setDateOpen((o) => !o); setViewsOpen(false); setColsOpen(false); }}
+                      style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+                        color: on ? ACCENT : "#334155", borderColor: on ? ACCENT : "#CBD5E1" }}>
+                      <span style={PM_PILL_TAG}>{String(dc.name || "Date").toUpperCase()}</span>
+                      {on ? condLabel : "Any time"} ▾
+                    </button>
+                    {dateOpen && (
+                      <div style={{ ...PM_POP, gap: 8, minWidth: 240 }}>
+                        {dateCols.length > 1 && (
+                          <label style={PM_POP_LBL}>Column
+                            <select value={whenColId || ""} onChange={(e) => setWhenColId(e.target.value || null)} style={PM_POP_SEL}>
+                              {dateCols.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </select>
+                          </label>
+                        )}
+                        <label style={PM_POP_LBL}>When
+                          <select value={whenCond} onChange={(e) => setWhenCond(e.target.value)} style={PM_POP_SEL}>
+                            {SS_WHEN.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                          </select>
+                        </label>
+                        {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_POP_SEL} />}
+                        {SS_WHEN_PARAM[whenCond] === "date2" && (<>
+                          <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_POP_SEL} />
+                          <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} style={PM_POP_SEL} />
+                        </>)}
+                        {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} style={PM_POP_SEL} />}
+                        {SS_WHEN_PARAM[whenCond] === "count" && (
+                          <span style={{ display: "flex", gap: 6 }}>
+                            <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} style={{ ...PM_POP_SEL, width: 64 }} />
+                            <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} style={{ ...PM_POP_SEL, flex: 1 }}>
+                              <option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option>
+                            </select>
+                          </span>
+                        )}
+                        <button type="button" onClick={() => setDateOpen(false)} style={{ ...PM_POP_ROW(false), textAlign: "center", background: "#F1F5F9" }}>Done</button>
+                      </div>
+                    )}
+                  </span>
+                );
+              })()}
+
+              <span style={{ flex: "0 0 auto", display: "inline-flex" }}>
+                <PMCtl label="Group by">
+                  <select value={view.groupBy} onChange={(e) => setViewPart({ groupBy: e.target.value })} style={PM_CTL_SEL}>
+                    <option value="groups">Groups</option>
+                    {groupables.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
-                  {SS_WHEN_PARAM[whenCond] === "date" && <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />}
-                  {SS_WHEN_PARAM[whenCond] === "date2" && (<>
-                    <input type="date" value={whenA} onChange={(e) => setWhenA(e.target.value)} style={PM_CTL_SEL} />
-                    <span style={{ color: "#94A3B8" }}>–</span>
-                    <input type="date" value={whenB} onChange={(e) => setWhenB(e.target.value)} style={PM_CTL_SEL} />
-                  </>)}
-                  {SS_WHEN_PARAM[whenCond] === "month" && <input type="month" value={whenMonth} onChange={(e) => setWhenMonth(e.target.value)} style={PM_CTL_SEL} />}
-                  {SS_WHEN_PARAM[whenCond] === "count" && (<>
-                    <input type="number" min="1" value={whenN} onChange={(e) => setWhenN(e.target.value)} style={{ ...PM_CTL_SEL, width: 52 }} />
-                    <select value={whenUnit} onChange={(e) => setWhenUnit(e.target.value)} style={PM_CTL_SEL}>
-                      <option value="days">days</option><option value="weeks">weeks</option><option value="months">months</option>
-                    </select>
-                  </>)}
                 </PMCtl>
-              )}
+              </span>
 
-              <PMCtl label="Group by">
-                <select value={view.groupBy} onChange={(e) => setViewPart({ groupBy: e.target.value })} style={PM_CTL_SEL}>
-                  <option value="groups">Groups</option>
-                  {groupables.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </PMCtl>
-
-              <span style={{ position: "relative", display: "inline-flex" }}>
-                <button type="button" onClick={() => setColsOpen((o) => !o)}
-                  style={{ ...PM_CTL, padding: "0 12px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
+              <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+                <button type="button" onClick={() => { setColsOpen((o) => !o); setViewsOpen(false); setDateOpen(false); }}
+                  style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
                   Columns ▾
                 </button>
                 {colsOpen && (
-                  <div style={{ position: "absolute", top: "110%", left: 0, zIndex: 60, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 10, boxShadow: "0 12px 30px rgba(20,24,40,.15)", padding: "8px 12px", minWidth: 170 }}>
+                  <div style={PM_POP}>
                     {data.columns.map((c) => (
-                      <label key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 600, padding: "3px 0", cursor: "pointer" }}>
+                      <label key={c.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, fontWeight: 600, padding: "3px 4px", cursor: "pointer", whiteSpace: "nowrap" }}>
                         <input type="checkbox" checked={!view.hiddenCols.includes(c.id)}
                           onChange={(e) => setViewPart({ hiddenCols: e.target.checked ? view.hiddenCols.filter((x) => x !== c.id) : [...view.hiddenCols, c.id] })} />
                         {c.name}
@@ -1667,100 +1711,99 @@ function ProjectsTab({ sub, onSub }) {
                 )}
               </span>
 
-              <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap" }}>
-                {/* Always-available add, regardless of grouping or filters (Carolyn 2026-09-12).
-                    Same inline name input as the group rows; files into the intake group and
-                    inherits any active facet values so it doesn't vanish behind the filter. */}
-                {canWrite && (topAdd == null ? (
-                  <button type="button" onClick={() => setTopAdd("")}
-                    style={{ ...S.btn(ACCENT, "#FFF"), height: 32, padding: "0 14px", fontSize: 12.5, fontFamily: "inherit" }}>＋ Add item</button>
-                ) : (
-                  <input autoFocus value={topAdd} placeholder="Item name — Enter to add, Esc to cancel"
-                    onChange={(e) => setTopAdd(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && topAdd.trim()) { onAddTop(topAdd.trim()); setTopAdd(null); }
-                      if (e.key === "Escape") setTopAdd(null);
-                    }}
-                    onBlur={() => setTopAdd(null)}
-                    style={{ ...PM_CTL, padding: "0 10px", width: 280, fontWeight: 600, color: "#1E293B", outline: "none", fontFamily: "inherit" }} />
-                ))}
-                Showing {filtered.length} of {data.items.length}
-                {filtersOn && (
+              <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "#64748B", fontWeight: 600, whiteSpace: "nowrap", flex: "0 0 auto", paddingLeft: 4 }}>
+                {/* "N of M" only while something is filtering — unfiltered it is the same
+                    number twice, and those ~90px are what decide whether the row fits a
+                    laptop with three facet columns. */}
+                {filtersOn && (<>
+                  <span title={`Showing ${filtered.length} of ${data.items.length} items`}>{filtered.length} of {data.items.length}</span>
                   <button type="button" style={{ background: "none", border: "none", color: "#DC2626", fontWeight: 700, fontSize: 12, cursor: "pointer", padding: 0, fontFamily: "inherit" }}
                     onClick={clearFilters}>
                     Clear filters
                   </button>
-                )}
+                </>)}
                 <button type="button" title="Refresh" style={{ background: "none", border: "none", color: "#64748B", fontWeight: 700, fontSize: 14, cursor: "pointer", padding: 0, opacity: loading ? 0.4 : 1 }}
                   disabled={loading} onClick={reload}>↻</button>
               </span>
             </div>
 
-            {/* WHAT IS IN FLIGHT, above the table. Carolyn, 2026-09-08 48:00: "I also want to
-                take it and add where a dashboard that shows us. Basically, I'm tired of seeing
-                completed in here."
+            {/* WHAT IS IN FLIGHT, directly above the table — and, at its far right, the add
+                button (Carolyn 2026-09-12: "move the add item down to the far right just above
+                the table headers"). Carolyn, 2026-09-08 48:00: "I also want to take it and add
+                where a dashboard that shows us. Basically, I'm tired of seeing completed in here."
                 COUNTS ARE OVER ALL LOADED ROWS, never the filtered subset — the rule
                 StatusChips already follows, and the reason is that a tile whose number changes
                 the moment you click it cannot be used to navigate. Clicking one sets the
                 ordinary status facet, so this is a shortcut into the filters that already
                 exist rather than a second filtering model living beside them.
                 Finished labels are omitted: they are precisely what she does not want to see,
-                and `kind` is the only machine-readable way to know which those are. */}
+                and `kind` is the only machine-readable way to know which those are.
+                The tiles are single-line pills now (label · count) so this row is 28px; the
+                two-line 45px tile was the last thing standing between the toolbar and the
+                headers, and the whole point of the row above is that the top stays short. */}
             {(() => {
               const st = (data.columns || []).find((c) => c.type === "status");
-              if (!st) return null;
-              const labels = (st.settings && st.settings.labels) || [];
               const all = data.items || [];
-              const doneIds = new Set(labels.filter((l) => l && l.kind === "done").map((l) => l.id));
-              const count = new Map();
-              for (const it of all) {
-                const v = (it.values || {})[st.id];
-                if (typeof v === "string") count.set(v, (count.get(v) || 0) + 1);
-              }
-              // ⚠️ THE DEADLINE COLUMN, NOT MERELY THE FIRST DATE ONE. Every board here seeds
-              // "Created" at position 1024 and "Due" at 5120, so taking the first date column
-              // picks Created — and "created before today" is true of almost every item, so
-              // Overdue would have read like a catastrophe on a healthy board. If a board has
-              // no deadline column at all there is nothing to be late against, and the tile is
-              // omitted rather than invented.
-              const dateCols = (data.columns || []).filter((c) => c.type === "date");
-              const dateCol = dateCols.find((c) => /^\s*(due|target|deadline)\s*$/i.test(c.name || ""))
-                || dateCols.find((c) => !/^\s*created\s*$/i.test(c.name || ""))
-                || null;
-              const today = new Date().toISOString().slice(0, 10);
-              const overdue = !dateCol ? 0 : all.filter((it) => {
-                const vals = it.values || {};
-                const d = vals[dateCol.id];
-                const s = vals[st.id];
-                // Past its date AND not finished. A finished item with an old date is not a
-                // problem, and counting it would make this number permanently red.
-                return typeof d === "string" && d && d < today && !(typeof s === "string" && doneIds.has(s));
-              }).length;
-              const live = labels.filter((l) => l && !doneIds.has(l.id) && (count.get(l.id) || 0) > 0);
-              if (!live.length && !overdue) return null;
+              const tiles = [];
               const tile = (key, label, n, color, active, onClick) => (
                 <button key={key} type="button" onClick={onClick}
-                  style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 88, textAlign: "left",
-                    background: active ? "#EEF2FF" : "#FFF", border: "1px solid " + (active ? ACCENT : "#E2E8F0"),
-                    borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontFamily: "inherit" }}>
-                  <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: color || "#94A3B8", whiteSpace: "nowrap" }}>{label}</span>
-                  <span style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", lineHeight: 1.1 }}>{n}</span>
+                  style={{ display: "inline-flex", alignItems: "center", gap: 7, height: 28, background: active ? "#EEF2FF" : "#FFF",
+                    border: "1px solid " + (active ? ACCENT : "#E2E8F0"), borderRadius: 999, padding: "0 11px", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: color || "#94A3B8" }}>{label}</span>
+                  <span style={{ fontSize: 13, fontWeight: 800, color: "#1E293B" }}>{n}</span>
                 </button>
               );
+              if (st) {
+                const labels = (st.settings && st.settings.labels) || [];
+                const doneIds = new Set(labels.filter((l) => l && l.kind === "done").map((l) => l.id));
+                const count = new Map();
+                for (const it of all) {
+                  const v = (it.values || {})[st.id];
+                  if (typeof v === "string") count.set(v, (count.get(v) || 0) + 1);
+                }
+                const dCols = (data.columns || []).filter((c) => c.type === "date");
+                const dateCol = dCols.find((c) => /^\s*(due|target|deadline)\s*$/i.test(c.name || ""))
+                  || dCols.find((c) => !/^\s*created\s*$/i.test(c.name || ""))
+                  || null;
+                const today = new Date().toISOString().slice(0, 10);
+                const overdue = !dateCol ? 0 : all.filter((it) => {
+                  const vals = it.values || {};
+                  const d = vals[dateCol.id];
+                  const sv = vals[st.id];
+                  return typeof d === "string" && d && d < today && !(typeof sv === "string" && doneIds.has(sv));
+                }).length;
+                labels.filter((l) => l && !doneIds.has(l.id) && (count.get(l.id) || 0) > 0).forEach((l) =>
+                  tiles.push(tile(l.id, l.label, count.get(l.id) || 0, l.color, facets[st.id] === l.id,
+                    () => setFacets((f) => ({ ...f, [st.id]: f[st.id] === l.id ? null : l.id })))));
+                if (overdue > 0) tiles.push(tile("__overdue", "Overdue", overdue, "#DC2626", false, () => {
+                  setWhenColId(dateCol.id); setWhenCond("before");
+                  setWhenA(new Date().toISOString().slice(0, 10));
+                }));
+              }
+              if (!tiles.length && !canWrite) return null;
               return (
-                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", margin: "0 0 10px" }}>
-                  {live.map((l) => tile(l.id, l.label, count.get(l.id) || 0, l.color,
-                    facets[st.id] === l.id,
-                    () => setFacets((f) => ({ ...f, [st.id]: f[st.id] === l.id ? null : l.id }))))}
-                  {overdue > 0 && tile("__overdue", "Overdue", overdue, "#DC2626", false, () => {
-                    // No facet for "overdue" exists, so this drives the WHEN filter the
-                    // toolbar already owns rather than inventing a parallel one.
-                    // ⚠️ whenColId too, not just the condition: WHEN applies to whichever date
-                    // column is bound, so setting the condition alone would filter on some
-                    // other column — or on none — and quietly show the wrong rows.
-                    setWhenColId(dateCol.id); setWhenCond("before");
-                    setWhenA(new Date().toISOString().slice(0, 10));
-                  })}
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", margin: "0 0 8px" }}>
+                  {tiles}
+                  {/* Always-available add, regardless of grouping or filters. Same inline name
+                      input as the group rows; files into the intake group and inherits any
+                      active facet values so it doesn't vanish behind the filter. */}
+                  {canWrite && (
+                    <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center" }}>
+                      {topAdd == null ? (
+                        <button type="button" onClick={() => setTopAdd("")}
+                          style={{ ...S.btn(ACCENT, "#FFF"), height: 30, padding: "0 14px", fontSize: 12.5, fontFamily: "inherit" }}>＋ Add item</button>
+                      ) : (
+                        <input autoFocus value={topAdd} placeholder="Item name — Enter to add, Esc to cancel"
+                          onChange={(e) => setTopAdd(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && topAdd.trim()) { onAddTop(topAdd.trim()); setTopAdd(null); }
+                            if (e.key === "Escape") setTopAdd(null);
+                          }}
+                          onBlur={() => setTopAdd(null)}
+                          style={{ ...PM_CTL, height: 30, padding: "0 10px", width: 300, fontWeight: 600, color: "#1E293B", outline: "none", fontFamily: "inherit" }} />
+                      )}
+                    </span>
+                  )}
                 </div>
               );
             })()}
