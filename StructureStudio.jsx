@@ -12826,6 +12826,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // adminCalPhotos, NOT adminCalBusy: raising the shared flag here would grey out the video
     // picker beside it, which is the same coupling being removed in the other direction.
     setAdminCalPhotos({ busy: true, step: take.length > 1 ? `Sent 0 of ${take.length}…` : "Uploading…", err: null });
+    // THE BULK PATH FIRST. One mint for the batch instead of one per image — see
+    // onUploadPhotoBatch. Falls through to the per-file pool below if the host is older than
+    // this bundle or the mint itself fails, which costs a round trip and nothing else.
+    if (setup3d.onUploadPhotoBatch) {
+      try {
+        const r = await setup3d.onUploadPhotoBatch(take, (n, total) =>
+          setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })));
+        if (r && r.urls && r.urls.length) {
+          calAddPhotos(r.urls);
+          const next2 = calTrimPhotos((adminCal ? adminCal.photos : []).concat(r.urls));
+          calPersistMedia(adminCal && adminCal.styleValue, next2, undefined);
+        }
+        const over2 = list.length - take.length;
+        setAdminCalPhotos({
+          busy: false, step: null,
+          err: (r && r.errs && r.errs.length)
+            ? `${(r.urls || []).length} of ${take.length} uploaded. ${r.errs.length} failed: ${r.errs[0]}`
+            : (over2 ? `${over2} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.` : null),
+        });
+        return;
+      } catch (e) {
+        // Only a MINT failure lands here (ssNoBatch); a failed PUT is already reported inside
+        // the batch. Fall through to the per-file route rather than failing the whole pick.
+        if (!(e && e.ssNoBatch)) {
+          setAdminCalPhotos({ busy: false, step: null, err: (e && e.message) || "Upload failed" });
+          return;
+        }
+      }
+    }
     // KEEPS WHAT SUCCEEDED. ssUploadPool never rejects, so a batch where the sixth timed out
     // still adds the other five rather than making the builder re-pick all six.
     const { urls, errs } = await ssUploadPool(
@@ -13043,14 +13072,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       const frames = await ssExtractOrbitFrames(file, (s) => setAdminCalVideo((p) => ({ ...p, step: s })));
       const files = frames.map((fr, i) => new File([dataUrlToBytes(fr.dataUrl)], `walk-${i + 1}.jpg`, { type: "image/jpeg" }));
-      // Three lanes rather than one at a time — see ssUploadPool. Order survives, which the
-      // video prompt depends on.
-      const { urls, errs } = await ssUploadPool(
-        files,
-        (f) => setup3d.onUploadPhoto(f),
-        (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` })),
-        3,
-      );
+      // ONE mint for all eight frames where the host supports it, three lanes over the PUTs.
+      // Order survives either way, which the video prompt depends on — it tells the model the
+      // frames are consecutive viewpoints of one lap.
+      let urls, errs;
+      const onFrameProgress = (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` }));
+      if (setup3d.onUploadPhotoBatch) {
+        try {
+          const r = await setup3d.onUploadPhotoBatch(files, onFrameProgress);
+          urls = r.urls; errs = r.errs;
+        } catch (_e) { /* mint failed — fall through to the per-file pool */ }
+      }
+      if (!urls) {
+        const r2 = await ssUploadPool(files, (f) => setup3d.onUploadPhoto(f), onFrameProgress, 3);
+        urls = r2.urls; errs = r2.errs;
+      }
       // A PARTIAL WALK IS STILL A WALK, above the floor. Four frames is what covers four sides
       // (CAL_VIDEO_MIN), so a dropped frame or two no longer throws the whole upload away — but
       // below the floor there is not enough of a lap left to be worth keeping, and the old

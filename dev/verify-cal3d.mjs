@@ -122,10 +122,16 @@ const putBytes = []
 // correctly DE-DUPLICATED, so the image silently never appeared and the test looked like an
 // upload failure. The stub must mint a genuinely new URL every time, like the real server does.
 let signedSeq = 0
-// Uploads by EITHER route. The pre-existing assertions count "did an image get stored", which
-// is route-agnostic; counting only base64 silently turned them into no-ops the day the signed
-// path landed, and two of them did exactly that before this line existed.
-const uploadCount = () => attempts.upload + attempts.signedMint
+// Uploads by EITHER route, counted MONOTONICALLY and never reset. The pre-existing assertions
+// ask "did an image get stored", which is route-agnostic.
+//
+// ⚠️ IT COUNTS STORES, NOT MINTS, and that distinction arrived the hard way twice. Counting only
+// base64 turned these into no-ops the day the signed path landed; then counting MINTS broke them
+// again the day minting went bulk, because one mint now covers a whole batch. A PUT is the only
+// event that means "an image was stored", so that is what this counts. It is also separate from
+// `attempts`, which individual blocks zero to measure themselves.
+let storedCount = 0
+const uploadCount = () => storedCount
 const saveBodies = []
 const mediaSaves = []
 const saved = {}
@@ -198,13 +204,23 @@ async function main() {
       if (a === 'style_photo_upload_url') {
         attempts.signedMint++
         if (delay.noSignedUrl) return json(route, { ok: false, error: 'signed urls off for this test' })
-        const n = ++signedSeq
-        return json(route, { ok: true, path: `${CLIENT}/style-photo-${n}.jpg`, token: `tok-${n}`, url: `${BASE}/__stub/img-s${n}.png` })
+        // BULK. `count` is the whole point of the 2026-09-12 change: one mint for the batch.
+        // The single-object fields are still returned alongside, because an older bundle can be
+        // talking to this function mid-deploy.
+        const want = Math.max(1, Math.min(20, Number(body.count) || 1))
+        const uploads = []
+        for (let i = 0; i < want; i++) {
+          const n = ++signedSeq
+          uploads.push({ path: `${CLIENT}/style-photo-${n}.jpg`, token: `tok-${n}`, url: `${BASE}/__stub/img-s${n}.png` })
+        }
+        return json(route, { ok: true, uploads, path: uploads[0].path, token: uploads[0].token, url: uploads[0].url })
       }
       if (a === 'upload_style_photo') {
         attempts.upload++
+        storedCount++
         if (delay.failNext > 0) {
           delay.failNext--
+          storedCount--   // that attempt is about to be aborted; it stored nothing
           // route.abort() rejects the fetch, which is exactly how supabase-js produces
           // FunctionsFetchError. Returning a 500 would produce FunctionsHttpError instead and
           // would NOT exercise the retry path.
@@ -252,6 +268,7 @@ async function main() {
   // The signed-URL PUT. supabase-js posts the raw file to /storage/v1/object/upload/sign/...
   await page.route(`**/${REF}.supabase.co/storage/v1/object/upload/sign/**`, (route) => {
     attempts.signedPut++
+    storedCount++
     try { putBytes.push((route.request().postDataBuffer() || Buffer.alloc(0)).length) } catch (_e) { putBytes.push(0) }
     return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify({ Key: 'branding/x' }) })
   })
@@ -310,6 +327,7 @@ async function main() {
   // ── four photos, still no video ───────────────────────────────────────────────────────
   // ONE picker interaction, FOUR files -- the whole point of the 2026-09-10 change. Setting
   // four files on one input is exactly what a builder shift-selecting four photos produces.
+  attempts.signedMint = 0; attempts.signedPut = 0
   const picker = page.locator('label', { hasText: /Choose images/ }).locator('input[type=file]')
   ok('the image input accepts multiple', await picker.evaluate((el) => el.multiple))
   await picker.setInputFiles([0, 1, 2, 3].map((i) => ({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`stub-photo-${i}`) })))
@@ -319,6 +337,11 @@ async function main() {
   await page.waitForTimeout(400)
   t = await text()
   ok('FOUR IMAGES UPLOADED IN ONE GO', t.includes('4 of 12 used'), (await line('4 of 12')).trim())
+  // THE SPEED CLAIM, asserted as a COUNT rather than a stopwatch. Four images used to cost four
+  // mints plus four PUTs; bulk minting makes it one plus four. A wall-clock assertion would be
+  // flaky on a loaded machine and would not say WHY it got faster.
+  ok('FOUR IMAGES COST ONE MINT, NOT FOUR', attempts.signedMint === 1, `${attempts.signedMint} mint(s) for ${attempts.signedPut} PUTs`)
+  ok('and every one of them was PUT', attempts.signedPut === 4, `${attempts.signedPut} PUTs`)
   ok('four thumbnails render', (await page.locator('img[alt^="Image "]').count()) === 4, `${await page.locator('img[alt^="Image "]').count()} thumbs`)
   ok('thumbnails are numbered, not side-named', (await page.locator('img[alt="Image 2 of 4"]').count()) === 1)
   ok('PHOTOS ALONE DO NOT UNLOCK GENERATE', await gen.first().isDisabled())

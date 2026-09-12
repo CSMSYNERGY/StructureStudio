@@ -3179,14 +3179,32 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const EXT: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" };
     const ext = EXT[ct];
     if (!ext) return json({ error: "Unsupported image type (use JPG, PNG, WEBP or GIF)." }, 400);
-    // Same shape as upload_style_photo's path, for the same reason: randomUUID makes the public
-    // URL an unguessable capability, which is what 093 relies on now that d3_photos is out of
-    // the anonymous get_config payload.
-    const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
-    const { data: signed, error } = await admin.storage.from("branding").createSignedUploadUrl(path);
-    if (error) return dbFail(req, clientId, "start that upload", error);
-    const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
-    return json({ ok: true, path, token: signed?.token, url: pub.publicUrl });
+    // BULK SINCE 2026-09-12. Minting one URL per image meant every image cost TWO round trips —
+    // mint, then PUT — and on a high-latency uplink the round trips ARE the cost, not the bytes.
+    // Eight images went from sixteen trips to nine. The cap matches CAL_PHOTO_MAX plus the eight
+    // walk-around frames a single video produces, because both paths mint through here.
+    //
+    // Absent `count` still returns the single-object shape, so an older bundle mid-deploy keeps
+    // working against a newer function. That is not hypothetical: the compiled portal and this
+    // function ship separately and a builder can be holding either for minutes.
+    const want = Math.max(1, Math.min(20, Math.floor(Number(payload.count) || 1)));
+    const uploads: { path: string; token: string | undefined; url: string }[] = [];
+    for (let i = 0; i < want; i++) {
+      // randomUUID per object, exactly as before: the public URL is an unguessable capability,
+      // which is what 093 leans on now that d3_photos is out of the anonymous get_config payload.
+      const path = `${clientId}/style-photo-${crypto.randomUUID()}.${ext}`;
+      const { data: signed, error } = await admin.storage.from("branding").createSignedUploadUrl(path);
+      if (error) {
+        // Partial success is the honest answer: the caller uploads what it was given URLs for
+        // and reports the rest as failures, rather than losing a whole batch to one bad mint.
+        if (!uploads.length) return dbFail(req, clientId, "start that upload", error);
+        break;
+      }
+      const { data: pub } = admin.storage.from("branding").getPublicUrl(path);
+      uploads.push({ path, token: signed?.token, url: pub.publicUrl });
+    }
+    const first = uploads[0];
+    return json({ ok: true, uploads, path: first?.path, token: first?.token, url: first?.url });
   }
 
   // Draft a 3D spec from reference photos with Claude. The builder reviews and tunes the

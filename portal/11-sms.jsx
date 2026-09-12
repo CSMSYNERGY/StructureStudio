@@ -349,7 +349,7 @@ function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
       </SmsField>
       <SmsField label="How do people agree to be texted?"
         hint="Describe where they tick the box. The carriers will look for it on your website, so it has to match what is actually there.">
-        <input style={SMS_INPUT} value={copy.messageFlow} disabled={readOnly}
+        <textarea style={SMS_TEXTAREA} rows={4} value={copy.messageFlow} disabled={readOnly}
           placeholder="Customers tick a box giving us permission to text them when they request a quote on our website."
           onChange={(e) => setCopy({ ...copy, messageFlow: e.target.value })} />
       </SmsField>
@@ -457,6 +457,15 @@ function SmsField({ label, hint, children, wide }) {
 const SMS_INPUT = {
   width: "100%", padding: "9px 11px", border: "1px solid #CBD5E1", borderRadius: 8,
   fontSize: 13, fontFamily: "inherit", boxSizing: "border-box", background: "#fff",
+};
+
+/** Same box, given room to breathe. The consent answer is a PARAGRAPH — it has to name who is
+ *  texting, what about, that frequency varies, that rates may apply, how to stop, and (since
+ *  30924) carry the public opt-in page address, which the “Add this link” button appends to
+ *  the end. In a one-line input every one of those sentences scrolls out of sight as it is
+ *  typed, and the appended link lands where the builder cannot see it. */
+const SMS_TEXTAREA = {
+  ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
 
 function SmsMessagingView({ clientId, viewingLabel, canEdit }) {

@@ -1070,6 +1070,67 @@ function Dashboard({ session }) {
       if (error || !data || !data.ok) return null;
       return data.url || null;
     },
+    // MANY IMAGES, ONE MINT (2026-09-12). The per-file path below is still the fallback and
+    // still correct; this exists because it is FASTER, and by a lot on a slow link: minting a
+    // signed URL is itself a round trip, so eight images used to cost sixteen and now cost nine.
+    //
+    // The host owns the whole batch — shrink, mint, PUT — because only the host knows that the
+    // mint is bulk-able. The designer just says "upload these" and watches the progress.
+    onUploadPhotoBatch: async (files, onProgress) => {
+      const list = Array.prototype.slice.call(files || []).filter(Boolean);
+      if (!list.length) return { urls: [], errs: [] };
+      // Shrink FIRST, sequentially: each one decodes a multi-megapixel bitmap onto a canvas, and
+      // three of those at once on a phone is how a tab runs out of memory. It is CPU, not
+      // network, so there is nothing to overlap anyway.
+      const prepped = [];
+      const errs = [];
+      for (let i = 0; i < list.length; i++) {
+        try { prepped.push(await ssShrinkStylePhoto(list[i])); }
+        catch (e) { errs.push((e && e.message) || "Could not prepare that image"); }
+      }
+      if (!prepped.length) return { urls: [], errs };
+      // ONE mint for the whole batch. `count` is what makes it one round trip.
+      const { data: sig, error: sigErr } = await sb.functions.invoke("portal-settings", {
+        body: { action: "style_photo_upload_url", contentType: "image/jpeg", count: prepped.length },
+      });
+      if (sigErr || !sig || !sig.ok || !Array.isArray(sig.uploads) || !sig.uploads.length) {
+        // No URLs means no fast path. Signal it rather than half-failing, and let the caller
+        // fall back to the per-file route, which mints its own.
+        const e = new Error((sigErr && sigErr.message) || (sig && sig.error) || "Could not start those uploads");
+        e.name = "FunctionsFetchError";
+        e.ssNoBatch = true;
+        throw e;
+      }
+      const slots = sig.uploads.slice(0, prepped.length);
+      const urls = new Array(slots.length);
+      let done = 0, next = 0;
+      // Three lanes over the PUTs — the same reasoning as ssUploadPool's header: the bodies are
+      // small now, so what is left to hide is latency.
+      await Promise.all(Array.from({ length: Math.min(3, slots.length) }, async () => {
+        for (;;) {
+          const i = next++;
+          if (i >= slots.length) return;
+          const s = slots[i];
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const put = await sb.storage.from("branding")
+                .uploadToSignedUrl(s.path, s.token, prepped[i], { contentType: prepped[i].type || "image/jpeg" });
+              if (put.error) throw new Error(put.error.message || "Upload failed");
+              urls[i] = s.url;
+              break;
+            } catch (e) {
+              // A signed PUT that never reached storage is safe to repeat — nothing was written.
+              if (attempt < 2) { await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 4000)); continue; }
+              errs.push((e && e.message) || "Upload failed");
+              break;
+            }
+          }
+          done++;
+          if (onProgress) onProgress(done, slots.length);
+        }
+      }));
+      return { urls: urls.filter(Boolean), errs };
+    },
     onUploadPhoto: async (file) => {
       // ssShrinkStylePhoto GUARANTEES a small JPEG or throws. It replaces a call to
       // ssFitImageForUpload(file, 900_000, 1600), which caused the bug it now fixes - see that
