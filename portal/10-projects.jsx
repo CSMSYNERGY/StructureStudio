@@ -50,14 +50,33 @@ const PM_POP_ROW = (on) => ({ background: on ? "#EEF2FF" : "none", border: "none
 const PM_POP_LBL = { display: "flex", flexDirection: "column", gap: 3, fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4, textTransform: "uppercase" };
 const PM_POP_SEL = { ...PM_CTL_SEL, border: "1px solid #CBD5E1", borderRadius: 7, padding: "5px 8px", maxWidth: "none", fontSize: 12.5, textTransform: "none", letterSpacing: 0 };
 // The pill's small uppercase prefix ("VIEW", "DUE") — the label sits INSIDE the control so
-// every pill shares one height and baseline (PMCtl does the same for the facet selects).
+// every pill shares one height and baseline (PMPickPill uses it for the facets and Group by).
 const PM_PILL_TAG = { fontSize: 10.5, fontWeight: 800, color: "#94A3B8", letterSpacing: 0.4 };
 
-function PMCtl({ label, children }) {
+// A single-choice pill: TAG + the current value + ▾, opening the choices in a popover.
+// It replaced a native <select> inside the pill (Carolyn 2026-09-12: "the boxes to select
+// are much wider than they need to be") — a native select is always as wide as its WIDEST
+// option, so "STATUS All" was the width of "Awaiting review" plus a chevron, and six of
+// those pushed the row into a scrollbar. This pill is the width of the text it shows.
+function PMPickPill({ tag, options, value, onPick, open, onToggle, allLabel }) {
+  const cur = options.find((o) => o.key === value);
+  const on = cur != null;
   return (
-    <span style={{ ...PM_CTL, padding: "0 8px", gap: 5 }}>
-      {label && <span style={{ fontSize: 11, fontWeight: 700, color: "#94A3B8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</span>}
-      {children}
+    <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
+      <button type="button" onClick={onToggle}
+        style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
+          color: on ? ACCENT : "#334155", borderColor: on ? ACCENT : "#CBD5E1" }}>
+        <span style={PM_PILL_TAG}>{String(tag).toUpperCase()}</span>
+        {cur ? cur.label : allLabel} ▾
+      </button>
+      {open && (
+        <div style={PM_POP}>
+          {allLabel != null && <button type="button" onClick={() => onPick(null)} style={PM_POP_ROW(!on)}>{allLabel}</button>}
+          {options.map((o) => (
+            <button key={o.key} type="button" onClick={() => onPick(o.key)} style={PM_POP_ROW(o.key === value)}>{o.label}</button>
+          ))}
+        </div>
+      )}
     </span>
   );
 }
@@ -1227,6 +1246,7 @@ function ProjectsTab({ sub, onSub }) {
   const [colsOpen, setColsOpen] = useState(false);
   const [viewsOpen, setViewsOpen] = useState(false);  // saved-views popover
   const [dateOpen, setDateOpen] = useState(false);    // WHEN date-filter popover
+  const [pickOpen, setPickOpen] = useState(null);     // id of the open facet / Group-by pill
   const [savedViews, setSavedViews] = useState([]);
   const [openItemId, setOpenItemId] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1577,14 +1597,15 @@ function ProjectsTab({ sub, onSub }) {
             {/* ONE ROW, and it stays one row (Carolyn 2026-09-12: "condense the top… fit the
                 filter options into one single row"). What used to wrap — a separate saved-views
                 chip row, and a WHEN date filter that inlined up to four controls — is now a
-                popover pill each, so nothing here is taller than 32px. nowrap + overflowX:auto:
-                on a normal screen no scrollbar ever appears; on a narrow one the row scrolls
-                sideways rather than stacking, which is what keeps the table area's height
-                stable. The add button is NOT here any more — it sits above the table headers. */}
-            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "nowrap", overflowX: "auto", marginBottom: 10, paddingBottom: 2 }}>
+                popover pill each, so nothing here is taller than 32px, and every pill is only
+                as wide as the value it shows (see PMPickPill). No sideways scroll ("Seriously?
+                a scroll bar?" — same day): if a window is too narrow the row wraps, which costs
+                one 32px line of table and nothing else. The add button is NOT here any more —
+                it sits above the table headers. */}
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
                 <button type="button" title="Saved views"
-                  onClick={() => { setViewsOpen((o) => !o); setDateOpen(false); setColsOpen(false); }}
+                  onClick={() => { setViewsOpen((o) => !o); setDateOpen(false); setColsOpen(false); setPickOpen(null); }}
                   style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
                     color: activeView || viewDirty ? ACCENT : "#334155", borderColor: activeView ? ACCENT : "#CBD5E1" }}>
                   <span style={PM_PILL_TAG}>VIEW</span>
@@ -1622,15 +1643,12 @@ function ProjectsTab({ sub, onSub }) {
               </span>
 
               {facetCols.map((c) => (
-                <span key={c.id} style={{ flex: "0 0 auto", display: "inline-flex" }}>
-                  <PMCtl label={c.name}>
-                    <select value={facets[c.id] || ""} onChange={(e) => setFacets((f) => ({ ...f, [c.id]: e.target.value || null }))}
-                      style={PM_CTL_SEL}>
-                      <option value="">All</option>
-                      {(pmType(c).groupsFor(c, ctx) || []).map((g) => <option key={g.key} value={g.key}>{g.label}</option>)}
-                    </select>
-                  </PMCtl>
-                </span>
+                <PMPickPill key={c.id} tag={c.name} allLabel="All"
+                  options={(pmType(c).groupsFor(c, ctx) || []).map((g) => ({ key: g.key, label: g.label }))}
+                  value={facets[c.id] || null}
+                  onPick={(k) => { setFacets((f) => ({ ...f, [c.id]: k })); setPickOpen(null); }}
+                  open={pickOpen === c.id}
+                  onToggle={() => { setPickOpen((o) => (o === c.id ? null : c.id)); setViewsOpen(false); setDateOpen(false); setColsOpen(false); }} />
               ))}
 
               {/* The WHEN filter as one pill. Its column select, condition select and one or
@@ -1643,7 +1661,7 @@ function ProjectsTab({ sub, onSub }) {
                 return (
                   <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
                     <button type="button" title="Filter by date"
-                      onClick={() => { setDateOpen((o) => !o); setViewsOpen(false); setColsOpen(false); }}
+                      onClick={() => { setDateOpen((o) => !o); setViewsOpen(false); setColsOpen(false); setPickOpen(null); }}
                       style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", gap: 6,
                         color: on ? ACCENT : "#334155", borderColor: on ? ACCENT : "#CBD5E1" }}>
                       <span style={PM_PILL_TAG}>{String(dc.name || "Date").toUpperCase()}</span>
@@ -1684,17 +1702,17 @@ function ProjectsTab({ sub, onSub }) {
                 );
               })()}
 
-              <span style={{ flex: "0 0 auto", display: "inline-flex" }}>
-                <PMCtl label="Group by">
-                  <select value={view.groupBy} onChange={(e) => setViewPart({ groupBy: e.target.value })} style={PM_CTL_SEL}>
-                    <option value="groups">Groups</option>
-                    {groupables.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                </PMCtl>
-              </span>
+              {/* "Groups" (the board's own) is a real choice here, not an "All" reset, so it is
+                  passed as an option and the pill never shows the accent for it. */}
+              <PMPickPill tag="Group by"
+                options={[{ key: "groups", label: "Groups" }, ...groupables.map((c) => ({ key: c.id, label: c.name }))]}
+                value={view.groupBy}
+                onPick={(k) => { setViewPart({ groupBy: k || "groups" }); setPickOpen(null); }}
+                open={pickOpen === "__groupBy"}
+                onToggle={() => { setPickOpen((o) => (o === "__groupBy" ? null : "__groupBy")); setViewsOpen(false); setDateOpen(false); setColsOpen(false); }} />
 
               <span style={{ position: "relative", display: "inline-flex", flex: "0 0 auto" }}>
-                <button type="button" onClick={() => { setColsOpen((o) => !o); setViewsOpen(false); setDateOpen(false); }}
+                <button type="button" onClick={() => { setColsOpen((o) => !o); setViewsOpen(false); setDateOpen(false); setPickOpen(null); }}
                   style={{ ...PM_CTL, padding: "0 10px", cursor: "pointer", fontWeight: 700, color: "#334155", fontFamily: "inherit" }}>
                   Columns ▾
                 </button>
