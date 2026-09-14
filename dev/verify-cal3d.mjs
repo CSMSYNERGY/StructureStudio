@@ -75,7 +75,7 @@ const SESSION = {
 // The tenant's one style, deliberately with NO photos and NO video frames, so the run starts at
 // the gate's most-closed state and every step of the unlock has to be earned.
 const STYLE_ROW = {
-  id: 's1', key: 'barn', label: 'Barn', code: 'BRN', image_url: null, active: true,
+  id: 's1', key: 'barn', label: 'Barn', code: 'BRN', image_url: null, active: true, updated_at: '2026-09-14T10:00:00.000+00:00',
   show_image_on_estimate: true, d3: null, d3_photos: [], d3_video_frames: [],
   model_url: null, model_status: 'none', model_uploaded_at: null, model_locked_at: null,
   model_meta: null, taxable: true,
@@ -98,7 +98,7 @@ const CONFIG = {
 // the refetch race can only be seen with two styles, because the symptom is style A's frames
 // landing in style B.
 const STYLE_ROW2 = {
-  id: 's2', key: 'shed', label: 'Shed', code: 'SHD', image_url: null, active: true,
+  id: 's2', key: 'shed', label: 'Shed', code: 'SHD', image_url: null, active: true, updated_at: '2026-09-14T10:00:00.000+00:00',
   show_image_on_estimate: true, d3: null,
   d3_photos: ['http://127.0.0.1:8123/__stub/img-90.png', 'http://127.0.0.1:8123/__stub/img-91.png', 'http://127.0.0.1:8123/__stub/img-92.png', 'http://127.0.0.1:8123/__stub/img-93.png'],
   d3_video_frames: ['http://127.0.0.1:8123/__stub/img-94.png', 'http://127.0.0.1:8123/__stub/img-95.png', 'http://127.0.0.1:8123/__stub/img-96.png', 'http://127.0.0.1:8123/__stub/img-97.png', 'http://127.0.0.1:8123/__stub/img-98.png'],
@@ -113,7 +113,10 @@ const STYLE_ROW2 = {
 // actually does. `attempts` counts every attempt including retries.
 // `stallPuts` makes the next n signed PUTs HANG - no answer at all, which is what a dead
 // connection looks like from the page and what the upload watchdog exists to notice.
-const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false, stallPuts: 0, stallMints: 0 }
+const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false, stallPuts: 0, stallMints: 0, stallSaves: 0, stallAllSaves: false, conflictSaves: 0, mediaMs: 0, stallMedia: 0 }
+// What the stub hands back as the row's CURRENT spec when a save is refused as stale.
+const CONFLICT_D3 = { roof: { type: 'gable', pitch: 0.33 }, wallHeightFt: 8 }
+const CONFLICT_VERSION = "2026-09-14T11:11:11.111+00:00"
 // Counted separately so a test can prove WHICH route an upload took. The signed route is the
 // fast one (raw bytes straight to storage); base64 through the edge function is the fallback.
 const attempts = { upload: 0, signedMint: 0, signedPut: 0, stalledPut: 0 }
@@ -123,6 +126,9 @@ const putBytes = []
 const putHosts = []
 // The HOST of every mint, so a test can prove a stalled one retried through the functions side door.
 const mintHosts = []
+// The host of every save_style_d3 attempt, and how many media saves were ever in flight at once.
+const saveHosts = []
+let mediaInFlight = 0, mediaMaxInFlight = 0
 // MONOTONIC, never reset. attempts.signedMint is zeroed by individual tests to count one block's
 // calls, and reusing it for the URL handed back the same path twice — which calTrimPhotos then
 // correctly DE-DUPLICATED, so the image silently never appeared and the test looked like an
@@ -258,19 +264,47 @@ async function main() {
       if (a === 'save_style_media') {
         // Mirrors the real action: writes ONLY the media columns, leaves d3 alone, and treats an
         // ABSENT key as "leave that column" rather than as an empty array.
+        // Hung, on whichever host: a stalled media save never reaches `mediaSaves`.
+        if (delay.stallMedia > 0) {
+          delay.stallMedia--
+          setTimeout(() => { route.abort('timedout').catch(() => {}) }, 8000)
+          return
+        }
         mediaSaves.push(body)
+        mediaInFlight++
+        mediaMaxInFlight = Math.max(mediaMaxInFlight, mediaInFlight)
+        if (delay.mediaMs) await new Promise((r) => setTimeout(r, delay.mediaMs))
+        mediaInFlight--
         const row = body.styleValue === 'shed' ? STYLE_ROW2 : STYLE_ROW
         if (Array.isArray(body.d3Photos)) row.d3_photos = body.d3Photos
         if (Array.isArray(body.d3VideoFrames)) row.d3_video_frames = body.d3VideoFrames
-        return json(route, { ok: true })
+        // The real action stamps updated_at and echoes it: that version is the portal's next base.
+        row.updated_at = new Date().toISOString()
+        return json(route, { ok: true, updatedAt: row.updated_at, ...(Array.isArray(body.d3Photos) ? { d3Photos: body.d3Photos } : {}), ...(Array.isArray(body.d3VideoFrames) ? { d3VideoFrames: body.d3VideoFrames } : {}) })
       }
       if (a === 'save_style_d3') {
+        const saveHost = new URL(url).host
+        saveHosts.push(saveHost)
+        if (delay.stallAllSaves || (delay.stallSaves > 0 && saveHost === `${REF}.supabase.co`)) {
+          if (!delay.stallAllSaves) delay.stallSaves--
+          setTimeout(() => { route.abort('timedout').catch(() => {}) }, 8000)
+          return
+        }
+        if (delay.conflictSaves > 0) {
+          delay.conflictSaves--
+          saveBodies.push(body)
+          return route.fulfill({
+            status: 409, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
+            body: JSON.stringify({ error: 'This style was changed after you opened it.', conflict: true, stale: ['d3'], current: { updatedAt: CONFLICT_VERSION, d3: CONFLICT_D3, d3Photos: STYLE_ROW.d3_photos || [], d3VideoFrames: STYLE_ROW.d3_video_frames || [] } }),
+          })
+        }
         saveBodies.push(body)
         saved.d3Photos = body.d3Photos || null
         saved.d3VideoFrames = body.d3VideoFrames || null
         STYLE_ROW.d3_photos = saved.d3Photos || []
         STYLE_ROW.d3_video_frames = saved.d3VideoFrames || []
-        return json(route, { ok: true, d3: body.d3, d3Photos: saved.d3Photos, d3VideoFrames: saved.d3VideoFrames })
+        STYLE_ROW.updated_at = new Date().toISOString()
+        return json(route, { ok: true, updatedAt: STYLE_ROW.updated_at, d3: body.d3, d3Photos: saved.d3Photos, d3VideoFrames: saved.d3VideoFrames })
       }
       return json(route, { ok: true })
     }
@@ -674,10 +708,102 @@ async function main() {
   ok('REOPEN RESTORES THE VIDEO - no re-filming', /\d+ views ready/.test(t), (await line('')).trim().slice(0, 40))
   ok('generate is still unlocked after a reopen', !(await gen.first().isDisabled()))
 
+  // ── THE SAVE TIMEOUT AND THE LATE-SAVE GUARD (2026-09-14) ──────────────────────────────
+  // Ahsan's real Save sat on "Saving…" for ~168s: save_style_d3 went through the main hostname
+  // with no deadline, the same stall the uploads had. And because a stalled request can still
+  // land minutes later, every guarded save carries the version it was edited from.
+  {
+    const last = saveBodies[saveBodies.length - 1] || {}
+    ok('A SAVE CARRIES THE VERSION IT WAS EDITING', typeof last.baseVersion === 'string' && last.baseVersion.length > 0, `baseVersion ${JSON.stringify(last.baseVersion)}`)
+    // Review wf_5199a3e0-d65 (high): with the key absent, 01-core's wrapper injects whatever view-as
+    // target is armed when a QUEUED save finally runs. Present-and-null is what stops that.
+    ok('AND NAMES ITS TENANT EXPLICITLY, SO A LATER VIEW-AS CANNOT BE INJECTED', 'targetClientId' in last && last.targetClientId === null, `targetClientId ${JSON.stringify(last.targetClientId)}`)
+    const savedClick = async () => {
+      await page.getByRole('button', { name: /Save 3D look/ }).first().click()
+      await page.waitForFunction(() => !document.body.innerText.includes('Saved.'), null, { timeout: 10000 }).catch(() => {})
+    }
+
+    await page.evaluate(() => { window.__ssSaveDeadlineMs = 1500 })
+    saveHosts.length = 0
+    delay.stallSaves = 1
+    await savedClick()
+    await page.waitForFunction(() => document.body.innerText.includes('Saved.'), null, { timeout: 30000 })
+    ok('A STALLED SAVE RETRIES THROUGH THE FUNCTIONS HOST',
+      saveHosts.length === 2 && saveHosts[0] === `${REF}.supabase.co` && saveHosts[1] === `${REF}.functions.supabase.co`, saveHosts.join(' -> '))
+
+    saveBodies.length = 0
+    saveHosts.length = 0
+    delay.conflictSaves = 1
+    await savedClick()
+    await page.waitForFunction(() => document.body.innerText.includes('Saved.'), null, { timeout: 30000 })
+    ok('A CONFLICT IS RESENT ONCE, ON THE CURRENT VERSION',
+      saveBodies.length === 2 && saveBodies[1].baseVersion === CONFLICT_VERSION, `${saveBodies.length} bodies; second base ${JSON.stringify(saveBodies[1] && saveBodies[1].baseVersion)}`)
+    // Both of those calls came moments after the stall above, so neither should have waited on the
+    // main host again.
+    ok('AFTER A STALL, THE NEXT SAVES SKIP THE STALLED HOST FOR A WHILE',
+      saveHosts.length === 2 && saveHosts.every((h) => h === `${REF}.functions.supabase.co`), saveHosts.join(' -> '))
+
+    delay.stallAllSaves = true
+    const t0 = Date.now()
+    await page.getByRole('button', { name: /Save 3D look/ }).first().click()
+    await page.waitForFunction(() => /Saving didn.t go through/.test(document.body.innerText), null, { timeout: 30000 })
+    const secs = Math.round((Date.now() - t0) / 100) / 10
+    ok('WHEN BOTH HOSTS STALL, THE SAVE SAYS SO IN SECONDS', secs < 12, `${secs}s with a 1.5s deadline`)
+    await page.evaluate(() => { if (window.__ssForgetStalledHosts) window.__ssForgetStalledHosts() })
+    delay.stallAllSaves = false
+    await page.evaluate(() => { window.__ssSaveDeadlineMs = undefined })
+
+    // Two media writes back to back: remove a photo, then add one while the first is still held.
+    const before = await imgCount()
+    delay.mediaMs = 900
+    mediaMaxInFlight = 0
+    const mediaStart = mediaSaves.length
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(150)
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'queued.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('queued-photo') }])
+    await waitForImages(before)
+    await page.waitForTimeout(2600)
+    ok('MEDIA SAVES NEVER OVERLAP', mediaMaxInFlight === 1 && mediaSaves.length - mediaStart >= 2, `max in flight ${mediaMaxInFlight}, ${mediaSaves.length - mediaStart} saves`)
+    const lastMedia = mediaSaves[mediaSaves.length - 1] || {}
+    ok('and the last one written is the latest list', (lastMedia.d3Photos || []).length === before, `${(lastMedia.d3Photos || []).length} photos, ${before} on screen`)
+    delay.mediaMs = 0
+  }
+
+  // ── A MEDIA SAVE LOST TO A STALL IS REPLAYED (final check wf_0e1e9235-8e5) ──────────────────
+  // Media saves show no error, and the guard refuses a late copy of an OLDER list, so a newest list
+  // that is simply abandoned lets an older copy become the last write. Remove a photo while both
+  // hosts hang for that save; once they recover, the removal must still land.
+  {
+    await page.evaluate(() => {
+      window.__ssSaveDeadlineMs = 800
+      window.__ssMediaReplayMs = 1500
+      if (window.__ssForgetStalledHosts) window.__ssForgetStalledHosts()
+    })
+    const before = await imgCount()
+    const mediaStart = mediaSaves.length
+    delay.stallMedia = 2   // the main-host copy and the side-door copy both hang
+    await page.locator('button[title="Remove this image"]').last().click()
+    await waitForImages(before - 1)
+    await page.waitForTimeout(6000)
+    const landed = mediaSaves.slice(mediaStart)
+    const lastLanded = landed[landed.length - 1] || {}
+    ok('A MEDIA SAVE LOST TO A STALL IS REPLAYED WITH THE LATEST LIST',
+      delay.stallMedia === 0 && landed.length >= 1 && (lastLanded.d3Photos || []).length === before - 1,
+      `${landed.length} landed; last has ${(lastLanded.d3Photos || []).length} photos, ${before - 1} on screen`)
+    await page.evaluate(() => { window.__ssSaveDeadlineMs = undefined; window.__ssMediaReplayMs = undefined })
+    // Put the image back so everything below still describes what it says.
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'replay-restore.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('replay-restore') }])
+    await waitForImages(before)
+    await page.waitForTimeout(800)
+  }
+
   // ── REGRESSION: a save before the refetch lands must not claim the frames are gone ──────
   // `adminCalVideo.urls === null` means "we have not looked yet". Sending [] for that wrote an
   // empty array over a walk-around already on file, and there is no UI anywhere that accepts
   // frame URLs, so the only recovery was re-filming.
+  // Forget every known version first, so this save genuinely has none when it is pressed — the
+  // case re-review wf_9d79b211-18b showed going out unguarded while the style's own load was hung.
+  await page.evaluate(() => { if (window.__ssForgetStyleVersions) window.__ssForgetStyleVersions() })
   delay.catalogMs = 6000
   await page.getByRole('button', { name: 'Shed', exact: true }).first().click()
   await page.waitForTimeout(400)
@@ -686,6 +812,8 @@ async function main() {
   await page.waitForTimeout(1500)
   const early = saveBodies[0] || {}
   ok('a save before the frames load OMITS the column', !('d3VideoFrames' in early), Object.keys(early).join(','))
+  ok('A SAVE BEFORE ITS STYLE HAS LOADED READS THE VERSION FIRST, NEVER SENDS ONE UNGUARDED',
+    typeof early.baseVersion === 'string' && early.baseVersion.length > 0, `baseVersion ${JSON.stringify(early.baseVersion)}`)
 
   // ── REGRESSION: a slow answer for one style must not land on another ────────────────────
   await page.waitForTimeout(6000)

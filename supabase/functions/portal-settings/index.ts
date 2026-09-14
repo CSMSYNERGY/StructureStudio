@@ -41,6 +41,7 @@ import {
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
 import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
 import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
@@ -1767,7 +1768,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
-      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, d3_video_frames, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable").eq("client_id", clientId).order("sort_order"),
+      // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
+      // next save so the late-save guard can refuse a stalled old copy (styleSaveGuard.ts).
+      admin.from("building_styles").select("id, key, label, code, image_url, active, show_image_on_estimate, d3, d3_photos, d3_video_frames, model_url, model_status, model_uploaded_at, model_locked_at, model_meta, taxable, updated_at").eq("client_id", clientId).order("sort_order"),
       admin.from("building_sizes").select("id, style_id, label, width_ft, length_ft, base_price, active").eq("client_id", clientId).order("sort_order"),
       admin.from("client_layout_items").select("item_key, label_override, active, archived, internal_only, sort_order, taxable, depth_in, height_off_floor_in").eq("client_id", clientId).order("sort_order"),
       // wall_snap + the two dimension defaults (171): the Options grid only offers Depth and
@@ -2935,19 +2938,37 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Resolve one of this tenant's styles by key-or-id, and report whether its 3D setup is
   // LOCKED. Shared by every write below so the lock cannot be enforced in one place and
   // forgotten in another.
+  // One style row as the 3D actions read it. The d3/media/updated_at members exist for the
+  // late-save guard; the lock and scan actions only ever touch id, key and the model fields.
+  type Style3D = {
+    id: string; key: string; model_status: string; model_url: string | null;
+    d3: unknown; d3_photos: unknown; d3_video_frames: unknown; updated_at: string | null;
+  };
   const findStyleFor3D = async (styleValue: string, styleId: string) => {
-    let q = admin.from("building_styles").select("id, key, model_status, model_url").eq("client_id", clientId);
+    // d3, the two media columns and updated_at ride along for the late-save guard in
+    // save_style_d3 / save_style_media (styleSaveGuard.ts); every other caller ignores them.
+    let q = admin.from("building_styles").select("id, key, model_status, model_url, d3, d3_photos, d3_video_frames, updated_at").eq("client_id", clientId);
     q = styleId ? q.eq("id", styleId) : q.eq("key", styleValue);
     const { data, error } = await q.maybeSingle();
     if (error) return { err: json({ error: error.message }, 500) };
     if (!data) return { err: json({ error: "Style not found (or not yours)." }, 404) };
-    return { style: data as { id: string; key: string; model_status: string; model_url: string | null } };
+    return { style: data as Style3D };
   };
   // The lock freezes SETUP only. Prices, sizes, active/hidden and the estimate-image flag stay
   // editable on a locked style on purpose: those are commercial decisions a builder makes every
   // week, while the geometry is the thing that must stop moving once it matches a real building
   // customers are being quoted against.
   const LOCKED_MSG = "This style's 3D setup is locked. Unlock it first if you really need to change the shape.";
+  // THE LATE-SAVE GUARD'S REFUSAL (2026-09-14) — see _shared/styleSaveGuard.ts for why a save
+  // can arrive after a newer one. `conflict: true` is what tells the portal this 409 is not the
+  // lock above: it takes `current.updatedAt` as its new base and resends once, because the save
+  // the builder is waiting on IS the latest intent. A late copy of an older save gets the same
+  // answer, but nobody is waiting for it any more, so it simply never lands.
+  const styleConflict = (style: Style3D) => json({
+    error: "This style was changed after you opened it. Reopen it to see the latest, then save again.",
+    conflict: true,
+    current: { updatedAt: style.updated_at ?? null, d3: style.d3 ?? null, d3Photos: mediaList(style.d3_photos), d3VideoFrames: mediaList(style.d3_video_frames) },
+  }, 409);
 
   if (action === "save_style_d3") {
     const styleValue = String(payload.styleValue ?? "").trim();
@@ -2978,7 +2999,27 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
-    const { error, count } = await admin.from("building_styles")
+    // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
+    // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
+    // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already
+    // landed) answers ok and writes nothing, so it cannot bump the version under a save that is
+    // still on its way. Only the columns this save writes are compared.
+    const decision = guardDecision({
+      baseVersion: "baseVersion" in payload ? (payload.baseVersion ?? null) : undefined,
+      currentVersion: found.style!.updated_at,
+      columns: [
+        { current: found.style!.d3 ?? null, next: clean.d3 },
+        { current: mediaList(found.style!.d3_photos), next: photos },
+        ...(hasVideoFrames ? [{ current: mediaList(found.style!.d3_video_frames), next: videoFrames }] : []),
+      ],
+    });
+    if (decision === "conflict") return styleConflict(found.style!);
+    if (decision === "duplicate") {
+      return json(hasVideoFrames
+        ? { ok: true, duplicate: true, updatedAt: found.style!.updated_at, d3: clean.d3, d3Photos: photos, d3VideoFrames: videoFrames }
+        : { ok: true, duplicate: true, updatedAt: found.style!.updated_at, d3: clean.d3, d3Photos: photos });
+    }
+    let write = admin.from("building_styles")
       .update(
         hasVideoFrames
           ? { d3: clean.d3, d3_photos: photos, d3_video_frames: videoFrames, updated_at: new Date().toISOString() }
@@ -2986,13 +3027,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         { count: "exact" },
       )
       .eq("client_id", clientId).eq("id", found.style!.id);
+    // AND ATOMIC. The decision above read the row a moment ago; the write only lands if nobody
+    // has written it since, which closes the gap between that read and this update.
+    if (decision === "write") write = found.style!.updated_at ? write.eq("updated_at", found.style!.updated_at) : write.is("updated_at", null);
+    const { data: wrote, error, count } = await write.select("updated_at");
     if (error) return json({ error: error.message }, 500);
-    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
+    if (!count) {
+      if (decision === "write") {
+        const again = await findStyleFor3D(styleValue, styleId);
+        if (again.err) return again.err;
+        return styleConflict(again.style!);
+      }
+      return json({ error: "Style not found (or not yours)." }, 404);
+    }
+    // The version this save just stamped, as the database prints it: the portal's next base.
+    const updatedAt = (Array.isArray(wrote) && wrote[0] && (wrote[0] as { updated_at?: string | null }).updated_at) || null;
     // Only reports what it wrote. Echoing `videoFrames` on a save that deliberately left the
     // column alone would tell the caller their frames are now [] and invite them to believe it.
     return json(hasVideoFrames
-      ? { ok: true, d3: clean.d3, d3Photos: photos, d3VideoFrames: videoFrames }
-      : { ok: true, d3: clean.d3, d3Photos: photos });
+      ? { ok: true, updatedAt, d3: clean.d3, d3Photos: photos, d3VideoFrames: videoFrames }
+      : { ok: true, updatedAt, d3: clean.d3, d3Photos: photos });
   }
 
   // Persist ONLY the reference media — the photos and the walk-around frames — leaving the d3
@@ -3024,12 +3078,39 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (Array.isArray(payload.d3Photos)) patch.d3_photos = sanitizePhotoUrls(payload.d3Photos, 12);
     if (Array.isArray(payload.d3VideoFrames)) patch.d3_video_frames = sanitizePhotoUrls(payload.d3VideoFrames, 8);
     if (Object.keys(patch).length === 1) return json({ ok: true, skipped: true });
-    const { error, count } = await admin.from("building_styles")
+    // The same version guard as save_style_d3, over only the columns this call writes.
+    const decision = guardDecision({
+      baseVersion: "baseVersion" in payload ? (payload.baseVersion ?? null) : undefined,
+      currentVersion: found.style!.updated_at,
+      columns: [
+        ...("d3_photos" in patch ? [{ current: mediaList(found.style!.d3_photos), next: patch.d3_photos }] : []),
+        ...("d3_video_frames" in patch ? [{ current: mediaList(found.style!.d3_video_frames), next: patch.d3_video_frames }] : []),
+      ],
+    });
+    if (decision === "conflict") return styleConflict(found.style!);
+    // What this call writes, after sanitising — echoed so the portal sees the stored lists.
+    const echo = {
+      ...("d3_photos" in patch ? { d3Photos: patch.d3_photos } : {}),
+      ...("d3_video_frames" in patch ? { d3VideoFrames: patch.d3_video_frames } : {}),
+    };
+    if (decision === "duplicate") return json({ ok: true, duplicate: true, updatedAt: found.style!.updated_at, ...echo });
+    let write = admin.from("building_styles")
       .update(patch, { count: "exact" })
       .eq("client_id", clientId).eq("id", found.style!.id);
+    if (decision === "write") write = found.style!.updated_at ? write.eq("updated_at", found.style!.updated_at) : write.is("updated_at", null);
+    const { data: wrote, error, count } = await write.select("updated_at");
     if (error) return dbFail(req, clientId, "save those photos", error);
-    if (!count) return json({ error: "Style not found (or not yours)." }, 404);
-    return json({ ok: true });
+    if (!count) {
+      if (decision === "write") {
+        const again = await findStyleFor3D(styleValue, styleId);
+        if (again.err) return again.err;
+        return styleConflict(again.style!);
+      }
+      return json({ error: "Style not found (or not yours)." }, 404);
+    }
+    // The version this call just stamped: the portal's next base.
+    const updatedAt = (Array.isArray(wrote) && wrote[0] && (wrote[0] as { updated_at?: string | null }).updated_at) || null;
+    return json({ ok: true, updatedAt, ...echo });
   }
 
   // ─── Building scan (094) ───────────────────────────────────────────────────────────────

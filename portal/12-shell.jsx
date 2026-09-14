@@ -158,6 +158,170 @@ async function ssShrinkStylePhoto(file, maxBytes = 900_000) {
   }
 }
 
+// ── STYLE SAVES: A DEADLINE, A SIDE DOOR, ONE AT A TIME, AND A BASE (2026-09-14) ──────────────
+// Ahsan pressed Save 3D look and watched "Saving…" for 168 seconds. save_style_d3 went through
+// the main Supabase hostname, whose connection on his network stalls for minutes at a time, with
+// no deadline at all — the same stall that had already cost him whole photo batches, fixed for
+// uploads in e70c697/3931fbf and left alone here.
+//
+// FOUR PARTS, and the fourth is the one that makes the first three safe:
+//  1. A 25s deadline. A style save is a few KB; one that has not answered in 25s is stuck.
+//  2. One retry through <ref>.functions.supabase.co — the same function on a different hostname,
+//     so it cannot ride the wedged connection back into the same stall.
+//  3. A queue per style. Media saves fire from uploads and removals without waiting, so two could
+//     be in flight at once and land in either order; now each waits for the one before it.
+//  4. A BASE. A stalled request cannot be cancelled once its bytes are in the socket, and it can
+//     complete minutes later — so a save we gave up on can land AFTER a newer one and silently put
+//     back what the builder replaced. Every save therefore carries the version it was edited from,
+//     and the server refuses one whose base no longer matches (_shared/styleSaveGuard.ts). On that
+//     refusal the save being waited on resends once on the current version, because it IS the
+//     latest intent; the late copy of an older save gets the same refusal and nobody is waiting.
+const SS_STYLE_SAVE_DEADLINE_MS = 25000;
+// When the main hostname last failed a style save. For a minute after, queued saves go straight to
+// the side door: each one used to wait out its own 25s on a host already known to be stalled, so a
+// Save queued behind a media save sat on "Saving…" for 50s or more (review wf_5199a3e0-d65).
+const SS_MAIN_HOST_MEMORY_MS = 60000;
+let ssMainHostStalledUntil = 0;
+// ⛔ NO FAIL-FAST, on purpose. A version of this refused every save for 30s once BOTH hosts had
+// just failed, and the final check (wf_0e1e9235-8e5) upheld what that cost: the newest media list
+// was dropped without being sent, so a stalled OLDER copy became the last write and a removed
+// photo came back; and a builder whose connection had already recovered was refused for the
+// whole window while being told to press Save again. The accepted residue is that with both hosts
+// down, a save queued behind another can wait out one more deadline pair. Slow, not wrong.
+//
+// Media saves issued per style, so a replay can tell whether a newer list has been sent since.
+const ssMediaSeq = new Map();
+// Test hooks, in the spirit of __SS3D_DEBUG: the harness has to be able to start a case clean.
+if (typeof window !== "undefined") {
+  window.__ssForgetStalledHosts = () => { ssMainHostStalledUntil = 0; };
+  window.__ssForgetStyleVersions = () => { ssStyleSaveBase.clear(); };
+}
+// `${view-as target}|${style}` -> { version }: the updated_at the server last CONFIRMED for that
+// style. A VERSION, not the content: review showed a content base lets an old save through after
+// the builder changes something and changes it back (A -> B -> A).
+const ssStyleSaveBase = new Map();
+// Same key -> how many saves have been confirmed, so a slow catalog read cannot overwrite a newer
+// base with the row as it was before those saves.
+const ssStyleSaveGen = new Map();
+// Same key -> the tail of that style's save queue. Never rejects, so one failure cannot jam it.
+const ssStyleSaveTail = new Map();
+
+// Read in the CALLER's tick, like 01-core's wrapper reads the view-as target, and for the same
+// reason: a queued save runs later, by which time an operator may be viewing somebody else.
+function ssStyleSaveKey(styleValue) {
+  return `${ssTargetClientId || ""}|${styleValue}`;
+}
+
+function ssQueueStyleSave(key, run) {
+  const next = (ssStyleSaveTail.get(key) || Promise.resolve()).then(run);
+  ssStyleSaveTail.set(key, next.then(() => {}, () => {}));
+  return next;
+}
+
+// Records the version a save just stamped. An older function answers without `updatedAt`; the base
+// is then FORGOTTEN rather than guessed, so the next save goes unguarded instead of being refused
+// against a version nobody knows.
+function ssConfirmStyleVersion(key, data) {
+  if (data && data.updatedAt !== undefined) ssStyleSaveBase.set(key, { version: data.updatedAt });
+  else ssStyleSaveBase.delete(key);
+}
+
+// The Error a failed style call becomes. A stall says so and says what to do; anything the server
+// REFUSED (the lock, a validation message, a permission) keeps its own sentence.
+function ssStyleSaveError(r) {
+  const e = r && r.error;
+  const stalled = !!(e && (e.ssTimeout || e.name === "FunctionsFetchError" || e.name === "FunctionsRelayError"));
+  const err = new Error(stalled
+    ? "Saving didn't go through \u2014 your connection stalled. Your changes are still on screen; press Save again."
+    : ((e && e.message) || (r && r.data && r.data.error) || "Save failed"));
+  // What the media replay keys on: a stall is worth another try, a refusal is not.
+  err.ssStalled = stalled;
+  return err;
+}
+
+// The JSON body of a refused call. 01-core's wrapper leaves the Response on error.context and has
+// already read one clone of it for the message, so another clone is still readable here.
+async function ssFunctionsErrorBody(err) {
+  if (!err) return null;
+  if (err.ssBody) return err.ssBody;
+  try {
+    if (err.context && typeof err.context.clone === "function") return await err.context.clone().json();
+  } catch (_b) { /* not JSON, or already consumed */ }
+  return null;
+}
+
+// One portal-settings call with a deadline, and on a transport failure one more through the
+// functions hostname. Resolves in the invoke shape: { data, error }.
+async function ssStyleSaveCall(body, label) {
+  const ms = (typeof window !== "undefined" && Number(window.__ssSaveDeadlineMs)) || SS_STYLE_SAVE_DEADLINE_MS;
+  const deadline = () => new Promise((res) => setTimeout(() => res({ data: null, error: { message: "timed out", ssTimeout: true } }), ms));
+  const transport = (r) => !!(r && r.error && (r.error.ssTimeout || r.error.name === "FunctionsFetchError" || r.error.name === "FunctionsRelayError"));
+  if (Date.now() >= ssMainHostStalledUntil) {
+    const first = await Promise.race([sb.functions.invoke("portal-settings", { body }), deadline()]);
+    if (!transport(first)) return first;
+    ssMainHostStalledUntil = Date.now() + ((typeof window !== "undefined" && Number(window.__ssSaveHostMemoryMs)) || SS_MAIN_HOST_MEMORY_MS);
+    try {
+      ssLogError("portal", `${label}: the main host ${first.error.ssTimeout ? "timed out" : "failed"}; retrying through the functions host`,
+        "style_save_side_door", { fn: "portal-settings", action: body.action }, "info");
+    } catch (_l) { /* a log line must never cost the save */ }
+  }
+  const second = await Promise.race([(async () => {
+    try {
+      const { data: auth } = await sb.auth.getSession();
+      const token = auth && auth.session && auth.session.access_token;
+      if (!token) return { data: null, error: { message: "Your session is reconnecting \u2014 try that again in a moment." } };
+      // A raw fetch skips 01-core's wrapper, so the view-as target must already be ON the body —
+      // every caller below puts it there in the click's tick.
+      const r = await fetch(`${SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co")}/portal-settings`, {
+        method: "POST",
+        headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => null);
+      if (r.ok) return { data, error: null };
+      return { data: null, error: { message: (data && (data.error || data.message)) || `Save failed (${r.status})`, ssStatus: r.status, ssBody: data } };
+    } catch (e) {
+      return { data: null, error: { message: (e && e.message) || "Save failed", name: "FunctionsFetchError" } };
+    }
+  })(), deadline()]);
+  return second;
+}
+
+// A style save, queued: base attached, side door on a stall, and one resend on the current version
+// if the server says the base is stale. `build(base)` makes the body; `confirm(data)` records what
+// the server now holds.
+function ssRunStyleSave(key, target, styleValue, label, build, confirm) {
+  return ssQueueStyleSave(key, async () => {
+    // READ THE VERSION FIRST when none is known (re-review wf_9d79b211-18b, high). A save sent with
+    // no base is unguarded, and its stalled main-host copy — the one its side-door retry made
+    // redundant — could still land after newer saves and put back what they replaced. That is the
+    // exact late write the guard exists to stop, and it was open for every style's FIRST save
+    // while the catalog read that supplies the version was hung on the same stalled host. One
+    // extra round trip is cheaper than one unguarded write.
+    if (!ssStyleSaveBase.has(key)) {
+      const v = await ssStyleSaveCall({ action: "catalog", targetClientId: target || null }, `${label}: read the style's version`);
+      if (v.error || !v.data || !v.data.ok) throw ssStyleSaveError(v);
+      const st = (v.data.styles || []).find((x) => x.key === styleValue);
+      // An older function's catalog carries no updated_at: go unguarded rather than refuse forever.
+      if (st && st.updated_at !== undefined && !ssStyleSaveBase.has(key)) ssStyleSaveBase.set(key, { version: st.updated_at });
+    }
+    let r = await ssStyleSaveCall(build(ssStyleSaveBase.get(key)), label);
+    if (r.error && r.error.ssStatus === 409) {
+      // `conflict` is what separates the late-save guard from the LOCK, which is also a 409 and
+      // must stay a refusal the builder sees.
+      const b = await ssFunctionsErrorBody(r.error);
+      if (b && b.conflict && b.current) {
+        ssStyleSaveBase.set(key, { version: b.current.updatedAt === undefined ? null : b.current.updatedAt });
+        r = await ssStyleSaveCall(build(ssStyleSaveBase.get(key)), `${label} (on the current version)`);
+      }
+    }
+    if (r.error || !r.data || !r.data.ok) throw ssStyleSaveError(r);
+    ssStyleSaveGen.set(key, (ssStyleSaveGen.get(key) || 0) + 1);
+    confirm(r.data);
+    return r.data;
+  });
+}
+
 function Dashboard({ session }) {
   const [tenant, setTenant] = useState(null);   // { clientId, businessName } | "none" | null(loading)
   // Seeded FROM THE URL, so a refresh or a pasted deep link lands where it says it will.
@@ -939,16 +1103,30 @@ function Dashboard({ session }) {
   const setup3d = useMemo(() => (!canAdmin || !view3dUnlocked ? null : {
     // d3VideoFrames rides along from 2026-09-10: the walk-around's frames are persisted beside
     // the photos, not inside them, so reopening a style can still answer "has this got a video".
-    onSaveSpec: async (styleValue, d3, d3Photos, d3VideoFrames) => {
-      // The key is OMITTED, not sent as null, when the caller does not know the frames: the
-      // server distinguishes absence ("leave the column alone") from an empty array ("the
-      // builder removed the video"), and JSON.stringify drops an undefined property for us.
-      const body = { action: "save_style_d3", styleValue, d3, d3Photos };
-      if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
-      const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      if (error) throw new Error(error.message || "Save failed");
-      if (!data || !data.ok) throw new Error((data && data.error) || "Save failed");
-      return data;
+    // Through the style-save queue since 2026-09-14: deadline, side door, base — see
+    // ssRunStyleSave above Dashboard.
+    onSaveSpec: (styleValue, d3, d3Photos, d3VideoFrames) => {
+      // Captured NOW, in the click's tick: the save may wait behind another in the queue.
+      const target = ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue);
+      return ssRunStyleSave(key, target, styleValue, "save 3D look", (base) => {
+        // The key is OMITTED, not sent as null, when the caller does not know the frames: the
+        // server distinguishes absence ("leave the column alone") from an empty array ("the
+        // builder removed the video"), and JSON.stringify drops an undefined property for us.
+        const body = { action: "save_style_d3", styleValue, d3, d3Photos };
+        if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+        // ALWAYS PRESENT, null included (review wf_5199a3e0-d65, high). 01-core's wrapper injects
+        // the view-as target whenever this key is absent, and it reads the target when the call
+        // RUNS — a queued save runs later. An operator's own-tenant save left queued while they
+        // opened a builder's account was injected with that builder and written over the builder's
+        // style of the same key. An explicit null skips the injection, and resolveTenant reads
+        // null as "no override".
+        body.targetClientId = target || null;
+        // No base (this style was never read here, or the function is older) sends none, and the
+        // server writes unconditionally — no worse than before the guard existed.
+        if (base && base.version !== undefined) body.baseVersion = base.version;
+        return body;
+      }, (data) => ssConfirmStyleVersion(key, data));
     },
     // Reference photos are no longer in the customer-facing config (migration 093 stopped
     // get_config broadcasting a builder's photos of their real buildings to anonymous
@@ -1000,19 +1178,55 @@ function Dashboard({ session }) {
     // Records WHICH images belong to a style without touching its d3 spec. Called as photos and
     // frames are added or removed, so a style switch or a reload cannot lose them; the spec is
     // still only written by the deliberate Save.
-    onSaveMedia: async (styleValue, d3Photos, d3VideoFrames) => {
-      const body = { action: "save_style_media", styleValue };
-      if (Array.isArray(d3Photos)) body.d3Photos = d3Photos;
-      if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
-      const { data, error } = await sb.functions.invoke("portal-settings", { body });
-      if (error) throw new Error(error.message || "Could not save those photos");
-      if (!data || !data.ok) throw new Error((data && data.error) || "Could not save those photos");
-      return data;
+    // Queued behind any other save of the same style, which is the part that matters most here:
+    // uploads and removals fire these without waiting, so two used to race.
+    onSaveMedia: (styleValue, d3Photos, d3VideoFrames) => {
+      const target = ssTargetClientId;
+      const key = ssStyleSaveKey(styleValue);
+      const seq = (ssMediaSeq.get(key) || 0) + 1;
+      ssMediaSeq.set(key, seq);
+      const build = (base) => {
+        const body = { action: "save_style_media", styleValue };
+        if (Array.isArray(d3Photos)) body.d3Photos = d3Photos;
+        if (Array.isArray(d3VideoFrames)) body.d3VideoFrames = d3VideoFrames;
+        body.targetClientId = target || null;   // explicit, null included — see onSaveSpec
+        if (base && base.version !== undefined) body.baseVersion = base.version;
+        return body;
+      };
+      // THE NEWEST LIST IS REPLAYED AFTER A STALL (final check wf_0e1e9235-8e5). A media save has
+      // no error on screen, and the version guard rightly refuses a late copy of an OLDER list — so
+      // if the newest list is simply given up on, an older copy still in flight can end up as the
+      // last write, and a photo the builder removed comes back. A stalled save is therefore tried
+      // again, backing off, but only while it is still the newest list issued for this style: the
+      // moment a newer one exists, that one carries the intent and this one stops.
+      const run = (attempt) => ssRunStyleSave(key, target, styleValue, "save style media", build, (data) => ssConfirmStyleVersion(key, data))
+        .catch((e) => {
+          if (!(e && e.ssStalled) || attempt >= 4 || ssMediaSeq.get(key) !== seq) throw e;
+          const wait = (typeof window !== "undefined" && Number(window.__ssMediaReplayMs)) || [5000, 15000, 30000, 60000][attempt];
+          return new Promise((res) => setTimeout(res, wait)).then(() => {
+            if (ssMediaSeq.get(key) !== seq) throw e;
+            return run(attempt + 1);
+          });
+        });
+      return run(0);
     },
     onLoadStyle3D: async (styleValue) => {
+      // Key and confirmed-save count taken BEFORE the await: a save confirmed while this read is
+      // in flight is newer than anything the read can return, so it must not become the base.
+      const key = ssStyleSaveKey(styleValue);
+      const gen = ssStyleSaveGen.get(key) || 0;
+      // NO DEADLINE ON THIS READ, deliberately (final check wf_0e1e9235-8e5). Put through the
+      // side door it could give up for good, which left the photo grid empty — and the next save
+      // then wrote that empty grid over the stored photos. A stalled plain read still lands in the
+      // end. A save issued before it lands reads the version for itself (ssRunStyleSave).
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "catalog" } });
       if (error || !data || !data.ok) return null;
       const st = (data.styles || []).find((x) => x.key === styleValue);
+      // The row's version as the base for this style's next save. A catalog without updated_at
+      // (an older function) gives no base, and that save goes unguarded rather than refused.
+      if (st && st.updated_at !== undefined && (ssStyleSaveGen.get(key) || 0) === gen) {
+        ssStyleSaveBase.set(key, { version: st.updated_at });
+      }
       return {
         photos: (st && Array.isArray(st.d3_photos)) ? st.d3_photos.filter(Boolean) : [],
         videoFrames: (st && Array.isArray(st.d3_video_frames)) ? st.d3_video_frames.filter(Boolean) : [],
