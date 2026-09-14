@@ -12,6 +12,7 @@ import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
+import { sendTenantSms } from "../_shared/smsSend.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
@@ -139,6 +140,10 @@ const RATE_MAX_PER_TENANT = 20;   // generous: a real public designer sees singl
 // per window instead of one per request. app_errors has NO fingerprint dedupe in this project,
 // so self-limiting here is the only thing stopping our own log becoming the amplification.
 const RATE_LOG_CEILING = RATE_MAX_PER_TENANT + 2;
+
+// How long the SS quote path waits on the quote-created text before answering without it (expo
+// plan 3.7). Twilio normally answers in well under a second; this only bounds a carrier stall.
+const QUOTE_TEXT_TIMEOUT_MS = 8_000;
 
 Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -2831,6 +2836,75 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }).catch(() => {});
     }
 
+    // ── THE QUOTE-CREATED TEXT (expo plan 3.7; Ahsan 2026-09-15, decision 4) ────────────────
+    // "Quote-created login text only when the builder can text (approved number + customer
+    // consent); otherwise email only." A shopper at the expo gets their quote by email AND a text
+    // with the link, so they can open it on the phone in their hand.
+    //
+    // WHEN: the FIRST issue of this quote only. A resubmit (the quote already had a number), a
+    // change order and a draft amendment never text — each would be the second "your quote is
+    // ready" for the same building. Placed AFTER the persist, so nothing about the quote itself can
+    // wait on a carrier.
+    //
+    // ⚠️ NEVER WHILE THE TENANT IS IN BETA MODE. Their email goes to their own test inbox (header,
+    // rule 1); there is no test PHONE, so texting would put a verification submit carrying a real
+    // lead's details on that lead's phone — exactly the 2026-08-07 incident, by text.
+    //
+    // HOW: sendTenantSms owns every rule that decides whether a text may go — the tenant's texting
+    // is active and its number registered, the customer has a recorded consent grant and has not
+    // said STOP, and quiet hours (NOT bypassed: this is automation, not a human replying). It never
+    // throws, and each refusal comes back as a reason. The email above is the fallback for all of
+    // them; nothing here can fail the submit.
+    //
+    // A carrier that has not answered in QUOTE_TEXT_TIMEOUT_MS does not hold the customer's quote
+    // screen: the response says "timeout", and the send is handed to EdgeRuntime.waitUntil so its
+    // sms_messages ledger row still settles. The ledger, not this flag, is the record of what went.
+    //
+    // The link is today's customer page (my-quotes, focused on this quote). It moves to the
+    // designer's own account panel with the other customer links, after the 2026-09-21 promotion.
+    let quoteTexted = false;
+    let quoteTextReason: string | null = null;
+    const textTo = String(contact?.phone ?? "").trim();
+    if (existingDesign.ss_quote_number || existingDesign.accepted_at || changeOrder) {
+      quoteTextReason = "not_first_issue";
+    } else if (redirectToTestInbox) {
+      quoteTextReason = "test_mode";
+    } else if (!textTo) {
+      quoteTextReason = "no_phone";
+    } else {
+      const link = `${myQuotesUrl(clientId, req)}&q=${encodeURIComponent(String(designId))}`;
+      // The registered business name, as text_sign_link uses it — never the tenant slug the email
+      // falls back to, which is not a name a customer would recognise as the sender.
+      const who = String(settings.business_name || "").trim();
+      const body = `${who ? who + ": " : ""}your quote ${ssQuoteNumber} is ready. `
+        + `View and accept it here: ${link} Reply STOP to opt out.`;
+      const secret = Deno.env.get("SMS_INBOUND_SECRET") ?? "";
+      const statusCallback = secret
+        ? `${supabaseUrl}/functions/v1/sms-status?key=${encodeURIComponent(secret)}`
+        : null;
+      const send = sendTenantSms(supabase, clientId, {
+        toPhone: textTo,
+        body,
+        shortCode: String(designId),
+        sentBy: null,
+        statusCallback,
+        bypassQuietHours: false,
+      });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        send,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), QUOTE_TEXT_TIMEOUT_MS); }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (outcome === null) {
+        quoteTextReason = "timeout";
+        try { (globalThis as any).EdgeRuntime?.waitUntil?.(send); } catch { /* the ledger settles or it doesn't */ }
+      } else {
+        quoteTexted = outcome.sent;
+        if (!outcome.sent) quoteTextReason = outcome.reason || "failed";
+      }
+    }
+
     return json({
       ok: true,
       issuedBy: "structurestudio",
@@ -2847,6 +2921,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       quotePdfUrl,
       quoteEmailed: emailed,
       quoteEmailReason: emailReason,
+      // The quote-created text (above). quoteTextReason is null when it went, else one of:
+      //   not_first_issue | test_mode | no_phone | timeout          (decided here)
+      //   not_active | no_consent | opted_out | quiet_hours |
+      //   bad_number | damaged_number | failed                     (sendTenantSms's refusals)
+      // The portal success screen shows "Texted a login link to …" / "Not texted — …"; the public
+      // designer ignores both. not_first_issue is not news to anyone and should render nothing.
+      quoteTexted,
+      quoteTextReason,
       // Which sheets the document is missing, and why — the answer to "the customer says the
       // 3D page isn't there".
       sheetsSkipped: skippedSheets,
