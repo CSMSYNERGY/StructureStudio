@@ -407,15 +407,27 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   //   sms    Twilio Verify credentials are present (twilioConfigured).
   //   email  Resend is configured AND PLATFORM_EMAIL_DOMAIN_READY is "true" — the same two
   //          gates request_code applies before it sends.
-  // defaultChannel is 'sms' whenever texting works — the phone is what the lead gate already
-  // collects — else 'email', else null (neither: the sheet says codes are unavailable and the
-  // shopper keeps designing, expo plan decision 2). Migration 231 adds the builder's own
-  // default (client_settings.customer_login_default); until then it is always this rule.
+  // defaultChannel is the BUILDER'S choice when that channel works here (migration 231,
+  // client_settings.customer_login_default, Settings → CRM Connection → "Customer login code").
+  // Otherwise 'sms' whenever texting works — the phone is what the lead gate already collects —
+  // else 'email', else null (neither: the sheet says codes are unavailable and the shopper keeps
+  // designing, expo plan decision 2). A preference never adds a channel: a builder who picked
+  // email on a deployment that cannot send email still gets text.
   if (action === "login_options") {
     const channels: string[] = [];
     if (twilioConfigured()) channels.push("sms");
     if (resendConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true") channels.push("email");
-    return json({ ok: true, channels, defaultChannel: channels[0] ?? null });
+    let defaultChannel: string | null = channels[0] ?? null;
+    // Read only when there is a choice to make. A failed read — including the column not existing
+    // yet, before 231 is applied — silently keeps the rule above: logging it would write a row on
+    // every sheet open, and the worst outcome is text-first, which is today's behaviour.
+    if (channels.length > 1) {
+      const { data: pref, error: prefErr } = await sb.from("client_settings")
+        .select("customer_login_default").eq("client_id", clientId).maybeSingle();
+      const preferred = prefErr ? null : String(pref?.customer_login_default ?? "");
+      if (preferred && channels.includes(preferred)) defaultChannel = preferred;
+    }
+    return json({ ok: true, channels, defaultChannel });
   }
 
   // ── EMAIL CHANNEL: re-opened 2026-09-15 (migration 230) ─────────────────────────────────

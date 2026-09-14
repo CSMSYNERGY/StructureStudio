@@ -1424,6 +1424,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
 
+    // How the designer's login sheet sends a customer's code FIRST (migration 231; expo plan 3.6,
+    // Ahsan 2026-09-15): 'sms' (Text) or 'email'. Blank clears it back to the default, text.
+    // customer-auth login_options reads it, and only ever as a preference among the channels the
+    // deployment can actually deliver. Written only when the key is sent, so a save from a portal
+    // that predates the control never touches the column (and cannot fail on it before 231 exists).
+    if ("customerLoginDefault" in payload) {
+      const v = String(payload.customerLoginDefault ?? "").trim().toLowerCase();
+      if (v && v !== "sms" && v !== "email") {
+        return json({ error: "The customer login code can be sent by text or by email." }, 400);
+      }
+      updates.customer_login_default = v || null;
+    }
+
     // ── CHANGING A SIGNED ORDER (migrations 209-216) ────────────────────────────────────
     // Carolyn 2026-09-06: "add a feature in the settings that allow admin/builder to set how
     // many days after an order is written that a sales rep can do a change order without
