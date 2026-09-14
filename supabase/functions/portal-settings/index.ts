@@ -277,6 +277,12 @@ const GATES: GateTable = {
   // same gate — deliberately its own row rather than a flag on send_invoice, so this
   // altitude is stated once per action and cannot be reached by a body parameter.
   push_to_invoice:  { area: "orders", level: "edit" },
+  // "Not now" on an invoice request (migration 229): the builder sets aside, for the moment,
+  // the draft invoice a customer's Accept raised. The other half of send_invoice — which is
+  // what APPROVING a request is — so it sits on the same gate: whoever may issue the invoice
+  // may decide not to yet. It issues, voids and emails nothing, and sending the invoice later
+  // still works (and marks the same request approved).
+  dismiss_invoice_request: { area: "orders", level: "edit" },
   // Re-sends the SS quote email (migration 122) — the rep who can edit designs can re-send
   // the quote for one. Idempotent (no numbering, no conversion): worst case is a duplicate
   // email to the design's own customer.
@@ -1417,6 +1423,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       updates.ss_tax_label = l || "Sales tax";
     }
     if ("ssTaxDelivery" in payload) updates.ss_tax_delivery = Boolean(payload.ssTaxDelivery);
+
+    // How the designer's login sheet sends a customer's code FIRST (migration 231; expo plan 3.6,
+    // Ahsan 2026-09-15): 'sms' (Text) or 'email'. Blank clears it back to the default, text.
+    // customer-auth login_options reads it, and only ever as a preference among the channels the
+    // deployment can actually deliver. Written only when the key is sent, so a save from a portal
+    // that predates the control never touches the column (and cannot fail on it before 231 exists).
+    if ("customerLoginDefault" in payload) {
+      const v = String(payload.customerLoginDefault ?? "").trim().toLowerCase();
+      if (v && v !== "sms" && v !== "email") {
+        return json({ error: "The customer login code can be sent by text or by email." }, 400);
+      }
+      updates.customer_login_default = v || null;
+    }
 
     // ── CHANGING A SIGNED ORDER (migrations 209-216) ────────────────────────────────────
     // Carolyn 2026-09-06: "add a feature in the settings that allow admin/builder to set how
@@ -5262,7 +5281,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // rails (Carolyn 2026-09-02: "can we make this like hide this if it doesn't have an
         // invoice?"). ⚠️ It is HALF the answer, not the whole one — see the note on the
         // design branch below.
-        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
+        // ss_invoice_requested_at (229): a customer accepted and the invoice is waiting on the
+        // builder. ⚠️ Needs the column — apply migration 229 before deploying this select.
+        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at")
         .eq("client_id", clientId).eq("contact_id", id).order("created_at", { ascending: false });
       designs = ds ?? [];
       codes = designs.map((d: any) => d.short_code);
@@ -5281,7 +5302,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // OUT BUT UNSIGNED (a state `status` cannot express, because send_invoice
         // deliberately stopped flipping it), and `status` catches the GHL path. Neither
         // half is redundant. crmHasInvoice in portal/02-sales.jsx is the union.
-        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at")
+        .select("short_code, created_at, updated_at, status, selections, expected_close_date, total_cents, contact, contact_id, ghl_estimate_number, image_url, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at")
         .eq("client_id", clientId).eq("short_code", id).maybeSingle();
       if (!d) return json({ error: "That design no longer exists." }, 404);
       // The design branch of the same rule. A design with contact_id NULL is refused here
@@ -8097,7 +8118,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // created to close for crew leaders and drivers one gate up.
     const cols = detail
       ? "short_code, contact_id, status, accepted_at, ss_quote_number, ss_quote_pdf_url, ss_quote_sent_at, image_url, plan_image_url, view3d_image_url, estimate_lines, selections, paint_colors, contact"
-      : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at";
+      // ss_invoice_requested_at (migration 229) is what turns an accepted order's chip into
+      // "Invoice to approve". ⚠️ Selecting it before the column exists 500s this whole read,
+      // which empties the Orders tab — migration 229 must be applied BEFORE this deploys.
+      : "short_code, contact_id, contact, selections, status, image_url, ghl_estimate_number, ss_quote_number, ss_quote_pdf_url, ss_invoice_sent_at, ss_invoice_requested_at";
     const { data, error } = await admin.from("designs")
       .select(cols).eq("client_id", clientId).in("short_code", codes).limit(2000);
     if (error) return dbFail(req, clientId, "read the designs for these orders", error);
@@ -8651,6 +8675,72 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return json({ error: "That change moved while you were looking at it — reload the order." }, 409);
     }
     return json({ ok: true, reverted, coNo: co.co_no });
+  }
+
+  // ── "Not now" on an invoice request (migration 229) ─────────────────────────────────────
+  // Ahsan, 2026-09-15: a customer's Accept raises a DRAFT invoice and the builder approves it
+  // with one click. Approving has no action of its own — it IS send_invoice below, which
+  // answers the request when it records the invoice. This is the other answer: the builder
+  // is not issuing it yet (a deposit agreed by phone, a customer who wants a change first).
+  //
+  // It issues, numbers, voids and emails nothing, and the acceptance is untouched. The order
+  // stays accepted and drops back to "Needs invoice" on the Orders tab, because the column the
+  // tab reads (ss_invoice_requested_at) is cleared — so issuing later is still one click.
+  if (action === "dismiss_invoice_request") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207), exactly as send_invoice: a rep on contacts:'own' holding orders:edit
+    // may only set aside requests from their own customers.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+    // The reason is for the team, never the customer — customer-quotes projects the status
+    // alone. Flattened and capped like the other free text this function stores.
+    const note = String(payload?.note ?? "").replace(/\s+/g, " ").trim().slice(0, 500) || null;
+
+    const { data: row, error: readErr } = await admin.from("invoice_requests")
+      .select("status").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (readErr) return dbFail(req, clientId, "read that invoice request", readErr);
+    if (!row) return json({ error: "There's no invoice request waiting on that order." }, 404);
+    if (row.status === "approved") return json({ error: "That invoice has already been issued." }, 409);
+    // THE INVOICE OUTRANKS THE REQUEST ROW (review, 2026-09-15). send_invoice answers the request
+    // best-effort after the invoice is recorded; when that write misses (logged as
+    // invoice_request_approve) the row still says 'pending' beside an issued invoice. Asking the
+    // invoice itself keeps "Not now" off an order whose invoice is already out: the stamp the
+    // Orders tab reads, or an invoice_sends row that completed ('created' = issued, email pending).
+    const [stampRes, sendRes] = await Promise.all([
+      admin.from("designs").select("ss_invoice_sent_at")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("invoice_sends").select("status")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+    ]);
+    if (stampRes.error) return dbFail(req, clientId, "read the order's invoice state", stampRes.error);
+    if (sendRes.error) return dbFail(req, clientId, "read the order's invoice", sendRes.error);
+    if (stampRes.data?.ss_invoice_sent_at || ["created", "sent"].includes(String(sendRes.data?.status ?? ""))) {
+      return json({ error: "That invoice has already been issued." }, 409);
+    }
+    if (row.status === "pending") {
+      // Guarded on status, so a send that lands between the read and this write wins: an
+      // issued invoice must never be relabelled as set aside.
+      const { data: upd, error: updErr } = await admin.from("invoice_requests")
+        .update({
+          status: "dismissed",
+          decided_at: new Date().toISOString(),
+          decided_by_user_id: operator ? null : (userId ?? null),
+          decided_by_operator: operator ? operator.email : null,
+          dismiss_note: note,
+        })
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("status", "pending")
+        .select("status");
+      if (updErr) return dbFail(req, clientId, "set that invoice request aside", updErr);
+      if (!upd?.length) return json({ error: "That request changed while you were looking at it — refresh the order." }, 409);
+    }
+    // Cleared on the already-dismissed path too, so a retry after a failed clear repairs it.
+    const { error: clrErr } = await admin.from("designs")
+      .update({ ss_invoice_requested_at: null })
+      .eq("client_id", clientId).eq("short_code", shortCode);
+    if (clrErr) return dbFail(req, clientId, "update the order's invoice state", clrErr);
+    // The note stays out of the audit line: it is free text about a customer.
+    audit("dismiss_invoice_request", null, `short_code=${shortCode}`);
+    return json({ ok: true, status: "dismissed", ...(row.status === "dismissed" ? { already: true } : {}) });
   }
 
   // push_to_invoice rides this same handler on purpose. It is send_invoice with ONE extra
@@ -9313,6 +9403,42 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         await admin.from("designs")
           .update({ ss_invoice_sent_at: nowIso(), updated_at: nowIso() })
           .eq("client_id", clientId).eq("short_code", shortCode);
+        // THE INVOICE REQUEST IS ANSWERED (migration 229). A customer's Accept raised a draft
+        // (customer-accept), and issuing the invoice is what approving it means — the number,
+        // the PDF, the QuickBooks push and the inventory claim around this line. So there is
+        // no separate approve action to keep in step with this one. push_to_invoice reaches
+        // here too; a rep who invoices before the customer clicks has no row, and this matches
+        // nothing. A DISMISSED request is answered as well: "Not now" followed by sending the
+        // invoice anyway is an approval, and the row should say so.
+        // Written as a separate statement, never folded into the stamp above: until migration
+        // 229 is applied the table does not exist, and a failure here must never take
+        // ss_invoice_sent_at down with it. Best-effort for the same reason as the stamp — the
+        // invoice is recorded and the customer is waiting.
+        // …but never SILENT (review, 2026-09-15). A miss leaves the request 'pending' beside an
+        // issued invoice, so it is logged where "fix the errors" finds it; and
+        // dismiss_invoice_request checks the invoice itself, so the stale row cannot then be set
+        // aside on an order whose invoice is already out.
+        let approveErr: { message?: string; code?: string } | null = null;
+        try {
+          const { error } = await admin.from("invoice_requests")
+            .update({
+              status: "approved",
+              decided_at: nowIso(),
+              decided_by_user_id: operator ? null : (userId ?? null),
+              decided_by_operator: operator ? operator.email : null,
+            })
+            .eq("client_id", clientId).eq("short_code", shortCode).in("status", ["pending", "dismissed"]);
+          approveErr = error;
+        } catch (e) {
+          approveErr = { message: (e as Error)?.message ?? String(e) };
+        }
+        if (approveErr) {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: "invoice_request_approve",
+            message: `invoice issued but its request was not marked approved: ${approveErr.message ?? "unknown"}`,
+            context: { action, shortCode, pgCode: approveErr.code ?? null },
+          }).catch(() => {});
+        }
         // The invoiced total becomes the order's total when none is set (SS designs are
         // skipped by the GHL total sync, so nothing else ever fills it). NULL-only: a
         // rep-set or CO-acknowledged number is never clobbered.

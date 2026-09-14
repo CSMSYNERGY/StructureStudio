@@ -171,6 +171,12 @@ verify_jwt = true
 # contact phone. SS-mode tenants only, and only once the invoice is signed.
 verify_jwt = true
 
+[functions.customer-designs]
+# A signed-in customer's saved designs (migration 231). Same auth story as customer-quotes: the
+# anon key passes the gateway, so verify_jwt is NOT the auth — the customer_sessions token is, and
+# a design is linked only when its contact names an identity that session proved.
+verify_jwt = true
+
 [functions.portal-payments]
 # The builder charging a card from the Orders tab (migration 174). JWT-authenticated like
 # every other portal-* function: resolveTenant resolves a real user through client_users

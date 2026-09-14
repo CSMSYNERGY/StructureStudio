@@ -1,7 +1,7 @@
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a
 // machine with no registry access -- the same rule the other _shared tests follow.
 // Preflight discovers _shared/*.test.ts automatically, so these run on every push.
-import { acceptanceEmail, changeOrderEmail, esc, estimateEmail, formatMoney, invoiceEmail, testEmail } from "./emailTemplates.ts";
+import { acceptanceEmail, changeOrderEmail, esc, estimateEmail, formatMoney, invoiceEmail, invoiceRequestEmail, testEmail } from "./emailTemplates.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg);
@@ -14,6 +14,11 @@ function assertIncludes(haystack: string, needle: string, msg?: string) {
 function assertNotIncludes(haystack: string, needle: string, msg?: string) {
   if (haystack.includes(needle)) {
     throw new Error(`${msg ?? "assertNotIncludes"}: output must not contain ${JSON.stringify(needle)}`);
+  }
+}
+function assertEq(actual: unknown, expected: unknown, msg?: string) {
+  if (actual !== expected) {
+    throw new Error(`${msg ?? "assertEq"}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
 }
 
@@ -147,12 +152,63 @@ const baseAcceptance = () => ({
 Deno.test("docWord 'quote' reworders the estimate email; default stays 'estimate'", () => {
   const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
   assertIncludes(q.subject, "Your quote JB-1041");
-  assertIncludes(q.html, "View &amp; Sign Your Quote");
+  assertIncludes(q.html, "View &amp; Accept Your Quote");
   assertNotIncludes(q.html, "Your estimate is ready");
   assertIncludes(q.text, "Quote #: JB-1041");
   const e = estimateEmail(baseEstimate());
   assertIncludes(e.subject, "Your estimate EST-1042");
   assertIncludes(e.html, "View &amp; Accept Your Estimate");
+});
+
+// ── The QUOTE email carries no total (Carolyn, 2026-09-14) ───────────────────────────
+// She highlighted "Quote total" in the Gmail preview and asked for it gone. The preview line
+// is the preheader, so the amount has to leave all three places, not just the visible row.
+
+Deno.test("quote email: no total in the html, the text, the subject or the inbox preview line", () => {
+  const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
+  for (const [label, s] of [["html", q.html], ["text", q.text], ["subject", q.subject]] as const) {
+    assertNotIncludes(s, "$12,345.50", `quote ${label} must not show the amount`);
+    assertNotIncludes(s, "12,345", `quote ${label} must not show any form of the amount`);
+    assertNotIncludes(s, "Quote total", `quote ${label} must not carry a total row`);
+  }
+  // The preheader is the hidden first div; pin its exact wording so the preview reads right.
+  assertIncludes(q.html, ">Your quote from Junior Barns is ready.</div>");
+  // Everything else in the summary survives.
+  assertIncludes(q.html, "JB-1041");
+  assertIncludes(q.html, "Northwood - 12x24");
+  assertIncludes(q.text, "Building: Northwood - 12x24");
+});
+
+Deno.test("quote email: the CTA says accept, never sign, in both halves", () => {
+  const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
+  assertIncludes(q.html, "View &amp; Accept Your Quote");
+  assertIncludes(q.text, "View & accept your quote: https://pay.example.com/estimate/abc123");
+  assertNotIncludes(q.html, "Sign Your Quote");
+  assertNotIncludes(q.text.toLowerCase(), "sign your quote");
+});
+
+Deno.test("estimate (CRM) email is unchanged: total row, text line and the amount in the preview", () => {
+  const e = estimateEmail(baseEstimate());
+  assertIncludes(e.html, "Estimate total");
+  assertIncludes(e.html, "$12,345.50");
+  assertIncludes(e.html, ">Your estimate from Junior Barns is ready - $12,345.50.</div>");
+  assertIncludes(e.text, "Estimate total: $12,345.50");
+});
+
+Deno.test("a builder's saved quote wording that uses {total} still fills it — never a literal token", () => {
+  // The token stays in the map on purpose: a builder who wrote "{total}" into their own
+  // subject or intro before the row was removed must not start sending customers "{total}".
+  const q = estimateEmail({
+    ...baseEstimate(),
+    estimateNumber: "JB-1041",
+    docWord: "quote",
+    templateCopy: { quote: { subject: "Quote {number} for {total}", intro: "Your {building} comes to {total}." } },
+  });
+  assertEq(q.subject, "Quote JB-1041 for $12,345.50");
+  assertIncludes(q.html, "Your Northwood - 12x24 comes to $12,345.50.");
+  assertNotIncludes(q.subject + q.html + q.text, "{total}");
+  // The builder chose to name the figure in their own words; the structural row stays gone.
+  assertNotIncludes(q.html, "Quote total");
 });
 
 Deno.test("acceptanceEmail carries the number, signer, date and signed-PDF link", () => {
@@ -205,6 +261,73 @@ Deno.test("acceptanceEmail escapes a hostile signer name", () => {
   assertIncludes(o.html, "&lt;script&gt;");
 });
 
+const baseInvoiceRequest = () => ({
+  businessName: "Junior Barns",
+  quoteNumber: "JB-1041",
+  customerName: "Pat Example",
+  styleLabel: "Northwood",
+  sizeLabel: "12x24",
+  total: 10505.14,
+  acceptedAtIso: "2026-09-15T14:03:00.000Z",
+  reviewUrl: "https://app.structurestudiosuite.com/portal/orders/o-3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+});
+
+Deno.test("invoiceRequestEmail: subject, rows, date and the CTA to the order", () => {
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  assertEq(o.subject, "Invoice to approve: quote JB-1041 was accepted");
+  assertIncludes(o.html, "Pat Example accepted quote JB-1041.");
+  assertIncludes(o.html, "Northwood - 12x24");
+  assertIncludes(o.html, "$10,505.14");
+  assertIncludes(o.html, "2026-09-15");
+  assertIncludes(o.html, `href="${baseInvoiceRequest().reviewUrl}"`);
+  assertIncludes(o.html, "Review &amp; send invoice");
+  assertIncludes(o.text, "Quote total: $10,505.14");
+  assertIncludes(o.text, "Accepted: 2026-09-15");
+  assertIncludes(o.text, `Review & send invoice: ${baseInvoiceRequest().reviewUrl}`);
+  // The header is the builder's own business; the reader is the builder.
+  assertIncludes(o.html, "Junior Barns");
+});
+
+Deno.test("invoiceRequestEmail never reads as though an invoice already exists", () => {
+  // Nothing is numbered, built or sent until the builder approves (migration 229).
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  const all = o.subject + o.html + o.text;
+  assertIncludes(o.text, "nothing has been sent to the customer yet");
+  assertIncludes(o.html, "nothing has been sent to the customer yet");
+  assertNotIncludes(all, "Invoice #");
+  assertNotIncludes(all, "Amount due");
+  assertNotIncludes(all.toLowerCase(), "invoice sent");
+});
+
+Deno.test("invoiceRequestEmail: optional fields absent leave no empty rows and still read", () => {
+  const o = invoiceRequestEmail({ ...baseInvoiceRequest(), customerName: null, styleLabel: null, sizeLabel: " ", total: null });
+  assertIncludes(o.html, "Your customer accepted quote JB-1041.");
+  assertNotIncludes(o.html, ">Customer<");
+  assertNotIncludes(o.html, ">Building<");
+  assertNotIncludes(o.html, "Quote total");
+  assertNotIncludes(o.text, "Customer:");
+  assertNotIncludes(o.text, "Quote total:");
+  assertIncludes(o.text, "Accepted: 2026-09-15");
+});
+
+Deno.test("invoiceRequestEmail: the wording names nothing of ours — only the portal link does", () => {
+  // Not a white-label email (the reader is the builder, and the CTA must open our portal), but
+  // the COPY carries no platform name, so a builder who forwards it forwards only a link.
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  const url = baseInvoiceRequest().reviewUrl;
+  const copy = (o.subject + o.html.split(url).join("") + o.text.split(url).join("")).toLowerCase();
+  for (const brand of ["structurestudio", "structure studio", "postmark", "csm synergy"]) {
+    assertNotIncludes(copy, brand, `platform identifier "${brand}" in the wording`);
+  }
+});
+
+Deno.test("invoiceRequestEmail escapes a hostile customer name and keeps the subject one line", () => {
+  const o = invoiceRequestEmail({ ...baseInvoiceRequest(), customerName: `Pat <script>alert(1)</script>`, quoteNumber: "JB-1\r\nBcc: x@example.com" });
+  assertNotIncludes(o.html, "<script>", "raw tag must never reach the html");
+  assertIncludes(o.html, "&lt;script&gt;");
+  assert(!/[\r\n]/.test(o.subject), `subject must be one line, got ${JSON.stringify(o.subject)}`);
+});
+
 Deno.test("white-label: no platform branding anywhere in any output", () => {
   // The whole point of the Postmark path is that the customer sees ONLY their builder.
   const outs = [
@@ -215,6 +338,8 @@ Deno.test("white-label: no platform branding anywhere in any output", () => {
     acceptanceEmail(baseAcceptance()),
     changeOrderEmail(baseChangeOrder()),
     testEmail({ businessName: "Junior Barns", fromAddress: "info@juniorbarns.example.com" }),
+    // invoiceRequestEmail is deliberately NOT here: it goes to the builder, and its button has
+    // to open OUR portal, so its link names our host by necessity. Its copy is pinned below.
   ];
   for (const o of outs) {
     const all = (o.subject + o.html + o.text).toLowerCase();
