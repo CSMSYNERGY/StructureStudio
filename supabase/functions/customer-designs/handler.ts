@@ -46,6 +46,43 @@ const CODE_RE = /^[A-Za-z0-9_-]{4,32}$/;
 /** PostgREST `in.(…)` rides in the URL; 100 codes is ~1.3 KB, well inside any proxy's limit. */
 const IN_CHUNK = 100;
 
+/** Visible links read per identity by the cap and the list (review, 2026-09-15). A link outlives
+ *  its draft becoming a quote, and link accepts 'sent' designs, so an identity's visible links are
+ *  drafts AND issued quotes. Both readers look past the quotes to the drafts, which is what the cap
+ *  and the Saved designs list are about. Kept under PostgREST's 1000-row cap so a read never comes
+ *  back silently short. */
+export const LINK_SCAN_LIMIT = 1000;
+
+/**
+ * How many of this identity's visible links still point at a DRAFT. That is what the cap counts:
+ * a customer's issued quotes are listed by customer-quotes, never under Saved designs, so they
+ * have no Remove button, and counting them would lock a repeat customer out of saving new drafts
+ * once they had 200 quotes. The newest LINK_SCAN_LIMIT links are counted, which is only ever an
+ * under-count for someone with more than a thousand visible links.
+ */
+async function visibleDraftLinkCount(admin: any, clientId: string, id: IdentityColumn): Promise<{ count: number; error: any }> {
+  const { data: links, error: lErr } = await admin.from("customer_design_links")
+    .select("short_code")
+    .eq("client_id", clientId)
+    .eq(id.column, id.value)
+    .is("hidden_at", null)
+    .order("created_at", { ascending: false })
+    .limit(LINK_SCAN_LIMIT);
+  if (lErr) return { count: 0, error: lErr };
+  const codes = (links ?? []).map((l: any) => String(l.short_code));
+  let count = 0;
+  for (let i = 0; i < codes.length; i += IN_CHUNK) {
+    const { count: n, error } = await admin.from("designs")
+      .select("short_code", { count: "exact", head: true })
+      .eq("client_id", clientId)
+      .eq("status", "draft")
+      .in("short_code", codes.slice(i, i + IN_CHUNK));
+    if (error) return { count: 0, error };
+    count += n ?? 0;
+  }
+  return { count, error: null };
+}
+
 export type LogInput = {
   fn: string;
   req: Request;
@@ -165,13 +202,9 @@ async function linkDesign(admin: any, identity: CustomerIdentity, code: string, 
   // The cap, checked for every identity about to gain a row, BEFORE any insert — so a refusal
   // leaves nothing half-written. An already-linked code never hits it.
   for (const id of toInsert) {
-    const { count, error: cErr } = await admin.from("customer_design_links")
-      .select("id", { count: "exact", head: true })
-      .eq("client_id", identity.clientId)
-      .eq(id.column, id.value)
-      .is("hidden_at", null);
+    const { count, error: cErr } = await visibleDraftLinkCount(admin, identity.clientId, id);
     if (cErr) return dbFail("count your saved designs", cErr);
-    if ((count ?? 0) >= MAX_LINKS_PER_IDENTITY) {
+    if (count >= MAX_LINKS_PER_IDENTITY) {
       return json({
         error: `You have ${MAX_LINKS_PER_IDENTITY} saved designs, which is as many as we can keep. Remove some under Saved designs to save this one.`,
         reason: "cap",
@@ -206,7 +239,9 @@ async function listDesigns(admin: any, identity: CustomerIdentity, deps: Deps, d
       .eq(id.column, id.value)
       .is("hidden_at", null)
       .order("created_at", { ascending: false })
-      .limit(MAX_LINKS_PER_IDENTITY);
+      // LINK_SCAN_LIMIT, not the cap (review, 2026-09-15): the newest 200 links can all be drafts
+      // that have since become quotes, and reading only those hid every real draft behind them.
+      .limit(LINK_SCAN_LIMIT);
     if (lErr) return dbFail("read your saved designs", lErr);
     for (const l of links ?? []) {
       const code = String(l.short_code);
@@ -224,6 +259,9 @@ async function listDesigns(admin: any, identity: CustomerIdentity, deps: Deps, d
     const { data, error } = await admin.from("designs")
       .select("short_code, status, contact, selections, created_at, updated_at, view3d_image_url")
       .eq("client_id", identity.clientId)
+      // Drafts only, in the query: most links behind a repeat customer are issued quotes, and
+      // their selections blobs are not worth carrying just to be filtered out below.
+      .eq("status", "draft")
       .in("short_code", codes.slice(i, i + IN_CHUNK));
     if (error) return dbFail("load your saved designs", error);
     rows.push(...(data ?? []));
@@ -247,6 +285,9 @@ async function listDesigns(admin: any, identity: CustomerIdentity, deps: Deps, d
         .some((m) => linkedAs.some((l) => l.column === m.column && l.value === m.value));
     })
     .sort((a, b) => when(b) - when(a))
+    // The list reads past the cap (LINK_SCAN_LIMIT) to reach drafts behind issued quotes, but it
+    // still shows at most the cap: the newest-edited 200.
+    .slice(0, MAX_LINKS_PER_IDENTITY)
     // NARROW projection (the migration-048 rule customer-quotes keeps): no contact, no lines, no
     // prices. Only what a "Saved designs" card renders.
     .map((d) => ({

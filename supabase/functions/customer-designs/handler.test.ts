@@ -295,12 +295,14 @@ Deno.test("link: at the cap it refuses BEFORE writing; an already-saved design a
   const token = await session(t.db, { phone: P });
   for (let i = 0; i < MAX_LINKS_PER_IDENTITY; i++) {
     t.db.links().push({ id: `seed${i}`, client_id: "t1", short_code: `SS-S${i}`, phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-09-01T00:00:00Z" });
+    design(t.db, `SS-S${i}`); // still drafts: these are what the cap counts
   }
   // Hidden links and another identity's links do not count against P.
   t.db.links().push({ id: "h", client_id: "t1", short_code: "SS-HID", phone_digits: P, email_lower: null, hidden_at: "2026-09-02T00:00:00Z" });
   t.db.links().push({ id: "q", client_id: "t1", short_code: "SS-Q", phone_digits: Q, email_lower: null, hidden_at: null });
+  design(t.db, "SS-HID");
+  design(t.db, "SS-Q", { contact: { phone: Q } });
   design(t.db, "SS-NEW");
-  design(t.db, "SS-S7");
 
   const refused = await call(t.deps, { action: "link", token, code: "SS-NEW" });
   assertEquals(refused.status, 409);
@@ -311,6 +313,28 @@ Deno.test("link: at the cap it refuses BEFORE writing; an already-saved design a
 
   await call(t.deps, { action: "hide", token, code: "SS-S7" });
   assertEquals((await call(t.deps, { action: "link", token, code: "SS-NEW" })).json, { ok: true, linked: true, hidden: false });
+});
+
+Deno.test("link: links whose drafts became quotes do not count against the cap — a repeat customer can still save", async () => {
+  // Review, 2026-09-15: a draft's link outlives it becoming a quote, and quotes have no Remove
+  // under Saved designs. Counting them locked a customer with 200 quotes out of saving any draft.
+  const t = setup();
+  const token = await session(t.db, { phone: P });
+  for (let i = 0; i < MAX_LINKS_PER_IDENTITY; i++) {
+    t.db.links().push({ id: `seed${i}`, client_id: "t1", short_code: `SS-S${i}`, phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-09-01T00:00:00Z" });
+    design(t.db, `SS-S${i}`, { status: i % 2 ? "sent" : "accepted" });
+  }
+  design(t.db, "SS-NEW");
+  assertEquals((await call(t.deps, { action: "link", token, code: "SS-NEW" })).json, { ok: true, linked: true, hidden: false });
+
+  // …and the cap still holds for real drafts: 199 more drafts fill it, the next one is refused.
+  for (let i = 0; i < MAX_LINKS_PER_IDENTITY - 1; i++) {
+    t.db.links().push({ id: `d${i}`, client_id: "t1", short_code: `SS-D${i}`, phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-09-02T00:00:00Z" });
+    design(t.db, `SS-D${i}`);
+  }
+  design(t.db, "SS-ONEMORE");
+  const refused = await call(t.deps, { action: "link", token, code: "SS-ONEMORE" });
+  assertEquals([refused.status, refused.json.reason], [409, "cap"]);
 });
 
 Deno.test("link: a database failure is an authored 500, and the raw message goes only to the log", async () => {
@@ -381,6 +405,32 @@ Deno.test("list: an email-only login does not see a design saved under the phone
 
   const otherTenant = await session(t.db, { phone: P }, "t2");
   assertEquals((await call(t.deps, { action: "list", token: otherTenant })).json.designs, [], "links never cross builders");
+});
+
+Deno.test("list: a draft behind more than 200 newer links to issued quotes still appears, and the list stops at the cap", async () => {
+  // Review, 2026-09-15: the list read the newest 200 links and THEN filtered to drafts, so a
+  // repeat customer's real drafts fell off the end behind their own quotes.
+  const t = setup();
+  const token = await session(t.db, { phone: P });
+  t.db.links().push({ id: "old", client_id: "t1", short_code: "SS-OLDDRAFT", phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-08-01T00:00:00Z" });
+  design(t.db, "SS-OLDDRAFT", { updated_at: "2026-08-01T00:00:00Z" });
+  for (let i = 0; i < 250; i++) {
+    const code = `SS-QT${i}`;
+    t.db.links().push({ id: `qt${i}`, client_id: "t1", short_code: code, phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-09-10T00:00:00Z" });
+    design(t.db, code, { status: "sent" });
+  }
+  assertEquals(((await call(t.deps, { action: "list", token })).json.designs as Row[]).map((d) => d.ref), ["SS-OLDDRAFT"]);
+
+  // More visible draft links than the cap (seeded past it): the list shows the cap, newest first.
+  for (let i = 0; i < MAX_LINKS_PER_IDENTITY + 5; i++) {
+    const code = `SS-DR${i}`;
+    t.db.links().push({ id: `dr${i}`, client_id: "t1", short_code: code, phone_digits: P, email_lower: null, hidden_at: null, created_at: "2026-09-11T00:00:00Z" });
+    design(t.db, code, { updated_at: `2026-09-12T${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}:00Z` });
+  }
+  const capped = (await call(t.deps, { action: "list", token })).json.designs as Row[];
+  assertEquals(capped.length, MAX_LINKS_PER_IDENTITY);
+  assertEquals(capped[0].ref, `SS-DR${MAX_LINKS_PER_IDENTITY + 4}`, "newest-edited first");
+  assert(!capped.some((d) => d.ref === "SS-OLDDRAFT"), "the oldest draft is the one past the cap");
 });
 
 // ── hide ───────────────────────────────────────────────────────────────────────────────────
