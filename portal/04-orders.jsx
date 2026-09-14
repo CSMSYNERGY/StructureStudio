@@ -1676,8 +1676,15 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
     // An invoice that is signed and unpaid is the customer's too, but for money.
     // Lumping them together hides which follow-up is actually owed.
     if ((r.d && r.d.status) === "accepted") {
-      return (r.d && r.d.ss_invoice_sent_at)
-        ? { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" }
+      if (r.d && r.d.ss_invoice_sent_at) return { key: "invoiceout", label: "Awaiting signature", bg: "#FEF9C3", fg: "#854D0E" };
+      // "Invoice to approve" (migration 229; Ahsan 2026-09-15: "Accept → auto-DRAFT invoice,
+      // builder approves with one click"). The CUSTOMER accepted in their account and asked for
+      // the invoice; nothing is numbered, emailed or pushed until the builder approves. Same move
+      // as "Needs invoice" — issue it — but somebody is now waiting on it, so it gets its own
+      // name. portal-settings "Not now" clears the stamp, which drops the order back to
+      // "Needs invoice". A server from before 229 never sends the column: this branch sleeps.
+      return (r.d && r.d.ss_invoice_requested_at)
+        ? { key: "invoicereq", label: "Invoice to approve", bg: "#EDE9FE", fg: "#5B21B6" }
         : { key: "needsinvoice", label: "Needs invoice", bg: "#FEF3C7", fg: "#92400E" };
     }
     return { key: "awaiting", label: "Awaiting payment", bg: "#FFE4E6", fg: "#9F1239" };
@@ -1724,6 +1731,7 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
   // Voided rows are fetched (they stay visible in the history) but must not be counted.
   const payCount = all.reduce((s, r) => s + r.pays.filter((p) => !p.voided_at).length, 0);
   const needsInvoice = all.filter((r) => stateOf(r).key === "needsinvoice").length;
+  const invoiceReq = all.filter((r) => stateOf(r).key === "invoicereq").length;
   const invoiceOut = all.filter((r) => stateOf(r).key === "invoiceout").length;
   const awaitingCount = all.filter((r) => stateOf(r).key === "awaiting").length;
   const needsTotal = all.filter((r) => r.o.total_cents == null).length;
@@ -1790,6 +1798,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
             {tile("Open balance", money(openBalance), `across ${withTotal.filter((r) => balOf(r) > 0).length} open orders`, "#F59E0B")}
             {refundsOwed > 0 && tile("Refunds owed", money(refundsOwed), `${refundCount} order${refundCount === 1 ? "" : "s"} paid above the total`, "#9A3412")}
             {tile("Collected", money(collected), `${payCount} payment${payCount === 1 ? "" : "s"} recorded`, "#16A34A")}
+            {/* Only while one is waiting, like "Awaiting signature": a permanent "0 to approve"
+                tile is noise on every tenant that has never had a customer accept online. */}
+            {invoiceReq > 0 && tile("Invoice to approve", String(invoiceReq), "customer accepted — approve to issue", "#6D28D9")}
             {tile("Needs invoice", String(needsInvoice), needsInvoice ? "accepted, not billed yet" : "all billed", "#92400E")}
             {invoiceOut > 0 && tile("Awaiting signature", String(invoiceOut), "invoice sent, not signed", "#CA8A04")}
             {tile("Awaiting payment", String(awaitingCount), "signed, nothing collected", "#9F1239")}
@@ -1814,6 +1825,9 @@ function OrdersView({ clientId, schedOn = false, deliverOn = false, coOn = false
               seconds teaches people it is broken. */}
           {chip("all", "All")}
           {moneyReady && (<>
+            {/* Kept while it is the active filter even at zero: "Not now" on the last one
+                would otherwise hide the chip that explains why the table just emptied. */}
+            {(invoiceReq > 0 || filter === "invoicereq") && chip("invoicereq", "Invoice to approve")}
             {chip("needsinvoice", "Needs invoice")}
             {invoiceOut > 0 && chip("invoiceout", "Awaiting signature")}
             {chip("awaiting", "Awaiting payment")}{chip("partial", "Partially paid")}{chip("paid", "Paid in full")}
@@ -2631,7 +2645,7 @@ function PreflightSheet({ feeCents, feeLabel, taxable, onCancel, onGo, busy }) {
   );
 }
 
-function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false }) {
+function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, onOpenDesign = null, onPreview = null, onRetry = null, coOn = false, coApproveOn = false, invoiceRequestedAt = null }) {
   const [draft, setDraft] = useState(null);      // null = viewing; else the six attrs
   const [preview, setPreview] = useState(null);  // dryRun result { totalBefore, totalAfter, description }
   const [previewErr, setPreviewErr] = useState(null);
@@ -2870,6 +2884,37 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
   const ssInvoicePdf = invoice && invoice.issued_by === "structurestudio" && invoice.invoice_pdf_url ? invoice.invoice_pdf_url : null;
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(cur);
   const anyBusy = busy || busyExt;
+
+  // ONE send handler for "Create & send invoice" and "Approve & send invoice" (migration 229).
+  // Approving a customer's invoice request has no action of its own on purpose: it IS
+  // send_invoice, which marks the request approved when it records the invoice. A second call
+  // shape would be a second thing to keep in step with the claim ladder, the numbering and QBO.
+  const createAndSendInvoice = async () => {
+    const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
+    if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
+    setBusy(false);
+    if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+    onMsg(data && data.sent === false
+      ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
+    onChanged();
+  };
+  // "Not now" (portal-settings dismiss_invoice_request). Issues, numbers and emails nothing;
+  // the order stays accepted and drops back to "Needs invoice", so issuing later is still the
+  // one button. fnError, not error.message: the refusals here are sentences worth reading
+  // ("That invoice has already been issued."), and invoke hides a non-2xx body behind a
+  // generic message.
+  const dismissInvoiceRequest = async () => {
+    setBusy(true); onMsg(null);
+    const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "dismiss_invoice_request", shortCode: o.short_code } });
+    setBusy(false);
+    if (error) { onMsg({ err: await fnError(error) }); onChanged(); return; }
+    if (data && data.error) { onMsg({ err: data.error }); return; }
+    onMsg({ ok: `Set aside — ${design.ss_quote_number || "this order"} is back under Needs invoice. Create the invoice whenever you're ready.` });
+    onChanged();
+  };
 
   // The amendment trail: accepted total + acknowledged CO snapshots — never re-summed line
   // items, so double-counting is structurally impossible.
@@ -3192,20 +3237,29 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
           ? <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 13px", marginTop: 12, fontSize: 12.5, color: "#64748B" }}>
               <b style={{ color: "#B45309" }}>Ready to invoice once CO-{anyPendingCo.co_no} is acknowledged</b> — the customer signs it from their quote page, or record their verbal OK below.
             </div>
+          : invoiceRequestedAt
+          /* INVOICE TO APPROVE (migration 229; Ahsan 2026-09-15). The customer accepted from
+             their account, which raised a DRAFT invoice: no number, no PDF, no QuickBooks push
+             and no inventory claim until this click. Below the change-order branch on purpose —
+             a pending change order still blocks issuing, and send_invoice would 409 anyway. */
+          ? <div data-invoice-request="pending" style={{ background: "#F5F3FF", border: "1px solid #DDD6FE", borderRadius: 8, padding: "10px 13px", marginTop: 12, fontSize: 12.5, color: "#4C1D95" }}>
+              <b>Invoice to approve</b>
+              <div style={{ marginTop: 3, color: "#5B21B6" }}>
+                Customer accepted {fmtDate(design.accepted_at || invoiceRequestedAt)}. Approve to issue the invoice (it takes the next number).
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, flexWrap: "wrap" }}>
+                <button type="button" disabled={anyBusy} onClick={createAndSendInvoice}
+                  style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                  {busy ? "Working…" : "Approve & send invoice"}
+                </button>
+                <button type="button" disabled={anyBusy} onClick={dismissInvoiceRequest}
+                  style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", padding: "9px 14px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
+                  Not now
+                </button>
+              </div>
+            </div>
           : <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-              <button type="button" disabled={anyBusy}
-                onClick={async () => {
-                  const totalTxt = o.total_cents != null ? money(o.total_cents) : ssUsd(totals.total);
-                  if (!window.confirm(`Create invoice for ${design.ss_quote_number} (${totalTxt}) and email it to the customer?\n\nThe invoice gets its own number and PDF. The customer signs the invoice — the order is marked Invoiced once they do.`)) return;
-                  setBusy(true); onMsg(null);
-                  const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
-                  setBusy(false);
-                  if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
-                  onMsg(data && data.sent === false
-                    ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
-                    : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
-                  onChanged();
-                }}
+              <button type="button" disabled={anyBusy} onClick={createAndSendInvoice}
                 style={{ ...S.btn("#059669", "#FFF"), padding: "9px 18px", fontSize: 13, opacity: anyBusy ? 0.6 : 1 }}>
                 {busy ? "Working…" : "Create & send invoice"}
               </button>
@@ -3252,7 +3306,11 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         )}
         <button type="button"
           onClick={(e) => {
-            const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
+            // The designer's own account panel, focused on THIS order (plan 3.8, Carolyn
+            // 2026-09-14: accept and sign live in the designer now). Invoices once the invoice
+            // is out, Quotes before. The designer switches to whichever tab the card actually
+            // lives on, so a stale guess still lands. /my-quotes stays up for older links.
+            const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=${ssInvoicePdf ? "invoices" : "quotes"}&q=${encodeURIComponent(o.short_code)}`;
             const btn = e.currentTarget;
             const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
             if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
@@ -3293,15 +3351,17 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
  *
  * The link is built HERE, in the browser, from the origin the operator is already on:
  * a link generated on beta must stay on beta, and that is exactly what window.origin
- * gives without a round trip. `?q=` is the deep link my-quotes.html reads — it points at
- * one invoice, and grants nothing on its own: the customer still signs in with their
- * texted code, and customer-quotes only ever returns designs matching that verified
- * phone. Opening someone else's link on your own number shows you your own quotes.
+ * gives without a round trip. `?account=invoices&q=` is the designer's deep link (plan 3.8,
+ * 2026-09-15; it was /my-quotes?q= before the account panel moved into the designer) — it
+ * points at one invoice and opens its Sign panel, and grants nothing on its own: the customer
+ * still logs in with the code we send them, and customer-quotes only ever returns designs
+ * matching that verified phone or email. Opening someone else's link on your own number shows
+ * you your own quotes. The URL stays well inside the QR's 213-byte version-10 capacity.
  */
 function SignOnPhoneModal({ clientId, shortCode, design, invoice, msg, setMsg, onClose }) {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
-  const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}&q=${encodeURIComponent(shortCode)}`;
+  const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=invoices&q=${encodeURIComponent(shortCode)}`;
   const phone = (design && design.contact && design.contact.phone) || "";
 
   // The matrix is derived once per link, not per render — it is ~200 lines of bit work.
@@ -3745,6 +3805,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
                lines with live roof/cladding/paint dropdowns, the amendment trail, and the
                action row. It replaces the old thin header card for SS orders. */
             <OrderDocumentCard clientId={clientId} o={o} st={st} doc={ssDoc} coOn={coOn} coApproveOn={coApproveOn}
+              invoiceRequestedAt={(d && d.ss_invoice_requested_at) || null}
               busyExt={busy} onMsg={setMsg} onChanged={changedAll} onOpenDesign={onOpenDesign}
               onPreview={(url, title) => setPdfView({ url, title })}
               onRetry={() => { setSsDoc(null); setSsReload((k) => k + 1); }} />

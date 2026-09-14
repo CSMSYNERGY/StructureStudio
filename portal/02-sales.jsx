@@ -403,15 +403,19 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
   // places — this table, the order detail, and the designer success screen).
   const [resendBusyKey, setResendBusyKey] = useState(null);
   const [copiedKey, setCopiedKey] = useState(null);
-  const myQuotesLink = `${window.location.origin}/my-quotes?client=${encodeURIComponent(clientId)}`;
   const copyCustomerLink = (code) => {
+    // The designer's account panel focused on THIS quote (plan 3.8, 2026-09-15), not the bare
+    // /my-quotes list it used to be: the customer logs in and lands on the card with Review &
+    // Accept. `quotes` even for an invoiced row — the designer moves to whichever tab the card
+    // lives on. /my-quotes stays up, so links already sent keep working.
+    const link = `${window.location.origin}/?client=${encodeURIComponent(clientId)}&account=quotes&q=${encodeURIComponent(code)}`;
     const done = () => { setCopiedKey(code); setTimeout(() => setCopiedKey((k) => (k === code ? null : k)), 2000); };
     // A rejected writeText is NOT a copy: the API exists but can still refuse (permissions
     // policy, unfocused tab), and `.then(done, done)` used to flash "Copied ✓" over a
     // clipboard that still held something else — the rep then pastes the wrong thing to a
     // customer. On rejection, fall back to the same manual prompt no-clipboard browsers get.
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(myQuotesLink).then(done, () => window.prompt("Copy the customer link:", myQuotesLink));
-    else window.prompt("Copy the customer link:", myQuotesLink);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, () => window.prompt("Copy the customer link:", link));
+    else window.prompt("Copy the customer link:", link);
   };
   const resendQuoteEmail = async (r) => {
     setResendBusyKey(r.short_code); setInvMsg(null);
@@ -751,7 +755,7 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
                           r.ss_quote_number && {
                             key: "copy", keepOpen: true,
                             label: copiedKey === r.short_code ? "Copied ✓" : "Copy link",
-                            title: "Copy the customer quote-page link (they sign in with their phone)",
+                            title: "Copy the customer's link to this quote (they log in with a code to accept it)",
                             onClick: () => copyCustomerLink(r.short_code),
                           },
                           // These two report through the invMsg banner above the table, which is

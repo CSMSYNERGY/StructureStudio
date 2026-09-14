@@ -1193,6 +1193,13 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
               <div style={S.lbl}>Your wording</div>
               <div style={{ fontSize: 12, color: "#64748B", margin: "2px 0 8px" }}>
                 Leave blank to use ours. Use {"{business}"}, {"{number}"}, {"{total}"}, {"{building}"} and they fill in automatically.
+                {/* Plan 3.1 (Carolyn 2026-09-14, the quote email she highlighted): the quote
+                    email no longer prints the total, so the customer meets the price on the
+                    quote itself. {total} still fills in — saved wording must never print a
+                    literal "{total}" — it is just the one token that works against that. */}
+                {tplKind === "quote" && (
+                  <span data-token-hint="total"> <b>{"{total}"}</b> is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.</span>
+                )}
               </div>
               <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
                 {[["estimate", "Estimate"], ["quote", "Quote"], ["invoice", "Invoice"]].map(([k, label]) => (
@@ -1209,7 +1216,9 @@ function EmailSendingView({ clientId, viewingLabel = null }) {
                 value={(tpl[tplKind] && tpl[tplKind].intro) || ""}
                 onChange={(e) => setTpl((p) => ({ ...p, [tplKind]: { ...(p[tplKind] || {}), intro: e.target.value } }))}
                 rows={3}
-                placeholder="Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."
+                placeholder={tplKind === "quote"
+                  ? "Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready."
+                  : "Opening line — e.g. Thanks for designing with {business}! Your {total} quote is ready."}
                 style={{ ...S.input, resize: "vertical" }} />
               <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
                 <button type="button" disabled={busy} style={S.btn(ACCENT, "#FFF")}
