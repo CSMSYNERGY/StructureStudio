@@ -5627,6 +5627,49 @@ function buildShed3DModel(THREE, p) {
       guv.needsUpdate = true;
     }
   }
+  // FLUSH WITH THE WALL FACE (2026-09-14). The caps are the extrusion's ends at local z = 0 and
+  // z = L, which is the wall's MID-plane — but the wall under them is a box T thick, so its face
+  // stands T/2 further out. Every gable end therefore showed a lit ledge along the plate (the wall
+  // box's top face) and, because the siding above sat 0.15 ft deeper than the siding below, its
+  // grooves and battens appeared to step sideways as the camera moved. Ahsan, with a screenshot:
+  // "it should be one single continuous side not splitting at when the roof starts". Measured on a
+  // 12x16 before this: wall face z = 8.15, cap z = 8.00.
+  //
+  // Only the CAP vertices move, never the swept sides: those are the roof's underside and every
+  // slab, rafter tail and ridge cap is laid against them in local z 0..L. Two ends keep the old
+  // plane on purpose:
+  //  * A PORCH end has no wall below the cap — the wall sets back and the cap rides the header —
+  //    so there is no face to meet, and the truss is placed proud of the cap as it stands.
+  //  * A shallow overhang: the rake board's inner face sits at OV - 0.1 from the cap plane, so the
+  //    cap moves out only as far as that allows and can never stand in front of its own trim.
+  const capPorchEnd = porchOn ? ((uAxisIsX ? porchAtNeg : !porchAtNeg) ? 0 : L) : null;
+  const capFlush = Math.max(0, Math.min(T / 2, OV - 0.1));
+  const capOut0 = capPorchEnd === 0 ? 0 : capFlush;
+  const capOutL = capPorchEnd === L ? 0 : capFlush;
+  // Run AFTER the single-slant pass below, not here. A shed profile has a VERTICAL swept side —
+  // the tall band above the high eave wall — and moving only the caps opened a 0.15 ft slot at both
+  // tall-wall corners between the cap's edge and the band's end (review wf_a6073b91-18a, upheld
+  // 2/2). The shed pass therefore stretches that band out to the moved cap planes and says so; a
+  // shed whose band could not be identified keeps today's plane rather than grow a slot.
+  let shedBandExtended = false;
+  const moveCapsFlush = () => {
+    if (!(capOut0 > 0 || capOutL > 0)) return;
+    const isShed = (roofCfg && roofCfg.type) === "shed";
+    if (isShed && !shedBandExtended) return;
+    // Same guard as the material groups: exactly caps + sides, except a shed whose groups the pass
+    // below has just re-cut — caps are still groups[0] there, added first.
+    if (!gableGeom.groups || !(gableGeom.groups.length === 2 || (isShed && gableGeom.groups.length > 2))) return;
+    const gpos0 = gableGeom.attributes.position, capGroup = gableGeom.groups[0];
+    if (!gpos0 || !capGroup) return;
+    for (let i = capGroup.start; i < capGroup.start + capGroup.count; i++) {
+      const z = gpos0.getZ(i);
+      if (Math.abs(z) < 1e-6) gpos0.setZ(i, -capOut0);
+      else if (Math.abs(z - L) < 1e-6) gpos0.setZ(i, L + capOutL);
+    }
+    gpos0.needsUpdate = true;
+    gableGeom.computeBoundingBox();
+    gableGeom.computeBoundingSphere();
+  };
   // ── SINGLE SLANT: the tall band above the plate is a WALL, not a soffit ────────────
   // Carolyn, 2026-09-01: "this thing needs some help, the siding needs ... go all the way up."
   //
@@ -5672,11 +5715,18 @@ function buildShed3DModel(THREE, p) {
           if (!triTall[k]) continue;
           for (let j = 0; j < 3; j++) {
             const i = sides.start + k * 3 + j;
-            const lz = gpos.getZ(i);
+            // The band's ends move out WITH the caps (moveCapsFlush), so the tall corner stays
+            // closed. Only this vertical band's own triangles move; the sloped and bottom sides keep
+            // their ends at 0 / L under the slab and the walls.
+            const lz0 = gpos.getZ(i);
+            const lz = Math.abs(lz0) < 1e-6 ? -capOut0 : (Math.abs(lz0 - L) < 1e-6 ? L + capOutL : lz0);
+            if (lz !== lz0) gpos.setZ(i, lz);
             guv2.setXY(i, uAxisIsX ? lz : (L - lz), gpos.getY(i));
           }
         }
         guv2.needsUpdate = true;
+        gpos.needsUpdate = true;
+        shedBandExtended = true;
         // Re-cut the groups so the band draws with wallMat. Contiguous runs, so a future
         // profile with the wall face split across the list still resolves correctly.
         gableGeom.clearGroups();
@@ -5692,6 +5742,7 @@ function buildShed3DModel(THREE, p) {
       }
     }
   }
+  moveCapsFlush();
   rg.add(new THREE.Mesh(gableGeom,
     (gableGeom.groups && gableGeom.groups.length >= 2) ? [wallMat, gableMat] : gableMat));
 
@@ -6125,6 +6176,9 @@ function buildShed3DModel(THREE, p) {
   // Each is clipped to the profile above it, so it stops on the roof line instead of poking
   // through the slab. They live in rg, so "look inside" hides them with the roof, exactly
   // like the cap they sit on.
+  // Built AFTER the gable vent is laid out (called just before rg is placed), because since the
+  // cap moved flush the strips stand in front of the vent's louvers and have to stop around it.
+  const addCapReliefStrips = (ventRect) => {
   if (clad.relief === "batten" || clad.relief === "rib") {
     const bs = clad.stepFt;
     const halfW = clad.relief === "rib" ? 0.05 : 0.07;
@@ -6150,13 +6204,33 @@ function buildShed3DModel(THREE, p) {
         if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
       }
       if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
-      [-(depth / 2) - 0.02, L + (depth / 2) + 0.02].forEach((z) => {
-        const st = box(reliefMat, halfW * 2, yTop - H, depth);
-        st.position.set(u, (H + yTop) / 2, z);
-        rg.add(st);
+      // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
+      // battens would step back at the plate line exactly as the siding used to. An end that kept
+      // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
+      // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
+      // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
+      // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
+      // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
+      const stripOut = (co) => {
+        const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + depth / 2 + 0.02;
+        return Math.max(co + depth / 2 - 0.02, Math.min(want, OV - 0.01 - depth / 2));
+      };
+      // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
+      // is split into the run below it and the run above it; a strip clear of it is unchanged.
+      const spans = (ventRect && u + halfW > ventRect.u0 && u - halfW < ventRect.u1)
+        ? [[H, Math.min(yTop, ventRect.y0)], [Math.max(H, ventRect.y1), yTop]]
+        : [[H, yTop]];
+      [-stripOut(capOut0), L + stripOut(capOutL)].forEach((z) => {
+        spans.forEach((sp) => {
+          if (sp[1] - sp[0] < 0.05) return;
+          const st = box(reliefMat, halfW * 2, sp[1] - sp[0], depth);
+          st.position.set(u, (sp[0] + sp[1]) / 2, z);
+          rg.add(st);
+        });
       });
     }
   }
+  };
   // Roof texture: metal standing-seam vs shingle courses. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
@@ -6342,6 +6416,8 @@ function buildShed3DModel(THREE, p) {
   // gable as a tunnel, which reveals nothing (the prism is solid) and whose inner faces
   // belong to the soffit material that "look inside" ghosts. Applied is also how casing,
   // muntins, relief strips, fascia, rake and ridge cap are every one of them built.
+  // The vent's footprint on the cap, frame included, for addCapReliefStrips. Null = no vent drawn.
+  let capVentRect = null;
   const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
   if (gv && gv.widthFrac > 0 && profPeak > H + 0.9) {
     // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
@@ -6389,9 +6465,11 @@ function buildShed3DModel(THREE, p) {
         ventMat.map = ltex; ventMat.needsUpdate = true;
       }
       const F = 0.12;                                    // trim board width
-      // The cap plane is the wall MID-plane, so 0.15 only reaches the siding face:
-      // 0.20 for the trim and 0.16 for the louvers leaves the blades recessed inside
-      // their own frame, which is what reads as louvered rather than as a grey rectangle.
+      capVentRect = { u0: vCu - vW / 2 - F, u1: vCu + vW / 2 + F, y0: vCy - vH / 2 - F, y1: vCy + vH / 2 + F };
+      // Offsets from the wall MID-plane. Since 2026-09-14 the cap itself is flush with the wall
+      // face at 0.15, so 0.20 for the trim and 0.16 for the louvers seats the frame on the cap
+      // and leaves the blades recessed inside it, which is what reads as louvered rather than as
+      // a grey rectangle. (Before that the cap sat ON the mid-plane and the vent floated.)
       [[0, -1], [L, 1]].forEach(function (end) {
         const z0 = end[0], s = end[1];
         const put = (m, w, h, d, du_, dy_, off) => {
@@ -6407,6 +6485,7 @@ function buildShed3DModel(THREE, p) {
       });
     }
   }
+  addCapReliefStrips(capVentRect);
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
