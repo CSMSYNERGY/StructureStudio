@@ -217,13 +217,29 @@ function getNearestWall(x, y, pW, pH, mgX, mgY) {
 // The CANDIDATE's band is read with itemTypes[ni.type], not with `nc`: most callers pass a
 // bare { width: wFt } as nc, which carries no wallOnly flag, and reading the band off that
 // would return null for every door and quietly restore the old behaviour everywhere.
-function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
+function checkDoorCollision(ni, nc, existing, itemTypes, sc, wallHeightFt) {
   if (!ni.wall) return false;
   const niw = (ni.widthFt || nc.width) * sc;
-  // wallHeightFt is deliberately not threaded in. The only band that reads it is a vent's,
-  // measured DOWN from the plate, and the 8 ft default puts a vent LOWER than a taller wall
-  // would — so a tenant on 10 ft walls errs toward refusing, which is the safe direction.
-  const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes);
+  // `wallHeightFt` is OPTIONAL, and only a vent's band reads it (ssVentSpan measures a vent's top
+  // spot down from the plate). It used to be left out on the theory that the 8 ft default puts a
+  // vent lower than a taller wall would, so a 10 ft tenant "errs toward refusing". That held only
+  // for a vent at the top spot. Once a vent could be moved down the wall (2026-09-15), its band was
+  // CLAMPED to the 8 ft plate while the 3D drew it against the real one. The review on 09-15 pressed
+  // ▲ on a 10 ft wall and ran a vent straight into a window with no refusal. So every path that moves
+  // a vent passes the plate it moves the vent against; a caller that omits it keeps the old default.
+  const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes, wallHeightFt);
+  // ⚠️ A GABLE VENT IS ABOVE THE PLATE, and most callers do not say where the plate is (see the
+  // wallHeightFt note above). Its band is H + rise, so against an 8 ft default a vent in a 10 ft
+  // building's gable would "overlap" a window at 8'4" that is really 2 ft below the plate. So a
+  // gable vent meets only other gable vents, along the wall alone — two in one gable at one spot is
+  // the one clash that can happen up there — and never a door, window, shelf or wall vent below it,
+  // which the plate is between.
+  //
+  // ⚠️ That rule trusts the ventZone KEY, so the key must match the drawing. A style change that
+  // takes the gable away (a single slant, a lower pitch) runs ssRefitGableVents, which brings such a
+  // vent down to the wall. Before that existed a stale "gable" key let a window be placed right on
+  // top of a vent the 3D drew on the wall (review, 2026-09-15).
+  const niGable = ssIsGableVent(ni);
   for (const it of existing) {
     const c = itemTypes[it.type];
     // ⛔ THE `it.type === "window"` CARVE-OUT IS GONE (2026-09-10, Ahsan's decision after the
@@ -245,14 +261,18 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
     if (!c || !c.wallOnly) continue;
     // Same wall, or they can never touch.
     if (it.wall !== ni.wall) continue;
+    // One in the gable and one below the plate never meet (see niGable above).
+    const itGable = ssIsGableVent(it);
+    if (itGable !== niGable) continue;
     const iw = (it.widthFt || c.width) * sc;
     const along = (ni.wall === "north" || ni.wall === "south")
       ? Math.abs(ni.x - it.x) < (niw / 2) + (iw / 2) + 4
       : Math.abs(ni.y - it.y) < (niw / 2) + (iw / 2) + 4;
     if (!along) continue;
+    if (niGable) return true;   // both in the gable: along is the whole test
     // Flush is allowed (<=, not <): a loft door whose sill sits exactly on the walk door's
     // head is one framed opening over another sharing a header, which is how they are built.
-    const itBand = ssItemVBand(it, c, itemTypes);
+    const itBand = ssItemVBand(it, c, itemTypes, wallHeightFt);
     if (niBand && itBand && (niBand.topFt <= itBand.bottomFt || itBand.topFt <= niBand.bottomFt)) continue;
     return true;
   }
@@ -357,18 +377,25 @@ const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other
 //
 // ⚠️ A null band still means ASSUME CLASH, never "no overlap". An item that states no height is
 // exactly the case where guessing is unsafe, so it keeps the old full-height blocker.
-function ssCandBandIn(cand, itemTypes) {
+// `wallHeightFt` is optional and reaches only a vent's band (see checkDoorCollision's note).
+function ssCandBandIn(cand, itemTypes, wallHeightFt) {
   if (!cand) return [0, 1e4];
   const slab = ssSlabBand(cand, itemTypes);
   if (slab) return slab;
   const cfg = itemTypes && itemTypes[cand.type];
-  const v = cfg ? ssItemVBand(cand, cfg, itemTypes) : null;
+  const v = cfg ? ssItemVBand(cand, cfg, itemTypes, wallHeightFt) : null;
   if (!v || !isFinite(v.bottomFt) || !isFinite(v.topFt)) return [0, 1e4];
   return [v.bottomFt * 12, v.topFt * 12];
 }
-function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand) {
+// A vent placed IN THE GABLE (ventZone, 2026-09-15 — see ssVentSpan). Written out rather than
+// through isVentItem because this sits inside the slab block, which the stub tests lift on its
+// own; checkDoorCollision and wallSlabBlocker both call it.
+function ssIsGableVent(it) { return !!(it && it.isVent && it.ventZone === "gable"); }
+function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt) {
   if (!sn.wall) return null;
-  const candBand = ssCandBandIn(cand, itemTypes);
+  // A vent in the gable is above the plate, and no workbench or shelf reaches past it.
+  if (ssIsGableVent(cand)) return null;
+  const candBand = ssCandBandIn(cand, itemTypes, wallHeightFt);
   const isH = sn.wall === "north" || sn.wall === "south";
   const candPos = isH ? sn.x : sn.y;
   const candHalf = widthFtPx / 2;
@@ -381,8 +408,8 @@ function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand) {
   }
   return null;
 }
-function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
-  return !!wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand);
+function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt) {
+  return !!wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt);
 }
 
 // SAY WHICH THING IS IN THE WAY. Every click-to-place refusal used to read "A workbench is on
@@ -533,7 +560,14 @@ const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east
  * expects when a building grows or shrinks, and reporting it would bury the two things
  * they do need to know.
  */
-function reflowItems(items, prev, next, ITEMS) {
+//
+// `gablePlace(cand, sn, geom)` is optional, passed by the SIZE change and, at unchanged dimensions,
+// by a STYLE change (ssRefitGableVents): the patch that puts
+// a gable vent (ssIsGableVent) into the gable above `sn.wall` on the NEW building, or null. A null
+// clears the zone, so a vent whose gable the new size took away (a landscape footprint's ends are
+// west/east) or made too small comes back down to the wall rather than being drawn in mid-air.
+// repairLoaded passes nothing, and then a gable vent keeps its zone exactly as saved.
+function reflowItems(items, prev, next, ITEMS, gablePlace) {
   const A = pageGeom(prev.w, prev.h), B = pageGeom(next.w, next.h);
   const events = [];
   const byId = new Map();
@@ -557,10 +591,16 @@ function reflowItems(items, prev, next, ITEMS) {
         const sn = cfg.wallSnap
           ? snapToWallInterior(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY)
           : snapToWall(wall, isH ? px : B.mgX, isH ? B.mgY : px, wFt * B.scale, hFt * B.scale, B.pW, B.pH, B.mgX, B.mgY);
-        const cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
+        let cand = { ...it, ...sn, widthFt: wFt, heightFt: hFt };
+        let out = sn;
+        if (gablePlace && ssIsGableVent(it)) {
+          const g = gablePlace(cand, sn, B);
+          out = g || { ...sn, ventZone: null, ventRiseFt: null };
+          cand = { ...cand, ...out };
+        }
         if (checkDoorCollision(cand, { ...cfg, width: wFt }, placed, ITEMS, B.scale)) continue;
-        if (checkWallSlabOverlap(sn, wFt * B.scale, placed, ITEMS, B.scale, cand)) continue;
-        return sn;
+        if (checkWallSlabOverlap(out, wFt * B.scale, placed, ITEMS, B.scale, cand)) continue;
+        return out;
       }
     }
     return null;
@@ -1028,23 +1068,301 @@ function ssDoorSillFt(it) {
 // 0.15 ft short of the clamp rather than flush with it, so the header strip above stays a REAL
 // panel: the wall-splitting loop skips a segment thinner than 0.01 ft and the casing itself
 // already reaches 0.17 ft above the opening.
+//
+// ⚠️ A VENT IN THE GABLE IS ABOVE THE PLATE (2026-09-15). Carolyn, 2026-09-14, placing a
+// Standard Vent: it landed on the front wall beside the door, low, and she wanted it "up in the
+// gable" where every vent she sells goes. So a vent now carries two optional fields, stamped at
+// placement and absent on every vent placed before them:
+//   ventZone   "gable" = drawn in the gable triangle, on the roof's end cap, not in the wall
+//   ventRiseFt the louvre's bottom edge above the PLATE, not above the floor, so a wall-height
+//              pick carries the vent up with the gable instead of leaving it behind in the siding
+// ssGableVentFit below decides whether one fits; this only reports where it is.
 function ssVentSpan(it, wallHeightFt) {
   const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
-  const maxTop = H - 0.2;
   const hIn = Number(it && it.heightIn);
+  if (it && it.ventZone === "gable") {
+    const r = it.ventRiseFt != null ? Number(it.ventRiseFt) : NaN;
+    const rise = Number.isFinite(r) && r >= 0 ? r : SS_GABLE_VENT_MIN_RISE;
+    const gh = hIn > 0 ? hIn / 12 : 1;
+    return [H + rise, H + rise + gh];
+  }
+  const maxTop = H - 0.2;
   const vh = Math.min(hIn > 0 ? hIn / 12 : 1, maxTop - 0.6);
   const top = maxTop - 0.15;
+  // ⚠️ A VENT THE CUSTOMER MOVED DOWN THE WALL (2026-09-15) carries the window's own pair, sillFt
+  // off the floor with sillMode "variable" (139), so this one function still answers for the hole,
+  // the collision band and the printed height. Clamped between the 0.5 ft floor below and the
+  // under-plate spot above, which is as high as a wall vent goes. sillMode is the switch, not
+  // sillFt alone: ventStamps writes sillFt null / "fixed" on every vent, and a stray sillFt on a
+  // "fixed" vent must keep meaning today's spot.
+  if (it && it.sillMode === "variable" && it.sillFt != null && Number.isFinite(Number(it.sillFt))) {
+    const b = Math.max(0.5, Math.min(Number(it.sillFt), top - vh));
+    return [b, Math.min(top, b + vh)];
+  }
   return [Math.max(0.5, top - vh), top];
 }
+// The gable vent's layout numbers, the style vent's own (buildShed3DModel's styleVent): a 2 in
+// sill over the plate, a 0.12 ft frame board, and the frame's top corners at least 3 in clear of
+// each rake. One copy, read by the fit AND the renderer, so what is refused and what is drawn agree.
+const SS_GABLE_VENT_MIN_RISE = 2 / 12;
+const SS_GABLE_VENT_TRIM = 0.12;
+const SS_GABLE_VENT_RAKE_CLEAR = 0.25;
+const SS_GABLE_TOO_SMALL = "This gable is too small for that vent — placed high on the wall.";
+// Which walls have a gable above them: the two ends the ridge runs between. Read off d3RoofAxes,
+// the SAME function the roof and the porch read, so a vent can never be sent into the gable of a
+// wall the 3D draws as an eave. A single slant has no gable triangle on either end in the sense a
+// vent needs (its "gable" is a tall wall band, see SINGLE SLANT), so it has none; every other
+// type — gable, gambrel, and an unknown one, which d3RoofProfile draws as a gable — has two.
+function ssGableEndWalls(roofCfg, bldgW, bldgH) {
+  if (((roofCfg && roofCfg.type) || "gable") === "shed") return [];
+  return d3RoofAxes(roofCfg, bldgW, bldgH).uAxisIsX ? ["north", "south"] : ["west", "east"];
+}
+// The gable end that carries the porch's king-post truss, or null. Mirrors buildShed3DModel's
+// porchWall + porchTrussOn exactly (depth clamp, "front" = south/west, gable only): the truss's
+// brace feet stand on the header, and a gable vent on that end has to sill above them.
+function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
+  const cfg = roofCfg || {};
+  if (!cfg.porchTruss || (cfg.type || "gable") !== "gable") return null;
+  const ax = d3RoofAxes(cfg, bldgW, bldgH);
+  const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
+  if (!(depth > 0.5)) return null;
+  const front = (cfg.porchEnd || "front") !== "back";
+  return ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+}
+// Where a vent sits in the gable above `wall`, or NULL when it cannot.
+//
+// ⛔ NULL, NEVER SMALLER. The style's own vent shrinks to fit its gable, and that is right for
+// it: it is appearance, nobody bought it. A PLACED vent is a priced catalog line with a size on
+// the estimate, and drawing a 24 in vent as 16 in so it squeezes under the rakes would show the
+// customer something other than what they are paying for. So the answer is "it does not fit" and
+// the caller puts it on the wall, where it does, and says so.
+//
+// What it clamps instead, in this order:
+//   rise   down toward the 2 in sill (3.4 in more over a porch truss's brace feet) until the
+//          frame's top corners clear the rakes — the gable narrows as it rises, so lower is roomier
+//   along  sideways, into the room left at that rise; `alongFt` null = centred under the ridge
+// Along is the wall's own frame (0 at its west/north end), which on a gable end IS the roof
+// profile's u shifted by half the span: world x on north/south, world z on west/east.
+function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, riseFt) {
+  if (ssGableEndWalls(roofCfg, bldgW, bldgH).indexOf(wall) < 0) return null;
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const ax = d3RoofAxes(roofCfg, bldgW, bldgH);
+  const S = ax.S;
+  const dedup = d3RoofProfile(roofCfg, S, H, ax.tallNeg).dedup;
+  const wIn = Number(it && it.widthIn), hIn = Number(it && it.heightIn);
+  const w = Number(it && it.widthFt) > 0 ? Number(it.widthFt) : (wIn > 0 ? wIn / 12 : 1);
+  const h = hIn > 0 ? hIn / 12 : 1;
+  const F = SS_GABLE_VENT_TRIM, CLR = SS_GABLE_VENT_RAKE_CLEAR;
+  // Over the truss the sill clears the brace feet (H + 0.2) by 0.1 ft, the style vent's rule.
+  const minRise = ssPorchTrussWall(roofCfg, bldgW, bldgH) === wall ? Math.max(SS_GABLE_VENT_MIN_RISE, 0.3 + F) : SS_GABLE_VENT_MIN_RISE;
+  // The centre positions a vent may take at a given rise. The frame's TOP corners are the tight
+  // point, because the gable only narrows going up (gable, gambrel and a skewed ridge alike).
+  const room = (rise) => {
+    const sp = d3ProfSpanAt(dedup, H + rise + h + F);
+    if (!sp) return null;
+    const lo = sp[0] + CLR + w / 2 + F, hi = sp[1] - CLR - w / 2 - F;
+    return hi >= lo - 1e-9 ? [lo, Math.max(lo, hi)] : null;
+  };
+  if (!room(minRise)) return null;
+  const r0 = riseFt != null ? Number(riseFt) : NaN;
+  let rise = Number.isFinite(r0) && r0 > minRise ? r0 : minRise;
+  if (!room(rise)) {
+    // Room shrinks monotonically with rise, so the highest rise that still fits is a bisection.
+    let a = minRise, b = rise;
+    for (let k = 0; k < 30; k++) { const m = (a + b) / 2; if (room(m)) a = m; else b = m; }
+    rise = a;
+  }
+  const rg = room(rise);
+  const mid = d3ProfSpanAt(dedup, H + rise + h / 2);
+  const centre = mid ? (mid[0] + mid[1]) / 2 : 0;       // under the ridge, even a skewed one
+  const a0 = alongFt != null ? Number(alongFt) : NaN;
+  const u = Math.max(rg[0], Math.min(Number.isFinite(a0) ? a0 - S / 2 : centre, rg[1]));
+  return { alongFt: u + S / 2, riseFt: rise, u, y0: H + rise, y1: H + rise + h, w, h, F };
+}
+// The patch that puts a vent snapped at `sn` into the gable above its wall: the fit's along
+// written back into x or y, plus the zone and rise. Null when that wall has no room for it.
+function ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, it, sn, scale, mgX, mgY, alongFt, riseFt) {
+  const fit = ssGableVentFit(roofCfg, bldgW, bldgH, sn.wall, wallHeightFt, it, alongFt, riseFt);
+  if (!fit) return null;
+  const px = fit.alongFt * scale;
+  return { ...sn, ...((sn.wall === "north" || sn.wall === "south") ? { x: mgX + px } : { y: mgY + px }), ventZone: "gable", ventRiseFt: fit.riseFt };
+}
+// THE PLACEMENT DEFAULT for a vent, shared by the 2D included-chip branch and the 3D viewer's
+// placeFixture3 so the two cannot disagree (the sill bug ventStamps cites failed exactly that way).
+//
+// On a gable end the vent goes into the gable, centred under the ridge; if another gable vent
+// already holds the centre, at the clicked spot instead. On any other wall, or on a gable too small
+// for it, `ni` comes back as it was — today's high-on-the-wall vent — with `note` set in the second
+// case so the customer is told why it did not go up. The caller's own collision checks still run
+// on what comes back.
+function ssVentGableDefault(roofCfg, bldgW, bldgH, wallHeightFt, ni, existing, itemTypes, scale, mgX, mgY) {
+  if (!isVentItem(ni) || ssGableEndWalls(roofCfg, bldgW, bldgH).indexOf(ni.wall) < 0) return { ni, note: null };
+  const clicked = ((ni.wall === "north" || ni.wall === "south") ? ni.x - mgX : ni.y - mgY) / scale;
+  let first = null;
+  for (const along of [null, clicked]) {
+    const g = ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, ni, ni, scale, mgX, mgY, along, null);
+    if (!g) return { ni, note: SS_GABLE_TOO_SMALL };
+    const cand = { ...ni, ...g };
+    if (!first) first = cand;
+    if (!checkDoorCollision(cand, { width: cand.widthFt }, existing, itemTypes, scale, wallHeightFt)) return { ni: cand, note: null };
+  }
+  return { ni: first, note: null };
+}
+// ── MOVING A VENT UP AND DOWN (2026-09-15) ───────────────────────────────────────────────────
+// Carolyn, 2026-09-14: the Standard Vent she placed sat low beside the door, and it had to be
+// "draggable up". ssVentGableDefault puts a NEW vent in the gable; these move one afterwards. Two
+// zones, one height number each, and the plate between them:
+//   gable  ventRiseFt above the plate, through ssGableVentFit (so never shrunk, see there)
+//   wall   sillFt off the floor with sillMode "variable", the window's own pair (139), which
+//          ssVentSpan reads. At the top of the wall it goes back to sillFt null / "fixed", today's
+//          under-plate spot, so a vent nobody lowered keeps following a wall-height pick.
+// The 3D drag, the plan's ▲/▼ and its two zone chips all go through the helpers below, so the
+// three gestures cannot disagree about where a vent may go — and every refusal is a sentence. A
+// button that silently does nothing reads as a broken app (the 2026-09-02 lesson Center carries).
+const SS_VENT_STEP_FT = 0.25;       // 3 in: one ▲/▼ press, and the 3D drag's step
+const SS_VENT_ZONE_HYST = 0.25;     // how far past the plate a 3D drag must carry a vent to change zone
+const SS_VENT_MIN_SILL = 0.5;       // ssVentSpan's floor for a vent's bottom edge
+const SS_VENT_NO_GABLE = "Only the end walls under the peak have a gable — move the vent to one of those first.";
+const SS_VENT_NO_ROOM = "This gable is too small for that vent.";
+const SS_VENT_TOP_GABLE = "That vent is as high as this gable allows.";
+const SS_VENT_BOTTOM_GABLE = "That vent is at the bottom of the gable — choose On the wall to bring it lower.";
+const SS_VENT_TOP_WALL = "That vent is as high as the wall allows.";
+const SS_VENT_TOP_WALL_GABLE = "That vent is as high as the wall allows — choose In the gable to go higher.";
+const SS_VENT_FLOOR = "That vent is as low as it goes.";
+const ssVentAlongFt = (it, scale, mgX, mgY) => ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
+// Where a vent is NOW, as drawn: its zone, its bottom edge off the floor, and (in the gable) its
+// rise. A "gable" vent whose gable no longer fits it is on the WALL here, because that is where
+// buildShed3DModel draws it. A size or style change re-fits the key (reflowItems' gablePlace,
+// ssRefitGableVents), so that is now only a design saved before 2026-09-15 with a stale key, and the
+// next move through these helpers writes it off.
+function ssVentWhere(roofCfg, bldgW, bldgH, wallHeightFt, it, scale, mgX, mgY) {
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const along = ssVentAlongFt(it, scale, mgX, mgY);
+  const topSill = ssVentSpan({ ...it, ventZone: null, sillFt: null, sillMode: "fixed" }, H)[0];
+  const fit = ssIsGableVent(it) ? ssGableVentFit(roofCfg, bldgW, bldgH, it.wall, H, it, along, it.ventRiseFt) : null;
+  if (fit) return { zone: "gable", bottomFt: fit.y0, riseFt: fit.riseFt, H, along, topSill };
+  return { zone: "wall", bottomFt: ssVentSpan({ ...it, ventZone: null }, H)[0], riseFt: null, H, along, topSill };
+}
+// The patch that puts a vent snapped at `sn` into `zone` with its bottom edge at `bottomFt` off the
+// floor (null = the zone's default: the 2 in sill in the gable, the top spot on the wall). Null
+// only when the gable has no room for it. The gable half writes the sill pair back to "fixed" so a
+// vent that later leaves the gable lands at the top of the wall, nearest where it was.
+function ssVentAt(roofCfg, bldgW, bldgH, wallHeightFt, it, sn, scale, mgX, mgY, zone, bottomFt) {
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  const b = bottomFt == null ? NaN : Number(bottomFt);
+  if (zone === "gable") {
+    const g = ssGableVentPlace(roofCfg, bldgW, bldgH, H, it, sn, scale, mgX, mgY, ssVentAlongFt(sn, scale, mgX, mgY), Number.isFinite(b) ? b - H : null);
+    return g ? { ...g, sillFt: null, sillMode: "fixed" } : null;
+  }
+  const top = ssVentSpan({ ...it, ventZone: null, sillFt: null, sillMode: "fixed" }, H)[0];
+  const sill = Math.max(SS_VENT_MIN_SILL, Math.min(Number.isFinite(b) ? b : top, top));
+  return { ...sn, ventZone: null, ventRiseFt: null,
+    ...(sill >= top - 1e-6 ? { sillFt: null, sillMode: "fixed" } : { sillFt: sill, sillMode: "variable" }) };
+}
+// Which zone a 3D drag wants, with HYSTERESIS: in the wall a vent must be carried a quarter foot
+// above the plate before it jumps into the gable, and in the gable a quarter foot below it before it
+// drops out. Without the band a pointer resting near the plate flips the vent between two drawings
+// (one in the wall, one on the roof's end cap) on every pixel, each a full model rebuild.
+function ssVentDragZone(zoneNow, bottomFt, wallHeightFt) {
+  const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
+  return zoneNow === "gable" ? (bottomFt > H - SS_VENT_ZONE_HYST ? "gable" : "wall") : (bottomFt > H + SS_VENT_ZONE_HYST ? "gable" : "wall");
+}
+// The drag's two guards, in the drag's order, for a vent already patched into place. Measured
+// against the plate the vent was moved on (`wallHeightFt`), not the 8 ft default: see checkDoorCollision.
+function ssVentRefusal(cand, existing, itemTypes, scale, wallHeightFt) {
+  const c = itemTypes[cand.type] || { wallOnly: true, width: 1 };
+  const wFt = cand.widthFt || c.width || 1;
+  if (checkDoorCollision(cand, { ...c, width: wFt }, existing, itemTypes, scale, wallHeightFt)) return SS_REFUSE_WALL;
+  if (checkWallSlabOverlap(cand, wFt * scale, existing, itemTypes, scale, cand, wallHeightFt)) return SS_REFUSE_SLAB;
+  return null;
+}
+// One ▲ (dir +1) or ▼ (dir -1) press on the plan: 3 in within the vent's zone. Crossing the plate is
+// the zone chips' job, not the arrows', so the arrow that would cross says which chip to use.
+// Returns { patch } or { refuse: sentence }.
+function ssVentNudge(roofCfg, bldgW, bldgH, wallHeightFt, it, dir, existing, itemTypes, scale, mgX, mgY) {
+  const w = ssVentWhere(roofCfg, bldgW, bldgH, wallHeightFt, it, scale, mgX, mgY);
+  const step = dir > 0 ? SS_VENT_STEP_FT : -SS_VENT_STEP_FT;
+  const at = { wall: it.wall, x: it.x, y: it.y };
+  let patch;
+  if (w.zone === "gable") {
+    patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "gable", w.bottomFt + step);
+    if (!patch) return { refuse: SS_VENT_NO_ROOM };
+    // The fit lowers a rise the gable cannot hold and raises one under the sill, so "did not move"
+    // is exactly "at the end of the zone".
+    if (dir > 0 && patch.ventRiseFt <= w.riseFt + 1e-6) return { refuse: SS_VENT_TOP_GABLE };
+    if (dir < 0 && patch.ventRiseFt >= w.riseFt - 1e-6) return { refuse: SS_VENT_BOTTOM_GABLE };
+  } else {
+    if (dir > 0 && w.bottomFt >= w.topSill - 1e-6) {
+      return { refuse: ssGableVentFit(roofCfg, bldgW, bldgH, it.wall, w.H, it, w.along, null) ? SS_VENT_TOP_WALL_GABLE : SS_VENT_TOP_WALL };
+    }
+    if (dir < 0 && w.bottomFt <= SS_VENT_MIN_SILL + 1e-6) return { refuse: SS_VENT_FLOOR };
+    patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "wall", w.bottomFt + step);
+  }
+  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);
+  return r ? { refuse: r } : { patch };
+}
+// The "In the gable" / "On the wall" chips. Into the gable at the 2 in sill, keeping the vent's place
+// along the wall (the fit slides it inside the rakes), exactly as a 3D drag up would; onto the wall
+// at the top spot, nearest where it was. { patch: null } = already there.
+function ssVentSetZone(roofCfg, bldgW, bldgH, wallHeightFt, it, zone, existing, itemTypes, scale, mgX, mgY) {
+  const w = ssVentWhere(roofCfg, bldgW, bldgH, wallHeightFt, it, scale, mgX, mgY);
+  const at = { wall: it.wall, x: it.x, y: it.y };
+  let patch;
+  if (zone === "gable") {
+    if (w.zone === "gable") return { patch: null };
+    if (ssGableEndWalls(roofCfg, bldgW, bldgH).indexOf(it.wall) < 0) return { refuse: SS_VENT_NO_GABLE };
+    patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "gable", null);
+    if (!patch) return { refuse: SS_VENT_NO_ROOM };
+  } else {
+    if (w.zone === "wall" && !it.ventZone) return { patch: null };
+    patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "wall", null);
+  }
+  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);
+  return r ? { refuse: r } : { patch };
+}
+// A STYLE CHANGE RE-FITS THE GABLE VENTS (review, 2026-09-15). Plan 1.9 says the zone comes off
+// when a size OR a style change takes the gable away, and only the size change did it: reflowItems'
+// gablePlace ran from the [sel.size] effect alone. Pick a single slant (or a pitch the vent no
+// longer fits) at the same size and the vent kept ventZone "gable". The 3D and the toolbar readout
+// both put it on the wall under the plate, while checkDoorCollision, trusting the key, let a window,
+// a door or another vent be placed right on top of it.
+//
+// So this is the size change's own reflow at the SAME dimensions — an identity for everything
+// already legal, which repairLoaded relies on at every load — with the NEW roof's gablePlace. A vent
+// that still fits is re-fitted inside the new rakes; one that does not comes down to its wall's top
+// spot, slid clear of whatever is already there. A vent the reflow cannot seat anywhere comes back
+// untouched, so its key comes off where it stands: an overlap the customer can see beats a rule that
+// cannot see it. Null when no item is a gable vent, so an ordinary style pick never touches the plan.
+// `dropped` counts the vents that came down, for the toast.
+function ssRefitGableVents(items, roofCfg, bldgW, bldgH, wallHeightFt, itemTypes) {
+  if (!Array.isArray(items) || !items.some(ssIsGableVent)) return null;
+  const d = { w: bldgW, h: bldgH };
+  const out = reflowItems(items, d, d, itemTypes, (cand, sn, g) =>
+    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt)).items;
+  const G = pageGeom(bldgW, bldgH);
+  const wasGable = new Set(items.filter(ssIsGableVent).map((i) => i.id));
+  let dropped = 0;
+  const next = out.map((it) => {
+    if (!wasGable.has(it.id)) return it;
+    if (!ssIsGableVent(it)) { dropped++; return it; }
+    if (ssGableVentFit(roofCfg, bldgW, bldgH, it.wall, wallHeightFt, it, ssVentAlongFt(it, G.scale, G.mgX, G.mgY), it.ventRiseFt)) return it;
+    dropped++;
+    return { ...it, ventZone: null, ventRiseFt: null, sillFt: null, sillMode: "fixed" };
+  });
+  return { items: next, dropped };
+}
+const ssVentStyleDropped = (n) => (n === 1
+  ? "This style has no gable room for your vent, so it moved down to the top of the wall."
+  : `This style has no gable room for ${n} of your vents, so they moved down to the top of the wall.`);
 function ventStamps(fx) {
   const fc = (fx && fx.fixedColor) || null;
   return {
     isVent: true,
     colorId: null, colorLabel: fc ? (fc.label || null) : null, colorHex: fc ? (fc.hex || null) : null,
     ...windowDressStamps(null),
-    // Explicit, not absent: openingSpan's vent branch never reads a sill (a vent hangs off the
-    // plate, not off the floor) but the swap and drag paths test sillMode, and "fixed" is what
-    // keeps the vertical drag handle off an item that has nothing to slide.
+    // Explicit, not absent. "fixed" + null is today's under-plate spot, and ssVentSpan reads a sill
+    // only under "variable" — which the customer sets by moving the vent DOWN the wall (the 3D drag
+    // or the plan's ▼, 2026-09-15). It no longer keeps a drag handle off: every vent moves vertically.
     sillFt: null, sillMode: "fixed",
   };
 }
@@ -1196,7 +1514,12 @@ function ssItemVBand(item, cfg, itemTypes, wallHeightFt) {
     // which PRINTS the number, passes it; the 3D dimension line uses the band only to choose
     // how high up the wall to hang a RUN measurement, so a default plate height there moves a
     // line and never a figure.
-    if (isVentItem(item)) { const s = ssVentSpan(item, wallHeightFt); return { bottomFt: s[0], topFt: s[1] }; }
+    // A vent in the gable reports its band ABOVE the plate and says so (`gable`), because the
+    // collision rules must not compare that band with anything measured on the wall below.
+    if (isVentItem(item)) {
+      const s = ssVentSpan(item, wallHeightFt);
+      return item.ventZone === "gable" ? { bottomFt: s[0], topFt: s[1], gable: true } : { bottomFt: s[0], topFt: s[1] };
+    }
     const def = d3OpeningDefaults(item.type) || {};
     // ⚠️ A CATALOG FIXTURE'S OWN heightIn, added 2026-09-04. It carries its real size there and
     // no Phase 5 stamp, so it used to be handed the GENERIC default instead: openingSpan cut a
@@ -1288,10 +1611,14 @@ function SSWallElevation({ item, cfg, itemTypes, dims, wallHeightFt, wallLabel }
   if (!dims || !band) return null;
   const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   const L = Math.max(1, dims.wallLen);
+  // A vent IN THE GABLE (2026-09-15) is above this drawing, which stops at the plate. Clamped like
+  // everything else it would collapse onto the top edge as a sliver with an "off floor" number
+  // measured to the plate, so it says where it is in words instead.
+  const inGable = !!band.gable;
   // Clamp to the wall: a legacy band or a builder's oversized depthIn can exceed the plate,
   // and a rectangle drawn through the roof reads as a rendering bug rather than a measurement.
-  const bot = Math.max(0, Math.min(band.bottomFt, H));
-  const top = Math.max(bot, Math.min(band.topFt, H));
+  const bot = inGable ? H : Math.max(0, Math.min(band.bottomFt, H));
+  const top = inGable ? H : Math.max(bot, Math.min(band.topFt, H));
 
   const VW = 420, VH = 176, PL = 52, PR = 20, PT = 14, PB = 42;
   const innerW = VW - PL - PR, innerH = VH - PT - PB;
@@ -1319,11 +1646,12 @@ function SSWallElevation({ item, cfg, itemTypes, dims, wallHeightFt, wallLabel }
       {/* the item on that wall */}
       <rect x={iL} y={Y(top)} width={Math.max(2, iR - iL)} height={Math.max(2, (top - bot) * sc)}
         fill={ACC + "33"} stroke={ACC} strokeWidth="1.6" rx={1.5} />
+      {inGable && lbl((iL + iR) / 2, Y(H) + 14, `In the gable, ${fmtDimFtIn(band.bottomFt - H)} above the plate`, "middle", ACC)}
 
       {/* HEIGHT OFF THE FLOOR — the number she asked for, and the reason this view exists.
           Suppressed when the item stands on the floor: a door does not have one, and a "0"
-          dimension line under a door reads as a mistake. */}
-      {bot > 0.01 && (
+          dimension line under a door reads as a mistake. A gable vent has no floor number either. */}
+      {!inGable && bot > 0.01 && (
         <g>
           <line x1={X(0) - 22} y1={Y(0)} x2={X(0) - 22} y2={Y(bot)} stroke={INK} strokeWidth="1" />
           <line x1={X(0) - 26} y1={Y(0)} x2={X(0) - 18} y2={Y(0)} stroke={INK} strokeWidth="1" />
@@ -1751,10 +2079,18 @@ function elecPerimeterPoint(d, W, L) {
 // NOT what pricing keys on: the charge nets placed against the RECOMPUTED count, so deleting an
 // auto outlet and adding a manual one costs nothing, which is the intent.
 //
-// A position that would land in a doorway or on top of a bench is SKIPPED rather than forced.
-// That lays out fewer devices than the count, and it deliberately does not reduce the charge:
+// A position that would land in a DOORWAY (or a window) is SKIPPED rather than forced. That lays
+// out fewer devices than the count, and it deliberately does not reduce the charge:
 // max(0, placed - auto) is already zero there. The alternative — stacking an outlet inside a
 // door opening — puts a drawing in front of a shop that cannot be built.
+//
+// A bench or shelf is NOT a reason to skip, and until 2026-09-15 it was. Carolyn's rule is "with
+// a workbench they go above the workbench", but the outlet was tried at exactly ONE height: the
+// builder's outletAboveBenchIn. Anything still in the way there — a shelf mounted at 42", a
+// double shelf over the bench — dropped the outlet from the layout without a word. So the
+// heights are a LIST now, first clear one wins: outletAboveBenchIn, then the top of whatever
+// actually blocked it plus 6". Height only, so it can never change a count or a price.
+const ELEC_CLEAR_ABOVE_SLAB_IN = 6;
 function electricalAutoItems(cfg, o) {
   const counts = electricalAutoCounts(cfg, o.widthFt, o.lengthFt);
   if (!counts) return [];
@@ -1764,37 +2100,58 @@ function electricalAutoItems(cfg, o) {
   let id = o.startId;
   const placed = () => (o.existing || []).concat(out);
 
-  const tryWall = (type, xFt, yFt, wall, heightOffFloorIn) => {
+  // `heights` is tried in order (null = the item's own heightOffFloorIn). With `climb`, a slab
+  // refusal appends that slab's top + 6" as the next try — the "go above it" rule measured off
+  // the thing in the way rather than off one number the builder set for a bench. A door refusal
+  // ends the attempt at once: a doorway is the one thing an outlet never climbs over.
+  const tryWall = (type, xFt, yFt, wall, heights, climb) => {
     const c = T[type];
     if (!c) return false;
     const sn = snapToWallInterior(wall, o.mgX + xFt * sc, o.mgY + yFt * sc,
       c.width * sc, slabDepthFt(c) * sc, o.pW, o.pH, o.mgX, o.mgY);
-    const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
-      ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
-      // The item id is what pricing counts, so an auto-placed device must carry it exactly as a
-      // hand-placed one does. `type` IS the id here, but naming it explicitly keeps the pricing
-      // rollup reading one field rather than two shapes.
-      ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
-      heightOffFloorIn: heightOffFloorIn != null ? heightOffFloorIn : c.heightOffFloorIn,
-      elecAuto: true };
-    const others = placed();
-    if (checkDoorCollision(cand, c, others, T, sc)) return false;
-    if (checkWallSlabOverlap(sn, c.width * sc, others, T, sc, cand)) return false;
-    out.push(cand); id++;
-    return true;
+    const tries = (heights && heights.length ? heights : [null]).slice();
+    // Three tries at most: the builder's height, one climb over the slab in the way, and one
+    // more for a shelf stacked above a bench. A wall still blocked after that has no sensible
+    // outlet height on that span, and skipping it is the honest answer.
+    for (let k = 0; k < tries.length && k < 3; k++) {
+      const h = tries[k];
+      const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
+        ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
+        // The item id is what pricing counts, so an auto-placed device must carry it exactly as
+        // a hand-placed one does. `type` IS the id here, but naming it explicitly keeps the
+        // pricing rollup reading one field rather than two shapes.
+        ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
+        heightOffFloorIn: h != null ? h : c.heightOffFloorIn,
+        elecAuto: true };
+      const others = placed();
+      if (checkDoorCollision(cand, c, others, T, sc)) return false;
+      const ob = wallSlabBlocker(sn, c.width * sc, others, T, sc, cand);
+      if (ob) {
+        const band = climb ? ssSlabBand(ob, T) : null;
+        // A legacy slab's [0, 1e4] is a full-height BLOCKER, not a measurement — there is no
+        // "above" it to climb to, so it stays a skip exactly as it always was.
+        if (band && isFinite(band[1]) && band[1] < 1e3) tries.push(band[1] + ELEC_CLEAR_ABOVE_SLAB_IN);
+        continue;
+      }
+      out.push(cand); id++;
+      return true;
+    }
+    return false;
   };
 
   // Outlets, evenly around the perimeter. The half-step offset keeps the first one off the
   // corner, where a plug cannot physically go.
   const outletId = elecRoleItemId(cfg, "outlet");
   const per = 2 * (W + L), n = outletId ? counts.outlet : 0;
+  const aboveBenchIn = cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : null;
+  const outletIn = cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null;
   for (let i = 0; i < n; i++) {
     const p = elecPerimeterPoint((i + 0.5) * (per / n), W, L);
     // "with a workbench they go above the workbench" — the bench does not move the outlet
-    // along the wall, it raises it. Height only, so it can never change a count or a price.
+    // along the wall, it raises it. Climbing is on for EVERY outlet, not just the ones whose
+    // point is inside a bench: an outlet half a width past a bench's end still overlaps it.
     const overBench = electricalBenchWall(placed(), T, p.wall, p.xFt, p.yFt, o);
-    tryWall(outletId, p.xFt, p.yFt, p.wall,
-      overBench && cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : (cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null));
+    tryWall(outletId, p.xFt, p.yFt, p.wall, [overBench && aboveBenchIn != null ? aboveBenchIn : outletIn], true);
   }
 
   // Lights down the centre of the length. Free-floating: both attachment guards key on
@@ -3609,6 +3966,26 @@ function d3MakeProfYAt(dedup, H) {
     return H;
   };
 }
+// Horizontal extent of the gable polygon at height y, as [lo, hi] in profile u, or null above the
+// peak. Generic on purpose: ridgeOffset skews a gable and a gambrel end is a five-point pentagon,
+// so a hard-coded (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
+// Hoisted out of buildShed3DModel's style vent on 2026-09-15, because a PLACED gable vent now has
+// to be fitted to the same triangle in 2D, where there is no renderer to ask.
+function d3ProfSpanAt(dedup, y) {
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i + 1 < dedup.length; i++) {
+    const P = dedup[i], Q = dedup[i + 1];
+    if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
+    const dY = Q[1] - P[1];
+    if (Math.abs(dY) < 1e-9) {
+      lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
+    } else {
+      const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
+      lo = Math.min(lo, u); hi = Math.max(hi, u);
+    }
+  }
+  return hi > lo ? [lo, hi] : null;
+}
 // Everything about a transom dormer that depends on the roof it sits on.
 //
 // ⚠️ ONE COPY, deliberately, and it is why this is module scope rather than inline in the
@@ -4849,6 +5226,18 @@ function buildShed3DModel(THREE, p) {
     west:  { len: bldgH - pN - pS, O: [-bldgW / 2 + pW, -bldgH / 2 + pN], U: [0, 1], N: [-1, 0], a0Ft: pN },
     east:  { len: bldgH - pN - pS, O: [bldgW / 2 - pE, -bldgH / 2 + pN],  U: [0, 1], N: [1, 0],  a0Ft: pN },
   };
+  // ── Vents placed IN THE GABLE (ventZone, 2026-09-15 — see ssVentSpan) ──
+  // Resolved here, above both builders that need the answer: buildOneWall must NOT cut a hole in
+  // the wall for one, and the roof builder draws it on the end cap. It is the SAME ssGableVentFit
+  // the placement ran, so the drawing and the refusal read one triangle. A gable vent that no
+  // longer fits — the style's roof changed under it, and only a SIZE change reflows items — gets
+  // null and falls back to the wall below the plate, where it would sit with no zone at all:
+  // drawn somewhere honest rather than through a rake.
+  const gableVentFitOf = (it) => {
+    if (!ssIsGableVent(it) || !it.wall) return null;
+    const along = ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
+    return ssGableVentFit(roofCfg, bldgW, bldgH, it.wall, H, it, along, it.ventRiseFt);
+  };
   const wallsGroup = new THREE.Group();     // ghosted in "look inside" mode
   const openingsGroup = new THREE.Group();  // frames + door/window fills (stay solid)
 
@@ -5089,7 +5478,9 @@ function buildShed3DModel(THREE, p) {
     // 0.15 ft under maxTop rather than flush with it, so the header strip above stays a REAL
     // panel: the wall-splitting loop skips a segment thinner than 0.01 ft, and the casing itself
     // already reaches 0.17 ft above the opening.
-    if (isVentItem(it)) return ssVentSpan(it, H);
+    // Only a gable vent that no longer fits its gable reaches here (buildOneWall skips the ones the
+    // roof draws), so its zone is dropped: it is cut into the wall at today's under-plate spot.
+    if (isVentItem(it)) return ssVentSpan(it.ventZone === "gable" ? { ...it, ventZone: null } : it, H);
     if (it.type === "window") {
       const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
       let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
@@ -5272,7 +5663,8 @@ function buildShed3DModel(THREE, p) {
   const buildOneWall = (wname, itemsNow) => {
     const wf = WALLS[wname];
     const ops = itemsNow
-      .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname; })
+      // A vent the roof draws in the gable is not an opening in this wall (gableVentFitOf).
+      .filter((it) => { const c = itemTypes[it.type]; return c && c.wallOnly && it.wall === wname && !gableVentFitOf(it); })
       .map((it) => {
         const c = itemTypes[it.type];
         const w = it.widthFt || c.width;
@@ -5397,9 +5789,12 @@ function buildShed3DModel(THREE, p) {
       // A two-tone catalog door's chosen TRIM color drives its own casing; everything
       // else keeps the building trim (windows deliberately so — their color is the sash).
       const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
-      og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+      // Every opening but a vent: a vent's own frame is its casing (see the vent branch below).
+      if (!isVentItem(o.it)) {
+        og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
+        og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
+        og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+      }
       // Bound to THIS opening's group and this wall — d3PhotoLayer above says what the layer is
       // and why the photo goes IN FRONT of the parametric fill instead of replacing it.
       const photoLayer = (entry, a0, a1, y0, y1, depth, tintHex) => d3PhotoLayer(og, wf, entry, a0, a1, y0, y1, depth, tintHex);
@@ -5408,20 +5803,31 @@ function buildShed3DModel(THREE, p) {
         // glass and no photo layer — a louvre is opaque, and the see-through pane that sells a
         // window would read here as a hole punched in the wall.
         //
-        // The depth ladder is plankDoorLeaf's, for plankDoorLeaf's reason: field 0 → frame 0.13
-        // → blades 0.16, each step about the 0.03 ft of relief the cladding uses, which is what
-        // casts the shadow lines that stop a small rectangle reading as a painted patch at the
-        // distance a customer actually orbits from.
-        //
         // Frame and blades take the vent's own fixed colour and fall back to the BUILDING TRIM,
         // not the body: a vent is millwork the builder paints with the trim, and falling back to
         // the body colour would make it vanish into the wall on every unconfigured catalog row.
+        //
+        // ⚠️ THE FRAME IS THE CASING (2026-09-15). This used to draw a four-board frame at 0.10-0.16
+        // INSIDE the three generic casing boxes every opening gets, whose faces stand on trimFace
+        // (0.18 panel, 0.26 batten/lap) — a frame within a frame, the inner one sunk behind the
+        // outer one and, on board-and-batten, behind the battens either side of it. Nobody frames a
+        // gable vent twice. buildOneWall now skips the generic casing for a vent, and these four
+        // boards take its job: each STRADDLES the hole's edge by vF, so it covers the cut end of
+        // the wall panels and the strips exactly as the casing did, and it is casingDepth deep and
+        // centred on the wall, so its front face lands on trimFace like every other casing in this
+        // renderer. The jambs run the full height; head and sill fit between them. The inner edge
+        // is unchanged (o.a0 + vF …), so the dark field and the blades keep their size.
+        //
+        // The shadow ladder inside is plankDoorLeaf's, for plankDoorLeaf's reason: field 0 →
+        // blades just behind the frame's face (trimFace - 0.04) → frame on trimFace, each step
+        // enough relief to cast the shadow lines that stop a small rectangle reading as a painted
+        // patch at the distance a customer actually orbits from.
         const ventMat = mat(o.it.colorHex || trimColor, { roughness: 0.7 });
         const vF = Math.min(0.14, (o.a1 - o.a0) * 0.16, (o.y1 - o.y0) * 0.16);
-        og.add(wallBox(ventMat, wf, o.a0, o.a0 + vF, o.y0, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a1 - vF, o.a1, o.y0, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y1 - vF, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y0, o.y0 + vF, 0.13, 0.06));
+        og.add(wallBox(ventMat, wf, o.a0 - vF, o.a0 + vF, o.y0 - vF, o.y1 + vF, 0, casingDepth));   // left jamb
+        og.add(wallBox(ventMat, wf, o.a1 - vF, o.a1 + vF, o.y0 - vF, o.y1 + vF, 0, casingDepth));   // right jamb
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y1 - vF, o.y1 + vF, 0, casingDepth));   // head
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y0 - vF, o.y0 + vF, 0, casingDepth));   // sill
         // The dark field BEHIND the blades. Without it the gaps between them show wall colour and
         // the vent reads as stripes painted on the siding rather than as an opening with blades
         // in it — the same trick the plank door's recessed slab plays.
@@ -5435,7 +5841,7 @@ function buildShed3DModel(THREE, p) {
           const pitch = vh / n, blade = pitch * 0.62;
           for (let k = 0; k < n; k++) {
             const b1 = vy1 - k * pitch;
-            og.add(wallBox(ventMat, wf, o.a0 + vF * 0.6, o.a1 - vF * 0.6, b1 - blade, b1, 0.16, 0.05));
+            og.add(wallBox(ventMat, wf, o.a0 + vF * 0.6, o.a1 - vF * 0.6, b1 - blade, b1, trimFace - 0.04, 0.05));
           }
         }
       } else if (o.it.type === "window") {
@@ -5753,6 +6159,103 @@ function buildShed3DModel(THREE, p) {
   // this renderer does — see d3MakeProfYAt.
   const profYAt = d3MakeProfYAt(dedup, H);
 
+  // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
+  // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
+  // vent was "merging with the wood", and an extra 2x4 ran along the top of the header. MEASURED
+  // before anything moved (tests/harness/gableProbe.mjs, scene graph of the real style): the vent
+  // frame stood 0.15-0.25 ft out from the cap and the truss 0.03-0.45, so the king post and both
+  // braces ran straight THROUGH the frame; the battens (0.02-0.12) ran through the truss too; and
+  // the vent's sill board lay 0.05 ft above the porch header's top, which from the front is a
+  // second board laid on the header. Three pieces each placed from its own constant, none of
+  // them from the surface under it.
+  //
+  // So every depth on a gable end now reads one ladder, from the REAL cap plane outward — the way
+  // a wall opening's casing reads trimFace instead of a number of its own:
+  //   capStripOut(co)   centre of a batten/rib strip on a cap standing `co` out from the mid-plane
+  //   capReliefFace(co) the cladding's proudest face on that cap (the bare cap on panel and lap,
+  //                     which carry no proud geometry above the plate)
+  //   capVentFace(co)   the vent frame's front: a 0.10 ft board on the cap, and never less than
+  //                     0.03 in front of the strips that stop at it. That is the door rule —
+  //                     nothing stands proud of its own trim — and on a flush batten cap it lands
+  //                     on 0.26, the wall's own trimFace below the plate.
+  // The truss stands in front of the proudest of them (see the porch block).
+  const capStripDepth = clad.relief === "rib" ? 0.05 : 0.1;
+  const capHasStrips = clad.relief === "batten" || clad.relief === "rib";
+  // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
+  // battens would step back at the plate line exactly as the siding used to. An end that kept
+  // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
+  // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
+  // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
+  // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
+  // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
+  // (Lifted out of addCapReliefStrips' loop on 2026-09-15 so the vent and the truss read it too.)
+  const capStripOut = (co) => {
+    const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + capStripDepth / 2 + 0.02;
+    return Math.max(co + capStripDepth / 2 - 0.02, Math.min(want, OV - 0.01 - capStripDepth / 2));
+  };
+  const capReliefFace = (co) => (capHasStrips ? capStripOut(co) + capStripDepth / 2 : co);
+  const capVentFace = (co) => Math.max(co + 0.1, capReliefFace(co) + 0.03);
+
+  // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
+  // has to clear the truss's brace feet, and the truss has to stand in front of the vent's frame.
+  // The same test the porch block used to apply inline.
+  const porchTrussOn = porchOn && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
+  const TRUSS_FOOT = H + 0.2;                    // brace feet, sitting on the header beside the king post
+
+  // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
+  // Laid out up here (it used to live inside the drawing block) only so the truss can ask
+  // whether there IS a vent before either is drawn. Null = no vent on this building.
+  const styleVent = (() => {
+    const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
+    if (!(gv && gv.widthFrac > 0)) return null;
+    let peak = -Infinity;
+    dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    if (!(peak > H + 0.9)) return null;
+    // Horizontal extent of the gable polygon at height y — module scope since 2026-09-15
+    // (d3ProfSpanAt), because a placed gable vent is fitted to the same triangle in 2D.
+    const profSpanAt = (y) => d3ProfSpanAt(dedup, y);
+    const F = 0.12;                                      // trim board width
+    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
+    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
+    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
+    // shrink by a third to clear the rakes while the same vent on a sill fits at full
+    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
+    //
+    // ON A TRUSS END THE SILL CLEARS THE BRACE FEET (2026-09-15). A porch end's plate line is
+    // the top of the HEADER, so 2 in put the vent's sill board 0.05 ft above that beam — the
+    // "extra 2x4 along the header" Carolyn marked. Its bottom edge now sits 0.1 ft above the
+    // brace feet, with siding showing between. Both ends share the one layout (the batten
+    // splitter takes one rect, and a building's two gable vents match), so the far end's vent
+    // rises with it — 3 in more sill on a wall nobody sees beside the first.
+    const VENT_SILL = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
+    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
+    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
+    let vCy = H + VENT_SILL + vH / 2;
+    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
+    // a narrower vent is also shorter and therefore has more room above it.
+    for (let k = 0; k < 3; k++) {
+      const sp = profSpanAt(vCy + vH / 2);
+      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
+      if (vW <= avail) break;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+    }
+    const spC = profSpanAt(vCy);
+    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
+    return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
+  })();
+  // ── Vents the CUSTOMER placed in the gable (2026-09-15) ──
+  // Each on the cap end above its wall: local z = 0 is world -Z (north) for a portrait footprint
+  // and world +X (east) for a landscape one, because rg turns a quarter circle in the second case
+  // — the porch block's porchAtLocalZero reasoning. Listed up here, beside the style vent, because
+  // the truss has to stand in front of whichever vent is on its end, and the style vent gives way
+  // on an end that has one of these.
+  const placedGableVents = items.map((it) => {
+    const fit = gableVentFitOf(it);
+    return fit ? { it, fit, atZero: uAxisIsX ? it.wall === "north" : it.wall === "east" } : null;
+  }).filter(Boolean);
+  const gableVentAt0 = placedGableVents.some((v) => v.atZero);
+  const gableVentAtL = placedGableVents.some((v) => !v.atZero);
+
   // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
   // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
   // means in this trade. The first -- a standalone single-slope building -- has always
@@ -5848,7 +6351,7 @@ function buildShed3DModel(THREE, p) {
     // gable above the porch at all, so drawing a triangular frame on either would be wrong
     // rather than merely approximate. `trimMat` is deliberate: the posts below it already
     // use it, and on a real porch shed the truss and the posts are the same timber.
-    if (roofCfg.porchTruss && (roofCfg.type || "gable") === "gable") {
+    if (porchTrussOn) {
       const tRise = (S / 2) * (roofCfg.pitch || 0.4);
       // Same ridge shift the roof profile applies, or a saltbox would grow a truss pointing
       // at where the peak is not.
@@ -5863,7 +6366,21 @@ function buildShed3DModel(THREE, p) {
       // it perfectly, invisibly. On a real porch shed the timbers are applied ON the gable and
       // stand out from it, so the offset has to go the other way: pzFace is the wall plane and
       // the MINUS direction is outward, because pzIn adds to reach the interior.
-      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (TD / 2 + 0.03);
+      //
+      // IN FRONT OF EVERYTHING ELSE ON THE GABLE (2026-09-15). This was `TD / 2 + 0.03` off the
+      // cap — a back face 0.03 ft out — while the vent frame stood to 0.25 and the battens to 0.12,
+      // so the king post and both braces passed straight through the frame and every batten ran
+      // through the timber: Carolyn's "vent merging with the wood", measured with gableProbe.
+      // A real porch truss is applied OVER the siding and the vent, so its back face now sits
+      // 0.02 ft in front of the proudest thing on this cap — the vent frame when the style has
+      // one, else the batten/rib face, else the bare cap (which is today's number, give or take
+      // 0.01). The porch end's cap keeps the mid-plane (capOut 0), read through the ladder
+      // rather than assumed.
+      const pzCapOut = porchAtLocalZero ? capOut0 : capOutL;
+      // A placed gable vent on this end counts the same as the style's: same frame, same face.
+      const pzHasVent = !!styleVent || (porchAtLocalZero ? gableVentAt0 : gableVentAtL);
+      const trussBackOut = (pzHasVent ? capVentFace(pzCapOut) : capReliefFace(pzCapOut)) + 0.02;
+      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (trussBackOut + TD / 2);
       const kpH = Math.max(0.2, tRise - 0.25);       // stop just under the ridge
       const kp = box(trimMat, TB, kpH, TD);
       kp.position.set(tRu, H + kpH / 2, zT);
@@ -5890,7 +6407,7 @@ function buildShed3DModel(THREE, p) {
       // steep side can no longer push a corner through the roof edge on a small overhang.
       // Positioned at their midpoint and rotated, because a box is built on the x axis.
       const BR_TAN = Math.tan(50 * Math.PI / 180), BR_SIN = Math.sin(50 * Math.PI / 180), BR_COS = Math.cos(50 * Math.PI / 180);
-      const foot = H + 0.2;                          // sitting on the header, beside the king post
+      const foot = TRUSS_FOOT;                       // sitting on the header, beside the king post
       const u0 = TB / 2 + 0.05;                      // the foot's distance out from the ridge line
       for (const s of [-1, 1]) {
         const run = S / 2 - s * tRu;                 // ridge to this side's eave
@@ -6181,11 +6698,13 @@ function buildShed3DModel(THREE, p) {
   // like the cap they sit on.
   // Built AFTER the gable vent is laid out (called just before rg is placed), because since the
   // cap moved flush the strips stand in front of the vent's louvers and have to stop around it.
-  const addCapReliefStrips = (ventRect) => {
+  // One LIST of vent rects per cap end (2026-09-15): the style vent, and every vent a customer
+  // placed in that gable, each cut out of the strips on its own end only.
+  const addCapReliefStrips = (rects0, rectsL) => {
   if (clad.relief === "batten" || clad.relief === "rib") {
     const bs = clad.stepFt;
     const halfW = clad.relief === "rib" ? 0.05 : 0.07;
-    const depth = clad.relief === "rib" ? 0.05 : 0.1;
+    const depth = capStripDepth;
     const reliefMat = clad.reliefTrim ? battenMat : wallMat;
     // ⚠️ CLIP TO THE LOWEST PROFILE ACROSS THE STRIP'S WIDTH, NEVER ITS CENTRE.
     // A batten is a BOX: its top is flat. The roof above it is not. Taking profYAt(u) at the
@@ -6207,24 +6726,27 @@ function buildShed3DModel(THREE, p) {
         if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
       }
       if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
-      // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
-      // battens would step back at the plate line exactly as the siding used to. An end that kept
-      // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
-      // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
-      // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
-      // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
-      // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
-      const stripOut = (co) => {
-        const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + depth / 2 + 0.02;
-        return Math.max(co + depth / 2 - 0.02, Math.min(want, OV - 0.01 - depth / 2));
-      };
+      // Depth: capStripOut, beside the ladder above the lean-to — the rake clamp and the flush rule
+      // are written there, because the vent frame and the porch truss now read the same number.
       // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
       // is split into the run below it and the run above it; a strip clear of it is unchanged.
-      const spans = (ventRect && u + halfW > ventRect.u0 && u - halfW < ventRect.u1)
-        ? [[H, Math.min(yTop, ventRect.y0)], [Math.max(H, ventRect.y1), yTop]]
-        : [[H, yTop]];
-      [-stripOut(capOut0), L + stripOut(capOutL)].forEach((z) => {
-        spans.forEach((sp) => {
+      // Every vent on the cap cuts the strip it crosses, one after another, so two vents stacked
+      // on one strip leave three runs. With one vent this is exactly the old two-run split.
+      const spansFor = (rects) => {
+        let spans = [[H, yTop]];
+        (rects || []).forEach((r) => {
+          if (!(u + halfW > r.u0 && u - halfW < r.u1)) return;
+          const cut = [];
+          spans.forEach((sp) => {
+            if (r.y1 <= sp[0] || r.y0 >= sp[1]) { cut.push(sp); return; }
+            cut.push([sp[0], Math.min(sp[1], r.y0)], [Math.max(sp[0], r.y1), sp[1]]);
+          });
+          spans = cut;
+        });
+        return spans;
+      };
+      [[-capStripOut(capOut0), rects0], [L + capStripOut(capOutL), rectsL]].forEach(([z, rects]) => {
+        spansFor(rects).forEach((sp) => {
           if (sp[1] - sp[0] < 0.05) return;
           const st = box(reliefMat, halfW * 2, sp[1] - sp[0], depth);
           st.position.set(u, (sp[0] + sp[1]) / 2, z);
@@ -6269,6 +6791,11 @@ function buildShed3DModel(THREE, p) {
   }
   let profPeak = -Infinity;
   dedup.forEach((pt) => { if (pt[1] > profPeak) profPeak = pt[1]; });
+  // The lowest the eave finish hangs over an eave wall (fascia board or rafter tails), recorded
+  // by the slope loop as it builds them. buildElectrical3D keeps an outside lamp under it: a
+  // fixed "under the plate" cap vanished behind the fascia, whose drop grows with pitch and
+  // overhang. One number from the geometry that was actually built, not a second copy of it.
+  let eaveHangY = H;
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
   const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
@@ -6339,6 +6866,7 @@ function buildShed3DModel(THREE, p) {
         const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
         fascia.position.set(edgeU, edgeY - 0.14, L / 2);
         rg.add(fascia);
+        eaveHangY = Math.min(eaveHangY, edgeY - 0.14 - 0.2);   // the board's bottom edge
       } else {
         // OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
         // the roof deck at 24 in on centre. On the building this was measured from it is
@@ -6352,6 +6880,7 @@ function buildShed3DModel(THREE, p) {
         // [0.02, 0.22] band, so nothing pokes through the roof and no daylight shows
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
+        eaveHangY = Math.min(eaveHangY, eaveY + ny * (0.02 - TAIL_DROP));   // tails' outboard bottom
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -6419,76 +6948,78 @@ function buildShed3DModel(THREE, p) {
   // gable as a tunnel, which reveals nothing (the prism is solid) and whose inner faces
   // belong to the soffit material that "look inside" ghosts. Applied is also how casing,
   // muntins, relief strips, fascia, rake and ridge cap are every one of them built.
-  // The vent's footprint on the cap, frame included, for addCapReliefStrips. Null = no vent drawn.
-  let capVentRect = null;
-  const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
-  if (gv && gv.widthFrac > 0 && profPeak > H + 0.9) {
-    // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
-    // skews a gable and a gambrel end is a five-point pentagon, so a hard-coded
-    // (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
-    const profSpanAt = (y) => {
-      let lo = Infinity, hi = -Infinity;
-      for (let i = 0; i + 1 < dedup.length; i++) {
-        const P = dedup[i], Q = dedup[i + 1];
-        if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
-        const dY = Q[1] - P[1];
-        if (Math.abs(dY) < 1e-9) {
-          lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
-        } else {
-          const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
-          lo = Math.min(lo, u); hi = Math.max(hi, u);
-        }
-      }
-      return hi > lo ? [lo, hi] : null;
+  // Every vent's footprint on each cap, frame included, for addCapReliefStrips.
+  const capVentRects0 = [], capVentRectsL = [];
+  // The louvre field: dark, with blade lines from the lap raster — the same trick the roll-up door
+  // uses. One per vent HEIGHT, because the blade count is read off it.
+  const louverMat = (vh) => {
+    const m = mat("#2A2E33", { roughness: 0.9 });
+    const ltex = d3MakeTexture(THREE, "lap");
+    if (ltex) { ltex.repeat.set(1, Math.max(3, Math.round(vh / 0.25))); m.map = ltex; m.needsUpdate = true; }
+    return m;
+  };
+  const END0 = [0, -1, capOut0], ENDL = [L, 1, capOutL];
+  // ONE LOUVERED VENT ON ONE CAP, in rg-local space: `end` = [z of the cap, outward sign, capOut],
+  // (cu, cy) the louvre's centre, w x h its size, F the frame board. Shared by the style's vent and
+  // every vent a customer placed in a gable (2026-09-15), so the two can never be framed or set in
+  // depth differently. Records its footprint for the strips on that end.
+  //
+  // DEPTHS FROM EACH END'S OWN CAP (2026-09-15). These were two constants off the wall
+  // MID-plane — 0.20 for the trim, 0.16 for the louvers — written for the flush cap at 0.15,
+  // and on that cap they sit right. The porch end keeps the mid-plane, though, so the same
+  // numbers floated the whole vent 0.13 ft off its cap, inside the truss (gableProbe measured
+  // both ends). Now each end reads its cap plane and the ladder:
+  //   frame   from the cap (embedded 0.005, so no coplanar back face flickers at a grazing
+  //           angle) out to capVentFace — never behind the battens that stop at it
+  //   louvers from the cap to 0.06 short of the frame's front, recessed inside it, which is
+  //           what reads as louvered rather than as a grey rectangle
+  // On the flush panel cap that reproduces the old faces exactly (frame 0.25, louvers 0.19).
+  const drawCapVent = (parent, end, cu, cy, w, h, F, frameMat, louvMat) => {
+    const z0 = end[0], s = end[1], co = end[2];
+    const back = co - 0.005, face = capVentFace(co);
+    const trimD = face - back;
+    const louvD = Math.max(0.03, face - 0.06 - back);
+    const put = (m, bw, bh, d, du_, dy_, off) => {
+      const b = box(m, bw, bh, d);
+      b.position.set(cu + du_, cy + dy_, z0 + s * off);
+      parent.add(b);
     };
-    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
-    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
-    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
-    // shrink by a third to clear the rakes while the same vent on a sill fits at full
-    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
-    const VENT_SILL = 2 / 12;
-    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
-    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = H + VENT_SILL + vH / 2;
-    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
-    // a narrower vent is also shorter and therefore has more room above it.
-    for (let k = 0; k < 3; k++) {
-      const sp = profSpanAt(vCy + vH / 2);
-      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
-      if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
-    }
-    const spC = profSpanAt(vCy);
-    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
-    if (vW >= 0.8 && vH >= 0.35) {
-      const ventMat = mat("#2A2E33", { roughness: 0.9 });
-      const ltex = d3MakeTexture(THREE, "lap");          // blade lines, same trick the
-      if (ltex) {                                        // roll-up door already uses
-        ltex.repeat.set(1, Math.max(3, Math.round(vH / 0.25)));
-        ventMat.map = ltex; ventMat.needsUpdate = true;
-      }
-      const F = 0.12;                                    // trim board width
-      capVentRect = { u0: vCu - vW / 2 - F, u1: vCu + vW / 2 + F, y0: vCy - vH / 2 - F, y1: vCy + vH / 2 + F };
-      // Offsets from the wall MID-plane. Since 2026-09-14 the cap itself is flush with the wall
-      // face at 0.15, so 0.20 for the trim and 0.16 for the louvers seats the frame on the cap
-      // and leaves the blades recessed inside it, which is what reads as louvered rather than as
-      // a grey rectangle. (Before that the cap sat ON the mid-plane and the vent floated.)
-      [[0, -1], [L, 1]].forEach(function (end) {
-        const z0 = end[0], s = end[1];
-        const put = (m, w, h, d, du_, dy_, off) => {
-          const b = box(m, w, h, d);
-          b.position.set(vCu + du_, vCy + dy_, z0 + s * off);
-          rg.add(b);
-        };
-        put(ventMat, vW, vH, 0.06, 0, 0, 0.16);                        // louver face
-        put(trimMat, vW + F * 2, F, 0.10, 0, (vH + F) / 2, 0.20);      // head
-        put(trimMat, vW + F * 2, F, 0.10, 0, -(vH + F) / 2, 0.20);     // sill
-        put(trimMat, F, vH + F * 2, 0.10, -(vW + F) / 2, 0, 0.20);     // left jamb
-        put(trimMat, F, vH + F * 2, 0.10, (vW + F) / 2, 0, 0.20);      // right jamb
-      });
-    }
+    put(louvMat, w, h, louvD, 0, 0, back + louvD / 2);                          // louver face
+    put(frameMat, w + F * 2, F, trimD, 0, (h + F) / 2, back + trimD / 2);       // head
+    put(frameMat, w + F * 2, F, trimD, 0, -(h + F) / 2, back + trimD / 2);      // sill
+    put(frameMat, F, h + F * 2, trimD, -(w + F) / 2, 0, back + trimD / 2);      // left jamb
+    put(frameMat, F, h + F * 2, trimD, (w + F) / 2, 0, back + trimD / 2);       // right jamb
+    (end === END0 ? capVentRects0 : capVentRectsL).push({ u0: cu - w / 2 - F, u1: cu + w / 2 + F, y0: cy - h / 2 - F, y1: cy + h / 2 + F });
+  };
+  // Laid out with the ladder above the lean-to (styleVent), because the porch truss needs to
+  // know about it before either is drawn. Null = no vent on this building.
+  if (styleVent) {
+    const { vW, vH, vCy, vCu, F } = styleVent;
+    // ⚠️ THE STYLE'S VENT GIVES WAY to a vent the customer placed on the same end. A gable with
+    // two vents in it — the one the photos showed and the one on the estimate — is a building
+    // nobody builds, and the priced one is the one that has to be there. The other end keeps its.
+    const ends = [END0, ENDL].filter((end) => !(end === END0 ? gableVentAt0 : gableVentAtL));
+    const ventMat = ends.length ? louverMat(vH) : null;
+    ends.forEach((end) => drawCapVent(rg, end, vCu, vCy, vW, vH, F, trimMat, ventMat));
   }
-  addCapReliefStrips(capVentRect);
+  // A PLACED gable vent: the same drawCapVent, in its own group so it is PICKABLE. The pick raycasts
+  // openingsGroup and interiorGroup only (rg is neither), so it goes into openingsGroup with rg's
+  // final transform copied onto the group — the lines just below — and userData.itemId like every
+  // wall opening. `gable: true` is what keeps model.rebuildWalls from tearing it down: it belongs
+  // to no wall's rebuild, so any change to one takes the full path (d3ScopeForItemsChange and the
+  // viewer's drag both say so).
+  // The frame takes the vent's own fixed colour, else the trim — the wall vent's rule — and the
+  // shared trimMat in that case, so a trim swatch recolours it live like the style's.
+  placedGableVents.forEach((v) => {
+    const vg = new THREE.Group();
+    vg.userData = { itemId: v.it.id, wallItem: true, wall: v.it.wall, gable: true };
+    if (uAxisIsX) { vg.position.z = -L / 2; }
+    else { vg.rotation.y = -Math.PI / 2; vg.position.x = L / 2; }
+    const f = v.fit;
+    drawCapVent(vg, v.atZero ? END0 : ENDL, f.u, (f.y0 + f.y1) / 2, f.w, f.h, f.F, v.it.colorHex ? mat(v.it.colorHex) : trimMat, louverMat(f.h));
+    openingsGroup.add(vg);
+  });
+  addCapReliefStrips(capVentRects0, capVentRectsL);
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
@@ -6508,8 +7039,127 @@ function buildShed3DModel(THREE, p) {
   // Same isolation as buildOneWall: rebuildInterior repopulates this group
   // alone when a loft/workbench/ramp moves during a live drag.
   const interiorGroup = new THREE.Group();
+  // ── Electrical devices: drawn, never picked (2026-09-15) ──
+  // Carolyn, 2026-09-14, on the expo build: she added a Flood Light and a Ceiling Fan from "Add
+  // an electrical item", the plan showed them, and the 3D showed an empty building. No branch
+  // below drew an electrical item at all, so a customer who paid for the package saw none of it.
+  //
+  // Drawn now, and deliberately INERT:
+  //   · NO itemId on the group. pickItem3 walks past a hit without one, so a click on an outlet
+  //     selects nothing (or whatever stands behind it). Electrical is placed and moved in 2D
+  //     only -- place3 refuses it and the 3D Add row leaves it out -- and a device you could
+  //     grab here but not place here would be half a feature.
+  //   · No shadows (userData.noShadow, honoured by setShadowFlags): a 3-in cover plate throwing
+  //     a sun shadow reads as a smudge on the wall, and the shadow map has no resolution for it.
+  //   · userData.ssElec = the electrical item id, ssElecFor = the placed item's id. Nothing in
+  //     the app reads either; tests/harness/elec3d.mjs counts and measures by them.
+  // Keyed on electricalItemId rather than on a tool, because the tools exist only for the
+  // CURRENT package state (elecToolsFor): a saved design whose package was later switched off
+  // still carries its devices, and they still draw. With no tool the name is "" and the mount
+  // is "has a wall or not".
+  //
+  // Where each one goes (a wall's local +z is its exterior normal, the ramp's trick below):
+  //   wall, inside   a cover plate at heightOffFloorIn on the INTERIOR face, sized by name
+  //                  (outlet/switch 0.23x0.37, 220V 0.35x0.45, a breaker panel a grey box)
+  //   wall, outside  /flood|exterior|outdoor/ or mounted within 3 in of the plate: a lamp on the
+  //                  cladding's proudest face (trimFace). Capped under the eave on an eave wall;
+  //                  on a gable end it may rise into the gable, to half a foot under the roof.
+  //   ceiling        a light disc just under the plate line, or a fan (hub + 4 blades) 0.6 ft down
+  const buildElectrical3D = (it, c) => {
+    const name = String((c && c.label) || it.name || "");
+    const hIn = Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : (c && c.heightOffFloorIn));
+    const hFt = Number.isFinite(hIn) && hIn > 0 ? hIn / 12 : null;
+    const onWall = c ? !!c.wallSnap : !!it.wall;
+    const g = new THREE.Group();
+    g.userData = { ssElec: String(it.electricalItemId), ssElecFor: it.id };   // NO itemId -- see above
+    const add = (parent, m) => { m.userData.noShadow = true; parent.add(m); return m; };
+    const glow = () => mat("#FFF6DC", { emissive: "#FFE7A3", emissiveIntensity: 0.85, roughness: 0.4 });
+    if (onWall) {
+      const wf = WALLS[it.wall];
+      if (!wf) return;          // a wall device whose wall no longer exists has nowhere to hang
+      // The same plan-frame -> wall-frame shift and porch clamp buildOneWall gives an opening.
+      const alongRaw = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
+      const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
+      g.rotation.y = Math.atan2(wf.N[0], wf.N[1]);   // local +z -> exterior, local x -> along
+      g.position.set(wf.O[0] + wf.U[0] * along, 0, wf.O[1] + wf.U[1] * along);
+      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= H - 0.25);
+      if (exterior) {
+        // Profile u is the along-wall world coordinate on a gable end: world x when the ridge
+        // runs along z (north/south are the ends), world z otherwise (see the cap UV comment).
+        const gableEnd = uAxisIsX ? (it.wall === "north" || it.wall === "south") : (it.wall === "west" || it.wall === "east");
+        const u = uAxisIsX ? g.position.x : g.position.z;
+        // UNDER THE EAVE FINISH, not just under the plate. A lamp capped at H - 0.35 (the first
+        // cut) disappeared behind the fascia -- elec3d.mjs's exterior shot showed one sliver of
+        // lens under the board, which on the default roof hangs to H - 0.45 and lower on a
+        // steeper pitch or a longer overhang. So the cap reads eaveHangY, the bottom of what the
+        // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
+        // and never higher than H - 0.75. The harness asserts that gap against the fascia it
+        // measures in the scene.
+        const EAVE_CAP = Math.min(H - 0.75, eaveHangY - 0.45);
+        const top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        const y = Math.min(hFt != null ? hFt : EAVE_CAP, top);
+        const dark = mat("#2B2F36", { roughness: 0.6, metalness: 0.3 });
+        // Base from just inside the bare wall face out past the cladding, so battens and lap
+        // courses never show through it; the head stands on its front.
+        const b0 = T / 2 - 0.005, b1 = trimFace + 0.05;
+        const base = add(g, box(dark, 0.42, 0.42, b1 - b0));
+        base.position.set(0, y, (b0 + b1) / 2);
+        const head = add(g, box(dark, 0.6, 0.34, 0.3));
+        head.position.set(0, y, b1 + 0.15);
+        head.rotation.x = 0.35;                       // tipped down at the yard
+        const lens = add(head, box(glow(), 0.5, 0.25, 0.02));
+        lens.position.z = 0.16;
+      } else {
+        const breaker = /breaker|panel|load ?cent/i.test(name);
+        const heavy = /220|240/.test(name);
+        const sw = /switch|dimmer/i.test(name);
+        const lamp = !breaker && !sw && /light|lamp|sconce/i.test(name);
+        const pw = breaker ? 1.0 : heavy ? 0.35 : lamp ? 0.35 : 0.23;
+        const ph = breaker ? 1.4 : heavy ? 0.45 : lamp ? 0.35 : 0.37;
+        const pd = breaker ? 0.25 : 0.04;
+        // Kept on the wall whatever the stored height says: the centre may not put the plate
+        // through the floor or above the plate line.
+        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, H - ph / 2 - 0.05));
+        const zBack = -(T / 2);                        // the interior face
+        const plate = add(g, box(mat(breaker ? "#9CA3AF" : "#F1F0EA", breaker ? { roughness: 0.5, metalness: 0.4 } : { roughness: 0.55 }), pw, ph, pd));
+        plate.position.set(0, y, zBack - pd / 2);
+        const zFront = zBack - pd - 0.005;
+        const detail = (m, w, h, d, dy) => { const b = add(g, box(m, w, h, d)); b.position.set(0, y + dy, zFront + 0.005 - d / 2); return b; };
+        if (breaker) detail(mat("#6B7280", { roughness: 0.5, metalness: 0.4 }), 0.84, 1.22, 0.02, 0);   // the door
+        else if (lamp) detail(glow(), 0.28, 0.2, 0.14, 0);
+        else if (sw) detail(mat("#D6D3CB"), 0.06, 0.12, 0.06, 0);                                         // the toggle
+        else if (heavy) detail(mat("#3F3F46"), 0.17, 0.17, 0.012, 0);
+        else { const rm = mat("#3F3F46"); detail(rm, 0.12, 0.09, 0.012, 0.08); detail(rm, 0.12, 0.09, 0.012, -0.08); }  // duplex faces
+      }
+    } else {
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      if (/fan/i.test(name)) {
+        const Y = H - 0.6;
+        const hubMat = mat("#374151", { roughness: 0.5, metalness: 0.3 });
+        const rod = add(g, cyl(hubMat, 0.03, 0.6));
+        rod.position.y = H - 0.3;
+        const hub = add(g, cyl(hubMat, 0.2, 0.22));
+        hub.position.y = Y;
+        const bladeMat = mat("#8B6B4A", { roughness: 0.8 });
+        for (let k = 0; k < 4; k++) {
+          const arm = new THREE.Group();
+          arm.rotation.y = Math.PI / 4 + (k * Math.PI) / 2;   // diagonal to the walls
+          const blade = add(arm, box(bladeMat, 1.6, 0.03, 0.38));
+          blade.position.set(0.2 + 0.8, Y, 0);
+          g.add(arm);
+        }
+      } else {
+        const lit = /light|lamp|led|bulb/i.test(name) || !name;
+        const disc = add(g, cyl(lit ? glow() : mat("#F1F0EA"), 0.45, 0.08));
+        disc.position.y = H - 0.06;
+      }
+    }
+    interiorGroup.add(g);
+  };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
+    // Before the tool check on purpose: a device whose tool left ITEMS still draws (see above).
+    if (it.electricalItemId) { buildElectrical3D(it, c); return; }
     if (!c) return;
     // Plan annotations, one more view of them: the note's text as a plaque
     // lying at its plan position, the line as a thin strip between its
@@ -6714,7 +7364,9 @@ function buildShed3DModel(THREE, p) {
   root.add(interiorGroup);
   // Sun shadows (SmartBuild's "Show Shadows"): solid building meshes cast,
   // the grass receives. Transparent fills (glass) don't cast; labels neither.
-  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  // userData.noShadow opts a mesh out (electrical devices: see buildElectrical3D). Checked here
+  // rather than set once at build, because every scoped rebuild runs this over its group again.
+  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.userData && o.userData.noShadow) && !(o.material && o.material.transparent); o.receiveShadow = false; } });
   setShadowFlags(root);
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
@@ -6733,8 +7385,9 @@ function buildShed3DModel(THREE, p) {
       if (!WALLS[wname]) return;
       const oldWg = wallsGroup.children.find((g) => g.userData && g.userData.wall === wname);
       if (oldWg) { wallsGroup.remove(oldWg); disposeSubtree(oldWg, sharedMats); }
+      // Not a gable vent's group: it is the roof builder's, and buildOneWall below never makes one.
       openingsGroup.children
-        .filter((g) => g.userData && g.userData.wall === wname)
+        .filter((g) => g.userData && g.userData.wall === wname && !g.userData.gable)
         .forEach((og) => { openingsGroup.remove(og); disposeSubtree(og, sharedMats); });
       const built = buildOneWall(wname, itemsNow);
       setShadowFlags(built.wg);
@@ -7237,6 +7890,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       };
       const applyShellMode = (e) => {
         e.model.roofGroup.visible = !e.interior && e.roofOn !== false;
+        // A vent placed in the gable lives in openingsGroup (to be pickable) but sits on the roof's
+        // end cap, so it hides WITH the roof: with the cap gone it would hang in the air.
+        e.model.openingsGroup.children.forEach((g) => { if (g.userData && g.userData.gable) g.visible = e.model.roofGroup.visible; });
         if (e.model.envGroup) e.model.envGroup.visible = e.envOn !== false;
         if (e.sky) e.sky.visible = e.envOn !== false;
         // Ghosted walls must stop casting shadows too — 14%-opacity walls
@@ -7286,6 +7942,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         for (let h = 0; h < hits.length; h++) {
           let n = hits[h].object;
           while (n && !(n.userData && n.userData.itemId)) n = n.parent;
+          // three's raycaster does not test `visible` (see dormerPick3), and a gable vent's group is
+          // hidden with the roof in "look inside" — so a hidden one is walked past, not grabbed.
+          if (n && n.visible === false) continue;
           if (n) { const it = liveItems.find((i) => i.id === n.userData.itemId); if (it) return it; }
         }
         return null;
@@ -7380,9 +8039,23 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // catalog fixture's own heightIn, then D3 defaults for legacy items. Mirrors
       // the builder's openingSpan, INCLUDING its clamps, so drag highlights track
       // a wall-height pick (spec.wallHeightFt is mutated live by setWallHeight).
+      // A gable vent's fit in THIS viewer's building — the same ssGableVentFit buildShed3DModel's
+      // gableVentFitOf makes, on the same roof and the live plate height — or null.
+      const gableFit3 = (it) => {
+        if (!ssIsGableVent(it) || !it.wall) return null;
+        const along = ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
+        return ssGableVentFit(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, it.wall, spec.wallHeightFt || D3.WALL_H, it, along, it.ventRiseFt);
+      };
       const openSpanOf = (it) => {
         const inchesFt = (v) => (Number(v) > 0 ? Number(v) / 12 : null);
         const maxTop = (spec.wallHeightFt || D3.WALL_H) - 0.2;
+        // A VENT HAD NO BRANCH HERE, so it fell into the window's (it is a type:"window" item) and
+        // its highlight and live dimensions sat at a window's 3'6" sill while the hole was cut
+        // under the plate. Now the renderer's own two answers: the gable fit, else ssVentSpan.
+        if (isVentItem(it)) {
+          const gf = gableFit3(it);
+          return gf ? [gf.y0, gf.y1] : ssVentSpan({ ...it, ventZone: null }, spec.wallHeightFt || D3.WALL_H);
+        }
         if (it.type === "window") {
           const wh = Math.min(it.openingHeightFt || inchesFt(it.heightIn) || D3.WINDOW_H, maxTop - 0.35);
           let s0 = it.sillFt != null ? it.sillFt : D3.WINDOW_SILL;
@@ -7411,7 +8084,8 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           const ns = it.wall === "north" || it.wall === "south";
           const len = ns ? bldgW : bldgH;
           const along = ns ? (it.x - mgX) / scale : (it.y - mgY) / scale;
-          const a = Math.max(w / 2, Math.min(along, len - w / 2)) - len / 2;
+          const gf = gableFit3(it);   // a gable vent is drawn where its fit put it
+          const a = (gf ? gf.alongFt : Math.max(w / 2, Math.min(along, len - w / 2))) - len / 2;
           const sp = openSpanOf(it);
           highlight.scale.set(w + 0.3, sp[1] - sp[0] + 0.3, D3.WALL_T + 0.4);
           highlight.rotation.y = ns ? 0 : Math.PI / 2;
@@ -7540,12 +8214,21 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setMsg3((cur) => (cur === m ? cur : m));
         setTimeout(() => setMsg3((cur) => (cur === m ? null : cur)), 4000);
       };
-      const itemLabel3 = (type) => (itemTypes[type] && (itemTypes[type].shortLabel || itemTypes[type].label)) || type;
+      // The footer's "Remove …" names the item the way the customer knows it (Carolyn,
+      // 2026-09-14). It used to read the TYPE's shortLabel, and a catalog vent is a type:"window"
+      // item, so every vent offered "Remove WIN" and a workbench "Remove WB". The catalog name
+      // stamped on the item wins, then the tool's full label; the button ellipsises and carries
+      // the whole name in its title, so a long catalog name can never push the footer apart.
+      const itemLabel3 = (it) => {
+        if (!it) return "";
+        const c = itemTypes[it.type];
+        return String(it.windowName || it.doorName || it.rampName || (c && (c.label || c.shortLabel)) || it.planLabel || it.type);
+      };
       const commitPlaced3 = (ni) => {
         liveItems = liveItems.concat([ni]);
         if (onItemAdd) onItemAdd(ni);
         if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
-        setSel3d({ id: ni.id, label: itemLabel3(ni.type) });
+        setSel3d({ id: ni.id, label: itemLabel3(ni) });
         capturedRef.current = false;
         setShotTaken(false);
         setTool3(null);
@@ -7636,6 +8319,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         }
         const sn = snapToWall(w, ptx, pty, widthFt * scale, 0.5 * scale, pWpx, pHpx, mgX, mgY);
         let ni;
+        let gableNote = null;
         if (type === "vent") {
           // The 3D twin of the 2D included-chip branch, field for field. Both write ventStamps
           // rather than spelling the fields out, because the sill bug this file documents failed
@@ -7644,6 +8328,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
             price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
             ...ventStamps(fx) };
+          // Into the gable when this is a gable end (Carolyn, 2026-09-14) — ssVentGableDefault, the
+          // one rule both placement paths call.
+          const vd = ssVentGableDefault(spec.roof || D3_DEFAULT_ROOF, bldgW, bldgH, spec.wallHeightFt || D3.WALL_H, ni, liveItems, itemTypes, scale, mgX, mgY);
+          ni = vd.ni; gableNote = vd.note;
         } else if (type === "window") {
           ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
             planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
@@ -7680,6 +8368,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           return false;
         }
         commitPlaced3(ni);
+        if (gableNote) flash3(gableNote);
         return true;
       };
       const placeRamp3 = (fx, door) => {
@@ -7759,7 +8448,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           let closest = null, minDist = Infinity;
           doors.forEach((d) => { const dx = pageX - d.x, dy = pageY - d.y; const dist = Math.sqrt(dx * dx + dy * dy); if (dist < minDist) { minDist = dist; closest = d; } });
           if (!closest) return;
-          if (liveItems.find((i) => i.type === "ramp" && i.snapDoorId === closest.id)) { flash3("This door already has a ramp. Delete it first to replace."); return; }
+          if (liveItems.find((i) => i.type === "ramp" && i.snapDoorId === closest.id)) { flash3("This door already has a ramp. Remove it first to replace."); return; }
           if (cfg.isRampPicker) { setPick3({ kind: "ramp", door: closest }); setTool3(null); return; }
           if (cfg.includedFixture) { placeRamp3(cfg.includedFixture, closest); return; }
           const doorCfg = itemTypes[closest.type];
@@ -7948,7 +8637,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // Cross-wall dragging still works: a point on the south wall's plane, dragged
             // far past a corner, is nearest the west wall, so getNearestWall re-homes it
             // exactly as before. Nothing here bypasses the shared 2D functions.
-            const vertical = it.type === "window" && it.sillMode === "variable";
+            // Not a vent: it is a type:"window" item too, and a lowered one carries "variable", but
+            // its height has zones and a hysteresis the window's plain sill does not (ventMove below).
+            const vertical = it.type === "window" && !isVentItem(it) && it.sillMode === "variable";
             const wallPlane = () => {
               if (it.wall === "north") dragPlane.set(new THREE.Vector3(0, 0, 1), bldgH / 2);
               else if (it.wall === "south") dragPlane.set(new THREE.Vector3(0, 0, 1), -bldgH / 2);
@@ -7988,7 +8679,38 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             const pageY = mgY + (p.z + bldgH / 2) * scale;
             const wFt = it.widthFt || c.width || 3;
             const w = getWallFromClick(pageX, pageY, pWpx, pHpx, mgX, mgY) || getNearestWall(pageX, pageY, pWpx, pHpx, mgX, mgY);
-            const sn = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            const sn0 = snapToWall(w, pageX, pageY, wFt * scale, (c.height || 0.5) * scale, pWpx, pHpx, mgX, mgY);
+            // A VENT MOVES UP AND DOWN as well as along (Carolyn, 2026-09-14: the vent had to be
+            // "draggable up"). The wall-plane hit's height is the vent's. Carried a quarter foot past
+            // the plate on a gable end it goes INTO THE GABLE, re-fitted under the rakes at every step;
+            // brought a quarter foot back below the plate it comes down onto the wall, where its
+            // bottom edge becomes a variable sill (ssVentAt, the helper the plan's ▲/▼ use). Carried
+            // onto a wall with no gable above it, a gable vent comes down to that wall's top spot.
+            //
+            // The height is measured from where the vent was GRABBED, and stepped relative to where it
+            // STARTED, not to a grid: a purely sideways drag therefore leaves the rise or sill exactly
+            // as it was (a 2 in rise would otherwise snap to 3 in on the first pixel), and grabbing
+            // the vent by its top edge does not jump it up by half its height.
+            const ventMove = isVentItem(it);
+            let sn = sn0;
+            if (ventMove) {
+              const Hv = spec.wallHeightFt || D3.WALL_H, roofV = spec.roof || D3_DEFAULT_ROOF;
+              const now = ssVentWhere(roofV, bldgW, bldgH, Hv, it, scale, mgX, mgY);
+              if (dragging3.ventGrab == null) {
+                dragging3.ventGrab = Math.max(0, Math.min(p.y - now.bottomFt, sp[1] - sp[0]));
+                dragging3.ventBottom0 = now.bottomFt;
+              }
+              const b0 = dragging3.ventBottom0;
+              const want = b0 + Math.round((p.y - dragging3.ventGrab - b0) / SS_VENT_STEP_FT) * SS_VENT_STEP_FT;
+              const zone = ssVentDragZone(now.zone, want, Hv);
+              const g = zone === "gable" ? ssVentAt(roofV, bldgW, bldgH, Hv, it, sn0, scale, mgX, mgY, "gable", want) : null;
+              // Pushed up into a gable that cannot hold it: say so once, rather than stopping dead at
+              // the top of the wall for no visible reason. An eave wall has no gable to explain.
+              if (zone === "gable" && !g && now.zone === "wall" && ssGableEndWalls(roofV, bldgW, bldgH).indexOf(sn0.wall) >= 0) flash3(SS_VENT_NO_ROOM);
+              // A vent nobody has lowered, dragged only sideways, keeps its fixed spot and gains no keys.
+              const untouched = want === b0 && now.zone === "wall" && !it.ventZone && it.sillMode !== "variable";
+              sn = g || (untouched ? sn0 : ssVentAt(roofV, bldgW, bldgH, Hv, it, sn0, scale, mgX, mgY, "wall", want));
+            }
             // Refuse the move rather than commit an overlap — same posture as the 2D wallOnly
             // drag (audit 2026-08-20) and the workbench branch below, which simply return.
             // Until now the 3D drag was the one path that could still land a door/window/RO
@@ -7997,8 +8719,20 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // covers both commit sites below with one check.
             const dOthers3 = liveItems.filter((i) => i.id !== it.id);
             const dCand3 = { ...it, ...sn, widthFt: wFt };
-            if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale)) { flash3(SS_REFUSE_WALL); return; }
-            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3)) { flash3(SS_REFUSE_SLAB); return; }
+            // Against the viewer's own plate, which is what a vent was just moved on (only a vent's
+            // band reads it; review 2026-09-15, a vent dragged into a window on a 10 ft wall).
+            const dH3 = spec.wallHeightFt || D3.WALL_H;
+            if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale, dH3)) { flash3(SS_REFUSE_WALL); return; }
+            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3, dH3)) { flash3(SS_REFUSE_SLAB); return; }
+            if (ventMove) {
+              const same = (k) => !(k in sn) || (sn[k] == null ? null : sn[k]) === (it[k] == null ? null : it[k]);
+              if (!["x", "y", "wall", "ventZone", "ventRiseFt", "sillFt", "sillMode"].every(same)) {
+                // In the gable, on either side of the change, it is drawn by the roof builder, which
+                // only the FULL rebuild runs; a wall vent re-cuts just the walls it touched.
+                commitLive(it, sn, (ssIsGableVent(it) || sn.ventZone === "gable") ? undefined : { walls: [it.wall, sn.wall] });
+              }
+              return;
+            }
             if (vertical) {
               // Quarter-foot steps, and the SAME bounds openSpanOf enforces at build time:
               // y = 0 is the interior floor (which is what Carolyn specified — "off the
@@ -8195,8 +8929,16 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           // would render live and then silently revert the moment the design is saved or
           // reloaded — this commit, not commitLive, is what reaches the parent's state.
           // Sent only when the item actually carries one, so nothing else gains the key.
+          // A vent's gable zone rides along for the same reason: a drag re-fits its rise, or brings it
+          // down to a wall with no gable, and the plan must end up agreeing.
+          // ⚠️ AND A VENT SENDS ITS WHOLE HEIGHT, all four keys, every time (2026-09-15). It moves up
+          // and down now, and half its moves CLEAR a value — back up to the wall's top spot is
+          // sillFt null, into the gable is sillMode "fixed" — which the window's `sillFt != null`
+          // test above would drop, leaving the plan with the old sill under a vent the 3D moved.
           if (moved && onItemMove) onItemMove(moved.id, { x: moved.x, y: moved.y, rotation: moved.rotation, wall: moved.wall,
-            ...(moved.type === "window" && moved.sillFt != null ? { sillFt: moved.sillFt } : {}) });
+            ...(moved.type === "window" && moved.sillFt != null ? { sillFt: moved.sillFt } : {}),
+            ...(isVentItem(moved) ? { ventZone: moved.ventZone || null, ventRiseFt: moved.ventRiseFt != null ? moved.ventRiseFt : null,
+              sillFt: moved.sillFt != null ? moved.sillFt : null, sillMode: moved.sillMode === "variable" ? "variable" : "fixed" } : {}) });
           // A moved door commits its ramp's new derived position too.
           const ramp = liveItems.find((i) => i.type === "ramp" && i.snapDoorId === d.id);
           if (ramp && onItemMove) onItemMove(ramp.id, { x: ramp.x, y: ramp.y, rotation: ramp.rotation, wall: ramp.wall });
@@ -8209,7 +8951,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // no-op and shouldn't re-render the parent (unless it moved).
         if (onItemSelect && (d.moved || d.id !== lastSentSelect)) { lastSentSelect = d.id; onItemSelect(d.id); }
         const selIt = liveItems.find((i) => i.id === d.id);
-        setSel3d(selIt ? { id: selIt.id, label: itemLabel3(selIt.type) } : null);
+        setSel3d(selIt ? { id: selIt.id, label: itemLabel3(selIt) } : null);
       };
       canvas.addEventListener("pointerdown", onPtr3Down, true);
       canvas.addEventListener("pointermove", onPtr3Move);
@@ -8467,7 +9209,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           {msg3 && <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>{msg3}</span>}
           {sel3d && !tool3 && (
             <button onClick={() => { const e = engineRef.current; if (e && e.delete3) e.delete3(sel3d.id); }}
-              style={{ background: "#7F1D1D", color: "#FECACA", border: "1px solid #991B1B", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              title={`Remove ${sel3d.label}`}
+              style={{ background: "#7F1D1D", color: "#FECACA", border: "1px solid #991B1B", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                maxWidth: "min(260px, 70vw)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               🗑 Remove {sel3d.label}
             </button>
           )}
@@ -8741,6 +9485,9 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
     if (!it) return;
     const c = itemTypes[it.type];
     if (!c) { full = true; return; }          // unknown class — never guess
+    // A vent in the gable is drawn by the ROOF builder (2026-09-15), which only the full path runs.
+    // Checked on both sides of the change, so a vent leaving the gable takes its drawing with it.
+    if (ssIsGableVent(it)) { full = true; return; }
     if (c.wallOnly) { if (it.wall) walls.add(it.wall); else full = true; return; }
     interior = true;                          // loft | workbench | ramp | note | line
   };
@@ -9867,9 +10614,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       out[it.id] = {
         label: it.name, icon: it.icon || "\u26a1", color: "#7C3AED",
         shortLabel: (it.name || "ITEM").toUpperCase().slice(0, 5),
-        // Two mounts, and both already exist: against a wall (never blocks a door - it carries
-        // no slab model), or free inside the footprint like a ceiling light.
+        // Two mounts, and both already exist: against a wall, or free inside the footprint like
+        // a ceiling light.
         wallSnap: it.mount !== "ceiling",
+        // ⛔ THE COMMENT HERE USED TO SAY THIS "carries no slab model", AND IT WAS BACKWARDS
+        // (Carolyn, 2026-09-14: "the shelf can't pass the electrical", a flood light refused with
+        // "something else is already mounted there", a light over a door refused). No modelKey on
+        // a wallSnap item is exactly what ssSlabModel reads as a LEGACY WORKBENCH, band [0, 1e4]:
+        // every outlet was a full-height bench to every shelf, bench and door on its wall.
+        // modelKey is the discriminator (see SS_SLAB_BANDS) and "electrical" is deliberately not
+        // one of its keys, so the device is not a slab and its band is its own
+        // heightOffFloorIn + height. An outlet at 24" beside a door is still refused; a flood
+        // light at 120" or a shelf over an outlet is not. wallSlab_test pins this line by shape.
+        modelKey: "electrical",
         width: it.mount === "ceiling" ? 0.8 : 0.5,
         height: it.mount === "ceiling" ? 0.8 : 0.3,
         heightOffFloorIn: it.heightOffFloorIn,
@@ -10738,6 +11495,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
+  // The style-change vent re-fit (ssRefitGableVents, 2026-09-15): the last style it saw, and the
+  // items of the last commit that changed them. A style that arrives WITH new items is a design
+  // being opened, and a saved design is never rewritten as it opens.
+  const ventStyleRef = useRef(null);
+  const ventItemsSeenRef = useRef(null);
   // Outcomes of a size-change reflow. `reflowNote` is advisory (items moved wall or were
   // shortened); `sizeBlock` is the refusal — { from, to, items } — shown when something
   // could not be placed at all, with the size already reverted.
@@ -10839,7 +11601,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!p) return;   // blank/unparseable (a style click just blanked it): keep the last real size
     const prev = parseSize(prevSizeRef.current);
     if (prev && (prev.w !== p.w || prev.h !== p.h) && items.length) {
-      const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS);
+      // A vent in the gable is re-fitted to the NEW building's gable, or brought down to its wall
+      // when the new size has none there (reflowItems' gablePlace).
+      const vr = ventRoof2D();
+      const { items: nextItems, events } = reflowItems(items, prev, p, ITEMS, (cand, sn, g) =>
+        ssGableVentPlace(vr.roof, p.w, p.h, vr.H, cand, sn, g.scale, g.mgX, g.mgY,
+          ((sn.wall === "north" || sn.wall === "south") ? sn.x - g.mgX : sn.y - g.mgY) / g.scale, cand.ventRiseFt));
       const blocked = events.filter((e) => e.kind === "blocked");
       if (blocked.length) {
         // Nothing has changed yet — put the size back and let them decide.
@@ -10865,6 +11632,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setTimeout(() => setToast(null), 6000);
     }
   }, [sel.size]);
+
+  // A STYLE change re-fits every gable vent against the new roof (ssRefitGableVents, review
+  // 2026-09-15): the half of plan 1.9 the size effect above never covered. A style pick blanks the
+  // size, so this runs on the dimensions still on the plan, and a different size picked afterwards
+  // reflows again through the effect above.
+  //
+  // ⚠️ NOT ON A LOAD. loadDesignByCode and openVersion set sel and items in the same commit, so a
+  // style that changed while the items changed too is a design being opened, and it keeps every key
+  // exactly as saved, the way repairLoaded does. That test reads ventItemsSeenRef, which the tracker
+  // declared AFTER this effect updates, so on a shared commit this still sees the previous items.
+  // The functional setItems lands only on the plan it was computed from, never on one that replaced
+  // it in the meantime.
+  useEffect(() => {
+    const prevStyle = ventStyleRef.current;
+    ventStyleRef.current = sel.style;
+    if (prevStyle === null || prevStyle === sel.style) return;      // first render, or no change
+    if (sel.style && !selectedStyle) return;                          // a style the config does not list
+    if (ventItemsSeenRef.current !== items) return;                   // arrived with new items: a load
+    const vr = ventRoof2D();
+    const r = ssRefitGableVents(items, vr.roof, bldgW, bldgH, vr.H, ITEMS);
+    if (!r) return;
+    const from = items;
+    setItems((cur) => (cur === from ? r.items : cur));
+    if (r.dropped) { setToast(ssVentStyleDropped(r.dropped)); setTimeout(() => setToast(null), 6000); }
+  }, [sel.style]);
+  useEffect(() => { ventItemsSeenRef.current = items; }, [items]);
 
   // Snap a loaded layout back onto legal positions. Designs saved before the size-change
   // reflow existed can carry items stranded off their walls by an old style-then-size
@@ -11236,6 +12029,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // Get sizes for selected style
   const selectedStyle = C.buildingStyles.find((s) => s.value === sel.style);
+  // The roof and plate height the 3D builds this design with — the SAME resolver call the 3D props
+  // make — for putting a vent into a gable from the plan, which has no roof of its own to ask
+  // (2026-09-15). A function, not a value: it is read when a vent is placed, dragged, reflowed or
+  // nudged, and on a render only while a vent is SELECTED (the toolbar's zone readout), so an
+  // ordinary render never pays for it.
+  const ventRoof2D = () => {
+    const s = d3ResolveStyleSpec(selectedStyle, sel.style, C.wallHeightFt, d3SidingOverride(C, sel), d3CustomerWallHeightFt(C, selectedStyle, sel.style, sel, bldgW));
+    return { roof: (s && s.roof) || D3_DEFAULT_ROOF, H: (s && s.wallHeightFt) || D3.WALL_H };
+  };
   const sizeOpts = selectedStyle && Array.isArray(selectedStyle.sizes) ? selectedStyle.sizes : (C.defaultSizes || []);
   const frontWall = getFrontWall(items);
   // Detect unattached lofts for warning banner
@@ -11358,6 +12160,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const iwPx2 = widthFt * scale, ihPx2 = 0.5 * scale;
       const sn = snapToWall(w, pt.x, pt.y, iwPx2, ihPx2, pW, pH, mgX, mgY);
       let ni;
+      let gableNote = null;
       if (fx.category === "vent") {
         // type:"window" carrying isVent — see FIXTURE_VENT_COLOR for why that is the only shape
         // submit-estimate can price. windowName carries the vent's name because that is the field
@@ -11366,6 +12169,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
           price: (fx.price != null ? fx.price : null), widthIn: Number(fx.widthIn) || null, heightIn: Number(fx.heightIn) || null,
           ...ventStamps(fx) };
+        // VENTS GO IN THE GABLE (Carolyn, 2026-09-14: a Standard Vent landed "on the front wall
+        // beside the door, low"). On a gable end it is fitted under the ridge; on an eave wall, or
+        // a gable too small for it, it stays high on the wall and the toast below says why.
+        // ssVentGableDefault is the one rule — placeFixture3 in the 3D viewer calls it too.
+        const vr = ventRoof2D();
+        const vd = ssVentGableDefault(vr.roof, bldgW, bldgH, vr.H, ni, items, ITEMS, scale, mgX, mgY);
+        ni = vd.ni; gableNote = vd.note;
       } else if (fx.category === "window") {
         ni = { id: idCounter++, type: "window", ...sn, widthFt, heightFt: 0.5, fixtureItemId: fx.id, windowName: fx.name || "Window",
           planLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "WIN").toUpperCase().slice(0, 6),
@@ -11400,7 +12210,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (checkWallSlabOverlap(sn, iwPx2, items, ITEMS, scale, ni)) {
         setToast(ssSlabInWay(sn, iwPx2, items, ITEMS, scale, ni, "place this somewhere else on the wall.")); setTimeout(() => setToast(null), 4000); return;
       }
-      setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(null);
+      setItems((p) => [...p, ni]); setSelectedId(ni.id); setActiveTool(null); setToast(gableNote);
+      if (gableNote) setTimeout(() => setToast((t) => (t === gableNote ? null : t)), 4000);
       return;
     }
     const iwPx = cfg.width * scale; const ihPx = slabDepthFt(cfg) * scale;
@@ -11470,7 +12281,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Check if this door already has a ramp
       const existingRamp = items.find((i) => i.type === "ramp" && i.snapDoorId === closest.id);
       if (existingRamp) {
-        setToast("This door already has a ramp. Delete it first to replace.");
+        setToast("This door already has a ramp. Remove it first to replace.");
         setTimeout(() => setToast(null), 5000);
         return;
       }
@@ -12097,7 +12908,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // and doesn't get stuck off-wall. The door's ramp (if any) follows too —
       // its placement is derived from the door's position/wall.
       const w = getWallFromClick(rx, ry, pW, pH, mgX, mgY) || getNearestWall(rx, ry, pW, pH, mgX, mgY);
-      const sn = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
+      const sn0 = snapToWall(w, rx, ry, iWidthFt * scale, cfg.height * scale, pW, pH, mgX, mgY);
+      // A vent in the gable slides along it, re-fitted under the rakes; dragged onto a wall with no
+      // gable above it (or too small a one) it comes down to that wall. The 3D drag's rule.
+      let sn = sn0;
+      if (ssIsGableVent(it)) {
+        const vr = ventRoof2D();
+        sn = ssGableVentPlace(vr.roof, bldgW, bldgH, vr.H, it, sn0, scale, mgX, mgY,
+          ((sn0.wall === "north" || sn0.wall === "south") ? sn0.x - mgX : sn0.y - mgY) / scale, it.ventRiseFt)
+          || { ...sn0, ventZone: null, ventRiseFt: null };
+      }
       // Refuse the move rather than commit an overlap — same posture as the workbench branch
       // below, which simply returns. Without this, dragging a door onto another door or onto a
       // workbench silently succeeded, producing the exact layout the workbench-side toast prevents.
@@ -12372,6 +13192,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       return i;
     }));
+  };
+  // A selected VENT's height, from the plan (2026-09-15). A floor plan looks down and cannot show
+  // up, so a vent gets words and arrows instead of a drag: "In the gable" / "On the wall" and ▲/▼
+  // in 3 in steps. All the rules live in ssVentSetZone / ssVentNudge beside ssVentSpan, the same
+  // helpers the 3D drag moves a vent with, and every refusal goes out through refuseDrag's
+  // stale-guarded toast — a repeated ▲ at the top of the gable must say so every time, and must not
+  // have its message blanked by an older timer.
+  const ventZoneSel = (zone) => {
+    if (!selectedId || planLocked) return;
+    const it = items.find((i) => i.id === selectedId);
+    if (!it || !isVentItem(it) || !it.wall) return;
+    const vr = ventRoof2D();
+    const r = ssVentSetZone(vr.roof, bldgW, bldgH, vr.H, it, zone, items.filter((i) => i.id !== it.id), ITEMS, scale, mgX, mgY);
+    if (r.refuse) { refuseDrag(r.refuse); return; }
+    if (r.patch) setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...r.patch } : i)));
+  };
+  const ventNudgeSel = (dir) => {
+    if (!selectedId || planLocked) return;
+    const it = items.find((i) => i.id === selectedId);
+    if (!it || !isVentItem(it) || !it.wall) return;
+    const vr = ventRoof2D();
+    const r = ssVentNudge(vr.roof, bldgW, bldgH, vr.H, it, dir, items.filter((i) => i.id !== it.id), ITEMS, scale, mgX, mgY);
+    if (r.refuse) { refuseDrag(r.refuse); return; }
+    setItems((p) => p.map((i) => (i.id === it.id ? { ...i, ...r.patch } : i)));
   };
   const clearAll = () => { setItems([]); setSelectedId(null); setEditingNoteId(null); };
 
@@ -15877,6 +16721,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
             </>;
           })()}
+          {/* A selected VENT's height (2026-09-15): where it is, and the controls to move it up
+              and down, which a plan cannot show by dragging. Both chips stay clickable whatever
+              the building: the one that cannot apply says why in a toast, instead of being a
+              greyed-out button nobody can read the reason off. */}
+          {selectedId && !planLocked && (() => {
+            const si = items.find((i) => i.id === selectedId);
+            if (!si || !isVentItem(si) || !si.wall) return null;
+            const vr = ventRoof2D();
+            const w = ssVentWhere(vr.roof, bldgW, bldgH, vr.H, si, scale, mgX, mgY);
+            const chip = (on) => ({ ...S.btn(on ? accent : "#F1F5F9", on ? "#FFF" : "#334155"), border: `1px solid ${on ? accent : "#CBD5E1"}` });
+            const arrow = { ...S.btn("#F8FAFC", "#334155"), border: "1px solid #CBD5E1", padding: "5px 9px" };
+            return <>
+              <button onClick={() => ventZoneSel("gable")} aria-pressed={w.zone === "gable"} title="Put the vent up in the gable, above the wall" style={chip(w.zone === "gable")}>In the gable</button>
+              <button onClick={() => ventZoneSel("wall")} aria-pressed={w.zone === "wall"} title="Put the vent on the wall, below the roof line" style={chip(w.zone === "wall")}>On the wall</button>
+              <button onClick={() => ventNudgeSel(1)} aria-label="Raise the vent 3 inches" title="Up 3 in" style={arrow}>▲</button>
+              <button onClick={() => ventNudgeSel(-1)} aria-label="Lower the vent 3 inches" title="Down 3 in" style={arrow}>▼</button>
+              <span data-vent-readout="1" style={{ fontSize: 11, fontWeight: 700, color: "#475569", whiteSpace: "nowrap" }}>
+                {w.zone === "gable" ? `${fmtDimFtIn(w.riseFt)} above the plate` : `${fmtDimFtIn(w.bottomFt)} off the floor`}
+              </span>
+            </>;
+          })()}
           {/* Center, and the centred READOUT, only for an item that actually has a wall to be
               centred on. Rotate beside it is shown for everything and silently no-ops on wall
               items (rotSel returns early for them) — do not copy that here: a button that
@@ -15894,7 +16759,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {selectedId && !planLocked && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
-              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
+              {/* "Remove", the word the 3D footer and every quote row already use (Carolyn,
+                  2026-09-14): one action should not have two names on one page. */}
+              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>🗑 Remove</button>
             </>
           )}
           {/* Note and Line sit right beside Clear floorplan, in the right-hand group (Carolyn
