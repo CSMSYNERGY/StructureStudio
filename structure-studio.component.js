@@ -14199,7 +14199,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }),
   };
 
-  // ─── PAINT FIELDS (inline, beside Roof Options) ───
+  // ─── PAINT FIELDS (two cells of the Size/Roof/Cladding row) ───
   // Body/Trim color pickers backed by the tenant palette (portal Colors tab).
   // Moved out of renderOption so the paint option can sit beside the roof
   // colors in the Size row, while other counter options keep rendering as
@@ -14209,12 +14209,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // save/load/estimate contract and is derived from the picks: the build is
   // "Painted" once a chosen Body/Trim color differs from that side's default
   // color (or is a custom color).
+  //
+  // 2026-09-15 (Carolyn 09-14, six selects on one row): paintField now returns a whole
+  // labelled grid CELL, and renderPaintFields returns the Body/Trim pair as a fragment so each
+  // is its own cell. Only the wrappers and labels changed. Every onChange/onSel line and the
+  // sel[opt.id] "Painted"/"No Paint" derivation are byte-identical to before — do not tidy
+  // them while you are here; that value is what the estimate prices.
   const renderPaintFields = (opt) => {
     const palette = Array.isArray(C.colors) ? C.colors : [];
-    // flex-basis 170px (not flex:1) so on a phone each color field wraps onto
-    // its own full-width row instead of overflowing the page horizontally.
-    const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
-    const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+    const PAINT_INPUT = { display: "block", width: "100%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
     const defaultLabel = (k) => {
       const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
       return d ? d.label : "";
@@ -14224,12 +14227,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
       const val = paintColors[kind] || "";
       const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
-      const labelTxt = kind === "body" ? "Body:" : "Trim:";
+      const labelTxt = kind === "body" ? "Body Color" : "Trim Color";
       const other = kind === "body" ? "trim" : "body";
+      // The tenant's optional paint photo (opt.img) was a 100px card beside the pair; a 150px
+      // cell has no room for it, so it shrinks to a thumbnail on the Body label. Sized and
+      // aligned to the 11px label text so the Body select does not sit lower than its neighbours.
+      const cellLbl = (
+        <span style={{ ...S.lbl, display: "block", marginBottom: 8, whiteSpace: "nowrap" }}>
+          {labelTxt}
+          {kind === "body" && opt.img && <img src={opt.img} alt={opt.label} style={{ width: 18, height: 11, objectFit: "cover", borderRadius: 2, marginLeft: 6, verticalAlign: "-1px" }} />}
+        </span>
+      );
       // No palette configured for this side → free-text. Any text on either side = painted.
       if (colors.length === 0) {
         return (
-          <label style={PAINT_LBL}>{labelTxt}
+          <label key={kind} style={{ display: "block", minWidth: 0 }}>{cellLbl}
             <input type="text" value={val}
               onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
               placeholder="Enter color or leave blank" style={PAINT_INPUT} />
@@ -14250,26 +14262,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
       };
       return (
-        <div style={{ ...PAINT_LBL, gap: 4 }}>
-          <span>{labelTxt}</span>
+        <div key={kind} style={{ minWidth: 0 }}>
+          {cellLbl}
           <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
           {isCustom && (
-            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={{ ...PAINT_INPUT, marginTop: 6 }} />
           )}
         </div>
       );
     };
-    return (
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", minWidth: 0 }}>
-        {opt.img && (
-          <div style={{ flex: "0 0 auto", width: 100, borderRadius: 10, overflow: "hidden", border: "2px solid #E2E8F0" }}>
-            <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
-          </div>
-        )}
-        {paintField("body")}
-        {paintField("trim")}
-      </div>
-    );
+    return (<>{paintField("body")}{paintField("trim")}</>);
   };
 
   // ─── OPTION RENDERER ───
@@ -15424,15 +15426,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           </div>
 
-          {/* Building Size + Roof Options + Cladding + Paint — one row. Cladding sits between
-              the roof and the paint, which is exactly where Carolyn drew it (2026-08-18). */}
+          {/* Building Size · Roof Type · Roof Color · Cladding · Body Color · Trim Color — six
+              compact cells on ONE grid row (Carolyn 2026-09-14: all six selects on one line, and
+              they "don't need to be as wide"). It was a gap-24 flex row whose Roof and Paint groups
+              each stacked two controls under one heading. auto-FILL, not auto-fit: empty tracks
+              are kept, so on a wide screen each cell stays ~160px instead of stretching across
+              1880px; near 900px it wraps 5+1 and a phone gets two a row. Every cell is still
+              conditional, so any subset lays out. Cladding still sits between the roof and the
+              paint, which is where Carolyn drew it (2026-08-18). minWidth:0 on each cell is
+              load-bearing: a grid item defaults to min-width:auto, and a long colour name would
+              otherwise widen its track past the page on a phone. */}
           {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px 14px", alignItems: "start", marginBottom: 14 }}>
               {sizeOpts.length > 0 && (
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
                   <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="" disabled>Select a size…</option>
                     {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -15455,47 +15465,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   if (c && c.allowCustom) { setRoofCustom(true); setSel((p) => ({ ...p, roofColor: "" })); }
                   else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
                 };
-                return (
-                  <div style={{ flex: 1, minWidth: 240 }}>
-                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Options</span>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
-                        <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
-                          style={{ minWidth: 130, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
-                          <option value="">Select…</option>
-                          {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      </label>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569", flex: "1 1 200px", minWidth: 0 }}>
-                        <span>Color:</span>
-                        {sel.roofType
-                          ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
-                          : <span style={{ flex: 1, fontSize: 12, color: "#94A3B8", fontStyle: "italic", fontWeight: 500 }}>pick a roof type first</span>}
-                        {rIsCustom && sel.roofType && (
-                          <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
-                            style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                        )}
-                      </div>
-                    </div>
+                // Two cells, Type then Color. Before a type is picked the Color cell shows a greyed
+                // box the height of a select, so the row's controls still line up.
+                return (<>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Type</span>
+                    <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
+                      style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                      <option value="">Select…</option>
+                      {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
                   </div>
-                );
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Color</span>
+                    {sel.roofType
+                      ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
+                      : <div style={{ border: "1px solid #E2E8F0", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: "#94A3B8", background: "#F8FAFC", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Pick a roof type first</div>}
+                    {rIsCustom && sel.roofType && (
+                      <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
+                        style={{ display: "block", width: "100%", marginTop: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                    )}
+                  </div>
+                </>);
               })()}
               {claddingChoices.length > 0 && (
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Cladding</span>
                   <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
-                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="">Builder's standard</option>
                     {claddingChoices.map((o) => <option key={o.id} value={o.id}>{claddingLabelOf(o, o.id)}</option>)}
                   </select>
                 </div>
               )}
-              {paintOpt && (
-                <div style={{ flex: 1, minWidth: 260 }}>
-                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{paintOpt.label}</span>
-                  {renderPaintFields(paintOpt)}
-                </div>
-              )}
+              {/* Body and Trim are two cells of this grid — renderPaintFields returns the pair. */}
+              {paintOpt && renderPaintFields(paintOpt)}
             </div>
           )}
 
@@ -15794,16 +15798,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {renderAddl()}
             </>);
           }
-          // Included items on their own row, a full-width horizontal rule, then the additional
-          // options below (width:100% children force line breaks inside the wrapping flex row).
+          // Additional options FIRST, then the included items LAST, in a light green callout right
+          // above the Wall height / Note / Line / Clear floorplan row (Carolyn 2026-09-14: move
+          // "place or decline" below Additional Options, just above the floor-plan toolbar). It
+          // used to open the palette, above a full-width rule; the callout box is the separator
+          // now and makes it read as the step still to do. The box only pads AROUND the chips —
+          // tool buttons, ✕ and Undo are the same elements at the same size — and the submit gate
+          // (every included item placed or declined, in submitQuote) is untouched. width:100%
+          // children force line breaks inside the wrapping flex row.
           return (<>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            {renderAddl()}
+            <div data-ss-included="1" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%", marginTop: 6, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "6px 10px" }}>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
               {incl.map(inclBtn)}
             </div>
-            <div style={{ width: "100%", borderTop: "1px solid #CBD5E1", margin: "2px 0" }} />
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
-            {renderAddl()}
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
@@ -15972,7 +15981,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
           and the PDF export draws from state, not this DOM. */}
       {!(show3D || adminCalPreview) && (
-      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: dock3D ? "flex-start" : "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
@@ -15986,7 +15995,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             workbench/shelf stretch grips appeared on mousedown and vanished before anyone could
             drag one. The panel is gone now, so this is belt and braces: a column cannot reproduce
             it if anything is ever added here again. */}
-        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
+        {/* flex-basis = dispMaxW, not "1 1 auto" (Carolyn 2026-09-14, full-width designer). With
+            the 1080 cap gone, a GROWING column docked beside the 3D panel took the whole row and
+            left the svg (capped at dispMaxW) floating in the middle of it, a dead strip away from
+            the panel. Sized to the drawing, plan + docked panel are one centred pair, which is
+            why justifyContent is "center" in both states now. It still SHRINKS (0 1), so a narrow
+            row gives the plan less, never the page more. dispMaxW follows the frame only, never
+            the selection, so "the plan must not move when an item is selected" still holds. */}
+        <div style={{ flex: `0 1 ${dispMaxW}px`, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
@@ -16998,8 +17014,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {submitError}
             </div>
           )}
-          <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
+          {/* flexWrap + a 200px basis on the hint: without them Floorplan PDF (nowrap) and Get
+              Quote (minWidth 160) could not fit beside the hint at 390px and pushed the page 17px
+              sideways (measured on beta 2026-09-15). Now the hint takes its own line on a phone
+              and the two buttons share the next; on desktop nothing wraps and nothing moves. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: "1 1 200px" }}>
               {(inventoryNew || inventoryMaster)
                 ? (inventoryMaster && inventoryMaster.unitId
                   ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
