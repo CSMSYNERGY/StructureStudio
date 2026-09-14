@@ -52,7 +52,8 @@ const BLOCK = [
   lift("function d3OpeningDefaults(", "// Resolve a palette value"),
   liftToComment("function d3ScopeForItemsChange(", "Structure3DPanel — the 3D docked"),
 ].join("\n");
-for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ssVentGableDefault", "ssIsGableVent", "d3ProfSpanAt", "ssPorchTrussWall", "reflowItems", "d3ScopeForItemsChange"]) {
+for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ssVentGableDefault", "ssIsGableVent", "d3ProfSpanAt", "ssPorchTrussWall", "reflowItems", "d3ScopeForItemsChange",
+  "ssVentWhere", "ssVentAt", "ssVentDragZone", "ssVentRefusal", "ssVentNudge", "ssVentSetZone"]) {
   assert(BLOCK.includes(`function ${name}(`), `extracted block is missing ${name}`);
 }
 
@@ -60,7 +61,9 @@ for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ss
 type Any = any;
 const F = new Function(`${BLOCK}; return { ssGableEndWalls, ssGableVentFit, ssGableVentPlace, ssVentGableDefault, ssIsGableVent, d3ProfSpanAt,
   d3RoofAxes, d3RoofProfile, ssVentSpan, ssItemVBand, checkDoorCollision, wallSlabBlocker, checkWallSlabOverlap, reflowItems, pageGeom,
-  d3ScopeForItemsChange, SS_GABLE_TOO_SMALL, SS_GABLE_VENT_MIN_RISE };`)() as Record<string, Any>;
+  d3ScopeForItemsChange, SS_GABLE_TOO_SMALL, SS_GABLE_VENT_MIN_RISE,
+  ssVentWhere, ssVentAt, ssVentDragZone, ssVentNudge, ssVentSetZone, SS_REFUSE_WALL, SS_REFUSE_SLAB,
+  SS_VENT_NO_GABLE, SS_VENT_NO_ROOM, SS_VENT_TOP_GABLE, SS_VENT_BOTTOM_GABLE, SS_VENT_TOP_WALL, SS_VENT_TOP_WALL_GABLE, SS_VENT_FLOOR };`)() as Record<string, Any>;
 
 const GABLE = { type: "gable", pitch: 0.42 };                        // the Cabin's pitch
 const H = 7.5;
@@ -256,5 +259,143 @@ Deno.test("both twins wire the gable vent into the 3D model and both placement p
     assert(text.includes("!(end === END0 ? gableVentAt0 : gableVentAtL)"), `${name}: style vent suppressed on an end with a placed vent`);
     // The 2D included chip and the 3D placeFixture3 both call the one default.
     assertEquals((text.match(/= ssVentGableDefault\(/g) || []).length, 2, `${name}: both placement paths call ssVentGableDefault`);
+  }
+});
+
+// ── Moving a vent up and down (2026-09-15, plan 1.10) ────────────────────────────────────────────
+// The 3D drag, the plan's ▲/▼ and its "In the gable" / "On the wall" chips all go through
+// ssVentAt / ssVentNudge / ssVentSetZone. Each case below is a place the customer can put a vent,
+// or a sentence they are told when they cannot.
+const TOP_SILL = H - 0.35 - 8 / 12;   // a Standard Vent's bottom edge at today's under-plate spot
+
+Deno.test("a vent moved down the wall: ssVentSpan honours a variable sill, clamps it, and ignores a sill on a fixed vent", () => {
+  const vh = 8 / 12;
+  const lowered = { isVent: true, heightIn: 8, sillFt: 3, sillMode: "variable" };
+  assertEquals(F.ssVentSpan(lowered, H), [3, 3 + vh]);
+  assertEquals(F.ssItemVBand(lowered, { wallOnly: true }, ITEMS, H), { bottomFt: 3, topFt: 3 + vh });
+  // Never through the plate, never under 6 in.
+  assertAlmostEquals(F.ssVentSpan({ ...lowered, sillFt: 7.4 }, H)[1], H - 0.35, 1e-9);
+  assertEquals(F.ssVentSpan({ ...lowered, sillFt: 0 }, H)[0], 0.5);
+  // "fixed" is today's spot whatever a stray sillFt says, and the gable zone wins over a leftover sill.
+  assertAlmostEquals(F.ssVentSpan({ ...lowered, sillMode: "fixed" }, H)[0], TOP_SILL, 1e-9);
+  assertAlmostEquals(F.ssVentSpan({ ...lowered, ventZone: "gable", ventRiseFt: 0.5 }, H)[0], H + 0.5, 1e-9);
+});
+
+Deno.test("ssVentAt: the wall's top spot is FIXED (it follows the plate), anything lower is a variable sill, and the gable writes the sill off", () => {
+  const g = geo(12, 32);
+  const v = vent(g, "east", 10);
+  const at = { wall: v.wall, x: v.x, y: v.y };
+  assertEquals(F.ssVentAt(GABLE, 12, 32, H, v, at, g.scale, g.mgX, g.mgY, "wall", null), { ...at, ventZone: null, ventRiseFt: null, sillFt: null, sillMode: "fixed" });
+  assertEquals(F.ssVentAt(GABLE, 12, 32, H, v, at, g.scale, g.mgX, g.mgY, "wall", 99).sillMode, "fixed");
+  const low = F.ssVentAt(GABLE, 12, 32, H, v, at, g.scale, g.mgX, g.mgY, "wall", TOP_SILL - 0.25);
+  assertEquals(low.sillMode, "variable");
+  assertAlmostEquals(low.sillFt, TOP_SILL - 0.25, 1e-9);
+  assertEquals(F.ssVentAt(GABLE, 12, 32, H, v, at, g.scale, g.mgX, g.mgY, "wall", -3).sillFt, 0.5);
+  // No gable above an eave wall; on the south end a rise, and the sill pair back to fixed.
+  assertEquals(F.ssVentAt(GABLE, 12, 32, H, v, at, g.scale, g.mgX, g.mgY, "gable", H + 1), null);
+  const s = vent(g, "south", 6, { sillFt: 3, sillMode: "variable" });
+  const up = F.ssVentAt(GABLE, 12, 32, H, s, { wall: "south", x: s.x, y: s.y }, g.scale, g.mgX, g.mgY, "gable", H + 1);
+  assertEquals([up.ventZone, up.sillFt, up.sillMode], ["gable", null, "fixed"]);
+  assertAlmostEquals(up.ventRiseFt, 1, 1e-9);
+});
+
+Deno.test("the 3D drag's zone has a quarter foot of hysteresis either side of the plate", () => {
+  assertEquals(F.ssVentDragZone("wall", H + 0.2, H), "wall");
+  assertEquals(F.ssVentDragZone("wall", H + 0.3, H), "gable");
+  assertEquals(F.ssVentDragZone("gable", H - 0.2, H), "gable");
+  assertEquals(F.ssVentDragZone("gable", H - 0.3, H), "wall");
+});
+
+Deno.test("▲/▼ in the gable: 3 in a press, refused with a sentence at the sill and under the peak, never shrunk", () => {
+  const g = geo(12, 32);
+  let v: Any = vent(g, "south", 6, { id: 1, ventZone: "gable", ventRiseFt: MIN_RISE });
+  assertEquals(F.ssVentNudge(GABLE, 12, 32, H, v, -1, [], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_VENT_BOTTOM_GABLE);
+  assertAlmostEquals(F.ssVentNudge(GABLE, 12, 32, H, v, 1, [], ITEMS, g.scale, g.mgX, g.mgY).patch.ventRiseFt, MIN_RISE + 0.25, 1e-9);
+  let n = 0, last: Any = null;
+  for (; n < 20; n++) {
+    last = F.ssVentNudge(GABLE, 12, 32, H, v, 1, [], ITEMS, g.scale, g.mgX, g.mgY);
+    if (last.refuse) break;
+    v = { ...v, ...last.patch };
+  }
+  assertEquals(last.refuse, F.SS_VENT_TOP_GABLE);
+  assert(n >= 3 && n < 12, `pressed ${n} times before the gable stopped it`);
+  assert(v.ventRiseFt > MIN_RISE + 0.5 && v.ventRiseFt < 2.52, `top rise ${v.ventRiseFt}`);
+  assertEquals(v.widthFt, 1);
+  assert(F.ssGableVentFit(GABLE, 12, 32, "south", H, v, (v.x - g.mgX) / g.scale, v.ventRiseFt), "the top it stopped at still fits");
+});
+
+Deno.test("▲/▼ on the wall: a variable sill down to the floor, back up to the FIXED top spot, and the top says where to go next", () => {
+  const g = geo(12, 32);
+  const south = vent(g, "south", 6, { id: 2 });
+  assertEquals(F.ssVentNudge(GABLE, 12, 32, H, south, 1, [], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_VENT_TOP_WALL_GABLE);
+  const east = vent(g, "east", 10, { id: 3 });
+  assertEquals(F.ssVentNudge(GABLE, 12, 32, H, east, 1, [], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_VENT_TOP_WALL);
+  const d1 = F.ssVentNudge(GABLE, 12, 32, H, east, -1, [], ITEMS, g.scale, g.mgX, g.mgY).patch;
+  assertEquals(d1.sillMode, "variable");
+  assertAlmostEquals(d1.sillFt, TOP_SILL - 0.25, 1e-9);
+  const back = F.ssVentNudge(GABLE, 12, 32, H, { ...east, ...d1 }, 1, [], ITEMS, g.scale, g.mgX, g.mgY).patch;
+  assertEquals([back.sillFt, back.sillMode], [null, "fixed"]);
+  assertEquals(F.ssVentNudge(GABLE, 12, 32, H, { ...east, sillFt: 0.5, sillMode: "variable" }, -1, [], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_VENT_FLOOR);
+});
+
+Deno.test("▼ refuses what a drag would: onto a window below, into a shelf's band", () => {
+  const g = geo(12, 32);
+  // A window whose head is 1 in under the vent's bottom edge.
+  const win = { id: 20, type: "window", wall: "east", x: g.mgX + g.pW, y: g.mgY + 10 * g.scale, widthFt: 2, rotation: 90, sillFt: TOP_SILL - 1 / 12 - 3, openingHeightFt: 3 };
+  const v = vent(g, "east", 10, { id: 21 });
+  assertEquals(F.ssVentNudge(GABLE, 12, 32, H, v, -1, [win], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_REFUSE_WALL);
+  // A double shelf low on the wall: the vent comes down until the next press would enter its band.
+  const shelf = { id: 22, type: "doubleShelf", wall: "east", x: g.mgX + g.pW - 0.5 * g.scale, y: g.mgY + 10 * g.scale, widthFt: 4, rotation: 90, heightOffFloorIn: 12 };
+  const shelfTop = F.ssItemVBand(shelf, ITEMS.doubleShelf, ITEMS).topFt;
+  assert(shelfTop < TOP_SILL, `the shelf (top ${shelfTop}) sits below the vent's top spot`);
+  let cur: Any = v, last: Any = null;
+  for (let k = 0; k < 40; k++) {
+    last = F.ssVentNudge(GABLE, 12, 32, H, cur, -1, [shelf], ITEMS, g.scale, g.mgX, g.mgY);
+    if (last.refuse) break;
+    cur = { ...cur, ...last.patch };
+  }
+  assertEquals(last.refuse, F.SS_REFUSE_SLAB);
+  assert(cur.sillFt >= shelfTop - 1e-9 && cur.sillFt - 0.25 < shelfTop, `stopped at ${cur.sillFt} over a shelf top of ${shelfTop}`);
+});
+
+Deno.test("the zone chips: into the gable at the sill keeping its place along, onto the wall at the top, and each refusal says why", () => {
+  const g = geo(12, 32);
+  const wallVent = vent(g, "south", 4, { id: 30, sillFt: 3, sillMode: "variable" });
+  const up = F.ssVentSetZone(GABLE, 12, 32, H, wallVent, "gable", [], ITEMS, g.scale, g.mgX, g.mgY).patch;
+  assertEquals([up.ventZone, up.sillFt, up.sillMode], ["gable", null, "fixed"]);
+  assertAlmostEquals(up.ventRiseFt, MIN_RISE, 1e-9);
+  assertAlmostEquals((up.x - g.mgX) / g.scale, 4, 1e-9);                 // not recentred
+  assertEquals(F.ssVentSetZone(GABLE, 12, 32, H, { ...wallVent, ...up }, "gable", [], ITEMS, g.scale, g.mgX, g.mgY), { patch: null });
+  const down = F.ssVentSetZone(GABLE, 12, 32, H, { ...wallVent, ...up }, "wall", [], ITEMS, g.scale, g.mgX, g.mgY).patch;
+  assertEquals([down.ventZone, down.ventRiseFt, down.sillFt, down.sillMode], [null, null, null, "fixed"]);
+  assertEquals(F.ssVentSetZone(GABLE, 12, 32, H, vent(g, "east", 10), "wall", [], ITEMS, g.scale, g.mgX, g.mgY), { patch: null });
+
+  assertEquals(F.ssVentSetZone(GABLE, 12, 32, H, vent(g, "east", 10), "gable", [], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_VENT_NO_GABLE);
+  const g8 = geo(8, 12);
+  const big = { ...vent(g8, "south", 4), widthIn: 24, heightIn: 12, widthFt: 2 };
+  assertEquals(F.ssVentSetZone({ type: "gable", pitch: 0.25 }, 8, 12, H, big, "gable", [], ITEMS, g8.scale, g8.mgX, g8.mgY).refuse, F.SS_VENT_NO_ROOM);
+  // Another vent holds that spot in the gable; another item holds the wall's top spot.
+  const holder = vent(g, "south", 4, { id: 31, ventZone: "gable", ventRiseFt: MIN_RISE });
+  assertEquals(F.ssVentSetZone(GABLE, 12, 32, H, wallVent, "gable", [holder], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_REFUSE_WALL);
+  assertEquals(F.ssVentSetZone(GABLE, 12, 32, H, holder, "wall", [vent(g, "south", 4, { id: 32 })], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_REFUSE_WALL);
+});
+
+Deno.test("a gable vent whose gable is gone (the style became a single slant) reads as on the wall, and On the wall writes the stale key off", () => {
+  const g = geo(12, 32);
+  const shed = { type: "shed", pitch: 0.25 };
+  const stale = vent(g, "south", 6, { id: 40, ventZone: "gable", ventRiseFt: MIN_RISE });
+  const w = F.ssVentWhere(shed, 12, 32, H, stale, g.scale, g.mgX, g.mgY);
+  assertEquals(w.zone, "wall");
+  assertAlmostEquals(w.bottomFt, TOP_SILL, 1e-9);
+  assertEquals(F.ssVentSetZone(shed, 12, 32, H, stale, "wall", [], ITEMS, g.scale, g.mgX, g.mgY).patch.ventZone, null);
+});
+
+Deno.test("both twins move vents vertically in 3D and give the plan its zone chips and arrows", () => {
+  for (const [name, text] of [["component.js", SRC], ["jsx", JSX]] as const) {
+    assert(text.includes("const zone = ssVentDragZone(now.zone, want, Hv);"), `${name}: the 3D drag decides the zone with hysteresis`);
+    assert(text.includes('it.type === "window" && !isVentItem(it) && it.sillMode === "variable"'), `${name}: the window's vertical branch excludes vents`);
+    assert(text.includes("sillFt: moved.sillFt != null ? moved.sillFt : null, sillMode:"), `${name}: drag end sends the vent's sill pair`);
+    assert(text.includes("= ssVentSetZone(") && text.includes("= ssVentNudge("), `${name}: plan handlers`);
+    assert(text.includes(">In the gable</button>") && text.includes(">On the wall</button>"), `${name}: zone chips`);
   }
 });
