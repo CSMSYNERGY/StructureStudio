@@ -27,7 +27,7 @@
 //      customer-quotes/index.ts
 //      customer-accept/index.ts
 //      customer-pay/index.ts
-//    (customer-designs/index.ts joins them with migration 231.)
+//      customer-designs/handler.ts (migration 231)
 
 import { phoneKey } from "./phoneKey.ts";
 import { normalizeEmail } from "./emailOtp.ts";
@@ -38,35 +38,65 @@ export type VerifiedIdentity = {
   emailLower: string | null;
 };
 
+/** One proven identity as the column that stores it (customer_sessions, design_acceptances and
+ *  customer_design_links all use these two names) and its normalised value. */
+export type IdentityColumn =
+  | { column: "phone_digits"; value: string }
+  | { column: "email_lower"; value: string };
+
 /**
- * True when the verified phone matches the design's contact phone, or the verified email matches
- * the design's contact email. False for anything else, including a missing or malformed contact.
+ * Each identity the session proved, normalised the way ownsDesign compares it: the phone through
+ * phoneKey, the address through normalizeEmail. Blank identities are absent. [] for no identity.
+ */
+export function provenIdentityColumns(identity: VerifiedIdentity | null | undefined): IdentityColumn[] {
+  if (!identity) return [];
+  const out: IdentityColumn[] = [];
+  const phone = phoneKey(identity.phoneDigits ?? "");
+  if (phone) out.push({ column: "phone_digits", value: phone });
+  const email = normalizeEmail(identity.emailLower ?? "");
+  if (email) out.push({ column: "email_lower", value: email });
+  return out;
+}
+
+/**
+ * The proven identities that the design's contact actually NAMES — the phone half and the email
+ * half of ownsDesign, reported separately. [] means the design is not theirs.
  *
- * Phone: both sides through phoneKey, exactly as the inline checks this replaces did, so an
+ * Phone: both sides through phoneKey, exactly as the inline checks ownsDesign replaced did, so an
  * 11-digit stored "1816…" still matches the 10-digit session and no existing match changes.
  * Email: both sides through normalizeEmail (trim + lower-case only — no +tag or dot folding, see
  * emailOtp.ts), and only when the contact's email is a STRING; a crafted array must not
  * stringify its way into a match.
  *
  * Blank never matches blank: an identity with no phone cannot own a design with no phone.
+ *
+ * Separately because customer-designs (migration 231) records a saved design under the identity
+ * that matched, not under whatever else the session holds: a session that proved phone P and
+ * email E, saving a design whose contact names only P, must not make that design appear for a
+ * later email-only login as E — ownsDesign would refuse that login, so the list must too.
+ */
+export function matchedIdentities(identity: VerifiedIdentity | null | undefined, contact: unknown): IdentityColumn[] {
+  if (!identity || !contact || typeof contact !== "object" || Array.isArray(contact)) return [];
+  const c = contact as Record<string, unknown>;
+  return provenIdentityColumns(identity).filter((id) => {
+    if (id.column === "phone_digits") {
+      const theirPhone = phoneKey(c.phone);
+      return !!theirPhone && theirPhone === id.value;
+    }
+    if (typeof c.email !== "string") return false;
+    const theirEmail = normalizeEmail(c.email);
+    return !!theirEmail && theirEmail === id.value;
+  });
+}
+
+/**
+ * True when the verified phone matches the design's contact phone, or the verified email matches
+ * the design's contact email. False for anything else, including a missing or malformed contact.
+ * The comparison rules are matchedIdentities' — one implementation, so the list, the accept, the
+ * signature and the payment cannot disagree about whose design it is.
  */
 export function ownsDesign(identity: VerifiedIdentity | null | undefined, contact: unknown): boolean {
-  if (!identity || !contact || typeof contact !== "object" || Array.isArray(contact)) return false;
-  const c = contact as Record<string, unknown>;
-
-  const myPhone = phoneKey(identity.phoneDigits ?? "");
-  if (myPhone) {
-    const theirPhone = phoneKey(c.phone);
-    if (theirPhone && theirPhone === myPhone) return true;
-  }
-
-  const myEmail = normalizeEmail(identity.emailLower ?? "");
-  if (myEmail && typeof c.email === "string") {
-    const theirEmail = normalizeEmail(c.email);
-    if (theirEmail && theirEmail === myEmail) return true;
-  }
-
-  return false;
+  return matchedIdentities(identity, contact).length > 0;
 }
 
 /**

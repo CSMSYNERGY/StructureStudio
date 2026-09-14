@@ -11,7 +11,12 @@
  * (preflight runs every _shared/*.test.ts with those flags)
  */
 
-import { acceptanceIdentityColumns, ownsDesign } from "./customerIdentity.ts";
+import {
+  acceptanceIdentityColumns,
+  matchedIdentities,
+  ownsDesign,
+  provenIdentityColumns,
+} from "./customerIdentity.ts";
 
 function assertEquals<T>(actual: T, expected: T, msg = ""): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -106,4 +111,34 @@ Deno.test("acceptance rows record both identity columns, null where not proven",
   assertEquals(acceptanceIdentityColumns(EMAIL_SESSION), { phone_digits: null, email_lower: "pat@example.com" });
   assertEquals(acceptanceIdentityColumns(BOTH_SESSION), { phone_digits: "8163003600", email_lower: "pat@example.com" });
   assertEquals(acceptanceIdentityColumns({ phoneDigits: "", emailLower: "" }), { phone_digits: null, email_lower: null });
+});
+
+// ── saved-design links (migration 231) ────────────────────────────────────────────────────────
+
+Deno.test("provenIdentityColumns: each proven identity, normalised as ownsDesign compares it; blanks absent", () => {
+  assertEquals(provenIdentityColumns(BOTH_SESSION), [
+    { column: "phone_digits", value: "8163003600" },
+    { column: "email_lower", value: "pat@example.com" },
+  ]);
+  assertEquals(provenIdentityColumns({ phoneDigits: "18163003600", emailLower: "  Pat@Example.com " }), [
+    { column: "phone_digits", value: "8163003600" },
+    { column: "email_lower", value: "pat@example.com" },
+  ]);
+  assertEquals(provenIdentityColumns(EMAIL_SESSION), [{ column: "email_lower", value: "pat@example.com" }]);
+  assertEquals(provenIdentityColumns({ phoneDigits: "", emailLower: "" }), []);
+  assertEquals(provenIdentityColumns(null), []);
+});
+
+Deno.test("matchedIdentities: only the halves the contact NAMES — a two-identity session saving a phone-only design is not saving it under the email", () => {
+  assertEquals(matchedIdentities(BOTH_SESSION, { phone: "(816) 300-3600", email: "other@example.com" }),
+    [{ column: "phone_digits", value: "8163003600" }]);
+  assertEquals(matchedIdentities(BOTH_SESSION, { phone: "5551234567", email: "PAT@example.com" }),
+    [{ column: "email_lower", value: "pat@example.com" }]);
+  assertEquals(matchedIdentities(BOTH_SESSION, { phone: "8163003600", email: "pat@example.com" }).length, 2);
+  // The same negatives as ownsDesign, because ownsDesign IS this, non-empty.
+  assertEquals(matchedIdentities(EMAIL_SESSION, { phone: "(816) 300-3600" }), [], "never email → phone");
+  assertEquals(matchedIdentities(EMAIL_SESSION, { email: ["pat@example.com"] }), [], "non-string email");
+  for (const contact of [null, undefined, "8163003600", [], {}]) {
+    assertEquals(matchedIdentities(BOTH_SESSION, contact), [], JSON.stringify(contact));
+  }
 });
