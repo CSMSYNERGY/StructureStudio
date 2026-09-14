@@ -9182,6 +9182,120 @@ function SSVersionList({ versions, viewing, accent, onOpen }) {
   );
 }
 
+// ─── STYLE STRIP ───
+// "Select Your Building Style" as ONE row of N tiles that scrolls sideways (Carolyn 2026-09-14:
+// a builder's 9th style, Playhouse, wrapped onto a second row). It was a wrapping flex row of
+// 120–160px cards. N is the builder's "styles per row", 5–8, read from
+// C.branding.stylesPerRow; anything missing or out of range falls back to 8, so a tenant that
+// never sets it gets 8. Each tile is 1/N of the row but never under 120px, so a phone shows
+// ~2.7 tiles and the rest scroll. Fewer styles than N keep the 1/N width, left-aligned,
+// rather than stretching into giant photos.
+//
+// Module level with its own hooks on purpose: a hook added inside StructureStudioInner below
+// its early returns is React #310 and a white screen.
+//
+// ⚠️ scrollLeft, NEVER scrollIntoView. scrollIntoView also scrolls every scrollable ancestor,
+// so loading a design would jump the page (and the portal's .ss-designer-host) to this row.
+// ⚠️ The padding is load-bearing: overflow-x:auto forces overflow-y to clip too, which cut off
+// the active tile's scale(1.03) and its 2px accent ring. scale(1.03) grows a tile by 1.5% of its
+// width on each side, so 12px sideways covers tiles up to ~600px wide (5 per row on a 3000px
+// screen); 8px above and 12px below cover the height. The matching negative margin keeps the
+// tiles lined up with the label above.
+const SS_STRIP_GAP = 10;
+const SS_STRIP_PAD = 12; // sideways; also the scroll-padding, so snap positions line up
+function SSStyleStrip({ styles, value, onPick, perRow, S }) {
+  const n = Math.min(8, Math.max(5, Math.round(Number(perRow)) || 8));
+  const ref = useRef(null);
+  // Which ends have tiles hidden past them. Both false = no overflow = no arrows, no fade.
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    const left = max > 1 && el.scrollLeft > 1;
+    const right = max > 1 && el.scrollLeft < max - 1;
+    setEdges((p) => (p.left === left && p.right === right ? p : { left, right }));
+  }, []);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (ro) ro.observe(el); else window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      if (ro) ro.disconnect(); else window.removeEventListener("resize", measure);
+    };
+  }, [measure]);
+  // Keep the picked style wholly in view: on first paint, when a saved design or an older
+  // version brings in a style from past the edge, and when a half-hidden edge tile is clicked.
+  // offsetLeft is relative to the scroller (it is position:relative), so it ignores scrollLeft.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const i = styles.findIndex((s) => s.value === value);
+    const tile = i >= 0 ? el.children[i] : null;
+    if (tile) {
+      const start = tile.offsetLeft - SS_STRIP_PAD; // this tile's snap position
+      const end = tile.offsetLeft + tile.offsetWidth + SS_STRIP_PAD - el.clientWidth;
+      if (start < el.scrollLeft) el.scrollLeft = start;
+      else if (end > el.scrollLeft) {
+        // Snapping is mandatory, so a raw right-aligned offset gets re-snapped and can hide the
+        // tile again. Land on the first tile START that still shows this one whole.
+        let target = start;
+        for (let j = 0; j <= i; j++) {
+          const s = el.children[j].offsetLeft - SS_STRIP_PAD;
+          if (s >= end) { target = s; break; }
+        }
+        el.scrollLeft = target;
+      }
+    }
+    measure();
+  }, [value, styles.length, n, measure]);
+  // One page per click; the snap lands it on a tile edge.
+  const page = (dir) => {
+    const el = ref.current;
+    if (el) el.scrollBy({ left: dir * (el.clientWidth - 2 * SS_STRIP_PAD), behavior: "smooth" });
+  };
+  const side = (dir) => (dir < 0 ? "left" : "right");
+  return (
+    <div style={{ position: "relative", margin: `-8px -${SS_STRIP_PAD}px -6px` }}>
+      <div ref={ref} data-ss-style-strip={n}
+        style={{ position: "relative", display: "grid", gridAutoFlow: "column",
+          gridAutoColumns: `max(120px, calc((100% - ${(n - 1) * SS_STRIP_GAP}px) / ${n}))`,
+          gap: SS_STRIP_GAP, overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory",
+          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "thin" }}>
+        {styles.map((s) => {
+          const active = value === s.value;
+          return (
+            <div key={s.value} data-ss-style={s.value} onClick={() => onPick(s.value)}
+              style={{ ...S.card(active), minWidth: 0, scrollSnapAlign: "start" }}>
+              <div style={{ position: "relative" }}>
+                <img src={s.img} alt={s.label} style={{ width: "100%", aspectRatio: "16 / 10", minHeight: 90, maxHeight: 170, objectFit: "cover", display: "block" }} />
+                {active && <div style={S.check}>✓</div>}
+              </div>
+              <div style={S.cardLabel(active)}>{s.label}</div>
+            </div>
+          );
+        })}
+      </div>
+      {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
+        <div key={"fade" + d} aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, [side(d)]: 0, width: 36, zIndex: 1, pointerEvents: "none",
+          background: `linear-gradient(to ${side(-d)}, #FFF, rgba(255,255,255,0))` }} />
+      ))}
+      {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
+        <button key={"arrow" + d} type="button" data-ss-strip-arrow={side(d)} aria-label={d < 0 ? "Previous styles" : "More styles"}
+          onClick={() => page(d)}
+          style={{ position: "absolute", top: "50%", [side(d)]: 2, transform: "translateY(-50%)", zIndex: 2, width: 30, height: 30,
+            borderRadius: 999, border: "1px solid #CBD5E1", background: "rgba(255,255,255,0.96)", boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+            color: "#334155", fontSize: 18, fontWeight: 700, lineHeight: "26px", padding: 0, cursor: "pointer" }}>
+          {d < 0 ? "‹" : "›"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───
 // Custom color dropdown: a native <select> can't render a color swatch per option, so this
 // shows a color chip + name in the closed button and in each list row (matching the palette).
@@ -15461,24 +15575,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined}
           style={{ border: "none", margin: 0, minWidth: 0, background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px",
             ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) }}>
-          {/* Building Styles */}
+          {/* Building Styles — one row of N tiles that scrolls (Carolyn 2026-09-14); see
+              SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
           <div style={{ marginBottom: 14 }}>
             <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {C.buildingStyles.map((s) => {
-                const active = sel.style === s.value;
-                return (
-                  <div key={s.value} onClick={() => setSel((p) => ({ ...p, style: s.value, size: "" }))}
-                    style={{ ...S.card(active), flex: "1 1 120px", maxWidth: 160 }}>
-                    <div style={{ position: "relative" }}>
-                      <img src={s.img} alt={s.label} style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
-                      {active && <div style={S.check}>✓</div>}
-                    </div>
-                    <div style={S.cardLabel(active)}>{s.label}</div>
-                  </div>
-                );
-              })}
-            </div>
+            <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S}
+              onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
           </div>
 
           {/* Building Size · Roof Type · Roof Color · Cladding · Body Color · Trim Color — six
