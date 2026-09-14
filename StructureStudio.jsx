@@ -1748,10 +1748,18 @@ function elecPerimeterPoint(d, W, L) {
 // NOT what pricing keys on: the charge nets placed against the RECOMPUTED count, so deleting an
 // auto outlet and adding a manual one costs nothing, which is the intent.
 //
-// A position that would land in a doorway or on top of a bench is SKIPPED rather than forced.
-// That lays out fewer devices than the count, and it deliberately does not reduce the charge:
+// A position that would land in a DOORWAY (or a window) is SKIPPED rather than forced. That lays
+// out fewer devices than the count, and it deliberately does not reduce the charge:
 // max(0, placed - auto) is already zero there. The alternative — stacking an outlet inside a
 // door opening — puts a drawing in front of a shop that cannot be built.
+//
+// A bench or shelf is NOT a reason to skip, and until 2026-09-15 it was. Carolyn's rule is "with
+// a workbench they go above the workbench", but the outlet was tried at exactly ONE height: the
+// builder's outletAboveBenchIn. Anything still in the way there — a shelf mounted at 42", a
+// double shelf over the bench — dropped the outlet from the layout without a word. So the
+// heights are a LIST now, first clear one wins: outletAboveBenchIn, then the top of whatever
+// actually blocked it plus 6". Height only, so it can never change a count or a price.
+const ELEC_CLEAR_ABOVE_SLAB_IN = 6;
 function electricalAutoItems(cfg, o) {
   const counts = electricalAutoCounts(cfg, o.widthFt, o.lengthFt);
   if (!counts) return [];
@@ -1761,37 +1769,58 @@ function electricalAutoItems(cfg, o) {
   let id = o.startId;
   const placed = () => (o.existing || []).concat(out);
 
-  const tryWall = (type, xFt, yFt, wall, heightOffFloorIn) => {
+  // `heights` is tried in order (null = the item's own heightOffFloorIn). With `climb`, a slab
+  // refusal appends that slab's top + 6" as the next try — the "go above it" rule measured off
+  // the thing in the way rather than off one number the builder set for a bench. A door refusal
+  // ends the attempt at once: a doorway is the one thing an outlet never climbs over.
+  const tryWall = (type, xFt, yFt, wall, heights, climb) => {
     const c = T[type];
     if (!c) return false;
     const sn = snapToWallInterior(wall, o.mgX + xFt * sc, o.mgY + yFt * sc,
       c.width * sc, slabDepthFt(c) * sc, o.pW, o.pH, o.mgX, o.mgY);
-    const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
-      ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
-      // The item id is what pricing counts, so an auto-placed device must carry it exactly as a
-      // hand-placed one does. `type` IS the id here, but naming it explicitly keeps the pricing
-      // rollup reading one field rather than two shapes.
-      ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
-      heightOffFloorIn: heightOffFloorIn != null ? heightOffFloorIn : c.heightOffFloorIn,
-      elecAuto: true };
-    const others = placed();
-    if (checkDoorCollision(cand, c, others, T, sc)) return false;
-    if (checkWallSlabOverlap(sn, c.width * sc, others, T, sc, cand)) return false;
-    out.push(cand); id++;
-    return true;
+    const tries = (heights && heights.length ? heights : [null]).slice();
+    // Three tries at most: the builder's height, one climb over the slab in the way, and one
+    // more for a shelf stacked above a bench. A wall still blocked after that has no sensible
+    // outlet height on that span, and skipping it is the honest answer.
+    for (let k = 0; k < tries.length && k < 3; k++) {
+      const h = tries[k];
+      const cand = { id: id, type: type, ...sn, widthFt: c.width, heightFt: slabDepthFt(c),
+        ...(c.depthIn != null ? { depthIn: c.depthIn } : {}),
+        // The item id is what pricing counts, so an auto-placed device must carry it exactly as
+        // a hand-placed one does. `type` IS the id here, but naming it explicitly keeps the
+        // pricing rollup reading one field rather than two shapes.
+        ...(c.electricalItemId ? { electricalItemId: c.electricalItemId } : {}),
+        heightOffFloorIn: h != null ? h : c.heightOffFloorIn,
+        elecAuto: true };
+      const others = placed();
+      if (checkDoorCollision(cand, c, others, T, sc)) return false;
+      const ob = wallSlabBlocker(sn, c.width * sc, others, T, sc, cand);
+      if (ob) {
+        const band = climb ? ssSlabBand(ob, T) : null;
+        // A legacy slab's [0, 1e4] is a full-height BLOCKER, not a measurement — there is no
+        // "above" it to climb to, so it stays a skip exactly as it always was.
+        if (band && isFinite(band[1]) && band[1] < 1e3) tries.push(band[1] + ELEC_CLEAR_ABOVE_SLAB_IN);
+        continue;
+      }
+      out.push(cand); id++;
+      return true;
+    }
+    return false;
   };
 
   // Outlets, evenly around the perimeter. The half-step offset keeps the first one off the
   // corner, where a plug cannot physically go.
   const outletId = elecRoleItemId(cfg, "outlet");
   const per = 2 * (W + L), n = outletId ? counts.outlet : 0;
+  const aboveBenchIn = cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : null;
+  const outletIn = cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null;
   for (let i = 0; i < n; i++) {
     const p = elecPerimeterPoint((i + 0.5) * (per / n), W, L);
     // "with a workbench they go above the workbench" — the bench does not move the outlet
-    // along the wall, it raises it. Height only, so it can never change a count or a price.
+    // along the wall, it raises it. Climbing is on for EVERY outlet, not just the ones whose
+    // point is inside a bench: an outlet half a width past a bench's end still overlaps it.
     const overBench = electricalBenchWall(placed(), T, p.wall, p.xFt, p.yFt, o);
-    tryWall(outletId, p.xFt, p.yFt, p.wall,
-      overBench && cfg.outletAboveBenchIn != null ? Number(cfg.outletAboveBenchIn) : (cfg.outletHeightIn != null ? Number(cfg.outletHeightIn) : null));
+    tryWall(outletId, p.xFt, p.yFt, p.wall, [overBench && aboveBenchIn != null ? aboveBenchIn : outletIn], true);
   }
 
   // Lights down the centre of the length. Free-floating: both attachment guards key on
@@ -9864,9 +9893,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       out[it.id] = {
         label: it.name, icon: it.icon || "\u26a1", color: "#7C3AED",
         shortLabel: (it.name || "ITEM").toUpperCase().slice(0, 5),
-        // Two mounts, and both already exist: against a wall (never blocks a door - it carries
-        // no slab model), or free inside the footprint like a ceiling light.
+        // Two mounts, and both already exist: against a wall, or free inside the footprint like
+        // a ceiling light.
         wallSnap: it.mount !== "ceiling",
+        // ⛔ THE COMMENT HERE USED TO SAY THIS "carries no slab model", AND IT WAS BACKWARDS
+        // (Carolyn, 2026-09-14: "the shelf can't pass the electrical", a flood light refused with
+        // "something else is already mounted there", a light over a door refused). No modelKey on
+        // a wallSnap item is exactly what ssSlabModel reads as a LEGACY WORKBENCH, band [0, 1e4]:
+        // every outlet was a full-height bench to every shelf, bench and door on its wall.
+        // modelKey is the discriminator (see SS_SLAB_BANDS) and "electrical" is deliberately not
+        // one of its keys, so the device is not a slab and its band is its own
+        // heightOffFloorIn + height. An outlet at 24" beside a door is still refused; a flood
+        // light at 120" or a shelf over an outlet is not. wallSlab_test pins this line by shape.
+        modelKey: "electrical",
         width: it.mount === "ceiling" ? 0.8 : 0.5,
         height: it.mount === "ceiling" ? 0.8 : 0.3,
         heightOffFloorIn: it.heightOffFloorIn,
