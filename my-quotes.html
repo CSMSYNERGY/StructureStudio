@@ -108,14 +108,15 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       <div id="phone-error" class="error" role="alert" hidden></div>
     </div>
     <p class="hint" id="signin-hint">Standard message rates may apply. We only use your number to show you your quotes.</p>
-    <!-- HIDDEN, not deleted (audit 2026-09-06). customer-auth refuses channel="email"
-         outright: it used to resolve a proven email to an UNPROVEN phone by scanning
-         designs and mint the session on that phone, and save_design is anon-callable, so
-         anyone could plant the pair. Leaving the button visible would offer a customer a
-         route that now answers with an error - worse than never offering it. The whole
-         email code path below is intact so re-enabling is removing this `hidden` once the
-         channel is re-keyed to a proven email identity. Zero customers are affected:
-         customer_email_otps has never held a row, and all 15 live sessions came via SMS. -->
+    <!-- STARTS hidden; the SERVER un-hides it (plan 3.5, 2026-09-15). It was hidden outright
+         after the 2026-09-06 audit: customer-auth used to resolve a proven email to an UNPROVEN
+         phone by scanning designs and mint the session on that phone, and save_design is
+         anon-callable, so anyone could plant the pair. Migration 230 re-keyed the channel: an
+         email code now mints a session on the verified ADDRESS itself, and ownership matches
+         like with like. The boot below asks customer-auth login_options and removes `hidden`
+         only when "email" is in its channels, so a deploy where email codes cannot be delivered
+         (or a function from before login_options, which answers "Unknown action") never offers
+         a route that can only fail. -->
     <p class="hint" id="use-email-wrap" hidden>
       <button id="use-email-btn" class="linkish" type="button">Use my email instead</button>
     </p>
@@ -318,10 +319,10 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
   // "sms" (default) or "email". The server treats an absent/unknown channel as sms, so this
   // page can only ever ADD a route, never break the existing one.
   //
-  // ⚠️ The email route resolves to the SAME phone identity server-side: it looks up the phone
-  // on the quote that carries the address. So proving the email is proving the same customer,
-  // and an address with no quote against it cannot mint a session — the server says so, and
-  // this page relays that sentence rather than inventing one.
+  // ⚠️ The email route is its OWN identity (migration 230, 2026-09-15): the session is the
+  // verified address, and customer-quotes lists the designs whose contact email matches it. It
+  // NEVER resolves an email to a phone — that resolution was the 2026-09-06 hole. The route is
+  // only offered when login_options lists "email" (see the boot at the bottom).
   var channel = "sms";
   var custEmail = "";
 
@@ -356,9 +357,9 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     (email ? $("email-input") : $("phone-input")).focus();
   }
   $("use-email-btn").addEventListener("click", function () {
-    // Belt and braces with the `hidden` on the wrapper above: the server refuses the email
-    // channel, so switching to it can only produce an error screen. A stray click - devtools,
-    // a stale cached page, an extension unhiding things - must not reach it.
+    // Belt and braces with the `hidden` on the wrapper above: it is only removed when
+    // login_options says email codes can be delivered here. A stray click - devtools, a stale
+    // cached page, an extension unhiding things - must not reach a route the server can't serve.
     if ($("use-email-wrap").hidden) return;
     setChannel(channel === "email" ? "sms" : "email");
   });
@@ -1612,10 +1613,30 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     show("phone");
   });
 
+  // ── Which sign-in routes this deployment can deliver (plan 3.5/3.6, 2026-09-15) ──
+  // customer-auth login_options → { channels: ["sms","email"], defaultChannel }. Email is
+  // offered only when it is listed; the builder's Settings choice (defaultChannel) picks which
+  // route the screen opens on, but never while the customer is already typing or waiting on a
+  // code. Anything else — "Unknown action" from an older function, a network failure — leaves
+  // the page exactly as it was: text only.
+  function loadLoginOptions() {
+    callFn("customer-auth", { action: "login_options", clientId: clientId })
+      .then(function (r) {
+        var chans = r && r.ok && r.data && Array.isArray(r.data.channels) ? r.data.channels : [];
+        if (chans.indexOf("email") === -1) return;
+        $("use-email-wrap").hidden = false;
+        var untouched = !$("screen-phone").hidden && !phoneDigits && !custEmail && !busy;
+        if (r.data.defaultChannel === "email" && untouched) setChannel("email");
+        else if (chans.indexOf("sms") === -1 && untouched) setChannel("email");
+      })
+      .catch(function () { /* text only, as before */ });
+  }
+
   // ── Boot ──
   if (!clientId) {
     show("notenant");
   } else {
+    loadLoginOptions();
     var cachedBiz = lsGet(bizKey);
     if (cachedBiz) setBizName(cachedBiz);
     if (token) {

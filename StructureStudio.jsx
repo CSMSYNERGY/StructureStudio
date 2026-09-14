@@ -9635,6 +9635,32 @@ function ssQuoteRefParam() {
 function ssMyQuotesLink(clientId, ref) {
   return `/my-quotes?client=${encodeURIComponent(clientId || "")}${ref ? `&q=${encodeURIComponent(ref)}` : ""}`;
 }
+// The link a REP hands a customer (plan 3.8, 2026-09-15): this designer's own account panel,
+// focused on one quote — the ?account=/?q= boot above lands it on the card. It replaced
+// /my-quotes?client= in the portal's Copy customer link; my-quotes stays up for links already
+// sent, and for Pay and change orders (ssMyQuotesLink) until those are ported.
+function ssDesignerAccountLink(clientId, ref, view) {
+  const v = view === "invoices" ? "invoices" : "quotes";
+  return `${window.location.origin}/?client=${encodeURIComponent(clientId || "")}&account=${v}${ref ? `&q=${encodeURIComponent(ref)}` : ""}`;
+}
+// submit-estimate's quoteTextReason (plan 3.7) in words a rep can act on. The codes are the
+// server's: decided there (not_first_issue | test_mode | no_phone | timeout) or sendTenantSms's
+// refusals. not_first_issue is never shown — a resubmit not texting again is not news.
+function ssQuoteTextReasonText(reason) {
+  switch (reason) {
+    case "test_mode": return "beta mode is on, so quotes go to your test inbox instead";
+    case "no_phone": return "there's no phone number on this quote";
+    case "timeout": return "the text service didn't answer in time, so it may still arrive";
+    case "not_active": return "texting isn't switched on for your business yet";
+    case "no_consent": return "the customer hasn't agreed to texts";
+    case "opted_out": return "the customer has opted out of texts";
+    case "quiet_hours": return "it's outside texting hours (8am to 9pm) where the customer is";
+    case "bad_number": return "that isn't a US mobile number we can text";
+    case "damaged_number": return "the phone number looks damaged, so re-enter it on the contact";
+    case "failed": return "the text couldn't be sent";
+    default: return reason ? String(reason).replace(/_/g, " ") : "";
+  }
+}
 // Invoices tab = a quote with an invoice out OR one being prepared (migration 229's request);
 // Quotes tab = everything else. One rule, used by the tabs, the counts and the deep link.
 const ssIsInvoiceCard = (q) => Boolean(q && (q.invoice || q.invoiceRequest));
@@ -15116,6 +15142,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         quotePdfUrl: result.quotePdfUrl || null,
         quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
         quoteEmailReason: result.quoteEmailReason || null,
+        // The quote-created login text (plan 3.7): the portal success screen says whether it
+        // went. A submit-estimate from before 3.7 sends neither field, which renders nothing.
+        quoteTexted: result.issuedBy === "structurestudio" ? result.quoteTexted === true : null,
+        quoteTextReason: result.quoteTextReason || null,
         changeOrder: result.changeOrder || null,
       });
       setSubmitted(true);
@@ -18470,6 +18500,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
             </div>
           )}
+          {/* THE LOGIN TEXT (plan 3.7, Ahsan 2026-09-15: "only when the builder can text").
+              Portal only — it answers the REP's question "did they get the link on their phone?",
+              and a shopper on the public page has no use for a carrier refusal code. Not for a
+              draft change (nothing went out) and never for not_first_issue (a resubmit does not
+              text again, and saying so on every update would be noise). */}
+          {embedded && savedDesign && savedDesign.ssQuote && !(savedDesign.changeOrder && savedDesign.changeOrder.draft)
+            && (savedDesign.quoteTexted === true || (savedDesign.quoteTextReason && savedDesign.quoteTextReason !== "not_first_issue")) && (
+            <div data-quote-texted={savedDesign.quoteTexted === true ? "yes" : "no"}
+              style={{ maxWidth: 520, margin: "10px auto 0", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left",
+                ...(savedDesign.quoteTexted === true
+                  ? { background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#065F46" }
+                  : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569" }) }}>
+              {savedDesign.quoteTexted === true
+                ? `Texted a login link to ${contact.phone || "the customer"}.`
+                : `Not texted — ${ssQuoteTextReasonText(savedDesign.quoteTextReason)}.`}
+            </div>
+          )}
           {savedDesign && (
             <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -18496,7 +18543,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {embedded && (
                   <button type="button"
                     onClick={(e) => {
-                      const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(C.clientId)}`;
+                      // The designer's account panel focused on this quote (plan 3.8), not the
+                      // bare /my-quotes list: the customer logs in and lands on Review & Accept.
+                      const link = ssDesignerAccountLink(C.clientId, savedDesign.code, "quotes");
                       const btn = e.currentTarget;
                       const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
                       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
