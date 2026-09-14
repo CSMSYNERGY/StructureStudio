@@ -9143,6 +9143,45 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   );
 }
 
+// "All designs on this estimate" — shared by the Submit Bar and the success screen so the two
+// can never drift. Always open (layout pass, 2026-09-15): it used to be one "viewing" line
+// plus a "▾ N versions" toggle, so the other designs on the estimate were one easy-to-miss
+// click away. Rows arrive newest first (list_design_versions orders them), so [0] is Latest.
+// The row being viewed is highlighted and has no Open (it is already on the plan); every
+// other row gets Open + PDF. No hooks: it is a plain module-level component, so it adds
+// nothing to StructureStudioInner's hook order.
+function SSVersionList({ versions, viewing, accent, onOpen }) {
+  const pill = (bg, fg) => ({ display: "inline-block", marginLeft: 6, padding: "1px 7px", borderRadius: 999, background: bg, color: fg, fontSize: 11, fontWeight: 700, lineHeight: "16px", verticalAlign: "1px" });
+  return (
+    <div data-ss-versions="1">
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>All designs on this estimate ({versions.length})</div>
+      {versions.length > 1 && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 2 }}>Open one to see it on the plan above.</div>}
+      <div style={{ marginTop: 6 }}>
+        {versions.map((v, i) => {
+          const vsel = v.selections || {};
+          const isViewing = v.version === viewing;
+          let dstr = ""; try { dstr = v.created_at ? new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : ""; } catch { /* ignore */ }
+          return (
+            <div key={v.version} data-ss-version={v.version} data-ss-viewing={isViewing ? "1" : undefined}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 10px", borderTop: i === 0 ? "none" : "1px solid #F1F5F9", borderLeft: `3px solid ${isViewing ? accent : "transparent"}`, background: isViewing ? "#FFFBEB" : "transparent" }}>
+              <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>
+                <span style={{ fontWeight: 700, color: "#1E293B" }}>v{v.version}</span>
+                {" · "}{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}
+                {isViewing && <span style={pill("#FEF3C7", "#92400E")}>Viewing</span>}
+                {i === 0 && <span style={pill("#F1F5F9", "#475569")}>Latest</span>}
+              </div>
+              <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                {!isViewing && <button type="button" onClick={() => onOpen(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>}
+                {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───
 // Custom color dropdown: a native <select> can't render a color swatch per option, so this
 // shows a color chip + name in the closed button and in each list row (matching the palette).
@@ -10235,8 +10274,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [estimateVersions, setEstimateVersions] = useState([]);
   // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
   const [viewingVersion, setViewingVersion] = useState(null);
-  // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
-  const [versionsOpen, setVersionsOpen] = useState(false);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
   // Every enabled contact field filled, phone a real 10 digits — the same bar submitQuote
@@ -11137,11 +11174,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // Switch to another saved version in place (no page reload). Loads that version's design
   // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
+  // Returns true only when the version actually loaded (2026-09-15). A failed read used to
+  // return silently, so Open looked like a dead button and the plan kept showing the old
+  // design with nothing saying so; now it says so in the toast. The message is an object
+  // ({tone,title,text}) so it does not borrow the refusal toast's "Can't place here" headline.
   const openVersion = useCallback(async (version) => {
-    if (!supabase || !designCode) return;
+    const say = (m) => {
+      setToast(m);
+      setTimeout(() => setToast((cur) => (cur === m ? null : cur)), 4000); // stale-guard, as refuseDrag
+    };
+    if (!supabase || !designCode) return false;
     const { data: vrows, error } = await supabase.rpc("load_design_version", { p_code: designCode, p_version: version });
     const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
-    if (error || !vrow) return;
+    if (error || !vrow) {
+      say({ tone: "warn", title: "Couldn't open that design", text: `v${version} didn't load, so the plan still shows the design you had. Check your connection and try again.` });
+      return false;
+    }
     const vsel = vrow.selections || {};
     // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
     // user size-change and wipe the items we're loading (same guard the initial load uses).
@@ -11169,6 +11217,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       p.set("v", String(version));
       window.history.replaceState({}, "", `?${p.toString()}`);
     }
+    // The list sits BELOW the plan (and on the success screen, below a page of text), so
+    // without this the plan changed off-screen and Open appeared to do nothing. setTimeout,
+    // not requestAnimationFrame: rAF never fires in a hidden tab, and this must run after the
+    // new size has committed so the scroll lands on the plan at its new height.
+    say({ tone: "info", title: "Now viewing", text: `v${version} · ${[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}` });
+    setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ block: "start", behavior: "smooth" }); } catch (_e) { /* old browsers: no options arg */ } }, 0);
+    return true;
   }, [supabase, designCode, embedded]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
@@ -17093,40 +17148,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             )}
           </div>
           {estimateVersions.length > 0 && (() => {
-            const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
-            const others = estimateVersions.filter((v) => v.version !== cur.version);
-            const csel = cur.selections || {};
+            // viewingVersion null = the latest; a version no longer in the list falls back to it.
+            const viewing = viewingVersion != null && estimateVersions.some((v) => v.version === viewingVersion)
+              ? viewingVersion : estimateVersions[0].version;
             return (
               <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
-                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (viewing)</span>
-                    {others.length > 0 && (
-                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
-                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
-                      </button>
-                    )}
-                  </div>
-                  <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                    <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                    {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                  </div>
-                </div>
-                {versionsOpen && others.map((v) => {
-                  const vsel = v.selections || {};
-                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                  return (
-                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
-                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
-                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                        <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                      </div>
-                    </div>
-                  );
-                })}
+                <SSVersionList versions={estimateVersions} viewing={viewing} accent={accent} onOpen={(n) => { openVersion(n); }} />
               </div>
             );
           })()}
@@ -17346,41 +17373,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
             </div>
           )}
-          {estimateVersions.length > 0 && (() => {
-            const cur = estimateVersions[0];
-            const others = estimateVersions.slice(1);
-            const csel = cur.selections || {};
-            return (
-              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
-                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (current)</span>
-                    {others.length > 0 && (
-                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
-                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
-                      </button>
-                    )}
-                  </div>
-                  {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
-                </div>
-                {versionsOpen && others.map((v) => {
-                  const vsel = v.selections || {};
-                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                  return (
-                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
-                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
-                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                        <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
+          {estimateVersions.length > 0 && (
+            // The success screen always shows the version just submitted ([0]) as Viewing.
+            // Open leaves the success screen FIRST, so the plan is mounted by the time
+            // openVersion scrolls to it.
+            <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+              <SSVersionList versions={estimateVersions} viewing={estimateVersions[0].version} accent={accent} onOpen={(n) => { setSubmitted(false); openVersion(n); }} />
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
             <button
               onClick={() => { setSubmitted(false); }}
@@ -17425,21 +17425,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </div>
         </div>
       )}
-      {toast && (
-        <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
+      {toast && (() => {
+        // A plain string is a placement refusal (every caller before 2026-09-15) and keeps
+        // the "Can't place here" headline. An object brings its own title and tone:
+        // openVersion's "Now viewing" (info, green) and its failed-load message (warn).
+        const t = typeof toast === "string" ? { tone: "warn", title: "Can't place here", text: toast } : toast;
+        const info = t.tone === "info";
+        return (
+        <div data-ss-toast={info ? "info" : "warn"} style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
           <div style={{
-            background: "#FFFBEB", border: "2px solid #F59E0B", borderRadius: 12, padding: "14px 20px",
+            background: info ? "#F0FDF4" : "#FFFBEB", border: `2px solid ${info ? "#22C55E" : "#F59E0B"}`, borderRadius: 12, padding: "14px 20px",
             boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 12, alignItems: "flex-start",
           }}>
-            <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>⚠️</span>
+            <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>{info ? "✅" : "⚠️"}</span>
             <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: "#92400E", marginBottom: 4 }}>Can't place here</div>
-              <div style={{ fontSize: 13, color: "#A16207", lineHeight: 1.4 }}>{toast}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: info ? "#166534" : "#92400E", marginBottom: 4 }}>{t.title}</div>
+              <div style={{ fontSize: 13, color: info ? "#15803D" : "#A16207", lineHeight: 1.4 }}>{t.text}</div>
             </div>
-            <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
+            <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: info ? "#166534" : "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {cal3dPreview}
 
