@@ -3010,6 +3010,18 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
+// methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
+// flat rate." Values must match the style_wall_heights check constraint (228).
+const WH_BOS_BASES = [
+  ["each", "flat rate"],
+  ["lineal_ft", "lineal ft"],
+  ["sqft_option", "sqft option"],
+  ["sqft_building", "sqft building"],
+  ["perimeter_building", "perimeter building"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
 // -- Wall Height Upgrades (172) ----------------------------------------------------------
 // One card, one section per building style -- the ColorsView pattern, and for the reason
 // Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
@@ -3533,8 +3545,8 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             No taller-wall option offered on this style — customers see no wall-height choice.
           </p>
         ) : (
-          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 980, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "19%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "26%" }} /><col style={{ width: "4%" }} /></colgroup>
             <thead><tr>
               <th style={thB} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={thB} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
@@ -3543,6 +3555,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
               <th style={thWrap} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
               <th style={thC} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={thC}>Active</th>
+              <th style={thB} title="The upcharge for sending a crew out, on rows ticked Built on site. Amount, then how it is charged — flat rate is one fee for the job; the rest use the same methods as layout items. Leave the amount blank if you don't charge extra: the building is still marked built on site.">On-site fee</th>
               <th style={thB}></th>
             </tr></thead>
             <tbody>
@@ -3569,27 +3582,26 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  {/* The build-on-site fee lives ON the row, to the right of Active (Carolyn
+                      2026-09-14: "instead of having it drop down, lets have it appear on the
+                      right side of the active button"). It used to be a band under the row,
+                      which pushed everything below it down the moment the box was ticked. A
+                      row that is not built on site shows a dash, so the table never jumps. */}
+                  <td style={tdMid}>
+                    {r.buildOnSite ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <span style={{ color: "#94A3B8", fontSize: 12.5 }}>$</span>
+                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="none"
+                          title="Leave blank if you don't charge extra — the building is still marked built on site."
+                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 78 }} />
+                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 132, fontSize: 12 }}>
+                          {WH_BOS_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                        </select>
+                      </span>
+                    ) : <span style={{ color: "#CBD5E1" }}>—</span>}
+                  </td>
                   <td style={{ ...tdMid, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
                 </tr>,
-                r.buildOnSite ? (
-                  <tr key={(r.id || ("new-" + i)) + "-bos"}>
-                    <td colSpan={8} style={{ ...S.td, background: "#F8FAFC" }}>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
-                        <span style={{ fontWeight: 700, color: "#0F766E" }}>Built on site — upcharge</span>
-                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 190 }}>
-                          <option value="each">Flat fee for the job</option>
-                          <option value="sqft_building">Per sq ft of floor</option>
-                          <option value="perimeter_building">Per lineal ft of perimeter</option>
-                        </select>
-                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="no upcharge"
-                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 130 }} />
-                        <span style={{ color: "#64748B" }}>
-                          Leave blank if you don’t charge extra — the building is still marked built on site.
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : null,
               ])}
             </tbody>
           </table>

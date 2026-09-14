@@ -2118,19 +2118,35 @@ function computeSelectionRows(sel, paintColors, C, items) {
     if (whOpt.buildOnSite) {
       const bosRate = Number(whOpt.bosFeeRate) || 0;
       const bosBasis = String(whOpt.bosFeeBasis || "each");
-      const bosQty = bosBasis === "sqft_building" ? buildingArea
-                   : bosBasis === "perimeter_building" ? buildingPerimeter
-                   : 1;
+      // ALL SEVEN methods (228), shaped exactly like cladShape below: a whole-building option,
+      // so "sq ft of option" is the WALL area at the height actually billed and "lineal ft" is
+      // the perimeter. pct_estimate_total defers to ssResolvePctSelectionRows via `pct`.
+      const stEntryB = ((C && C.buildingStyles) || []).find((s) => s.value === styleKey);
+      const bosWallArea = Math.round(buildingPerimeter * pricedWallHeightFt(C, stEntryB, styleKey, sel, bW));
+      const bosShape =
+        bosBasis === "sqft_option"          ? { qty: bosWallArea,      unitWord: " / sq ft of wall" }
+        : bosBasis === "sqft_building"      ? { qty: buildingArea,     unitWord: " / sq ft" }
+        : bosBasis === "lineal_ft"          ? { qty: buildingPerimeter, unitWord: " / ft" }
+        : bosBasis === "perimeter_building" ? { qty: buildingPerimeter, unitWord: " / ft" }
+        : bosBasis === "pct_building_price" ? { qty: 1, unitWord: null, pctOf: "building price" }
+        : bosBasis === "pct_estimate_total" ? { qty: 1, unitWord: null, pctOf: "subtotal", deferred: true }
+        : /* each */                          { qty: 1, unitWord: "" };
+      const bosTotal =
+        !showP ? null
+        : bosShape.deferred ? null
+        : bosBasis === "pct_building_price" ? Math.round((bosRate / 100) * buildingPrice * 100) / 100
+        : Math.round(bosRate * bosShape.qty * 100) / 100;
       rows.push({
         key: "buildOnSite",
         label: "Built On Site",
         detail: "Walls this tall cannot be hauled, so this building is assembled on your site.",
-        qty: bosQty,
+        qty: bosShape.qty,
         unit: bosRate > 0
-          ? fmtMoney2(bosRate) + (bosBasis === "sqft_building" ? " / sq ft" : bosBasis === "perimeter_building" ? " / ft" : "")
+          ? (bosShape.pctOf ? bosRate + "% of " + bosShape.pctOf : fmtMoney2(bosRate) + bosShape.unitWord)
           : "",
-        total: showP ? Math.round(bosRate * bosQty * 100) / 100 : null,
+        total: bosTotal,
         method: bosBasis,
+        ...(bosShape.deferred && showP && bosRate > 0 ? { pct: bosRate } : {}),
       });
     }
   }

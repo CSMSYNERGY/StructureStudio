@@ -13,7 +13,7 @@ import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
-import { bosBasisOf, bosQtyFor, bosCharges } from "../_shared/buildOnSite.ts";
+import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor } from "../_shared/buildOnSite.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
@@ -930,6 +930,14 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // blocks down insisting the two "must agree to the penny". Seven live styles are affected
   // (six at 6.4–7 ft, one at 7 ft), all of them over-billed. Carolyn's call was to fix both
   // at once rather than let cladding inherit the same bug.
+  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
+  // HERE, above the FIRST thing that registers into it (the build-on-site fee, then cladding,
+  // then the layout add-ons), because `const` has no hoisting — a declaration below the first
+  // use is a TDZ ReferenceError at runtime, on the one code path that would only fire for a
+  // builder who chose that method.
+  // deno-lint-ignore no-explicit-any
+  const deferredPctLines: { item: any; rate: number }[] = [];
+
   let resolvedWallHeightFt = styleBaseWallHeightFt;
   const wallHeightDeltaIn = Number(selections.wallHeightDeltaIn) || 0;
   if (wallHeightDeltaIn > 0) {
@@ -983,21 +991,29 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // not a constraint. The building is still built on site; there is simply no line.
     {
       const bosRate = Number(wh.bos_fee_rate) || 0;
-      // Same vocabulary as layout_item_pricing, so all three already have geometry here.
+      // ALL SEVEN pricing methods (228), the same vocabulary layout items and cladding price by.
+      // The wall area is the one the increase itself just produced — resolvedWallHeightFt was
+      // raised a few lines up — so "per sq ft of wall" charges for the taller wall, exactly as
+      // cladding's cladWallArea does. MIRRORS the designer's build-on-site rows; keep both.
       const bosBasis = bosBasisOf(wh.bos_fee_basis);
-      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter);
-      const bosDesc = bosBasis === "sqft_building"
-        ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
-        : bosBasis === "perimeter_building"
-        ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+      const bosWallArea = Math.round(buildingPerimeter * resolvedWallHeightFt);
+      const bosQty = bosQtyFor(bosBasis, buildingArea, buildingPerimeter, bosWallArea);
+      const bosAmount = bosAmountFor(bosBasis, bosRate, buildingPrice);
+      const bosDesc =
+        bosBasis === "sqft_building"      ? `${buildingArea} sq ft at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "sqft_option"      ? `${bosWallArea} sq ft of wall at $${bosRate.toFixed(2)} per sq ft`
+        : bosBasis === "perimeter_building" ? `${buildingPerimeter} ft of perimeter at $${bosRate.toFixed(2)} per foot`
+        : bosBasis === "lineal_ft"        ? `${buildingPerimeter} ft of wall at $${bosRate.toFixed(2)} per foot`
+        : bosBasis === "pct_building_price" ? `${bosRate}% of the building price`
+        : bosBasis === "pct_estimate_total" ? `${bosRate}% of the rest of this quote`
         : "Crew and equipment to build on your site";
       if (bosCharges(wh.build_on_site, wh.bos_fee_rate, bosQty)) {
-        targetItems.push(tagLine({
+        const bosLine = tagLine({
           // Named for what it IS, not for what triggered it: the customer is buying an
           // on-site build, and the wall height is why. The line above already says the height.
           name: "Built On Site",
           qty: bosQty,
-          amount: bosRate,
+          amount: bosAmount,
           priceId: "",
           productId: "",
           attachments: [],
@@ -1007,17 +1023,12 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           // Taxability is INHERITED from the increase that caused it rather than given its own
           // column. They are one decision on one row, and a builder who marks taller walls
           // non-taxable has already said what they think about this charge.
-        }, { kind: "build_on_site", nonTaxable: wh.taxable === false }));
+        }, { kind: "build_on_site", nonTaxable: wh.taxable === false });
+        targetItems.push(bosLine);
+        if (bosBasis === "pct_estimate_total") deferredPctLines.push({ item: bosLine, rate: bosRate });
       }
     }
   }
-
-  // Percentage-of-everything lines, resolved in step 7a once every other line exists. Declared
-  // HERE rather than beside the layout add-ons that also use it, because cladding registers into
-  // it and `const` has no hoisting — a declaration below the first use is a TDZ ReferenceError
-  // at runtime, on the one code path that would only fire for a builder who chose that method.
-  // deno-lint-ignore no-explicit-any
-  const deferredPctLines: { item: any; rate: number }[] = [];
 
   // ── Cladding (207) ──────────────────────────────────────────────────────────────────────
   // The third SELECTION charge, and it copies the wall-height shape exactly: nothing is on the

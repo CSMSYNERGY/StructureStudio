@@ -3743,11 +3743,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${bosRateRaw}" is not a usable build-on-site fee${unchanged}`); i++; continue; }
         bosFeeRate = n;
       }
-      const BOS_BASES = ["each", "sqft_building", "perimeter_building"];
+      // All seven pricing methods since 228 — the same list the DB check constraint enforces.
+      const BOS_BASES = ["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"];
       const bosBasisRaw = String(row?.bosFeeBasis ?? "").trim();
       // An unrecognised basis is refused rather than defaulted: defaulting would price the fee
-      // by a rule the builder did not choose, and the three shapes differ by orders of
-      // magnitude on the same number.
+      // by a rule the builder did not choose, and the shapes differ by orders of magnitude on
+      // the same number.
       if (buildOnSite && bosBasisRaw !== "" && !BOS_BASES.includes(bosBasisRaw)) {
         skipped.push(`+${deltaIn} in: "${bosBasisRaw}" is not a build-on-site fee basis${unchanged}`); i++; continue;
       }

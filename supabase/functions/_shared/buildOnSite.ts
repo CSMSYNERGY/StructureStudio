@@ -11,12 +11,19 @@
 // this, so it still carries its own copy — but the ESTIMATE, which is the number that binds,
 // has exactly one authority, and this is the file a test can hold still.
 
-export type BosBasis = "each" | "sqft_building" | "perimeter_building";
+// ALL SEVEN pricing methods since migration 228 (Carolyn 2026-09-14: "All these but each is
+// flat rate") — the same vocabulary layout items and cladding already price by, so every one
+// of them has geometry or a base price in submit-estimate. It was three until then.
+export const BOS_BASES = [
+  "each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building",
+  "pct_building_price", "pct_estimate_total",
+] as const;
+export type BosBasis = typeof BOS_BASES[number];
 
 /** NULL/unknown reads as a flat fee, matching the column comment on `bos_fee_basis`. */
 export function bosBasisOf(raw: unknown): BosBasis {
   const s = String(raw ?? "").trim();
-  return s === "sqft_building" || s === "perimeter_building" ? s : "each";
+  return (BOS_BASES as readonly string[]).includes(s) ? (s as BosBasis) : "each";
 }
 
 /**
@@ -25,17 +32,40 @@ export function bosBasisOf(raw: unknown): BosBasis {
  * A flat fee is quantity ONE, not the building's size — that is the whole point of "each",
  * and returning area here would multiply a $500 call-out into $144,000 on a 12x24.
  */
-export function bosQtyFor(basis: BosBasis, buildingArea: number, buildingPerimeter: number): number {
+export function bosQtyFor(basis: BosBasis, buildingArea: number, buildingPerimeter: number, wallArea = 0): number {
   if (basis === "sqft_building") return Number(buildingArea) || 0;
-  if (basis === "perimeter_building") return Number(buildingPerimeter) || 0;
-  return 1;
+  // A wall-height fee is a whole-building option, so it reads like cladding: "option area" is
+  // the WALL area (perimeter x the wall height actually billed) and "lineal ft" is the
+  // perimeter — identical to perimeter_building on purpose, both names are in the vocabulary.
+  if (basis === "sqft_option") return Number(wallArea) || 0;
+  if (basis === "perimeter_building" || basis === "lineal_ft") return Number(buildingPerimeter) || 0;
+  return 1;   // each, and both percentages: the rate is not a per-unit price
 }
 
 /** The unit suffix the customer reads beside the rate. A flat fee has no "per" anything. */
 export function bosUnitSuffix(basis: BosBasis): string {
   if (basis === "sqft_building") return " / sq ft";
-  if (basis === "perimeter_building") return " / ft";
+  if (basis === "sqft_option") return " / sq ft of wall";
+  if (basis === "perimeter_building" || basis === "lineal_ft") return " / ft";
   return "";
+}
+
+/** True for the two percentage bases, whose "rate" is a percent rather than dollars. */
+export function bosIsPct(basis: BosBasis): boolean {
+  return basis === "pct_building_price" || basis === "pct_estimate_total";
+}
+
+/**
+ * The per-unit amount that goes on the line. pct_building_price resolves here because the
+ * base price is already known; pct_estimate_total CANNOT — it is a share of every OTHER line —
+ * so it goes out at 0 and the caller registers the line for submit-estimate's step 7a pass,
+ * exactly as cladding and layout add-ons do. Everything else is the rate as typed.
+ */
+export function bosAmountFor(basis: BosBasis, rate: number, buildingPrice: number): number {
+  const r = Number(rate) || 0;
+  if (basis === "pct_building_price") return (r / 100) * (Number(buildingPrice) || 0);
+  if (basis === "pct_estimate_total") return 0;
+  return r;
 }
 
 /**
