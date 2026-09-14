@@ -8,6 +8,7 @@ import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import { acceptanceEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
 //
@@ -76,25 +77,13 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
   return json({ error: "Something went wrong on our side. Please try again in a moment." }, 500);
 }
 
-/** The exact sentence the customer agrees to — composed HERE, not trusted from the browser,
- *  so the stored consent_text is always the sentence this build showed (approved wording,
- *  Carolyn 2026-08-23). my-quotes.html renders the same composition client-side. */
-export function consentSentence(quoteNumber: string, totalDisplay: string | null): string {
-  return `I agree that my electronic signature is as binding as a handwritten one, and I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
-}
-
-/** Accepting a quote is not signing for it. The sentence says what the customer is actually
- *  agreeing to — that they want to go ahead, and that the binding document arrives next —
- *  so nobody can later claim a click was presented to them as a signature. */
-export function consentSentenceClick(quoteNumber: string, totalDisplay: string | null): string {
-  return `I accept quote ${quoteNumber}${totalDisplay ? ` for ${totalDisplay}` : ""} and understand that my builder will send me an invoice to sign.`;
-}
-
-/** The invoice is the binding document now, so this is the sentence that carries the weight
- *  the quote's used to. Same "as binding as handwritten" language, pointed at the invoice. */
-export function consentSentenceInvoice(invoiceNumber: string, totalDisplay: string | null): string {
-  return `I agree that my electronic signature is as binding as a handwritten one, and I accept invoice ${invoiceNumber}${totalDisplay ? ` for ${totalDisplay}` : ""}.`;
-}
+// The exact sentence the customer agrees to is composed on the SERVER, never trusted from the
+// browser, so the stored consent_text is always the sentence this build showed. The three
+// compositions and their money formatter moved to _shared/consentSentences.ts (2026-09-15):
+// customer-quotes now sends the same sentence down with each quote for the designer's account
+// panel to print, and two functions composing it must share one copy. Re-exported so anything
+// that reached for them here still finds them. Behaviour is unchanged.
+export { consentSentence, consentSentenceClick, consentSentenceInvoice };
 
 // taxFreeze moved to _shared/estimateLines.ts (2026-09-02) — push_to_invoice freezes the same
 // four columns for a rep-attested acceptance, and these are what a disputed change order turns
@@ -111,11 +100,7 @@ function orderMoney(snap: any): Record<string, unknown> {
   return { total_cents: m.totalCents, pretax_subtotal_cents: m.pretaxCents, tax_cents: m.taxCents };
 }
 
-const fmtMoney = (n: number): string => {
-  const v = Math.round(n * 100) / 100;
-  const [int, frac] = Math.abs(v).toFixed(2).split(".");
-  return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
-};
+// fmtMoney moved to _shared/consentSentences.ts (2026-09-15) with the sentences it formats.
 
 // phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
 // three private copies of the check that decides whether a stranger can read, sign or PAY

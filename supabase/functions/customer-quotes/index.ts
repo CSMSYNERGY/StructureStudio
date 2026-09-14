@@ -6,6 +6,7 @@ import { phoneKey } from "../_shared/phoneKey.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
+import { consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
@@ -282,6 +283,20 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     }
   }
 
+  // What each out-for-signature invoice actually bills, computed ONCE per code and used for
+  // both the card's `amountDue` and the sentence the customer signs, so the two can never
+  // name different money. The inputs are exactly customer-accept sign_invoice's: the AGREED
+  // lines, the acknowledged change orders, and the order's own total.
+  const amountDueByCode = new Map<string, number | null>();
+  for (const d of mine) {
+    if (!invByCode.has(d.short_code)) continue;
+    amountDueByCode.set(d.short_code, amountOwed(
+      agreedBaseline(d).lines,
+      ackedByCode.get(d.short_code) ?? [],
+      orderTotalByCode.get(d.short_code) ?? null,
+    ));
+  }
+
   const quotes = mine
     // NARROW projection — the migration-048 lesson (a phone number once bridged to full
     // contact PII, and 048's fix was to stop returning it). Never echo `contact` back:
@@ -334,14 +349,31 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           // live on purpose — that is the quote headline, and while a change is pending the
           // customer is meant to see the old and new figures side by side on the change card.
           invoice: invByCode.has(d.short_code)
-            ? {
-              ...invByCode.get(d.short_code),
-              amountDue: amountOwed(
-                agreedBaseline(d).lines,
-                ackedByCode.get(d.short_code) ?? [],
-                orderTotalByCode.get(d.short_code) ?? null,
-              ),
-            }
+            ? { ...invByCode.get(d.short_code), amountDue: amountDueByCode.get(d.short_code) ?? null }
+            : null,
+          // ⚠️ THE EXACT SENTENCES THE CUSTOMER AGREES TO (2026-09-15). The designer's account
+          // panel prints these beside its checkboxes instead of composing its own, because the
+          // text is stored verbatim as the consent evidence and a hand-kept copy in the browser
+          // is how "what they ticked" and "what the record says" drift apart. Same composer and
+          // same inputs as customer-accept (_shared/consentSentences.ts):
+          //   acceptConsentText — accept_quote method "click": ss_quote_number + the live quote
+          //     total, exactly as accept_quote reads them. Null until the quote has a number.
+          //   signConsentText — sign_invoice: the invoice number + amountDue above. Null until
+          //     an invoice is out.
+          // Always present on an SS quote, as null when not applicable — the same shape rule as
+          // `invoice`. Showing a sentence is not permission to act: canAccept / canSignInvoice
+          // still decide whether the button appears.
+          acceptConsentText: d.ss_quote_number
+            ? consentSentenceClick(
+              String(d.ss_quote_number),
+              (() => { const t = totalFromSnapshot(d.estimate_lines); return t == null ? null : fmtMoney(t); })(),
+            )
+            : null,
+          signConsentText: invByCode.has(d.short_code)
+            ? consentSentenceInvoice(
+              String(invByCode.get(d.short_code).number || ""),
+              (() => { const t = amountDueByCode.get(d.short_code); return t == null ? null : fmtMoney(t); })(),
+            )
             : null,
           // Whether the SIGN button may appear. Every condition the server enforces in
           // customer-accept's sign_invoice is mirrored here, so the button is absent
@@ -360,5 +392,11 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
         : {}),
     }));
 
-  return json({ ok: true, businessName, name: identity.name, ssMode, quotes });
+  // `identity` (2026-09-15): who this session proved to be, for the designer header's
+  // "Signed in as (816) 300-3600". It is the SESSION's own verified key — the 10 digits the
+  // OTP was checked against — never anything read off a design's contact blob, so the
+  // migration-048 rule above still holds: no address, no email, no other person's data.
+  // A token that leaks already lists this phone's quotes; naming the phone adds nothing.
+  // The email half arrives with email login (migration 230); until then it is absent.
+  return json({ ok: true, businessName, name: identity.name, identity: { phone: identity.phoneDigits }, ssMode, quotes });
 }));
