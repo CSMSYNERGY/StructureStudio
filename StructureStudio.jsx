@@ -9210,6 +9210,10 @@ function ssClearCustSession(clientId) {
 }
 // Twilio Verify codes live ten minutes; a pending code older than that is not worth a pill.
 const SS_CODE_TTL_MS = 10 * 60 * 1000;
+// Draft autosave (plan 3.3): 20 s after the last change, at most 200 saves per page load — each
+// save_design writes a design_versions row, so the cap is what bounds a tab left open all day.
+const SS_DRAFT_DEBOUNCE_MS = 20 * 1000;
+const SS_DRAFT_SAVE_CAP = 200;
 function ssReadCodePending(clientId) {
   try {
     const p = JSON.parse(sessionStorage.getItem(ssCustKeys(clientId).pending) || "null");
@@ -9218,10 +9222,13 @@ function ssReadCodePending(clientId) {
   return null;
 }
 // ?account=quotes|invoices — the deep link the quote email and text will carry (plan 3.8).
+// A bare ?q=<code> opens the account too (Quotes first; CustomerAccount moves to Invoices when
+// that is where the card lives) — ssQuoteRefParam below is the same shape rule as my-quotes.
 function ssAccountParam() {
   try {
     const v = new URLSearchParams(location.search).get("account");
-    return v === "quotes" || v === "invoices" ? v : null;
+    if (v === "quotes" || v === "invoices") return v;
+    return ssQuoteRefParam() ? "quotes" : null;
   } catch (_e) { return null; }
 }
 // A shape check only (deliverability is proven by the code arriving). Mirrors isEmailish in
@@ -9578,49 +9585,570 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   );
 }
 
-// The header's Quotes / Invoices panel, until the full in-page account (cards, Review & Accept,
-// Sign invoice — plan 3.3's CustomerAccount) replaces its body. It is deliberately NOT a dead
-// button meanwhile: it proves the session with a real customer-quotes list (a 401 there signs
-// out and reopens the sheet through `load`), says how many there are, and hands off to
-// /my-quotes, which reads the same ssq_token_ — so the customer is not asked for a second code.
-function SSAccountHandoff({ view, clientId, accent, load, onClose }) {
-  const [state, setState] = useState({ loading: true, count: 0, error: "" });
-  useEffect(() => {
-    let live = true;
-    (async () => {
-      const r = await load();
-      if (!live) return;
-      if (!r.ok || !r.data) {
-        if (r.status !== 401) setState({ loading: false, count: 0, error: ssCustErrText(r, "Couldn't load your quotes. Please try again.") });
-        return;
-      }
-      const quotes = Array.isArray(r.data.quotes) ? r.data.quotes : [];
-      // Invoices = a quote with an invoice or one being prepared; Quotes = everything else.
-      const isInvoice = (q) => Boolean(q && (q.invoice || q.invoiceRequest));
-      setState({ loading: false, count: quotes.filter((q) => (view === "invoices" ? isInvoice(q) : !isInvoice(q))).length, error: "" });
-    })();
-    return () => { live = false; };
-  }, [view]);
-  const noun = view === "invoices" ? "invoice" : "quote";
-  const link = `/my-quotes?client=${encodeURIComponent(clientId || "")}`;
+// ─── The customer's account, in the designer (plan 3.3, Carolyn 2026-09-14) ──────────────
+// Carolyn at 23:23 on the 09-14 call, looking at the portal's "Quote Created!": she wants
+// my-quotes' accept / invoice / sign blocks HERE, not on a second page. So this is a port of
+// my-quotes.html's quoteCard / invoiceBlock / toggleAcceptPanel / toggleSignPanel /
+// applyDeepLink into React, and my-quotes stays as the fallback page for old emails.
+//
+// ⚠️ THE CONSENT SENTENCES ARE THE SERVER'S, NEVER COMPOSED HERE. customer-quotes sends
+// acceptConsentText / signConsentText — the exact words customer-accept stores as the legal
+// evidence (_shared/consentSentences.ts). my-quotes keeps a hand-mirrored copy and that is the
+// drift the plan refuses to repeat: a third copy in this file is how "what they ticked" and
+// "what the record says" come apart. When a sentence is missing (a customer-quotes deploy older
+// than 2026-09-15), the panel does NOT fall back to a local sentence — it links to my-quotes,
+// which still works on the same session.
+//
+// Pay and change-order sign-off are NOT ported yet (plan "Later"): both link to /my-quotes on
+// the same ssq_token_, so the customer is not asked for a second code.
+const SS_ACCT_STATUS = {
+  sent: { bg: "#EEF2FF", fg: "#3D3672", label: "Sent" },
+  accepted: { bg: "#F0FDF4", fg: "#15803D", label: "Accepted" },
+  invoiced: { bg: "#FFFBEB", fg: "#B45309", label: "Invoiced" },
+  delivered: { bg: "#ECFEFF", fg: "#0E7490", label: "Delivered" },
+};
+function ssAcctMoney(v) {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (!isFinite(n)) return null;
+  try { return n.toLocaleString("en-US", { style: "currency", currency: "USD" }); } catch (_e) { return "$" + n.toFixed(2); }
+}
+function ssAcctDate(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return null;
+  try { return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch (_e) { return d.toDateString(); }
+}
+// GHL's hosted estimate page lives off-site, which ssSafeUrl (our storage + this origin only)
+// refuses by design — that link only has to be https, the same bar my-quotes' safeUrl sets.
+function ssHttpsUrl(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^https:\/\//i.test(s) ? s : null;
+}
+// ?q=<short code> — the card a quote email / text link was built for. Same shape rule as
+// my-quotes' readDeepRef, so a link that focuses a card there focuses the same card here.
+function ssQuoteRefParam() {
+  try {
+    const v = (new URLSearchParams(location.search).get("q") || "").trim();
+    return /^[A-Za-z0-9_-]{4,32}$/.test(v) ? v : null;
+  } catch (_e) { return null; }
+}
+function ssMyQuotesLink(clientId, ref) {
+  return `/my-quotes?client=${encodeURIComponent(clientId || "")}${ref ? `&q=${encodeURIComponent(ref)}` : ""}`;
+}
+// Invoices tab = a quote with an invoice out OR one being prepared (migration 229's request);
+// Quotes tab = everything else. One rule, used by the tabs, the counts and the deep link.
+const ssIsInvoiceCard = (q) => Boolean(q && (q.invoice || q.invoiceRequest));
+const SS_ACCT_BTN = { border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", textDecoration: "none", display: "inline-block", fontFamily: "inherit", lineHeight: 1.2 };
+
+// Review & Accept (migration 136): a name and a tick, no signature pad. Accepting a quote is not
+// signing for it, so it must not look like signing — the signature comes later, on the invoice.
+function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
+  const [name, setName] = useState(defaultName || "");
+  const [agree, setAgree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const sentence = typeof q.acceptConsentText === "string" && q.acceptConsentText.trim() ? q.acceptConsentText : null;
+  if (!sentence) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
+        Review and accept this quote on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+      </div>
+    );
+  }
+  const submit = async () => {
+    setErr("");
+    const signerName = name.trim();
+    if (!signerName) { setErr("Enter your full name."); return; }
+    if (!agree) { setErr("Please tick the agreement box to accept."); return; }
+    setBusy(true);
+    const r = await call("customer-accept", { action: "accept_quote", quoteRef: q.quoteRef, signerName, consent: true, method: "click" });
+    if (r.status === 401) return;   // the session is gone — the sheet has already reopened
+    if (r.ok && r.data && r.data.ok) { onDone(r.data); return; }
+    setBusy(false);
+    setErr(ssCustErrText(r, "Couldn't record your acceptance. Please try again."));
+  };
   return (
-    <div role="region" aria-label={view === "invoices" ? "Your invoices" : "Your quotes"}
-      style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "12px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-      <div style={{ flex: "1 1 220px", minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 800, color: "#1E293B" }}>{view === "invoices" ? "Your invoices" : "Your quotes"}</div>
-        <div style={{ fontSize: 13, color: state.error ? "#B91C1C" : "#64748B", marginTop: 2 }}>
-          {state.loading ? `Loading your ${noun}s…`
-            : state.error ? state.error
-            : state.count === 0 ? `No ${noun}s yet${view === "quotes" ? " — press Get Quote when your design is ready." : "."}`
-            : `You have ${state.count} ${noun}${state.count === 1 ? "" : "s"}.`}
+    <div data-panel="accept" style={{ marginTop: 12, borderTop: "1px solid #E2E8F0", paddingTop: 12 }}>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Your full name</label>
+      <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
+        onChange={(e) => setName(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
+        <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+        <span>{sentence}</span>
+      </label>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
+      <button type="button" disabled={busy} onClick={submit}
+        style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF", opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Accepting…" : "Accept Quote"}
+      </button>
+    </div>
+  );
+}
+
+// Sign the invoice (migration 136): draw OR type, plus the server's sentence. Same pad as
+// my-quotes — a canvas backed at devicePixelRatio so the stored PNG is crisp, pointer events so
+// mouse, finger and stylus all work, and a single dot counts (tap-signers exist).
+function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
+  const [mode, setMode] = useState("drawn");
+  const [name, setName] = useState(defaultName || "");
+  const [typed, setTyped] = useState("");
+  const [agree, setAgree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const canvasRef = useRef(null);
+  const inkRef = useRef(false);
+  const drawingRef = useRef(false);
+  const setupPad = () => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const rect = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.round(rect.width * dpr));
+    c.height = Math.max(1, Math.round(rect.height * dpr));
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 2.25; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#0F172A";
+    inkRef.current = false;
+  };
+  // The canvas only has a size once it is in the document. It stays mounted (hidden) while
+  // "Type my name" is showing, so switching tabs back and forth never wipes the ink.
+  useEffect(() => { setupPad(); }, []);
+  const sentence = typeof q.signConsentText === "string" && q.signConsentText.trim() ? q.signConsentText : null;
+  if (!sentence) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
+        Sign this invoice on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+      </div>
+    );
+  }
+  const padPos = (e) => { const r = canvasRef.current.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const submit = async () => {
+    setErr("");
+    const signerName = name.trim();
+    if (!signerName) { setErr("Enter your full name."); return; }
+    if (!agree) { setErr("Please tick the agreement box to sign."); return; }
+    const payload = { action: "sign_invoice", quoteRef: q.quoteRef, signerName, consent: true, method: mode };
+    if (mode === "drawn") {
+      if (!inkRef.current) { setErr("Draw your signature in the box (or switch to typing your name)."); return; }
+      payload.signatureDataUrl = canvasRef.current.toDataURL("image/png");
+    } else {
+      const t = typed.trim();
+      if (!t) { setErr("Type your name to sign."); return; }
+      payload.typedName = t;
+    }
+    setBusy(true);
+    const r = await call("customer-accept", payload);
+    if (r.status === 401) return;
+    if (r.ok && r.data && r.data.ok) { onDone(r.data); return; }
+    setBusy(false);
+    setErr(ssCustErrText(r, "Couldn't record your signature. Please try again."));
+  };
+  const tab = (id, label) => (
+    <button type="button" aria-pressed={mode === id} onClick={() => setMode(id)}
+      style={{ flex: 1, fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: 8, borderRadius: 8, cursor: "pointer",
+        border: `1px solid ${mode === id ? accent : "#CBD5E1"}`, background: mode === id ? "#EEF2FF" : "#FFF", color: mode === id ? "#1E293B" : "#475569" }}>
+      {label}
+    </button>
+  );
+  return (
+    <div data-panel="sign" style={{ marginTop: 12, borderTop: "1px solid #BBF7D0", paddingTop: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{tab("drawn", "Draw my signature")}{tab("typed", "Type my name")}</div>
+      <div hidden={mode !== "drawn"}>
+        <canvas ref={canvasRef} aria-label="Signature pad"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) {}
+            const ctx = canvasRef.current.getContext("2d");
+            drawingRef.current = true;
+            const p = padPos(e);
+            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 0.01, p.y + 0.01); ctx.stroke();
+            inkRef.current = true;
+          }}
+          onPointerMove={(e) => {
+            if (!drawingRef.current) return;
+            e.preventDefault();
+            const ctx = canvasRef.current.getContext("2d");
+            const p = padPos(e);
+            ctx.lineTo(p.x, p.y); ctx.stroke();
+          }}
+          onPointerUp={() => { drawingRef.current = false; }}
+          onPointerCancel={() => { drawingRef.current = false; }}
+          onPointerLeave={() => { drawingRef.current = false; }}
+          style={{ width: "100%", height: 140, border: "1px dashed #94A3B8", borderRadius: 8, background: "#FFF", touchAction: "none", display: "block", cursor: "crosshair" }} />
+        <div style={{ textAlign: "right", marginTop: 4 }}>
+          <button type="button" onClick={setupPad} style={{ background: "none", border: "none", color: "#475569", fontSize: 12, fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}>Clear</button>
         </div>
       </div>
-      <a href={link} target="_blank" rel="noopener"
-        style={{ background: accent, color: "#FFF", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, textDecoration: "none", whiteSpace: "nowrap" }}>
-        Open your {noun}s ↗
-      </a>
-      <button type="button" onClick={onClose} aria-label="Close" title="Close"
-        style={{ background: "transparent", border: "none", fontSize: 20, color: "#94A3B8", cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
+      <div hidden={mode !== "typed"}>
+        <input type="text" value={typed} maxLength={120} autoComplete="name" placeholder="Type your full name" aria-label="Type your full name"
+          onChange={(e) => setTyped(e.target.value)}
+          style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+        <div style={{ fontStyle: "italic", fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 26, minHeight: 40, padding: "6px 2px", color: "#0F172A", borderBottom: "1px solid #CBD5E1" }}>{typed}</div>
+      </div>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", margin: "12px 0 4px" }}>Your full name</label>
+      <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
+        onChange={(e) => setName(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
+        <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+        <span>{sentence}</span>
+      </label>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
+      <button type="button" disabled={busy} onClick={submit}
+        style={{ ...SS_ACCT_BTN, background: "#15803D", color: "#FFF", opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Signing…" : "Sign Invoice"}
+      </button>
+    </div>
+  );
+}
+
+// One quote, as my-quotes' quoteCard draws it. `panel` is lifted to CustomerAccount so a deep
+// link can open Review & Accept / Sign for the card it names.
+function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, highlight, onChanged, onOpenDesign }) {
+  const [thumbBroken, setThumbBroken] = useState(false);
+  const ref = q.quoteRef || null;
+  const statusKey = String(q.status || "").toLowerCase();
+  const chip = SS_ACCT_STATUS[statusKey];
+  const rawNum = q.estimateNumber != null ? String(q.estimateNumber).trim() : "";
+  // EST- belongs on BARE GHL numbers only; an SS number carries the builder's own prefix.
+  const numText = rawNum ? (/^\d+$/.test(rawNum) ? "EST-" + rawNum : rawNum) : "Quote";
+  const thumb = !thumbBroken && ssSafeUrl(q.view3dImageUrl);
+  const hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;
+  const dateStr = ssAcctDate(q.createdAt);
+  const totalStr = hasTax ? null : ssAcctMoney(q.total);
+  const inv = q.invoice || null;
+  const req = !inv && q.invoiceRequest ? q.invoiceRequest : null;
+  const pdfUrl = ssSafeUrl(q.pdfUrl);
+  const acceptUrl = ssHttpsUrl(q.acceptUrl);
+  const canAccept = q.canAccept === true && ref;
+  const acceptOpen = canAccept && panel && panel.ref === ref && panel.kind === "accept";
+  const signOpen = inv && q.canSignInvoice === true && ref && panel && panel.ref === ref && panel.kind === "sign";
+  const toggle = (kind) => setPanel((p) => (p && p.ref === ref && p.kind === kind ? null : { ref, kind }));
+  const cos = Array.isArray(q.changeOrders) ? q.changeOrders : [];
+  const row = (label, value, extra) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, color: "#334155", ...(extra || {}) }}><div>{label}</div><div>{value}</div></div>
+  );
+  return (
+    <div data-ref={ref || undefined}
+      style={{ background: "#FFF", border: highlight ? `2px solid ${accent}` : "1px solid #E2E8F0", borderRadius: 12, padding: highlight ? 13 : 14, textAlign: "left", boxShadow: highlight ? "0 0 0 4px rgba(59,130,246,0.12)" : "none", transition: "box-shadow .3s" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", fontFamily: "monospace" }}>{numText}</div>
+        {statusKey && (
+          <span style={{ fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: chip ? chip.bg : "#F1F5F9", color: chip ? chip.fg : "#475569" }}>
+            {chip ? chip.label : statusKey.charAt(0).toUpperCase() + statusKey.slice(1)}
+          </span>
+        )}
+      </div>
+      {thumb && (
+        <img src={thumb} alt="" loading="lazy" onError={() => setThumbBroken(true)}
+          style={{ display: "block", width: "100%", maxHeight: 190, objectFit: "cover", borderRadius: 10, marginTop: 10, background: "#F1F5F9" }} />
+      )}
+      {(q.style || q.size) && (
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>{[q.style ? capWords(q.style) : null, q.size].filter(Boolean).join(" · ")}</div>
+      )}
+      {(dateStr || totalStr) && (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+          <div style={{ fontSize: 12.5, color: "#64748B" }}>{dateStr || ""}</div>
+          {totalStr && <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>{totalStr}</div>}
+        </div>
+      )}
+      {/* Sales tax (migration 148): the same pools the PDF prints, the charged amount beside
+          the rate label — never rate × base recomputed here. */}
+      {hasTax && (
+        <div style={{ marginTop: 8, display: "grid", gap: 2 }}>
+          {row("Taxable", ssAcctMoney(q.taxable))}
+          {row("Non-taxable", ssAcctMoney(q.nonTaxable))}
+          {q.discount != null && q.discount > 0 && row("Discount", "-" + ssAcctMoney(q.discount), { color: "#15803D" })}
+          {row(`${q.taxLabel || "Sales tax"}${typeof q.taxRate === "number" && q.taxRate > 0 ? ` (${String(Math.round(q.taxRate * 10000) / 100).replace(/\.0+$/, "")}%)` : ""}`, ssAcctMoney(q.tax))}
+          {row("Total", ssAcctMoney(q.total), { fontWeight: 800, color: "#0F172A", borderTop: "1px solid #E2E8F0", paddingTop: 4, marginTop: 2 })}
+        </div>
+      )}
+      {/* A change to a signed order needs its own signature. Not ported yet — the card names
+          the change, its fee and the new total, and hands off to my-quotes on this session. */}
+      {cos.map((co, i) => {
+        const feeTotal = (Number(co.feeCents) || 0) + (Number(co.feeTaxCents) || 0);
+        let desc = String(co.description || "");
+        if (co.totalBefore != null || co.totalAfter != null) {
+          const lines = desc.split("\n");
+          if (lines.length > 1 && /^Total:/.test(lines[lines.length - 1])) lines.pop();
+          desc = lines.join("\n");
+        }
+        return (
+          <div key={co.id || i} style={{ marginTop: 12, border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#B45309" }}>Change order CO-{co.coNo != null ? co.coNo : "?"} — needs your approval</div>
+            {desc && <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", marginTop: 6 }}>{desc}</div>}
+            {(co.totalBefore != null || co.totalAfter != null) && (
+              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 6 }}>{ssAcctMoney(co.totalBefore) || "—"} → {ssAcctMoney(co.totalAfter) || "—"}</div>
+            )}
+            {feeTotal > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 6 }}>+ {co.feeLabel || "Change order fee"}: {ssAcctMoney(feeTotal / 100)}</div>}
+            {feeTotal > 0 && ssAcctMoney(co.newTotal) && <div style={{ fontSize: 13, fontWeight: 800, marginTop: 4, color: "#92400E" }}>New order total: {ssAcctMoney(co.newTotal)}</div>}
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, marginTop: 10, background: accent, color: "#FFF" }}>Review &amp; sign the change ↗</a>
+          </div>
+        );
+      })}
+      {inv && inv.signedAt && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>Invoice signed ✓{ssAcctDate(inv.signedAt) ? ` · ${ssAcctDate(inv.signedAt)}` : ""}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            {ssSafeUrl(inv.pdfUrl) && (
+              <a href={ssSafeUrl(inv.pdfUrl)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
+                Invoice {inv.number ? `${inv.number} ` : ""}(PDF)
+              </a>
+            )}
+            {/* Paying stays on my-quotes until the tokenizer is ported (plan "Later"). */}
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>Pay or see payments ↗</a>
+          </div>
+        </div>
+      )}
+      {inv && !inv.signedAt && (
+        <div style={{ marginTop: 12, border: "1px solid #BBF7D0", background: "#F0FDF4", borderRadius: 10, padding: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>Invoice {inv.number ? String(inv.number) : ""} — ready for your signature</div>
+          {/* The INVOICE's amount: an approved change moves what is owed without touching the quote. */}
+          {ssAcctMoney(inv.amountDue == null ? q.total : inv.amountDue) && (
+            <div style={{ fontSize: 15, fontWeight: 700, marginTop: 6, color: "#0F172A" }}>{ssAcctMoney(inv.amountDue == null ? q.total : inv.amountDue)}</div>
+          )}
+          {inv.stale && (
+            <div style={{ fontSize: 13, color: "#92400E", marginTop: 8 }}>This invoice was issued before your latest approved change. Your builder needs to resend it before you can sign.</div>
+          )}
+          {!inv.stale && cos.length > 0 && (
+            <div style={{ fontSize: 13, color: "#92400E", marginTop: 8 }}>Approve the change order above first — then you can sign this invoice.</div>
+          )}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {ssSafeUrl(inv.pdfUrl) && (
+              <a href={ssSafeUrl(inv.pdfUrl)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>Invoice (PDF)</a>
+            )}
+            {q.canSignInvoice === true && ref && (
+              <button type="button" data-sign-invoice="1" aria-expanded={Boolean(signOpen)} onClick={() => toggle("sign")}
+                style={{ ...SS_ACCT_BTN, background: "#15803D", color: "#FFF" }}>
+                Review &amp; Sign Invoice
+              </button>
+            )}
+          </div>
+          {signOpen && (
+            <SSSignPanel q={q} inv={inv} call={call} accent={accent} defaultName={custName} clientId={clientId}
+              onDone={() => { setPanel(null); onChanged(); }} />
+          )}
+        </div>
+      )}
+      {/* Accept → a DRAFT invoice the builder approves (Ahsan 2026-09-15, migration 229). Between
+          the two the customer is told what is happening instead of seeing nothing at all. */}
+      {req && req.status === "pending" && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#334155" }}>
+          Your invoice is being prepared — you'll get it here to sign.
+        </div>
+      )}
+      {req && req.status === "dismissed" && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#334155" }}>
+          Your builder will be in touch about your invoice.
+        </div>
+      )}
+      {q.acceptedAt && (
+        <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: "#15803D" }}>
+          Accepted ✓{ssAcctDate(q.acceptedAt) ? ` · ${ssAcctDate(q.acceptedAt)}` : ""}
+          {!inv && !req ? <span style={{ fontWeight: 500, color: "#334155" }}> — your invoice will follow for you to sign.</span> : null}
+        </div>
+      )}
+      {(canAccept || (acceptUrl && !q.acceptedAt) || pdfUrl || (ref && onOpenDesign)) && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {canAccept ? (
+            <button type="button" aria-expanded={Boolean(acceptOpen)} onClick={() => toggle("accept")}
+              style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>
+              Review &amp; Accept
+            </button>
+          ) : acceptUrl && !q.acceptedAt ? (
+            <a href={acceptUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>View &amp; Accept ↗</a>
+          ) : null}
+          {pdfUrl && (
+            <a href={pdfUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
+              {q.ssQuote ? "Quote (PDF)" : "Floor plan (PDF)"}
+            </a>
+          )}
+          {ref && onOpenDesign && (
+            <button type="button" onClick={() => onOpenDesign(ref)}
+              style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#1E293B", border: `1px solid ${accent}` }}>
+              Open design
+            </button>
+          )}
+        </div>
+      )}
+      {acceptOpen && (
+        <SSAcceptPanel q={q} call={call} accent={accent} defaultName={custName} clientId={clientId}
+          onDone={() => { setPanel(null); onChanged(); }} />
+      )}
+    </div>
+  );
+}
+
+// CustomerAccount — the header's Quotes / Invoices panel, and (inline) the success screen's
+// "accept this quote" block. Module-level on purpose: its hooks stay out of
+// StructureStudioInner's order (React #310), and it remounts cleanly when the token changes.
+//   call          StructureStudioInner's callCustomer — adds clientId + token, and turns a 401
+//                 into "session expired" (clears ssq_*, reopens the sheet)
+//   view          "quotes" | "invoices"; onViewChange keeps the header buttons in step
+//   focusRef      a short code to land on (?q=, or the quote just created): its tab opens, the
+//                 card is highlighted and Review & Accept / Sign opens for them — once
+//   inline        the success screen: only the focused card, no tabs, no saved designs
+//   onOpenDesign  loads a design into the canvas (resolves true when it loaded)
+function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, accent, call, custName, onViewChange, onOpenDesign, onFocusDone, onExpired, onClose }) {
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  const [reload, setReload] = useState(0);
+  const [panel, setPanel] = useState(null);         // { ref, kind: "accept" | "sign" }
+  const [flashRef, setFlashRef] = useState(null);
+  // Saved designs (plan 3.6): null = not offered (the customer-designs function is absent, or it
+  // refused) — the section simply is not there. [] = offered, nothing saved.
+  const [saved, setSaved] = useState(null);
+  const [savedErr, setSavedErr] = useState("");
+  const focusDoneRef = useRef(false);
+  const rootRef = useRef(null);
+  const liveRef = useRef(true);
+  useEffect(() => () => { liveRef.current = false; }, []);
+  useEffect(() => {
+    let live = true;
+    setState((s) => ({ ...s, loading: true, error: "" }));
+    (async () => {
+      const r = await call("customer-quotes", { action: "list" });
+      if (!live) return;
+      if (r.status === 401) return;       // signed out by call(); this panel is unmounting
+      if (!r.ok || !r.data || r.data.error) {
+        setState((s) => ({ loading: false, error: ssCustErrText(r, "Couldn't load your quotes. Please try again."), data: s.data }));
+        return;
+      }
+      setState({ loading: false, error: "", data: r.data });
+    })();
+    return () => { live = false; };
+  }, [token, reload]);
+  // Saved designs degrade SILENTLY. The function ships separately (migration 231 + its deploy),
+  // and until then the browser's CORS preflight gets a 404 and the call reports status 0 — the
+  // Quotes tab must look exactly as it did, with no error line about a feature nobody asked for.
+  // A 401 only counts as "session expired" when the function itself said so: a gateway refusal
+  // must never sign a customer out.
+  useEffect(() => {
+    if (inline || !supabase) return;
+    let live = true;
+    (async () => {
+      const r = await callCustomerFn(supabase, "customer-designs", { action: "list", clientId, token });
+      if (!live) return;
+      if (r.status === 401 && r.data && /session/i.test(String(r.data.error || ""))) { if (onExpired) onExpired(); return; }
+      const list = r.ok && r.data ? (Array.isArray(r.data.designs) ? r.data.designs : Array.isArray(r.data.items) ? r.data.items : null) : null;
+      setSaved(list ? list.filter((d) => d && typeof d.ref === "string" && d.ref) : null);
+    })();
+    return () => { live = false; };
+  }, [token, reload, inline]);
+  const quotes = state.data && Array.isArray(state.data.quotes) ? state.data.quotes.filter(Boolean) : [];
+  const ssMode = state.data ? state.data.ssMode !== false : true;
+  // Deep link: land on the card, open its panel. Once — a later reload (after accepting) must
+  // not yank the page back. Silent when nothing matches: a link opened on a different login
+  // reveals nothing about whether that code exists (my-quotes' applyDeepLink rule).
+  useEffect(() => {
+    if (!focusRef || focusDoneRef.current || !state.data) return;
+    focusDoneRef.current = true;
+    if (!inline && onFocusDone) onFocusDone();
+    const q = quotes.find((x) => x.quoteRef === focusRef);
+    if (!q) return;
+    const tab = ssIsInvoiceCard(q) ? "invoices" : "quotes";
+    if (!inline && view !== tab && onViewChange) onViewChange(tab);
+    if (q.invoice && q.canSignInvoice === true) setPanel({ ref: focusRef, kind: "sign" });
+    else if (q.canAccept === true) setPanel({ ref: focusRef, kind: "accept" });
+    if (inline) return;
+    setFlashRef(focusRef);
+    setTimeout(() => { if (liveRef.current) setFlashRef(null); }, 2600);
+    setTimeout(() => {
+      const root = rootRef.current;
+      const sel = `[data-ref="${window.CSS && CSS.escape ? CSS.escape(focusRef) : focusRef}"]`;
+      const el = root && root.querySelector(sel);
+      if (el) { try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_e) { el.scrollIntoView(); } }
+    }, 80);
+  }, [state.data, focusRef]);
+  const refresh = () => setReload((n) => n + 1);
+  const card = (q, i) => (
+    <SSQuoteCard key={q.quoteRef || `q${i}`} q={q} clientId={clientId} accent={accent} call={call} custName={custName}
+      panel={panel} setPanel={setPanel} highlight={flashRef && q.quoteRef === flashRef}
+      onChanged={refresh} onOpenDesign={inline ? null : onOpenDesign} />
+  );
+
+  if (inline) {
+    const q = quotes.find((x) => x.quoteRef === focusRef);
+    return (
+      <div ref={rootRef} role="region" aria-label="Your quote" style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "left" }}>
+        {q ? card(q, 0) : (
+          <div style={{ background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, fontSize: 13, color: state.error ? "#B91C1C" : "#475569" }}>
+            {state.loading ? "Loading your quote…"
+              : state.error ? <>{state.error} <button type="button" onClick={refresh} style={{ background: "none", border: "none", color: accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Try again</button></>
+              : "This quote isn't showing under your login yet — you'll find it under Quotes once it's ready."}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const inTab = quotes.filter((q) => (view === "invoices" ? ssIsInvoiceCard(q) : !ssIsInvoiceCard(q)));
+  const nQuotes = quotes.filter((q) => !ssIsInvoiceCard(q)).length;
+  const nInvoices = quotes.length - nQuotes;
+  const tabBtn = (v, label, n) => (
+    <button type="button" aria-pressed={view === v} onClick={() => onViewChange && onViewChange(v)}
+      style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 700, borderRadius: 8, padding: "7px 14px", cursor: "pointer",
+        border: `1px solid ${view === v ? accent : "#CBD5E1"}`, background: view === v ? accent : "#FFF", color: view === v ? "#FFF" : "#334155" }}>
+      {label}{state.data ? ` · ${n}` : ""}
+    </button>
+  );
+  const removeSaved = async (ref) => {
+    setSavedErr("");
+    const before = saved;
+    setSaved((s) => (s || []).filter((d) => d.ref !== ref));
+    const r = await callCustomerFn(supabase, "customer-designs", { action: "hide", clientId, token, code: ref });
+    if (!liveRef.current) return;
+    if (r.status === 401 && r.data && /session/i.test(String(r.data.error || ""))) { if (onExpired) onExpired(); return; }
+    if (!r.ok) { setSaved(before); setSavedErr(ssCustErrText(r, "Couldn't remove that design. Please try again.")); }
+  };
+  return (
+    <div ref={rootRef} role="region" aria-label={view === "invoices" ? "Your invoices" : "Your quotes"}
+      style={{ background: "#F8FAFC", borderBottom: "1px solid #E2E8F0", padding: "14px 20px 18px" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {tabBtn("quotes", "Quotes", nQuotes)}
+          {tabBtn("invoices", "Invoices", nInvoices)}
+          {state.loading && state.data && <span style={{ fontSize: 12, color: "#94A3B8" }}>Updating…</span>}
+          <button type="button" onClick={onClose} aria-label="Close" title="Close"
+            style={{ marginLeft: "auto", background: "transparent", border: "none", fontSize: 22, color: "#94A3B8", cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
+        </div>
+        {state.error && (
+          <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 10 }}>
+            {state.error} <button type="button" onClick={refresh} style={{ background: "none", border: "none", color: accent, fontWeight: 700, cursor: "pointer", padding: 0, fontSize: 13 }}>Try again</button>
+          </div>
+        )}
+        {state.loading && !state.data ? (
+          <div style={{ fontSize: 13, color: "#64748B" }}>Loading your {view === "invoices" ? "invoices" : "quotes"}…</div>
+        ) : state.data && inTab.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
+            {view === "invoices"
+              ? (ssMode ? "No invoices yet. When you accept a quote, your invoice appears here for you to sign." : "Your builder sends invoices by email.")
+              : "No quotes yet — press Get Quote when your design is ready."}
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 300px), 1fr))", gap: 12, alignItems: "start" }}>
+            {inTab.map(card)}
+          </div>
+        )}
+        {view === "quotes" && saved && saved.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Saved designs</div>
+            {savedErr && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 6 }}>{savedErr}</div>}
+            <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10 }}>
+              {saved.map((d, i) => (
+                <div key={d.ref} data-saved-ref={d.ref} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderTop: i ? "1px solid #F1F5F9" : "none", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 180px", minWidth: 0, fontSize: 13, color: "#1E293B" }}>
+                    <b>{[d.style ? capWords(d.style) : null, d.size].filter(Boolean).join(" ") || "Design"}</b>
+                    {ssAcctDate(d.updatedAt) && <span style={{ color: "#94A3B8" }}> · saved {ssAcctDate(d.updatedAt)}</span>}
+                  </div>
+                  <button type="button" onClick={() => onOpenDesign && onOpenDesign(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 12px", background: accent, color: "#FFF" }}>Open</button>
+                  <button type="button" onClick={() => removeSaved(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 10px", background: "#FFF", color: "#64748B", border: "1px solid #E2E8F0" }}>Remove</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -10479,6 +11007,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return v ? { mode: gatePassed ? "login" : "gate", afterLogin: v } : null;
   });
   const [codePending, setCodePending] = useState(() => (embedded || ssReadCustSession(C.clientId) ? null : ssReadCodePending(C.clientId)));
+  //   accountFocus  the short code ?q= named — CustomerAccount lands on that card once, then clears it
+  //   custNotice    {text, tone} — a small bottom toast for account moments ("Your quote … is saved
+  //                 under Quotes."). NOT `toast`: that one is titled "Can't place here".
+  //   custTokenRef  the live token for async work that outlives a render (draft links)
+  const [accountFocus, setAccountFocus] = useState(() => (embedded || isAdmin ? null : ssQuoteRefParam()));
+  const [custNotice, setCustNotice] = useState(null);
+  const custTokenRef = useRef(custToken);
+  custTokenRef.current = custToken;
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
   // design overrides this from design.paint_colors on load.
   const [paintColors, setPaintColors] = useState(() => {
@@ -10664,6 +11200,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // rendered, no URL is rewritten, nothing changes for the visitor.
   const draftStateRef = useRef(null);  // JSON of the last draft-saved payload (skip no-op re-saves)
   const isDraftRef = useRef(false);    // the row behind currentDesignIdRef is a draft, safe to re-save
+  // ── Refresh keeps the design (plan 3.3, Ahsan 2026-09-15) ────────────────────────────────
+  // The same silent draft now also AUTOSAVES (effect below) and leaves a pointer,
+  // localStorage ss_draft_<clientId> = the draft's short code, so a reload — or a tablet that
+  // went to sleep at the expo — reopens the building instead of a blank plan.
+  //   draftBusyRef / draftAgainRef  one save in flight at a time. Two overlapping FIRST saves
+  //                                 would each mint a code and leave an orphan row; a change
+  //                                 that arrives mid-flight re-runs with the latest state after.
+  //   draftGenRef                   bumped whenever the canvas stops being "this draft" (submit,
+  //                                 Start New, Sign out, opening another design). A save that
+  //                                 lands after that must NOT adopt its code: adopting after a
+  //                                 submit would mark a sent quote as a draft again, and the
+  //                                 next autosave would rewrite the customer's quote.
+  //   draftSavesRef                 saves this page load. Every save_design writes a
+  //                                 design_versions row, so a tab left open all day stops at
+  //                                 SS_DRAFT_SAVE_CAP instead of writing thousands.
+  //   draftAdoptRef                 set for one call right after a restore: record what was
+  //                                 loaded as "already saved" rather than writing it straight back.
+  //   draftSaveFnRef                the latest saveDraftSilently, for timers and pagehide.
+  const draftBusyRef = useRef(false);
+  const draftAgainRef = useRef(false);
+  const draftGenRef = useRef(0);
+  const draftSavesRef = useRef(0);
+  const draftAdoptRef = useRef(false);
+  const draftSaveFnRef = useRef(null);
+  const draftKey = "ss_draft_" + (C.clientId || "");
+  // Saved designs (plan 3.6): a verified customer's autosaved draft is linked to their login
+  // through customer-designs, once per code. The function ships separately — until it exists
+  // the browser gets status 0 (its CORS preflight 404s) and linking switches itself off for
+  // this page load, silently. Never through callCustomer: a background save must not pop the
+  // login sheet over someone's drawing; the Quotes panel catches an expired session instead.
+  const designLinksRef = useRef({ codes: new Set(), off: false });
+  const linkSavedDesign = (code) => {
+    const token = custTokenRef.current;
+    const st = designLinksRef.current;
+    if (embedded || !supabase || !token || !code || st.off || st.codes.has(code)) return;
+    st.codes.add(code);
+    callCustomerFn(supabase, "customer-designs", { action: "link", clientId: C.clientId, token, code }).then((r) => {
+      if (r.ok) return;
+      if (r.status >= 500) { st.codes.delete(code); return; }   // transient — the next save retries
+      if (r.status === 0 || r.status === 404 || r.status === 401) st.off = true;
+    });
+  };
   const saveDraftSilently = () => {
     if (!customerFacing || !supabase) return;
     // Never write over a row we didn't create as a draft: someone re-opening a SUBMITTED
@@ -10681,8 +11259,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       p_bldg_h: bldgH,
     };
     const snapshot = JSON.stringify(body);
+    if (draftAdoptRef.current) { draftStateRef.current = snapshot; return; }
     if (snapshot === draftStateRef.current) return; // unchanged since the last draft save
+    if (draftBusyRef.current) { draftAgainRef.current = true; return; }
+    if (draftSavesRef.current >= SS_DRAFT_SAVE_CAP) return;
+    draftSavesRef.current += 1;
     const code = currentDesignIdRef.current || genShortCode();
+    const gen = draftGenRef.current;
+    draftBusyRef.current = true;
     (async () => {
       try {
         const { error } = await supabase.rpc("save_design", {
@@ -10693,12 +11277,84 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           p_status: "draft",   // the ONLY status the RPC accepts from an anon caller
         });
         if (error) return;     // best-effort: a failed draft save is invisible by design
+        if (gen !== draftGenRef.current) return;   // the canvas moved on (see draftGenRef)
         currentDesignIdRef.current = code;
         isDraftRef.current = true;
         draftStateRef.current = snapshot;
+        try { localStorage.setItem(draftKey, code); } catch (_e) {}
+        linkSavedDesign(code);
       } catch (_e) { /* draft save must never break the designer */ }
+      finally {
+        draftBusyRef.current = false;
+        if (draftAgainRef.current) {
+          draftAgainRef.current = false;
+          setTimeout(() => { if (draftSaveFnRef.current) draftSaveFnRef.current(); }, 0);
+        }
+      }
     })();
   };
+  draftSaveFnRef.current = saveDraftSilently;
+  // Autosave: 20 s after the last change, and on the way out (pagehide, or the tab going to the
+  // background — phones rarely fire pagehide). Only once the visitor is a lead we could call
+  // back — gate passed, a name and a 10-digit phone — because a nameless draft is a row nobody
+  // can ever connect to a person. Get Quote still needs none of this (decision 5).
+  const autosaveReady = customerFacing && !isAdmin && gatePassed && !submitted && !submitting
+    && Boolean(String(contact.name || "").trim()) && ssPhone10(contact.phone).length === 10;
+  const autosaveReadyRef = useRef(false);
+  autosaveReadyRef.current = autosaveReady;
+  useEffect(() => {
+    if (!autosaveReady) return;
+    const t = setTimeout(() => { if (draftSaveFnRef.current) draftSaveFnRef.current(); }, SS_DRAFT_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [autosaveReady, sel, items, paintColors, customOptions, roDimensions, bldgW, bldgH, contact]);
+  useEffect(() => {
+    if (!customerFacing) return;
+    const flush = () => { if (autosaveReadyRef.current && draftSaveFnRef.current) draftSaveFnRef.current(); };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", onVis); };
+  }, [customerFacing]);
+  // Signing in after the draft already exists links it then, not only on the next save.
+  useEffect(() => {
+    if (custToken && isDraftRef.current && currentDesignIdRef.current) linkSavedDesign(currentDesignIdRef.current);
+  }, [custToken]);
+  // Restore: a reload with no ?id= reopens the pointed-at draft — ONLY while it is still a
+  // draft. Submitted since (another tab, the rep), gone, or another tenant's: the pointer is
+  // dropped and the page starts blank as before. A failed READ keeps the pointer (offline for a
+  // moment is not a reason to lose someone's building). The gate flag is required too: Sign out
+  // and "Not you? Start over" clear both, so a pointer without a gate is not this visitor's.
+  useEffect(() => {
+    if (!supabase || embedded || isAdmin || !gatePassed) return;
+    let code = null;
+    try {
+      if (new URLSearchParams(window.location.search).get("id")) return;
+      code = localStorage.getItem(draftKey);
+    } catch (_e) { return; }
+    if (!code) return;
+    const dropPointer = () => { try { localStorage.removeItem(draftKey); } catch (_e) {} };
+    if (!/^SS-[A-Za-z0-9]{6,12}$/.test(code)) { dropPointer(); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data: rows, error } = await supabase.rpc("load_design", { p_code: code });
+        if (cancelled || error) return;
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (!row || row.status !== "draft" || (row.client_id && row.client_id !== C.clientId)) { dropPointer(); return; }
+        if (currentDesignIdRef.current) return;   // something else was opened meanwhile
+        const ok = await loadDesignByCode(code, NaN, () => cancelled);
+        if (!ok || cancelled) return;
+        // Let the load settle (size reflow, the verified-contact lock), then adopt it as saved.
+        setTimeout(() => {
+          if (cancelled || !draftSaveFnRef.current) return;
+          draftAdoptRef.current = true;
+          try { draftSaveFnRef.current(); } finally { draftAdoptRef.current = false; }
+        }, 1500);
+      } catch (_e) { /* restore is best-effort; the page simply starts blank */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, embedded]);
   // ─── Inventory (migration 075) — embedded-only ───
   // inventoryUnitRef: the unit a "Send estimate" flow came from; the submit success path
   // links the new design back to it. inventoryMaster: non-null while an inventory MASTER
@@ -14099,6 +14755,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // — from here on it is a submitted design and draft saves must leave it alone.
       isDraftRef.current = false;
       draftStateRef.current = null;
+      // …and the refresh pointer goes: the URL's ?id= reopens a sent quote now. The generation
+      // bump stops an autosave already in flight from re-adopting this code as a draft.
+      draftGenRef.current += 1;
+      if (!embedded) { try { localStorage.removeItem(draftKey); } catch (_e) {} }
       // Estimate sent from an inventory unit ("Send estimate"): tie the new design to its
       // unit so the Inventory tab lists it. Best-effort — a link failure must never break
       // a submitted estimate; the fire-and-forget catch keeps it silent.
@@ -14751,6 +15411,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   };
   // Every signed-in call goes through here so the token and the 401 rule are never forgotten.
   const callCustomer = (fn, body) => callCustomerFn(supabase, fn, { clientId: C.clientId, ...(body || {}), token: custToken }, { onExpired: expireCustSession });
+  const flashCustNotice = (text, tone) => {
+    const n = { text, tone: tone || "ok", at: Date.now() };
+    setCustNotice(n);
+    setTimeout(() => setCustNotice((cur) => (cur === n ? null : cur)), 5000);
+  };
+  // "Open design" / a saved design's Open, from the account panel. The work on the canvas is
+  // flushed first (a draft ≤20 s stale would otherwise lose those seconds), then the generation
+  // moves on so that flush can never re-adopt the old code over the design being opened.
+  // A DRAFT keeps autosaving and becomes the refresh pointer; anything already sent reopens by
+  // ?id= in the URL, exactly as a quote email link would, and draft saves leave it alone.
+  const openCustomerDesign = async (ref) => {
+    if (!ref) return false;
+    if (autosaveReady && draftSaveFnRef.current) draftSaveFnRef.current();
+    draftGenRef.current += 1;
+    const ok = await loadDesignByCode(ref);
+    if (!ok) { flashCustNotice("That design couldn't be opened. Check your connection and try again.", "err"); return false; }
+    setAccountView(null);
+    const p = new URLSearchParams(window.location.search);
+    p.delete("account"); p.delete("q"); p.delete("v");
+    try {
+      if (isDraftRef.current) { p.delete("id"); localStorage.setItem(draftKey, ref); }
+      else { p.set("id", ref); localStorage.removeItem(draftKey); }
+    } catch (_e) {}
+    window.history.replaceState({}, "", window.location.pathname + (p.toString() ? "?" + p.toString() : ""));
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (_e) { window.scrollTo(0, 0); }
+    flashCustNotice(isDraftRef.current ? "Your saved design is open — keep designing." : "Your design is open.");
+    return true;
+  };
   const onCustCodeSent = (p) => {
     setCodePending(p);
     try { sessionStorage.setItem(custKeys.pending, JSON.stringify(p)); } catch (_e) {}
@@ -14789,6 +15477,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     currentDesignIdRef.current = null;
     isDraftRef.current = false;
     draftStateRef.current = null;
+    draftGenRef.current += 1;           // an autosave in flight must not re-adopt their draft
+    designLinksRef.current = { codes: new Set(), off: false };
+    setAccountFocus(null);
     leadCapturedRef.current = false;
     ghlContactIdRef.current = null;
     ghlEstimateIdRef.current = null;
@@ -14850,6 +15541,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       localStorage.removeItem("ss_gate_" + (C.clientId || ""));
       localStorage.removeItem("ss_gate_name_" + (C.clientId || ""));
+      // "Not you?" — then the building restored on the next load isn't yours either.
+      localStorage.removeItem(draftKey);
     } catch (_e) {}
     // Strip the design code (and version) from the URL — a bare reload would keep
     // ?id=, which re-passes the gate and rehydrates the same contact, making the
@@ -15836,9 +16529,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       </div>
       )}
       {!embedded && custToken && accountView && (
-        <SSAccountHandoff key={accountView} view={accountView} clientId={C.clientId} accent={accent}
-          load={() => callCustomer("customer-quotes", { action: "list" })}
+        <CustomerAccount key={custToken} supabase={supabase} clientId={C.clientId} token={custToken}
+          view={accountView} focusRef={accountFocus} accent={accent} call={callCustomer}
+          custName={contact.name || (custIdentity && custIdentity.name) || ""}
+          onViewChange={setAccountView} onFocusDone={() => setAccountFocus(null)}
+          onOpenDesign={openCustomerDesign} onExpired={expireCustSession}
           onClose={() => setAccountView(null)} />
+      )}
+      {/* Account moments ("Your quote … is saved under Quotes.") — fixed at the bottom so it
+          never covers the header's account buttons, and polite so a screen reader hears it. */}
+      {!embedded && custNotice && (
+        <div role="status" aria-live="polite"
+          style={{ position: "fixed", left: "50%", bottom: 20, transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "calc(100% - 32px)",
+            background: custNotice.tone === "err" ? "#FEF2F2" : "#F0FDF4", border: `1px solid ${custNotice.tone === "err" ? "#FECACA" : "#BBF7D0"}`,
+            color: custNotice.tone === "err" ? "#991B1B" : "#166534", borderRadius: 12, padding: "12px 16px", fontSize: 14, fontWeight: 600,
+            boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 10, alignItems: "center", boxSizing: "border-box" }}>
+          <span style={{ flex: 1 }}>{custNotice.text}</span>
+          <button type="button" onClick={() => setCustNotice(null)} aria-label="Dismiss"
+            style={{ background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "inherit", padding: 0 }}>✕</button>
+        </div>
       )}
 
       {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
@@ -17782,6 +18491,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       Print quote (PDF)
                     </a>
                   )}
+                  {/* The PORTAL keeps Copy customer link (a rep sends it on). The public page
+                      shows the customer's own account block below instead (Carolyn 2026-09-14). */}
+                  {embedded && (
                   <button type="button"
                     onClick={(e) => {
                       const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(C.clientId)}`;
@@ -17793,6 +18505,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
                     Copy customer link
                   </button>
+                  )}
                   {/* PUSH TO INVOICE (Carolyn 2026-09-01) — the rep closes the sale here
                       instead of leaving for the portal and waiting on the customer.
 
@@ -17891,6 +18604,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
             </div>
           )}
+          {/* ACCEPT IT RIGHT HERE (Carolyn 2026-09-14 @23:23 — my-quotes' blocks on this screen).
+              Public page, SS quotes only: a GHL-mode estimate is accepted on GHL's hosted page and
+              the portal keeps its Copy link + Push to Invoice above. Signed in → the card for the
+              quote just created, Review & Accept already open. Signed out → the code first; Get
+              Quote never needed one (decision 5), accepting does. Keyed on the token so signing
+              in mounts a fresh list that contains this quote. */}
+          {!embedded && savedDesign && savedDesign.ssQuote && !savedDesign.changeOrder && (
+            custToken ? (
+              <CustomerAccount key={`${savedDesign.code}:${custToken}`} inline supabase={supabase} clientId={C.clientId} token={custToken}
+                view="quotes" focusRef={savedDesign.code} accent={accent} call={callCustomer}
+                custName={contact.name || (custIdentity && custIdentity.name) || ""}
+                onExpired={expireCustSession} />
+            ) : (
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+                <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this quote right here.</div>
+                <button type="button" onClick={() => openLoginSheet()}
+                  style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13 }}>
+                  Verify your phone to accept this quote
+                </button>
+              </div>
+            )
+          )}
           {estimateVersions.length > 0 && (() => {
             const cur = estimateVersions[0];
             const others = estimateVersions.slice(1);
@@ -17935,17 +18670,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </button>
             <button
               onClick={() => {
+                // START NEW KEEPS THE SESSION (plan 3.3). A signed-in customer is still the same
+                // person, so their contact stays too (the verified phone is locked to it anyway);
+                // only the building goes. The quote they just made is not lost — say where it is.
+                const keepPerson = !embedded && Boolean(custToken);
+                const madeQuote = savedDesign && savedDesign.ssQuote && savedDesign.estimateNumber;
                 setSubmitted(false);
                 setSavedDesign(null);
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-                setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
                 setPaintColors({ body: "", trim: "" });
                 setCustomOptions([]);
                 setRoDimensions({});
                 currentDesignIdRef.current = null;
                 isDraftRef.current = false;
                 draftStateRef.current = null;
+                draftGenRef.current += 1;
+                if (!embedded) {
+                  try { localStorage.removeItem(draftKey); } catch (_e) {}
+                  if (madeQuote) {
+                    flashCustNotice(custToken
+                      ? `Your quote ${savedDesign.estimateNumber} is saved under Quotes.`
+                      : `Your quote ${savedDesign.estimateNumber} is saved. Log in any time to find it under Quotes.`);
+                  }
+                }
                 ghlContactIdRef.current = null;
                 ghlEstimateIdRef.current = null;
                 ghlEstimateNumberRef.current = null;
