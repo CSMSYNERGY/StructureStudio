@@ -9299,7 +9299,15 @@ function ssCustErrText(r, fallback) {
 // on a TYPED phone, only on the token customer-auth mints after the OTP proves it.
 //
 // mode: "gate" (the interaction gate: name + phone always, it is the lead), "login" (header,
-// gate already passed), "code" (reopened from "Enter your code" with `pending`).
+// gate already passed), "code" (reopened from "Enter your code" with `pending`), "account"
+// (a ?account= / ?q= link — the rep's Copy customer link or sign-on-phone QR — opened signed out).
+//
+// "account" is NOT the gate (review 2026-09-15): the person holding that link is already the
+// builder's customer, on their own phone, there to see a quote or sign an invoice. Treating them
+// as a new lead titled the sheet "Log in to design your building", demanded a name, showed the
+// lead-gen consent box and filed capture-lead a second time for someone the CRM already has.
+// So it asks for the phone (or email) only, like /my-quotes always did, files no lead, and the
+// design gate opens when the code is verified (onVerified), not before.
 function LoginSheet({ config, supabase, accent, mode, notice, pending, initialName, initialPhone, onPass, onCodeSent, onVerified, onClose }) {
   const [name, setName] = useState(initialName || (pending && pending.name) || "");
   const [phone, setPhone] = useState(initialPhone ? formatPhoneDisplay(initialPhone) : "");
@@ -9322,6 +9330,10 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   const [now, setNow] = useState(() => Date.now());
   const sendFailsRef = useRef(0);
   const passedRef = useRef(false);
+  // The {name, phone, consent} capture-lead last filed from this sheet. A refused code request
+  // (a 429 on shared expo Wi-Fi, a 400) leaves the details step open, and every retry used to
+  // file the same person again — another captured_leads row and CRM write each press.
+  const lastLeadRef = useRef(null);
   useEffect(() => {
     let live = true;
     (async () => {
@@ -9350,9 +9362,19 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   // to sit where the number is collected. Only a returning visitor signing in by email skips it.
   const needPhone = mode === "gate" || channel === "sms";
   const needEmail = channel === "email";
+  // An account link files no lead (see "account" above), so it has no reason to insist on a name.
+  const isLead = mode !== "account";
   // Name is required wherever the phone is: capture-lead quietly skips a lead with no name,
   // and a ticked consent box that silently records nothing is worse than asking for a name.
-  const valid = (!needPhone || (name.trim().length > 0 && digits.length === 10)) && (!needEmail || ssEmailish(email));
+  //
+  // ⚠️ THE GATE UNLOCKS ON NAME + PHONE ALONE, whatever the code route (review 2026-09-15).
+  // With the builder's Settings default on Email, `valid` used to demand an email too, so a
+  // visitor who typed a name and phone could neither design nor be captured until they also
+  // gave an address — the lead blocked on the CODE's route, which decision 2 forbids. The email
+  // is only where the code goes: submit() files the lead and unlocks first, then asks for it.
+  const valid = mode === "gate"
+    ? name.trim().length > 0 && digits.length === 10
+    : (!needPhone || ((!isLead || name.trim().length > 0) && digits.length === 10)) && (!needEmail || ssEmailish(email));
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
   // ⚠️ CONSENT IS NOT REQUIRED TO CONTINUE, and that is deliberate. This gate is the builder's
@@ -9406,7 +9428,9 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
     // EXACTLY what the gate always sent. smsConsent + the verbatim sentence ride along:
     // capture-lead writes the consent record, and it is the only moment this page can prove
     // WHAT was shown and WHERE.
-    if (needPhone) {
+    const leadKey = JSON.stringify([name.trim(), digits, smsConsent]);
+    if (needPhone && isLead && lastLeadRef.current !== leadKey) {
+      lastLeadRef.current = leadKey;
       try {
         supabase.functions.invoke("capture-lead", { body: {
           clientId: config.clientId, name: name.trim(), phone,
@@ -9418,9 +9442,19 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
     }
     // The design unlocks HERE, before a code is even requested — see the ⚠️ above. Once per
     // sheet: "Use a different number" comes back through submit, and the gate is already open.
-    if (!passedRef.current) {
+    // An account link never unlocks here: it is not a lead, and the verified code opens the gate.
+    if (isLead && !passedRef.current) {
       passedRef.current = true;
       onPass({ name: name.trim(), phone: needPhone ? phone : "" });
+    }
+    // The gate let an Email default through without an address (see `valid`): the lead is in and
+    // the design is open, so this is the one thing left to ask for, and closing the sheet is fine.
+    if (needEmail && !ssEmailish(email)) {
+      setErr(email.trim()
+        ? "That email doesn't look right. Check it and we'll send your code there."
+        : "Add your email and we'll send your code there — your design is already unlocked.");
+      setBusy(false);
+      return;
     }
     const list = channels || ["sms"];
     if (!list.includes(channel)) {
@@ -9471,7 +9505,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   const offerChoice = Array.isArray(channels) && channels.includes("sms") && channels.includes("email");
   const title = step === "code" ? "Enter your code"
     : step === "unavailable" ? "Keep designing"
-    : (mode === "gate" ? "Log in to design your building" : "Log in");
+    : (mode === "gate" ? "Log in to design your building" : mode === "account" ? "Log in to see your quotes and invoices" : "Log in");
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.42)", backdropFilter: "blur(2.5px)", WebkitBackdropFilter: "blur(2.5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -9508,7 +9542,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
                 ))}
               </div>
             )}
-            <label style={lbl}>{needPhone ? "Name" : "Name (optional)"}</label>
+            <label style={lbl}>{needPhone && isLead ? "Name" : "Name (optional)"}</label>
             <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Your name" autoComplete="name" style={inp} autoFocus />
             {needPhone && (
               <>
@@ -9524,7 +9558,9 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
                   onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@example.com" style={{ ...inp, margin: "4px 0 16px" }} />
               </>
             )}
-            {needPhone && (
+            {/* The texting-consent box belongs to the LEAD form, where capture-lead records it. An
+                account link files no lead, so a box there would record nothing it claims to. */}
+            {needPhone && isLead && (
               <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
                 <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
                   style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
@@ -9576,9 +9612,13 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
         {step === "unavailable" && (
           <>
             <div style={{ fontSize: 14, color: "#334155", lineHeight: 1.5, margin: "6px 0 18px" }}>
-              {byEmail
-                ? "We couldn't email you a code right now — you can keep designing and still get your quote."
-                : "We couldn't text you a code right now — you can keep designing and still get your quote."}
+              {mode === "account"
+                ? (byEmail
+                  ? "We couldn't email you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes."
+                  : "We couldn't text you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes.")
+                : byEmail
+                  ? "We couldn't email you a code right now — you can keep designing and still get your quote."
+                  : "We couldn't text you a code right now — you can keep designing and still get your quote."}
             </div>
             <button type="button" onClick={onClose} style={primaryBtn(true)}>Keep designing →</button>
           </>
@@ -10992,7 +11032,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // computeSelectionRows either way, and only an explicit decline ever credits.
   const actionableIncludedKeys = includedItemKeys.filter((k) => ITEMS[k] && (embedded || !ITEMS[k].internalOnly));
 
-  const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+  // A remembered visitor comes back with the name and phone they gave the gate (review
+  // 2026-09-15). Only ss_gate_ and the name used to survive a reload, so the contact came back
+  // blank — and the draft autosave, which needs a name and a 10-digit phone, never started again
+  // for anyone whose draft wasn't restored (a reload inside the first 20 s, a dropped pointer).
+  // Public page only, and not on an ?id= reopen (that loads its own contact). Sign out and
+  // "Not you? Start over" clear all three keys.
+  const [contact, setContact] = useState(() => {
+    const blank = { name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" };
+    if (embedded) return blank;
+    try {
+      const params = new URLSearchParams(location.search);
+      const id = C.clientId || "";
+      if (params.get("id") || params.get("admin") === "1" || !localStorage.getItem("ss_gate_" + id)) return blank;
+      const phone = ssPhone10(localStorage.getItem("ss_gate_phone_" + id) || "");
+      return { ...blank, name: (localStorage.getItem("ss_gate_name_" + id) || "").trim(), phone: phone.length === 10 ? formatPhoneDisplay(phone) : "" };
+    } catch (_e) { return blank; }
+  });
   // Lead-capture gate: shoppers give name + phone before designing (the customer link is a
   // lead-gen tool). Bypassed for a returning shopper arriving via a saved-design link (?id=,
   // which loads their contact), the operator preview (?admin=1), and once remembered in this
@@ -11022,7 +11078,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //   custToken     the opaque bearer customer-auth minted (ssq_token_<clientId>, shared with /my-quotes)
   //   custIdentity  {phone, email, name} the token was PROVEN for — phone as 10 digits
   //   accountView   null | "quotes" | "invoices" — the account tab open under the header
-  //   loginSheet    null | {mode:"gate"|"login"|"code", notice?, afterLogin?} — a sheet opened on
+  //   loginSheet    null | {mode:"gate"|"login"|"code"|"account", notice?, afterLogin?} — a sheet opened on
   //                 purpose; the interaction gate still opens through gateOpen
   //   codePending   {channel, to, name, at} while a code is out but not entered — the header's
   //                 amber "Enter your code"
@@ -11030,10 +11086,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [custIdentity, setCustIdentity] = useState(() => (embedded ? null : ((ssReadCustSession(C.clientId) || {}).identity || null)));
   const [accountView, setAccountView] = useState(() => (embedded || isAdmin || !ssReadCustSession(C.clientId) ? null : ssAccountParam()));
   // A ?account= link opened signed out goes straight to the sheet, then to the tab it named.
+  // Always "account", gate passed on this device or not: the rep's link and QR land on the
+  // CUSTOMER's phone, and "gate" there asked an existing customer to be a lead again.
   const [loginSheet, setLoginSheet] = useState(() => {
     if (embedded || isAdmin || ssReadCustSession(C.clientId)) return null;
     const v = ssAccountParam();
-    return v ? { mode: gatePassed ? "login" : "gate", afterLogin: v } : null;
+    return v ? { mode: "account", afterLogin: v } : null;
   });
   const [codePending, setCodePending] = useState(() => (embedded || ssReadCustSession(C.clientId) ? null : ssReadCodePending(C.clientId)));
   //   accountFocus  the short code ?q= named — CustomerAccount lands on that card once, then clears it
@@ -11255,10 +11313,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const draftSaveFnRef = useRef(null);
   const draftKey = "ss_draft_" + (C.clientId || "");
   // Saved designs (plan 3.6): a verified customer's autosaved draft is linked to their login
-  // through customer-designs, once per code. The function ships separately — until it exists
-  // the browser gets status 0 (its CORS preflight 404s) and linking switches itself off for
-  // this page load, silently. Never through callCustomer: a background save must not pop the
-  // login sheet over someone's drawing; the Quotes panel catches an expired session instead.
+  // through customer-designs, once per code. The function is written (ss/login-srv-0914, commit
+  // 6e837e1, with migration 231) and deploys separately — until it is live the browser gets
+  // status 0 (its CORS preflight 404s) and linking switches itself off for this page load,
+  // silently. Never through callCustomer: a background save must not pop the login sheet over
+  // someone's drawing; the Quotes panel catches an expired session instead.
+  // ⚠️ A 404 WITH THE SERVER'S SENTENCE IS NOT "MISSING" (review 2026-09-15): customer-designs
+  // answers 404 "That design wasn't found on your account." when the draft's contact names a
+  // different phone/email than the login proved — e.g. the gate took number P, the code was
+  // verified for Q. That refusal forgets only that code, so the next save (contact now Q, via
+  // the verified-contact lock) links it; switching linking off there lost every later draft.
   const designLinksRef = useRef({ codes: new Set(), off: false });
   const linkSavedDesign = (code) => {
     const token = custTokenRef.current;
@@ -11268,11 +11332,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     callCustomerFn(supabase, "customer-designs", { action: "link", clientId: C.clientId, token, code }).then((r) => {
       if (r.ok) return;
       if (r.status >= 500) { st.codes.delete(code); return; }   // transient — the next save retries
+      const refused = r.data && typeof r.data.error === "string";
+      if (r.status === 404 && refused) { st.codes.delete(code); return; }   // not yours YET — see ⚠️
       if (r.status === 0 || r.status === 404 || r.status === 401) st.off = true;
     });
   };
-  const saveDraftSilently = () => {
+  //   draftCodeInflightRef          the code a FIRST save is minting while it is still in flight,
+  //                                 so an unload flush racing it writes the same row, not an orphan.
+  //   draftRestoringRef             true while a reload's restore is reading the pointed-at draft.
+  //                                 A save then would mint a fresh code over the pointer and make
+  //                                 the restore stand down ("something else was opened").
+  const draftCodeInflightRef = useRef(null);
+  const draftRestoringRef = useRef(false);
+  // opts.unload: the page is going away (pagehide, or hidden — a phone's version of leaving).
+  // ⚠️ AN ORDINARY FETCH DOES NOT SURVIVE THAT (review 2026-09-15; proven in Chrome: on a real
+  // reload the plain request never arrived and the keepalive one did, and this exact cross-origin
+  // POST, headers and all, reached a local server as the page went away). supabase.rpc cannot ask
+  // for keepalive, so the unload save is a direct PostgREST POST with keepalive:true, anon
+  // headers exactly as supabase-js sends them for this page, and the refresh pointer written
+  // BEFORE the answer — there may be no page left to receive it. A pointer to a save that then
+  // failed is harmless: the restore finds no row and drops it. Browsers cap keepalive bodies at
+  // 64 KiB, so a bigger design falls back to the ordinary save (best effort, as before).
+  const saveDraftSilently = (opts) => {
     if (!customerFacing || !supabase) return;
+    const unload = Boolean(opts && opts.unload);
+    if (draftRestoringRef.current) return;
     // Never write over a row we didn't create as a draft: someone re-opening a SUBMITTED
     // design from a share link must not have it silently rewritten by browsing further.
     if (currentDesignIdRef.current && !isDraftRef.current) return;
@@ -11290,12 +11374,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const snapshot = JSON.stringify(body);
     if (draftAdoptRef.current) { draftStateRef.current = snapshot; return; }
     if (snapshot === draftStateRef.current) return; // unchanged since the last draft save
-    if (draftBusyRef.current) { draftAgainRef.current = true; return; }
+    // An unload cannot wait for the save in flight: that request dies with the page.
+    if (draftBusyRef.current && !unload) { draftAgainRef.current = true; return; }
     if (draftSavesRef.current >= SS_DRAFT_SAVE_CAP) return;
-    draftSavesRef.current += 1;
-    const code = currentDesignIdRef.current || genShortCode();
+    const code = currentDesignIdRef.current || draftCodeInflightRef.current || genShortCode();
     const gen = draftGenRef.current;
+    if (unload) {
+      const payload = JSON.stringify({ p_code: code, p_client_id: C.clientId, ...body, p_image_url: null, p_status: "draft" });
+      let bytes = payload.length * 3;
+      try { bytes = new TextEncoder().encode(payload).length; } catch (_e) {}
+      if (bytes < 60000) {
+        draftSavesRef.current += 1;
+        currentDesignIdRef.current = code;
+        isDraftRef.current = true;
+        draftStateRef.current = snapshot;
+        try { localStorage.setItem(draftKey, code); } catch (_e) {}
+        const forget = () => { if (draftStateRef.current === snapshot) draftStateRef.current = null; };
+        try {
+          fetch(SUPABASE_URL + "/rest/v1/rpc/save_design", {
+            method: "POST", keepalive: true,
+            headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+            body: payload,
+          }).then((res) => {
+            if (!res.ok) { forget(); return; }   // the next save (if the page lives on) tries again
+            if (gen === draftGenRef.current) linkSavedDesign(code);
+          }, forget);
+        } catch (_e) { forget(); }
+        return;
+      }
+      if (draftBusyRef.current) return;   // too big for keepalive, and a save is already out
+    }
+    draftSavesRef.current += 1;
     draftBusyRef.current = true;
+    if (!currentDesignIdRef.current) draftCodeInflightRef.current = code;
     (async () => {
       try {
         const { error } = await supabase.rpc("save_design", {
@@ -11315,6 +11426,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       } catch (_e) { /* draft save must never break the designer */ }
       finally {
         draftBusyRef.current = false;
+        if (draftCodeInflightRef.current === code) draftCodeInflightRef.current = null;
         if (draftAgainRef.current) {
           draftAgainRef.current = false;
           setTimeout(() => { if (draftSaveFnRef.current) draftSaveFnRef.current(); }, 0);
@@ -11338,7 +11450,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   }, [autosaveReady, sel, items, paintColors, customOptions, roDimensions, bldgW, bldgH, contact]);
   useEffect(() => {
     if (!customerFacing) return;
-    const flush = () => { if (autosaveReadyRef.current && draftSaveFnRef.current) draftSaveFnRef.current(); };
+    const flush = () => { if (autosaveReadyRef.current && draftSaveFnRef.current) draftSaveFnRef.current({ unload: true }); };
     const onVis = () => { if (document.visibilityState === "hidden") flush(); };
     window.addEventListener("pagehide", flush);
     document.addEventListener("visibilitychange", onVis);
@@ -11364,7 +11476,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const dropPointer = () => { try { localStorage.removeItem(draftKey); } catch (_e) {} };
     if (!/^SS-[A-Za-z0-9]{6,12}$/.test(code)) { dropPointer(); return; }
     let cancelled = false;
+    // No saves until this settles (see draftRestoringRef). The contact now comes back on boot,
+    // so autosave is ready from the first render — a quick second reload used to be able to
+    // mint a new code over the pointer mid-restore.
+    draftRestoringRef.current = true;
     (async () => {
+      let adopting = false;
       try {
         const { data: rows, error } = await supabase.rpc("load_design", { p_code: code });
         if (cancelled || error) return;
@@ -11374,14 +11491,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const ok = await loadDesignByCode(code, NaN, () => cancelled);
         if (!ok || cancelled) return;
         // Let the load settle (size reflow, the verified-contact lock), then adopt it as saved.
+        adopting = true;
         setTimeout(() => {
+          draftRestoringRef.current = false;
           if (cancelled || !draftSaveFnRef.current) return;
           draftAdoptRef.current = true;
           try { draftSaveFnRef.current(); } finally { draftAdoptRef.current = false; }
+          linkSavedDesign(code);   // a draft saved on the way out never got its link answer
         }, 1500);
       } catch (_e) { /* restore is best-effort; the page simply starts blank */ }
+      finally { if (!adopting) draftRestoringRef.current = false; }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; draftRestoringRef.current = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supabase, embedded]);
   // ─── Inventory (migration 075) — embedded-only ───
@@ -15484,6 +15605,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       sessionStorage.removeItem(custKeys.pending);
     } catch (_e) {}
     const after = loginSheet && loginSheet.afterLogin;
+    // A verified code is more than the gate ever asked for, so it opens the design gate too. That
+    // is the only way an "account" sheet (the rep's link on a customer's phone) passes it: it
+    // files no lead and skips onPass, and a customer who just proved their number must not be
+    // stopped by "Log in to design your building" the first time they touch the plan.
+    if (!gatePassed) {
+      try {
+        localStorage.setItem("ss_gate_" + (C.clientId || ""), "1");
+        if (v.name) localStorage.setItem("ss_gate_name_" + (C.clientId || ""), v.name);
+        if (v.phone) localStorage.setItem("ss_gate_phone_" + (C.clientId || ""), v.phone);
+      } catch (_e) {}
+      setGatePassed(true);
+    }
     setCustToken(v.token);
     setCustIdentity({ phone: v.phone || null, email: v.email || null, name: v.name || null });
     setCodePending(null);
@@ -15501,6 +15634,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       localStorage.removeItem("ss_gate_" + (C.clientId || ""));
       localStorage.removeItem("ss_gate_name_" + (C.clientId || ""));
+      localStorage.removeItem("ss_gate_phone_" + (C.clientId || ""));
       localStorage.removeItem("ss_draft_" + (C.clientId || ""));
     } catch (_e) {}
     setCustToken(null); setCustIdentity(null); setAccountView(null); setCodePending(null); setLoginSheet(null);
@@ -15556,6 +15690,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (embedded || !custIdentity) return;
     setContact((p) => {
       let n = p;
+      // The name is NOT locked (it isn't what was verified) — only filled when empty, so a
+      // signed-in customer with no gate name on this device still has a contact autosave can use.
+      if (custIdentity.name && !String(p.name || "").trim()) n = { ...n, name: custIdentity.name };
       if (custIdentity.phone && ssPhone10(p.phone) !== custIdentity.phone) n = { ...n, phone: formatPhoneDisplay(custIdentity.phone) };
       if (custIdentity.email && String(p.email || "").trim().toLowerCase() !== custIdentity.email) n = { ...n, email: custIdentity.email };
       return n;
@@ -15573,9 +15710,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       localStorage.removeItem("ss_gate_" + (C.clientId || ""));
       localStorage.removeItem("ss_gate_name_" + (C.clientId || ""));
+      localStorage.removeItem("ss_gate_phone_" + (C.clientId || ""));
       // "Not you?" — then the building restored on the next load isn't yours either.
       localStorage.removeItem(draftKey);
     } catch (_e) {}
+    // Nor the code still out: sessionStorage survives the reload below, and the next person at a
+    // shared tablet was greeted by an amber "Enter your code" for the previous visitor's number.
+    try { sessionStorage.removeItem(custKeys.pending); } catch (_e) {}
     // Strip the design code (and version) from the URL — a bare reload would keep
     // ?id=, which re-passes the gate and rehydrates the same contact, making the
     // button a no-op on share-link reopens and post-submit pages.
@@ -15605,6 +15746,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         try {
           localStorage.setItem("ss_gate_" + (C.clientId || ""), "1");
           if (info && info.name) localStorage.setItem("ss_gate_name_" + (C.clientId || ""), info.name);
+          // The phone too, so a reload brings the contact back and autosave keeps going (see contact).
+          const gatePhone = info ? ssPhone10(info.phone || "") : "";
+          if (gatePhone.length === 10) localStorage.setItem("ss_gate_phone_" + (C.clientId || ""), gatePhone);
         } catch (_e) {}
         setGatePassed(true);
         setGateOpen(false);
