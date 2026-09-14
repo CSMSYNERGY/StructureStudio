@@ -37,6 +37,37 @@ export function myQuotesUrl(clientId: string, req?: Request | null): string {
   return `https://${hostFor(req)}/my-quotes?client=${encodeURIComponent(clientId)}`;
 }
 
+/** The quote reference shape customer-accept / customer-pay accept (quoteRef). */
+const REF_RE = /^[A-Za-z0-9_-]{4,32}$/;
+
+/**
+ * The customer's home IN THE DESIGNER: `/?client=<id>&account=quotes|invoices[&q=<ref>]`.
+ *
+ * Carolyn, 2026-09-14: accept and sign belong on the designer, not on a separate page. The designer
+ * reads `?account=` to open its Quotes / Invoices panel (logging the customer in first if needed)
+ * and `?q=` to focus one card — the my-quotes applyDeepLink behaviour, ported (expo plan 3.8).
+ *
+ * ⚠️ NOT CALLED YET, ON PURPOSE (2026-09-15). The designer that understands `?account=` reaches
+ * production only at the Monday 2026-09-21 promotion; edge functions go live the moment they deploy.
+ * Switching an email CTA before that would send production customers to a designer that ignores
+ * the parameter and shows them an empty building instead of their quote. The caller switch is a
+ * prepared patch, applied only after production serves the new designer bundle. `myQuotesUrl` and
+ * /my-quotes stay regardless: every email already sent links there.
+ *
+ * `view` is 'quotes' unless it is exactly 'invoices'. `ref` is dropped unless it has the short-code
+ * shape, so nothing a caller passes can add a parameter or reach the path.
+ */
+export function customerHomeUrl(
+  clientId: string,
+  req?: Request | null,
+  opts: { ref?: string | null; view?: string | null } = {},
+): string {
+  const view = opts.view === "invoices" ? "invoices" : "quotes";
+  const ref = String(opts.ref ?? "").trim();
+  const q = REF_RE.test(ref) ? `&q=${encodeURIComponent(ref)}` : "";
+  return `https://${hostFor(req)}/?client=${encodeURIComponent(clientId)}&account=${view}${q}`;
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
