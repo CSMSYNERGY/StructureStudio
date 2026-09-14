@@ -67,6 +67,13 @@
 
 begin;
 
+-- LOCK TIMEOUT (review, 2026-09-15). The ALTER below takes an ACCESS EXCLUSIVE lock on
+-- client_configs. Without a timeout it waits behind any open transaction touching that table, and
+-- every get_config call — the boot read for every tenant's public designer, beta AND production —
+-- then queues behind the waiting ALTER. 5 s fails fast and rolls the whole file back instead of
+-- stalling every designer page; just run it again. `set local` ends with this transaction.
+set local lock_timeout = '5s';
+
 -- ── 1. The column ────────────────────────────────────────────────────────────────────────────
 alter table public.client_configs
   add column if not exists styles_per_row smallint;
