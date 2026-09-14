@@ -40,8 +40,19 @@ import { clientIp } from "../_shared/adminGate.ts";
 
 // ── Throttle (customer_otp_throttle, migration 108) ──────────────────────────────────
 // Three buckets per send: '<clientId>:<digits>' (the target phone, per tenant),
-// 'ip:<caller>' (adminGate's clientIp — the leftmost x-forwarded-for hop), and
-// 'sends:tenant:<clientId>' (every send for the tenant — the forge-proof backstop).
+// 'ip:<clientId>:<caller>' (adminGate's clientIp — the leftmost x-forwarded-for hop — PER
+// TENANT), and 'sends:tenant:<clientId>' (every send for the tenant — the forge-proof backstop).
+//
+// ⚠️ THE IP BUCKET IS PER TENANT, AND THE CAPS ARE 20 / 60 (Ahsan, 2026-09-15 — decision 7
+// of the Carolyn 09-14 expo plan). The designer's gate becomes a login at the Shed Show Expo,
+// where every visitor on the venue Wi-Fi arrives from ONE public address. Under the old
+// shared 'ip:<caller>' bucket at 10 sends, the eleventh shopper at the booth was refused a
+// code — and so was every shopper of every OTHER builder at the same show, because the
+// bucket ignored the tenant. Scoping it to the tenant means one builder's busy booth can't
+// lock out another's, and 20 per IP / 60 per tenant per window covers a crowded booth.
+// What it costs: a pumper now has a separate 20-send IP budget per tenant — but the
+// tenant cap below is still the thing that bounds any one tenant's texting bill, and it
+// never trusted the IP anyway.
 //
 // Why three (audit 2026-08-20): the per-IP bucket is honest attribution and a brake on
 // naive scripts, but a client can PREPEND forged x-forwarded-for values and land every
@@ -64,8 +75,8 @@ import { clientIp } from "../_shared/adminGate.ts";
 const THROTTLE_WINDOW_MS = 15 * 60_000; // counters and the lockout both use 15 minutes
 const LOCKOUT_MS = 15 * 60_000;
 const MAX_SENDS_PER_PHONE = 3; // codes texted to one phone per window (per tenant)
-const MAX_SENDS_PER_IP = 10; // sends one caller may trigger per window, across phones
-const MAX_SENDS_PER_TENANT = 30; // ALL sends for one tenant per window — the XFF-proof backstop
+const MAX_SENDS_PER_IP = 20; // sends one caller may trigger per window, across phones, per tenant (was 10 — expo Wi-Fi, see above)
+const MAX_SENDS_PER_TENANT = 60; // ALL sends for one tenant per window — the XFF-proof backstop (was 30)
 const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are refused
 
 // ── The EMAIL channel (2026-08-30) ────────────────────────────────────────────────────
@@ -405,7 +416,11 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     const ip = clientIp(req);
     // Named once: the pre-check read and the claim below MUST address the same rows, and a
     // second copy of either template is how they would quietly stop doing so.
-    const ipBucketKey = `ip:${ip}`;
+    // Per TENANT (2026-09-15, see the header): a shared venue IP must not let one builder's
+    // booth spend another builder's shoppers' budget. It cannot collide with a phone bucket
+    // even for a tenant slugged "ip": a phone key is '<slug>:<10 digits>' with ONE colon (slugs
+    // carry none), and this key always has a second colon after the slug.
+    const ipBucketKey = `ip:${clientId}:${ip}`;
     // 'sends:tenant:<slug>' cannot collide with a phone bucket — even for a tenant whose
     // slug is literally "sends", a phone key ends in ':<10 digits>' and this one never
     // does — nor with an 'ip:' bucket.
@@ -421,13 +436,14 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       return json({ error: MSG_TOO_MANY_CODES }, 429);
     }
 
-    // Caps: 3 sends to one phone (per tenant) or 10 sends from one caller inside a
-    // window locks the breaching bucket(s) for 15 minutes. 30 sends tenant-wide refuses
-    // WITHOUT a lock — the un-forgeable backstop (audit 2026-08-20): a caller rotating
+    // Caps: 3 sends to one phone (per tenant) or 20 sends from one caller to one tenant
+    // inside a window locks the breaching bucket(s) for 15 minutes. 60 sends tenant-wide
+    // refuses WITHOUT a lock — the un-forgeable backstop (audit 2026-08-20): a caller rotating
     // x-forwarded-for gets a fresh ip bucket every request, but every send still lands in
-    // this one tenant bucket, so the tenant's Twilio bill is bounded at 30 texts per
+    // this one tenant bucket, so the tenant's Twilio bill is bounded at 60 texts per
     // 15 minutes however many IPs the attacker claims to be. Legitimate shoppers caught
-    // behind a tripped tenant cap are back the moment the window rolls over.
+    // behind a tripped tenant cap are back the moment the window rolls over. (Were 10 / 30
+    // until 2026-09-15 — raised for a crowded expo booth on one venue IP; see the header.)
     const phoneOver = phoneBucket !== null && phoneBucket.sendCount >= MAX_SENDS_PER_PHONE;
     const ipOver = ipBucket !== null && ipBucket.sendCount >= MAX_SENDS_PER_IP;
     const tenantOver = tenantBucket !== null && tenantBucket.sendCount >= MAX_SENDS_PER_TENANT;
@@ -631,7 +647,8 @@ async function handleEmailChannel(
   if (action === "request_code") {
     const ip = clientIp(req);
     // Named once, as on the phone path: the pre-check and the claim must address the same rows.
-    const ipBucketKey = `ip:${ip}`;
+    // And the SAME per-tenant key as the phone path, so switching channel buys no fresh budget.
+    const ipBucketKey = `ip:${clientId}:${ip}`;
     const tenantBucketKey = `sends:tenant:${clientId}`;
     const emailBucket = await readBucket(sb, emailBucketKey);
     const ipBucket = await readBucket(sb, ipBucketKey);
