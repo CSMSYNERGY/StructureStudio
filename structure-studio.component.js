@@ -5426,9 +5426,12 @@ function buildShed3DModel(THREE, p) {
       // A two-tone catalog door's chosen TRIM color drives its own casing; everything
       // else keeps the building trim (windows deliberately so — their color is the sash).
       const casingMat = (o.it.type === "fixtureDoor" && o.it.trimColorHex) ? mat(o.it.trimColorHex) : trimMat;
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
-      og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
-      og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+      // Every opening but a vent: a vent's own frame is its casing (see the vent branch below).
+      if (!isVentItem(o.it)) {
+        og.add(wallBox(casingMat, wf, o.a0 - f, o.a0, o.y0, o.y1 + f, 0, casingDepth));
+        og.add(wallBox(casingMat, wf, o.a1, o.a1 + f, o.y0, o.y1 + f, 0, casingDepth));
+        og.add(wallBox(casingMat, wf, o.a0 - f, o.a1 + f, o.y1, o.y1 + f, 0, casingDepth));
+      }
       // Bound to THIS opening's group and this wall — d3PhotoLayer above says what the layer is
       // and why the photo goes IN FRONT of the parametric fill instead of replacing it.
       const photoLayer = (entry, a0, a1, y0, y1, depth, tintHex) => d3PhotoLayer(og, wf, entry, a0, a1, y0, y1, depth, tintHex);
@@ -5437,20 +5440,31 @@ function buildShed3DModel(THREE, p) {
         // glass and no photo layer — a louvre is opaque, and the see-through pane that sells a
         // window would read here as a hole punched in the wall.
         //
-        // The depth ladder is plankDoorLeaf's, for plankDoorLeaf's reason: field 0 → frame 0.13
-        // → blades 0.16, each step about the 0.03 ft of relief the cladding uses, which is what
-        // casts the shadow lines that stop a small rectangle reading as a painted patch at the
-        // distance a customer actually orbits from.
-        //
         // Frame and blades take the vent's own fixed colour and fall back to the BUILDING TRIM,
         // not the body: a vent is millwork the builder paints with the trim, and falling back to
         // the body colour would make it vanish into the wall on every unconfigured catalog row.
+        //
+        // ⚠️ THE FRAME IS THE CASING (2026-09-15). This used to draw a four-board frame at 0.10-0.16
+        // INSIDE the three generic casing boxes every opening gets, whose faces stand on trimFace
+        // (0.18 panel, 0.26 batten/lap) — a frame within a frame, the inner one sunk behind the
+        // outer one and, on board-and-batten, behind the battens either side of it. Nobody frames a
+        // gable vent twice. buildOneWall now skips the generic casing for a vent, and these four
+        // boards take its job: each STRADDLES the hole's edge by vF, so it covers the cut end of
+        // the wall panels and the strips exactly as the casing did, and it is casingDepth deep and
+        // centred on the wall, so its front face lands on trimFace like every other casing in this
+        // renderer. The jambs run the full height; head and sill fit between them. The inner edge
+        // is unchanged (o.a0 + vF …), so the dark field and the blades keep their size.
+        //
+        // The shadow ladder inside is plankDoorLeaf's, for plankDoorLeaf's reason: field 0 →
+        // blades just behind the frame's face (trimFace - 0.04) → frame on trimFace, each step
+        // enough relief to cast the shadow lines that stop a small rectangle reading as a painted
+        // patch at the distance a customer actually orbits from.
         const ventMat = mat(o.it.colorHex || trimColor, { roughness: 0.7 });
         const vF = Math.min(0.14, (o.a1 - o.a0) * 0.16, (o.y1 - o.y0) * 0.16);
-        og.add(wallBox(ventMat, wf, o.a0, o.a0 + vF, o.y0, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a1 - vF, o.a1, o.y0, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y1 - vF, o.y1, 0.13, 0.06));
-        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y0, o.y0 + vF, 0.13, 0.06));
+        og.add(wallBox(ventMat, wf, o.a0 - vF, o.a0 + vF, o.y0 - vF, o.y1 + vF, 0, casingDepth));   // left jamb
+        og.add(wallBox(ventMat, wf, o.a1 - vF, o.a1 + vF, o.y0 - vF, o.y1 + vF, 0, casingDepth));   // right jamb
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y1 - vF, o.y1 + vF, 0, casingDepth));   // head
+        og.add(wallBox(ventMat, wf, o.a0 + vF, o.a1 - vF, o.y0 - vF, o.y0 + vF, 0, casingDepth));   // sill
         // The dark field BEHIND the blades. Without it the gaps between them show wall colour and
         // the vent reads as stripes painted on the siding rather than as an opening with blades
         // in it — the same trick the plank door's recessed slab plays.
@@ -5464,7 +5478,7 @@ function buildShed3DModel(THREE, p) {
           const pitch = vh / n, blade = pitch * 0.62;
           for (let k = 0; k < n; k++) {
             const b1 = vy1 - k * pitch;
-            og.add(wallBox(ventMat, wf, o.a0 + vF * 0.6, o.a1 - vF * 0.6, b1 - blade, b1, 0.16, 0.05));
+            og.add(wallBox(ventMat, wf, o.a0 + vF * 0.6, o.a1 - vF * 0.6, b1 - blade, b1, trimFace - 0.04, 0.05));
           }
         }
       } else if (o.it.type === "window") {
