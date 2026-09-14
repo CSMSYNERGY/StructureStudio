@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession, identityForClient } from "../_shared/customerSession.ts";
-import { ownsDesign } from "../_shared/customerIdentity.ts";
+import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
@@ -167,13 +167,20 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     .eq("client_id", identity.clientId)
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
+  // The shared-address rule (customerIdentity.ts, review 2026-09-15): an address this tenant has
+  // filed beside more than one phone owns nothing by email. Its own paged read, never `rows`
+  // above: that read is unpaged, and a row cap there would drop the older design that shows the
+  // address is shared. Reads nothing for a phone-only session.
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load quotes", addr.error);
+  const standing = addr.standing;
 
   const mine = (rows ?? [])
     .filter((d) => {
       // The verified identity — only this customer's designs. A verified phone matches the
-      // design's phone, a verified email the design's email, and neither is ever resolved to
-      // the other through a design (customerIdentity.ts, migration 230).
-      if (!ownsDesign(identity, d?.contact)) return false;
+      // design's phone, a verified email the design's email (unless that address is shared),
+      // and neither is ever resolved to the other through a design (customerIdentity.ts, 230).
+      if (!ownsDesign(identity, d?.contact, standing)) return false;
       // 'inventory' is the tenant's own spec-build master designs — internal stock, never
       // something this customer asked for. 'draft' is a silent capture the visitor never
       // knowingly created (saveDraftSilently fires when they open quote Details) — showing

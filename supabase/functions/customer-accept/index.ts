@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { acceptanceIdentityColumns, ownsDesign } from "../_shared/customerIdentity.ts";
+import { acceptanceIdentityColumns, loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
@@ -19,7 +19,8 @@ import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney
 // contract. Identity comes entirely from the customer_sessions token (phone OTP, migration
 // 108; emailed code, migration 230); a write only ever attaches to a design whose contact
 // phone matches the session's verified phone or whose contact email matches its verified
-// email (_shared/customerIdentity.ts ownsDesign — never one resolved to the other). Every
+// email (_shared/customerIdentity.ts ownsDesign — never one resolved to the other, and never by
+// an address this tenant has filed beside more than one phone: loadAddressStanding). Every
 // design_acceptances row records BOTH verified columns, each null when not proven.
 //
 // THE LADDER (Carolyn 2026-08-25 — "I want them to accept the quote to let us know, then I
@@ -374,7 +375,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
     if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
     if (!coDesign) return notYoursCo;
-    if (!ownsDesign(identity, coDesign?.contact)) return notYoursCo;
+    const coAddr = await loadAddressStanding(admin, identity.clientId, identity);
+    if (!coAddr.standing) return dbFail(req, identity.clientId, "load the quote", coAddr.error);
+    if (!ownsDesign(identity, coDesign?.contact, coAddr.standing)) return notYoursCo;
 
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status === "void") return json({ error: "This change was withdrawn by your builder — nothing to sign." }, 409);
@@ -579,7 +582,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     if (dErr) return dbFail(req, identity.clientId, "load the invoice", dErr);
     const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
     if (!d) return notYours;
-    if (!ownsDesign(identity, d?.contact)) return notYours;
+    const addr = await loadAddressStanding(admin, identity.clientId, identity);
+    if (!addr.standing) return dbFail(req, identity.clientId, "load the invoice", addr.error);
+    if (!ownsDesign(identity, d?.contact, addr.standing)) return notYours;
 
     const { data: settings, error: sErr } = await admin
       .from("client_settings")
@@ -818,7 +823,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // learns nothing about which short codes exist.
   const notYours = json({ error: "That quote wasn't found on your account." }, 404);
   if (!design) return notYours;
-  if (!ownsDesign(identity, design?.contact)) return notYours;
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load the quote", addr.error);
+  if (!ownsDesign(identity, design?.contact, addr.standing)) return notYours;
 
   // ── SS mode only ─────────────────────────────────────────────────────────────────────
   const { data: settings, error: settingsErr } = await admin

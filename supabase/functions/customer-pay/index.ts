@@ -25,7 +25,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, SS_REFUSAL_HEADER, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { ownsDesign } from "../_shared/customerIdentity.ts";
+import { loadAddressStanding, ownsDesign } from "../_shared/customerIdentity.ts";
 import {
   amountRefusalText,
   chargeInvoicePayment,
@@ -157,7 +157,10 @@ async function gate(req: Request, admin: any, identity: any, body: any): Promise
   // status here would confirm that somebody else's quote exists.
   const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
   if (!d) return notYours;
-  if (!ownsDesign(identity, d.contact)) return notYours;
+  // An email login only pays when its address isn't shared across customers (customerIdentity.ts).
+  const addr = await loadAddressStanding(admin, identity.clientId, identity);
+  if (!addr.standing) return dbFail(req, identity.clientId, "load your invoice", addr.error);
+  if (!ownsDesign(identity, d.contact, addr.standing)) return notYours;
 
   const { data: inv, error: iErr } = await admin.from("invoice_sends")
     .select("invoice_number, status, issued_by, signed_at, updated_at, document_at, deposit_cents")
