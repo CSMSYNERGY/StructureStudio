@@ -2,7 +2,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { checkSession } from "../_shared/customerSession.ts";
-import { phoneKey } from "../_shared/phoneKey.ts";
+import { acceptanceIdentityColumns, ownsDesign } from "../_shared/customerIdentity.ts";
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
@@ -17,7 +17,10 @@ import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney
 // customer-quotes is documented read-only and stays that way — accepting and signing are the
 // only writes a customer can perform, so they get their own function with their own narrow
 // contract. Identity comes entirely from the customer_sessions token (phone OTP, migration
-// 108); a write only ever attaches to a design whose contact phone matches the session phone.
+// 108; emailed code, migration 230); a write only ever attaches to a design whose contact
+// phone matches the session's verified phone or whose contact email matches its verified
+// email (_shared/customerIdentity.ts ownsDesign — never one resolved to the other). Every
+// design_acceptances row records BOTH verified columns, each null when not proven.
 //
 // THE LADDER (Carolyn 2026-08-25 — "I want them to accept the quote to let us know, then I
 // will [invoice]... I honestly want them to sign the invoice"):
@@ -279,7 +282,9 @@ async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestA
 
 // phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
 // three private copies of the check that decides whether a stranger can read, sign or PAY
-// someone else's invoice is how one of them drifts. Behaviour is unchanged.
+// someone else's invoice is how one of them drifts. Behaviour is unchanged. The whole
+// ownership compare followed it to _shared/customerIdentity.ts (2026-09-15, migration 230),
+// when a session could first be keyed on a verified email instead of a phone.
 
 const MAX_SIGNATURE_BYTES = 300 * 1024;
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47];
@@ -363,14 +368,13 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     const notYoursCo = json({ error: "That change order wasn't found on your account." }, 404);
     if (!co) return notYoursCo;
 
-    // The signature only attaches to a change on a design this verified phone owns.
+    // The signature only attaches to a change on a design this verified customer owns.
     const { data: coDesign, error: coDesignErr } = await admin.from("designs")
       .select("short_code, contact, ss_quote_number, estimate_lines, accepted_snapshot")
       .eq("client_id", identity.clientId).eq("short_code", co.short_code).maybeSingle();
     if (coDesignErr) return dbFail(req, identity.clientId, "load the quote", coDesignErr);
     if (!coDesign) return notYoursCo;
-    const coPhone = phoneKey(coDesign?.contact?.phone);
-    if (!coPhone || coPhone !== phoneKey(identity.phoneDigits)) return notYoursCo;
+    if (!ownsDesign(identity, coDesign?.contact)) return notYoursCo;
 
     if (co.status === "acknowledged") return json({ ok: true, already: true });
     if (co.status === "void") return json({ error: "This change was withdrawn by your builder — nothing to sign." }, 409);
@@ -467,7 +471,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       signer_name: signerName,
       typed_signature: typedSignature,
       consent_text: coConsent,
-      phone_digits: identity.phoneDigits,
+      ...acceptanceIdentityColumns(identity),
       session_seen_name: identity.name,
       ip,
       user_agent: userAgent,
@@ -575,8 +579,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     if (dErr) return dbFail(req, identity.clientId, "load the invoice", dErr);
     const notYours = json({ error: "That invoice wasn't found on your account." }, 404);
     if (!d) return notYours;
-    const dPhone = phoneKey(d?.contact?.phone);
-    if (!dPhone || dPhone !== phoneKey(identity.phoneDigits)) return notYours;
+    if (!ownsDesign(identity, d?.contact)) return notYours;
 
     const { data: settings, error: sErr } = await admin
       .from("client_settings")
@@ -679,7 +682,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       signer_name: signerName,
       typed_signature: typedSignature,
       consent_text: consentText,
-      phone_digits: identity.phoneDigits,
+      ...acceptanceIdentityColumns(identity),
       session_seen_name: identity.name,
       ip,
       user_agent: userAgent,
@@ -802,7 +805,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   const quoteRef = typeof body?.quoteRef === "string" ? body.quoteRef.trim() : "";
   if (!/^[A-Za-z0-9_-]{4,32}$/.test(quoteRef)) return json({ error: "Invalid quote reference." }, 400);
 
-  // ── The design, owned by this verified phone ────────────────────────────────────────
+  // ── The design, owned by this verified customer (phone or email) ────────────────────
   const { data: design, error: designErr } = await admin
     .from("designs")
     // selections + paint_colors ride along only for the accepted_snapshot stamp below (153).
@@ -815,8 +818,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // learns nothing about which short codes exist.
   const notYours = json({ error: "That quote wasn't found on your account." }, 404);
   if (!design) return notYours;
-  const designPhone = phoneKey(design?.contact?.phone);
-  if (!designPhone || designPhone !== phoneKey(identity.phoneDigits)) return notYours;
+  if (!ownsDesign(identity, design?.contact)) return notYours;
 
   // ── SS mode only ─────────────────────────────────────────────────────────────────────
   const { data: settings, error: settingsErr } = await admin
@@ -880,7 +882,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     signer_name: signerName,
     typed_signature: typedSignature,
     consent_text: consentText,
-    phone_digits: identity.phoneDigits,
+    ...acceptanceIdentityColumns(identity),
     session_seen_name: identity.name,
     ip,
     user_agent: userAgent,

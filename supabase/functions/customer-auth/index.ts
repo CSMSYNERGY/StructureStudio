@@ -9,7 +9,14 @@ import {
   twilioConfigured,
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
-import { mintSession, revokeSession } from "../_shared/customerSession.ts";
+import {
+  addIdentity,
+  type CustomerIdentity,
+  identityForClient,
+  mintSession,
+  type ProvenIdentity,
+  revokeSession,
+} from "../_shared/customerSession.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import {
   isPlausibleEmail, normalizeEmail, issueEmailOtp, verifyEmailOtp, emailOtpBody,
@@ -82,19 +89,25 @@ const MAX_FAILS_PER_PHONE = 5; // wrong codes before checks for that phone are r
 // ── The EMAIL channel (2026-08-30) ────────────────────────────────────────────────────
 // A second way in, because this function was SMS-ONLY and customer login therefore died on
 // ANY Twilio unavailability — an outage, a billing lapse, a mistyped token, or a messaging
-// suspension on the shared ISV account. The code is delivered by Resend FROM THE BUILDER'S
-// OWN DOMAIN, so it arrives from the same sender that sent the quote.
+// suspension on the shared ISV account. The code is sent from the PLATFORM's own domain on the
+// platform's Resend key (see the send site for why not the builder's), with the builder's name
+// in the body.
 //
-// ⚠️ THE SESSION IS STILL KEYED ON THE PHONE. customer_sessions.phone_digits is NOT NULL and
-// the whole quote lookup is phone-based, so a verified email is RESOLVED to a phone through
-// the tenant's designs. That resolution is the weak joint of this channel and is guarded
-// accordingly — designs.contact is written by whoever submitted the design, the anonymous
-// designer included, so it is a claim about a number and never proof of one. See the rules
-// at the resolution itself: only a design the customer would recognise as a quote may supply
-// an identity, and a number another address already answers to supplies none. If nothing
-// resolves, no identity is minted and the honest answer is that we have no quotes for that
-// address. That answer is only ever given AFTER the code is proven, which is what keeps the
-// NO ENUMERATION rule intact: the send path behaves identically for every address.
+// ⚠️ THE SESSION IS KEYED ON THE VERIFIED ADDRESS (re-opened 2026-09-15, migration 230). The
+// first version of this channel had nowhere to put an address — customer_sessions.phone_digits
+// was NOT NULL — so it RESOLVED a verified email to a phone read off the tenant's designs, and
+// minted the session on that phone. designs.contact is written by save_design, anon included,
+// so that pairing was a claim, never proof: pair your own inbox with someone else's number and
+// the session was theirs. It was switched off on 2026-09-06 for exactly that. Now a verified
+// address mints a session whose email_lower is that address and whose phone is NULL, and the
+// customer functions match designs on like-with-like (_shared/customerIdentity.ts ownsDesign).
+// There is no resolution step left to get wrong. Ahsan, 2026-09-15 (expo plan decision 3):
+// "Text AND email login codes before the expo."
+//
+// The same person by phone AND email: verify_code on either channel that presents a still-valid
+// session token for this tenant ADDS the newly proven identity to that session (addIdentity)
+// instead of minting a second one. A conflicting value (a different phone on a phone session)
+// is someone else on the same device and gets a fresh session of its own.
 //
 // ⚠️ Unlike the SMS path, WE hold this code — Twilio Verify holds its own. See
 // _shared/emailOtp.ts for why it is stored as a keyed hash and never a bare digest.
@@ -134,6 +147,32 @@ const refusal = (b: unknown, s = 503) => {
   r.headers.set("Access-Control-Expose-Headers", SS_REFUSAL_HEADER);
   return r;
 };
+
+/**
+ * The session a successful verify hands back. With a still-valid token for this tenant the proven
+ * identity is ADDED to that session and the same token comes back; otherwise (no token, a dead
+ * one, another tenant's, or one already holding a different value) a fresh session carrying ONLY
+ * what was just proven is minted. mintSession throws on a failed write, which withErrorLog turns
+ * into a logged 500 — a token with no row behind it would fail every later check silently.
+ */
+async function sessionAfterVerify(
+  // deno-lint-ignore no-explicit-any
+  sb: any,
+  clientId: string,
+  who: ProvenIdentity,
+  name: string | null,
+  presentedToken: unknown,
+): Promise<{ token: string; identity: CustomerIdentity }> {
+  if (typeof presentedToken === "string" && presentedToken) {
+    const merged = await addIdentity(sb, presentedToken, clientId, who, name);
+    if (merged) return { token: presentedToken, identity: merged };
+  }
+  const token = await mintSession(sb, clientId, who, name);
+  return {
+    token,
+    identity: { clientId, phoneDigits: who.phoneDigits ?? null, emailLower: who.emailLower ?? null, name },
+  };
+}
 
 type BucketState = {
   bucket: string;
@@ -341,7 +380,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     return json({ ok: true });
   }
 
-  if (action !== "request_code" && action !== "verify_code") {
+  if (action !== "request_code" && action !== "verify_code" && action !== "login_options") {
     return json({ error: "Unknown action" }, 400);
   }
 
@@ -350,7 +389,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   // the email route.
   const channel = body?.channel === "email" ? "email" : "sms";
 
-  // ── Shared validation for the two OTP actions ────────────────────────────────────────
+  // ── Shared validation for the two OTP actions (and login_options) ────────────────────
   // Tenant: slug shape + existence in client_configs (the same guard the public RPCs
   // and capture-lead use). One message for both failures — a probe can't tell "bad
   // shape" from "no such tenant".
@@ -360,39 +399,32 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     .select("client_id").eq("client_id", clientId).maybeSingle();
   if (!cfg) return json({ error: "Unknown builder link." }, 404);
 
-  // ── EMAIL CHANNEL: TURNED OFF 2026-09-06, and it must stay off until the identity model
-  // below changes. ───────────────────────────────────────────────────────────────────────
-  //
-  // The channel proves an EMAIL ADDRESS and then mints the session on a PHONE it read off a
-  // design's `contact` blob. That blob is written by `save_design`, which is granted to anon
-  // and stores it verbatim — so the phone is a claim by whoever filed the design, never a
-  // proven fact. Pair your own address with someone else's number, verify a code to your own
-  // inbox, and the session you get is theirs: `customer-quotes` lists every design matching
-  // that phone and `customer-accept` will sign their invoice on it.
-  //
-  // ⚠️ THE DEFENCES BELOW IN handleEmailChannel ARE REAL BUT NOT SUFFICIENT, so do not read
-  // them as a reason to re-open this. Skipping draft/inventory rows stops nothing an attacker
-  // does — `save_design` writes `coalesce(p_status,'sent')`, so OMITTING the status field
-  // files the plant as 'sent'. The contradiction rule (a number whose designs disagree about
-  // the address supplies no identity) is the one that bites, and it cannot fire for a tenant
-  // that does not collect email at all: every contact is phone-only, nothing contradicts, and
-  // the plant resolves.
-  //
-  // Cost of turning it off: none measured. Zero email codes had ever been issued on this
-  // project when it was disabled (`select count(*) from customer_email_otps` = 0; all 15
-  // customer sessions came through SMS), and the SMS channel — where the OTP proves the very
-  // phone the session is keyed on — is unaffected.
-  //
-  // To re-open it, mint the session on the VERIFIED ADDRESS instead of back-resolving to a
-  // phone: `customer_sessions.phone_digits` (NOT NULL, migration 108) needs to become
-  // nullable beside an `email_lower`, and `customer-quotes` / `customer-accept` /
-  // `customer-pay` need to match on the address when the session is email-keyed. Then delete
-  // this block. Everything under handleEmailChannel is left intact for that work.
+  // ── login_options {clientId} ─────────────────────────────────────────────────────────
+  // Which ways in this deployment can deliver a code right now, so the designer's login sheet
+  // offers only a channel that works (Text | Email). Answered after the tenant check above, and
+  // it reveals nothing that check does not: whether texting and platform email are configured is
+  // a property of the deployment, never of a customer.
+  //   sms    Twilio Verify credentials are present (twilioConfigured).
+  //   email  Resend is configured AND PLATFORM_EMAIL_DOMAIN_READY is "true" — the same two
+  //          gates request_code applies before it sends.
+  // defaultChannel is 'sms' whenever texting works — the phone is what the lead gate already
+  // collects — else 'email', else null (neither: the sheet says codes are unavailable and the
+  // shopper keeps designing, expo plan decision 2). Migration 231 adds the builder's own
+  // default (client_settings.customer_login_default); until then it is always this rule.
+  if (action === "login_options") {
+    const channels: string[] = [];
+    if (twilioConfigured()) channels.push("sms");
+    if (resendConfigured() && Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") === "true") channels.push("email");
+    return json({ ok: true, channels, defaultChannel: channels[0] ?? null });
+  }
+
+  // ── EMAIL CHANNEL: re-opened 2026-09-15 (migration 230) ─────────────────────────────────
+  // Switched off on 2026-09-06 because it minted the session on a phone read off a design's
+  // contact blob (see the header). handleEmailChannel now mints on the verified address alone,
+  // and the resolution step it used to run is gone — do not bring it back as a convenience
+  // ("find their phone so the old phone-only checks work"): that step IS the hole.
   if (channel === "email") {
-    return refusal({
-      error: "Signing in by email isn't available right now — use your mobile number and " +
-             "we'll text you a code.",
-    });
+    return handleEmailChannel(sb, req, action, body, clientId);
   }
 
   const phoneRaw = typeof body?.phone === "string" ? body.phone.trim().slice(0, 40) : "";
@@ -607,13 +639,15 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     }, 401);
   }
 
-  // Approved: the caller has PROVEN control of the phone. Clear the fail counter and
-  // mint the opaque bearer session — customer_sessions stores only its hash, and
-  // mintSession throws on a failed write (a token with no row behind it would fail
-  // every later check silently), which withErrorLog turns into a logged 500.
+  // Approved: the caller has PROVEN control of the phone. Clear the fail counter and hand back
+  // the opaque bearer session — customer_sessions stores only its hash. A still-valid token for
+  // this tenant (the shopper already verified by email) gains this phone instead of a second
+  // session being minted; see sessionAfterVerify.
   if (phoneBucket) await saveBucket(sb, phoneBucket, { fail: 0 });
-  const token = await mintSession(sb, clientId, digits, name);
-  return json({ ok: true, token, name });
+  const s = await sessionAfterVerify(sb, clientId, { phoneDigits: digits }, name, body?.token);
+  // `identity` (2026-09-15): {phone?, email?} — what this session has proven, for the designer's
+  // "Signed in as". Its own verified keys only.
+  return json({ ok: true, token: s.token, name: s.identity.name ?? name, identity: identityForClient(s.identity) });
 }));
 
 /**
@@ -819,88 +853,20 @@ async function handleEmailChannel(
   }
   if (emailBucket) await saveBucket(sb, emailBucket, { fail: 0 });
 
-  // ── Resolve the address to the phone identity the portal is built on ────────────────
-  // ⚠️ designs.contact IS A CLAIM, NOT EVIDENCE. Every design write goes through
-  // save_design, which the anonymous designer may call, and the contact blob is stored
-  // verbatim — so "a design in this tenant carries my address" says only that SOMEBODY typed
-  // that pair, not that the number beside the address belongs to whoever proved the address.
-  // Handing the newest such row's phone straight to mintSession would make the whole portal's
-  // ownership model (customer-quotes, customer-accept and customer-pay all authorise on
-  // phone_digits alone) rest on a field a stranger can write.
+  // ── The session is the VERIFIED ADDRESS — nothing is looked up (2026-09-15, migration 230) ──
+  // This used to read the tenant's designs, pick a phone that sat beside this address on one,
+  // and mint the session on that phone. designs.contact is written by save_design (anon
+  // included) and stored verbatim, so that phone was somebody's claim, and pairing your own
+  // inbox with a victim's number made their session yours — the reason this channel was off
+  // from 2026-09-06. The resolution is DELETED, not guarded: the session carries email_lower =
+  // the address just proven and a null phone, and customer-quotes / customer-accept /
+  // customer-pay match designs on that address directly (customerIdentity.ownsDesign).
   //
-  // The address must therefore resolve to a number this tenant's own records do not
-  // CONTRADICT. Two rules, both cheap:
-  //   1. only a design the customer would recognise as their quote may supply an identity.
-  //      'inventory' is the builder's own stock and 'draft' is the silent capture a visitor
-  //      never knowingly created — customer-quotes hides both, so neither could ever have
-  //      produced a portal to sign in to.
-  //   2. every other design carrying that same number must agree on the address. A number
-  //      that already answers to a different address in this tenant is spoken for, and the
-  //      honest answer is the noQuotes one below. A blank address claims nothing, so it
-  //      never contradicts.
-  // A number that fails rule 2 is skipped rather than fatal, so a customer who changed
-  // number still falls through to the older one they own.
-  //
-  // Tenant-wide read, matched in code: PostgREST cannot state the normalize-to-digits
-  // expression both sides of a phone comparison need (customer-quotes carries the same note),
-  // and the limit(200) this replaces silently truncated a busy tenant's older designs into
-  // the noQuotes answer.
-  const { data: matches } = await sb.from("designs")
-    .select("contact, created_at, status")
-    .eq("client_id", clientId)
-    .order("created_at", { ascending: false });
-  // deno-lint-ignore no-explicit-any
-  const designRows = (matches ?? []) as any[];
-  const contactEmail = (c: Record<string, unknown>) => normalizeEmail(String(c.email ?? ""));
-  const contactPhone = (c: Record<string, unknown>) => {
-    const raw = String(c.phone ?? "").replace(/\D/g, "");
-    return raw.length === 11 && raw.startsWith("1") ? raw.slice(1) : raw;
-  };
-
-  // Every address this tenant's designs carry for a given number, built in one pass so the
-  // contradiction test below is a lookup rather than a rescan.
-  const addressesByPhone = new Map<string, Set<string>>();
-  for (const d of designRows) {
-    if (d?.status === "inventory") continue;
-    const c = (d?.contact ?? {}) as Record<string, unknown>;
-    const ten = contactPhone(c);
-    const addr = contactEmail(c);
-    if (ten.length !== 10 || !addr) continue;
-    const seen = addressesByPhone.get(ten);
-    if (seen) seen.add(addr);
-    else addressesByPhone.set(ten, new Set([addr]));
-  }
-
-  let digits = "";
-  let foundName: string | null = null;
-  for (const d of designRows) {
-    if (d?.status === "draft" || d?.status === "inventory") continue;
-    const c = (d?.contact ?? {}) as Record<string, unknown>;
-    if (contactEmail(c) !== email) continue;
-    const ten = contactPhone(c);
-    if (ten.length !== 10) continue;
-    // The matched design contributed this address itself, so more than one means another
-    // address also answers to this number.
-    if ((addressesByPhone.get(ten)?.size ?? 0) > 1) continue;
-    digits = ten;
-    foundName = typeof c.name === "string" && c.name.trim() ? c.name.trim().slice(0, 80) : null;
-    break;
-  }
-
-  if (!digits) {
-    // They proved the address; there is simply nothing filed under it. Saying so is safe HERE
-    // — the enumeration rule governs the send path, and they have already proven control.
-    // No session is minted: customer_sessions.phone_digits is NOT NULL, and inventing an
-    // identity to satisfy a column would be a login as nobody.
-    return json({
-      ok: true,
-      noQuotes: true,
-      error: "That email is confirmed, but we don't have any quotes filed under it. " +
-             "Try signing in with the phone number on your quote instead.",
-    });
-  }
-
-  const token = await mintSession(sb, clientId, digits, name ?? foundName);
-  return json({ ok: true, token, name: name ?? foundName });
+  // Always a session, even for an address with nothing filed under it yet. The old noQuotes
+  // answer existed only because there was no phone to mint on; now an empty quote list is the
+  // honest answer, and it is still given only AFTER the code is proven (NO ENUMERATION holds).
+  // A still-valid token for this tenant gains this address instead (sessionAfterVerify).
+  const s = await sessionAfterVerify(sb, clientId, { emailLower: email }, name, body?.token);
+  return json({ ok: true, token: s.token, name: s.identity.name ?? name, identity: identityForClient(s.identity) });
 }
 

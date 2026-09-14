@@ -1,8 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
-import { checkSession } from "../_shared/customerSession.ts";
-import { phoneKey } from "../_shared/phoneKey.ts";
+import { checkSession, identityForClient } from "../_shared/customerSession.ts";
+import { ownsDesign } from "../_shared/customerIdentity.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { amountOwed, subtotalsFromSnapshot, taxFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
@@ -11,8 +11,9 @@ import { consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shar
 // customer-quotes: the authenticated quote list for the CUSTOMER portal (the shed
 // shopper's own view, not the tenant owner's). The caller presents the opaque bearer
 // token minted by customer-auth after Twilio Verify approved their phone OTP
-// (migration 108); identity — tenant + verified phone — comes entirely from that
-// session row, never from the request body.
+// (migration 108), or after they proved an emailed code (migration 230); identity —
+// tenant + verified phone and/or email — comes entirely from that session row, never
+// from the request body.
 //
 // This function serves ONE action, `list`. Logout is deliberately NOT here:
 // customer-auth minted the session, so customer-auth revokes it — one owner for the
@@ -48,7 +49,8 @@ function dbFail(req: Request, clientId: string | null, where: string, err: any) 
  *  renders as "sent" — the safe floor — rather than leaking internal vocabulary. */
 const CUSTOMER_STATUSES = new Set(["sent", "accepted", "invoiced", "delivered"]);
 
-// phoneKey moved to _shared/phoneKey.ts (174) — see the note in customer-accept.
+// phoneKey moved to _shared/phoneKey.ts (174), and the ownership compare built on it to
+// _shared/customerIdentity.ts ownsDesign (230) — see the note in customer-accept.
 
 /**
  * A document link leaves this function only when it names an object in THIS project's own
@@ -166,13 +168,12 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     .order("created_at", { ascending: false }); // newest first
   if (designsErr) return dbFail(req, identity.clientId, "load quotes", designsErr);
 
-  const identityPhone = phoneKey(identity.phoneDigits);
   const mine = (rows ?? [])
     .filter((d) => {
-      // The verified phone is the identity — only this customer's designs. Both sides
-      // through phoneKey: an 11-digit stored "1816…" must match the 10-digit session.
-      const phone = phoneKey(d?.contact?.phone);
-      if (!phone || phone !== identityPhone) return false;
+      // The verified identity — only this customer's designs. A verified phone matches the
+      // design's phone, a verified email the design's email, and neither is ever resolved to
+      // the other through a design (customerIdentity.ts, migration 230).
+      if (!ownsDesign(identity, d?.contact)) return false;
       // 'inventory' is the tenant's own spec-build master designs — internal stock, never
       // something this customer asked for. 'draft' is a silent capture the visitor never
       // knowingly created (saveDraftSilently fires when they open quote Details) — showing
@@ -429,10 +430,10 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     }));
 
   // `identity` (2026-09-15): who this session proved to be, for the designer header's
-  // "Signed in as (816) 300-3600". It is the SESSION's own verified key — the 10 digits the
-  // OTP was checked against — never anything read off a design's contact blob, so the
-  // migration-048 rule above still holds: no address, no email, no other person's data.
-  // A token that leaks already lists this phone's quotes; naming the phone adds nothing.
-  // The email half arrives with email login (migration 230); until then it is absent.
-  return json({ ok: true, businessName, name: identity.name, identity: { phone: identity.phoneDigits }, ssMode, quotes });
+  // "Signed in as (816) 300-3600" / "Signed in as pat@example.com". {phone?, email?}, each key
+  // present only when that identity was proven by a code. They are the SESSION's own verified
+  // keys — never anything read off a design's contact blob — so the migration-048 rule above
+  // still holds: no other person's data. A token that leaks already lists this identity's
+  // quotes; naming the identity adds nothing.
+  return json({ ok: true, businessName, name: identity.name, identity: identityForClient(identity), ssMode, quotes });
 }));
