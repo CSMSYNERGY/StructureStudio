@@ -49,6 +49,23 @@ async function shot(page, name) {
 async function stubBackend(page, o = {}) {
   const calls = [];
   const respond = async (spec, body) => (typeof spec === "function" ? spec(body) : spec);
+  // ⚠️ THE UNLOAD DRAFT SAVE CANNOT BE STUBBED WHERE IT IS GOING (proven 2026-09-15). The designer
+  // sends it as a keepalive fetch straight to <project>/rest/v1/rpc/save_design as the page
+  // unloads. Chrome delivers that request — a local cross-origin server received it on a real
+  // reload — but NEITHER page.route NOR context.route can hold a cross-origin request from a
+  // document that is going away: page.route aborted it, and context.route let it straight past to
+  // the network. Left alone, a reload test would write a draft to the LIVE project. So every
+  // keepalive save_design is sent to a same-origin path instead: page.route does catch a
+  // same-origin unload keepalive, the rpc stub below matches it (its pattern has no host), and a
+  // miss can only reach the local static server. Only the destination changes; the body, headers
+  // and timing are the product's own.
+  await page.addInitScript(() => {
+    const realFetch = window.fetch;
+    window.fetch = function (u, opts) {
+      if (opts && opts.keepalive && /\/rest\/v1\/rpc\/save_design$/.test(String(u))) return realFetch.call(this, "/__e2e/rest/v1/rpc/save_design", opts);
+      return realFetch.apply(this, arguments);
+    };
+  });
   await page.route(/\/functions\/v1\/[a-z0-9-]+/, async (route) => {
     const req = route.request();
     if (req.method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
@@ -102,6 +119,16 @@ async function boot(page, path = `/?client=${CLIENT}`) {
 async function armATool(page) {
   await page.getByRole("button", { name: /Workbench|Loft Area|Window wall$/ }).first().click();
 }
+
+// The test tenant's catalog is LIVE and moves under the suite: on 2026-09-15 pw-demo-barns went
+// from several styles (Utility, sizes from 8x10) to one "Lofted Barn" (10x12–12x24), and every
+// driver that clicked "Utility" or picked "8x10" timed out with the product working fine. So pick
+// the FIRST style card under the heading and a size the select actually offers, never a name.
+async function pickFirstStyle(page) {
+  await page.getByText("Select Your Building Style", { exact: true }).locator("xpath=following-sibling::*[1]/*[1]").click();
+}
+const sizeSelectOf = (page) => page.locator("select").filter({ has: page.locator("option", { hasText: "Select a size…" }) });
+const sizeValues = (page) => sizeSelectOf(page).evaluate((s) => [...s.options].map((o) => o.value).filter(Boolean));
 
 async function fillGateDetails(sheet) {
   await sheet.getByPlaceholder("Your name").fill("Pat Tester");
@@ -173,6 +200,51 @@ test("the gate is the login: design unlocks before the code, and the code can wa
   await page.waitForTimeout(300);
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(authCall(calls, "verify_code")).toBeFalsy();
+  expect(await ls(page, "ss_gate_phone_" + CLIENT)).toBe(PHONE10);          // a reload keeps the contact
+
+  // "Not you? Start over" (the shared expo tablet) lets go of the code still out as well: the
+  // next person must not be greeted by "Enter your code" for the previous visitor's number.
+  await Promise.all([page.waitForEvent("load"), page.getByRole("button", { name: "Not you? Start over" }).click()]);
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Enter your code" })).toHaveCount(0);
+  expect(await ls(page, "ss_gate_phone_" + CLIENT)).toBeNull();
+  await expect(page.getByPlaceholder("Full Name")).toHaveValue("");
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+// Decision 2 with the builder's Settings default on Email (review 2026-09-15): the email is only
+// where the code goes. Name + phone unlock the design and file the lead; the sheet then asks for
+// the address, and pressing again files nothing twice.
+test("an Email default never holds the gate: name and phone unlock and file the lead once, the email only routes the code", async ({ page }) => {
+  const errors = watchConsole(page);
+  const calls = await stubBackend(page, {
+    loginOptions: { status: 200, body: { ok: true, channels: ["sms", "email"], defaultChannel: "email" } },
+  });
+  await boot(page);
+  await armATool(page);
+  const sheet = page.getByRole("dialog");
+  await expect(sheet.getByRole("group", { name: "Send my code by" }).getByRole("button", { name: "Email" })).toHaveAttribute("aria-pressed", "true");
+  await fillGateDetails(sheet);
+  const logIn = sheet.getByRole("button", { name: "Log in →" });
+  await expect(logIn).toBeEnabled();                                          // no email typed
+  await logIn.click();
+  await expect(sheet.getByRole("alert")).toHaveText("Add your email and we'll send your code there — your design is already unlocked.");
+  expect(await ls(page, "ss_gate_" + CLIENT)).toBe("1");
+  expect(calls.filter((c) => c.fn === "capture-lead")).toHaveLength(1);
+  expect(authCall(calls, "request_code")).toBeFalsy();
+  await shot(page, "07b-sheet-email-default-no-address");
+
+  await logIn.click();                                                        // nothing changed: no second lead
+  await sheet.getByPlaceholder("you@example.com").fill("pat@example.com");
+  await logIn.click();
+  await expect(sheet.getByText("We emailed a 6-digit code to pat@example.com.")).toBeVisible();
+  expect(calls.filter((c) => c.fn === "capture-lead")).toHaveLength(1);
+  expect(authCall(calls, "request_code").body).toMatchObject({ channel: "email", email: "pat@example.com" });
+  await sheet.getByRole("button", { name: "Keep designing, I'll enter it later" }).click();
+  await armATool(page);
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
 
@@ -281,6 +353,13 @@ test("texting unavailable (503) says so kindly, and Get Quote still works withou
   const errors = watchConsole(page);
   const calls = await stubBackend(page, {
     requestCode: { status: 503, body: { error: "Sign-in by text isn't available yet." } },
+    rpc: { list_design_versions: { status: 200, body: [] } },
+  });
+  let estimate = null;
+  await page.route(/\/functions\/v1\/submit-estimate/, (route) => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
+    estimate = route.request().postDataJSON();
+    return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(SUBMIT_OK.body) });
   });
   await boot(page);
   await armATool(page);
@@ -294,13 +373,15 @@ test("texting unavailable (503) says so kindly, and Get Quote still works withou
   await expect(page.getByRole("button", { name: "Enter your code" })).toHaveCount(0);   // nothing was sent
   await expect(page.getByRole("button", { name: "Log in", exact: true })).toBeVisible();
 
-  // Get Quote runs its own checks (or saves) — it never asks for a code.
-  const before = calls.length;
+  // Get Quote never asks for a code (decision 5): a whole quote goes out on the unverified
+  // contact — saved, submitted, "Quote Created!" — with no sheet and no verify_code anywhere.
+  await fillQuoteForm(page);
   await page.getByRole("button", { name: "Get Quote", exact: true }).click();
-  await expect.poll(async () =>
-    calls.slice(before).some((c) => c.fn === "rpc:save_design")
-    || (await page.getByText(/^Please (fill in|select|place)/).count()) > 0,
-  ).toBe(true);
+  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+  expect(estimate, "submit-estimate was called").toBeTruthy();
+  expect(calls.some((c) => c.fn === "rpc:save_design")).toBe(true);
+  expect(authCall(calls, "verify_code")).toBeFalsy();
+  expect(calls.filter((c) => c.fn === "customer-auth" && c.action === "request_code")).toHaveLength(1);
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
@@ -569,8 +650,12 @@ test("autosave leaves a pointer on the way out, a reload restores that draft, an
     },
   });
   await boot(page);
-  await page.getByPlaceholder("Full Name").fill("Pat Tester");
-  await page.locator("select").filter({ has: page.locator("option", { hasText: "Select a size…" }) }).selectOption("8x10");
+  // Nothing typed: the gate's remembered name comes back on boot and the verified phone is locked
+  // in, which is exactly what autosave needs (the name used to come back blank and stop it).
+  await expect(page.getByPlaceholder("Full Name")).toHaveValue("Pat Tester");
+  await pickFirstStyle(page);
+  const [size] = await sizeValues(page);
+  await sizeSelectOf(page).selectOption(size);
   await page.waitForTimeout(400);
   expect(calls.some((c) => c.fn === "rpc:save_design")).toBe(false);          // 20 s debounce: nothing yet
   // The tab goes to the background (what a phone does instead of pagehide): flush now.
@@ -580,7 +665,7 @@ test("autosave leaves a pointer on the way out, a reload restores that draft, an
   });
   await expect.poll(() => saved && saved.p_code).toMatch(/^SS-[A-Z0-9]{10}$/);
   expect(saved).toMatchObject({ p_client_id: CLIENT, p_status: "draft", p_image_url: null });
-  expect(saved.p_selections.size).toBe("8x10");
+  expect(saved.p_selections.size).toBe(size);
   expect(saved.p_contact).toMatchObject({ name: "Pat Tester", phone: PHONE_SHOWN });   // the verified phone, locked
   await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toBe(saved.p_code);
   // Signed in, so the draft is linked to the login once (plan 3.6).
@@ -608,11 +693,107 @@ test("autosave leaves a pointer on the way out, a reload restores that draft, an
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
 
+// The review's two gaps, driven for real (2026-09-15): a SIGNED-OUT visitor, a reload with no
+// faked visibility (the save has to leave WITH the page — keepalive), and a contact that comes
+// back after a reload so autosave keeps going on its own 20 s timer.
+test("signed out: the contact survives a reload, a reload straight after a change keeps it, and autosave carries on", async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = watchConsole(page);
+  const rows = new Map();
+  const saves = [];
+  const calls = await stubBackend(page, {
+    requestCode: { status: 503, body: { error: "Sign-in by text isn't available yet." } },
+    rpc: {
+      save_design: (b) => { saves.push(b); rows.set(b.p_code, b); return { status: 200, body: null }; },
+      load_design: (b) => {
+        const s = rows.get(b.p_code);
+        return { status: 200, body: s ? [{ short_code: s.p_code, client_id: CLIENT, status: "draft", selections: s.p_selections, items: s.p_items,
+          paint_colors: s.p_paint_colors, custom_options: s.p_custom_options, ro_dimensions: s.p_ro_dimensions, contact: s.p_contact }] : [] };
+      },
+    },
+  });
+  const sizeSelect = page.locator("select").filter({ has: page.locator("option", { hasText: "Select a size…" }) });
+  await boot(page);
+  await armATool(page);
+  const sheet = page.getByRole("dialog");
+  await fillGateDetails(sheet);
+  await sheet.getByRole("button", { name: "Log in →" }).click();
+  await sheet.getByRole("button", { name: "Keep designing →" }).click();
+  await expect(sheet).toHaveCount(0);
+
+  // 1. A reload before anything is designed: no draft, but the contact comes back.
+  await page.reload();
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  await expect(page.getByPlaceholder("Full Name")).toHaveValue("Pat Tester");
+  await expect(page.locator('input[placeholder="(555) 555-5555"]')).toHaveValue(PHONE_SHOWN);
+  expect(saves).toHaveLength(0);
+
+  // 2. Change the design and reload AT ONCE — well inside the 20 s debounce.
+  await pickFirstStyle(page);
+  const [size] = await sizeValues(page);
+  await sizeSelect.selectOption(size);
+  await page.waitForTimeout(300);
+  expect(saves).toHaveLength(0);
+  await page.reload();
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  await expect.poll(() => saves.length).toBe(1);
+  const first = saves[0];
+  expect(first).toMatchObject({ p_client_id: CLIENT, p_status: "draft", p_image_url: null });
+  expect(first.p_code).toMatch(/^SS-[A-Z0-9]{10}$/);
+  expect(first.p_selections.size).toBe(size);
+  expect(first.p_contact).toMatchObject({ name: "Pat Tester", phone: PHONE_SHOWN });
+  expect(await ls(page, "ss_draft_" + CLIENT)).toBe(first.p_code);
+  await expect(sizeSelect).toHaveValue(size);                                   // restored
+  expect(calls.filter((c) => c.fn === "capture-lead")).toHaveLength(1);        // the gate's one lead, no more
+
+  // 3. After the restore settles, a change saves on the ordinary timer, under the same code.
+  await page.waitForTimeout(2000);
+  expect(saves).toHaveLength(1);                                               // adopting wrote nothing back
+  const other = (await sizeValues(page)).find((v) => v !== size);
+  await sizeSelect.selectOption(other);
+  await expect.poll(() => saves.length, { timeout: 35_000 }).toBe(2);
+  expect(saves[1].p_code).toBe(first.p_code);
+  expect(saves[1].p_selections.size).toBe(other);
+  expect(saves[1].p_contact).toMatchObject({ name: "Pat Tester", phone: PHONE_SHOWN });
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+// The rep's Copy customer link / sign-on-phone QR lands on the CUSTOMER's own phone, signed out
+// and with no gate on that device (review 2026-09-15). It is a login to see a quote or sign an
+// invoice — not the lead gate: no "design your building", no name demanded, no consent box, no
+// second capture-lead. The verified code then opens both the account and the design.
+test("the rep's account link, opened signed out on a new phone: a phone-only login, no lead filed, then Invoices", async ({ page }) => {
+  const errors = watchConsole(page);
+  const calls = await stubBackend(page, { quotes: () => listBody(quoteFixtures()) });
+  await boot(page, `/?client=${CLIENT}&account=invoices&q=SS-INVOICE002`);
+  const sheet = page.getByRole("dialog");
+  await expect(sheet.getByText("Log in to see your quotes and invoices")).toBeVisible();
+  await expect(sheet.getByText("Log in to design your building")).toHaveCount(0);
+  await expect(sheet.getByText("We'll text you a code to open your quotes and invoices.")).toBeVisible();
+  await expect(sheet.getByRole("checkbox")).toHaveCount(0);
+  await expect(sheet.getByText("Name (optional)")).toBeVisible();
+  await sheet.getByPlaceholder("(555) 555-5555").fill(PHONE10);
+  await shot(page, "18-account-link-signed-out");
+  await sheet.getByRole("button", { name: "Log in →" }).click();
+  await expect(sheet.getByText(`We texted a 6-digit code to ${PHONE_SHOWN}.`)).toBeVisible();
+  expect(calls.some((c) => c.fn === "capture-lead")).toBe(false);
+  expect(await ls(page, "ss_gate_" + CLIENT)).toBeNull();                      // typing a phone unlocks nothing
+  await sheet.locator("#ss-login-code").fill("123456");
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Your invoices" }).locator('[data-ref="SS-INVOICE002"]')).toBeVisible();
+  expect(await ls(page, "ss_gate_" + CLIENT)).toBe("1");                       // the code opened the gate too
+  await armATool(page);
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(calls.some((c) => c.fn === "capture-lead")).toBe(false);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
 // ── The success screen (public page) ─────────────────────────────────────────────────────────
 // Drives a real Get Quote with submit-estimate, storage and save_design stubbed: the quote PDF is
 // rendered and "uploaded" to the stub, and the SS-mode response is what the screen reacts to.
 async function fillQuoteForm(page) {
-  await page.getByText("Utility", { exact: true }).first().click();
+  await pickFirstStyle(page);
   await page.locator("select").filter({ has: page.locator("option", { hasText: "Select a size…" }) }).selectOption({ index: 3 });
   await page.getByPlaceholder("Full Name").fill("Pat Tester");
   await page.getByPlaceholder("email@example.com").fill("pat@example.com");
