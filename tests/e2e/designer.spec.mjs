@@ -2,7 +2,7 @@
 // collision refusals, and the window-overlap rule. Real mouse clicks (the app snaps by the
 // click's client coordinates, so a synthetic click with the wrong CTM lands elsewhere).
 import { test, expect } from "@playwright/test";
-import { CLIENT, bypassGate, watchConsole, designerItems, planPoint } from "./helpers.mjs";
+import { CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint } from "./helpers.mjs";
 
 async function arm(page, label) {
   await page.getByRole("button", { name: label }).first().click();
@@ -270,4 +270,174 @@ test("selecting a wall item draws no dimension chips on the plan", async ({ page
   await clickPlan(page, 5, 0);
   const selected = await ftIn();
   expect(selected, "selecting an item must not paint new dimensions on the plan").toEqual(unselected);
+});
+
+// ── LAYOUT, Carolyn's screen share 2026-09-14 (style bar, Included callout, designs list) ──────
+// These three were proven by throwaway scripts on the branch that shipped them; this is the part
+// worth keeping, so a later edit to one twin cannot quietly undo it.
+//
+// SUPABASE IS ROUTED for these, unlike the tests above. Reads pass through; get_config is
+// REWRITTEN per case (the test tenant has one style and no inclusions, and its stylesPerRow is
+// whatever someone last saved); the design-version RPCs are FAKED; and every other call (a
+// save_design, a log row, an edge function) is answered locally, so nothing is written to the
+// tenant. `o` is mutable: a case sets o.rewrite / o.design before its goto.
+const LAYOUT_READS = /\/rest\/v1\/rpc\/(get_config|get_catalog|get_fixtures)\b/;
+async function routeLayout(page) {
+  const o = { rewrite: null, design: null, versions: [], cfg: null };
+  await page.route(`${SUPABASE_URL}/**`, async (route) => {
+    const req = route.request(); const u = req.url();
+    const json = (body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (/\/rpc\/get_config\b/.test(u)) {
+      const resp = await route.fetch();
+      const j = await resp.json();
+      if (o.rewrite) o.rewrite(j);
+      o.cfg = j;
+      return route.fulfill({ response: resp, json: j });
+    }
+    if (o.design && /\/rpc\/load_design\b/.test(u)) return json([o.design]);
+    if (o.design && /\/rpc\/list_design_versions\b/.test(u)) return json(o.versions);
+    if (o.design && /\/rpc\/load_design_version\b/.test(u)) {
+      let b = {}; try { b = JSON.parse(req.postData() || "{}"); } catch { /* ignore */ }
+      return json(o.versions.find((v) => v.version === Number(b.p_version)) || null);
+    }
+    if ((req.method() === "GET" || LAYOUT_READS.test(u)) && !/\/functions\/v1\//.test(u)) return route.continue();
+    return json({});
+  });
+  return o;
+}
+const sizeLabel = (s) => (typeof s === "string" ? s : (s && (s.value || s.label || s.size)) || "");
+// The tenant's styles copied out to `count`, each with its own value, so the bar has something to scroll.
+function padStyles(j, count) {
+  const base = j.buildingStyles || [];
+  const out = base.slice(0, count);
+  for (let k = 0; out.length < count && base.length; k++) {
+    const s = base[k % base.length];
+    out.push({ ...s, value: `${s.value}-pw${k}`, label: `${s.label} ${k + 2}` });
+  }
+  j.buildingStyles = out;
+}
+
+// The style bar used to be a wrapping row of cards; a ninth style (Playhouse) dropped onto a second
+// row. It is ONE row of N tiles now, N = branding.stylesPerRow clamped to 5..8, anything missing or
+// unusable = 8 (SSStyleStrip). data-ss-style-strip carries the N it settled on.
+test("style bar is one row of N tiles: 8 by default, the builder's 5, bad values fall back", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  await bypassGate(page, CLIENT);
+  for (const [spr, want] of [[undefined, 8], [5, 5], [12, 8], ["abc", 8]]) {
+    o.rewrite = (j) => {
+      padStyles(j, 10);
+      j.branding = { ...(j.branding || {}) };
+      if (spr === undefined) delete j.branding.stylesPerRow; else j.branding.stylesPerRow = spr;
+    };
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+    const strip = page.locator("[data-ss-style-strip]");
+    await expect(strip, `stylesPerRow ${JSON.stringify(spr)}`).toHaveAttribute("data-ss-style-strip", String(want));
+    await expect(strip.locator("[data-ss-style]")).toHaveCount(10);
+    const m = await strip.evaluate((el) => ({
+      tops: [...el.children].map((t) => Math.round(t.getBoundingClientRect().top)),
+      overflow: el.scrollWidth > el.clientWidth + 1,
+    }));
+    expect(new Set(m.tops).size, "all 10 tiles on ONE row").toBe(1);
+    expect(m.overflow, "10 styles with N <= 8 scroll sideways").toBe(true);
+    await expect(page.locator('[data-ss-strip-arrow="right"]')).toBeVisible();
+    const doc = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    expect(doc.sw, "the strip scrolls, the page does not").toBeLessThanOrEqual(doc.cw + 1);
+  }
+  expect(errors, "page errors").toEqual([]);
+});
+
+// Carolyn 2026-09-14: "place or decline" moves BELOW Additional options, just above the floor-plan
+// toolbar, in a green callout. Order in the DOM is the whole requirement, so that is what is asserted.
+test("the Included callout sits after Additional options and before Clear floorplan", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  // Give every size of the first style one included workbench; the test tenant has no inclusions.
+  o.rewrite = (j) => {
+    const st = j.buildingStyles[0];
+    st.sizeInclusionQty = Object.fromEntries((st.sizes || []).map((s) => [sizeLabel(s), { workbench: 1 }]));
+  };
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  // Inclusions are per SIZE, and picking a style clears the size (onPick sets size: ""), so the
+  // callout cannot exist until a size is chosen too. The label is CSS-uppercased; match its text.
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const callout = page.locator("[data-ss-included]");
+  await expect(callout).toBeVisible();
+  await expect(callout).toContainText(/Included/i);
+  const order = await page.evaluate(() => {
+    const inc = document.querySelector("[data-ss-included]");
+    const lbl = [...document.querySelectorAll("span")].find((s) => s.textContent.trim() === "Additional options:");
+    const clear = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Clear floorplan");
+    const after = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+    return { label: !!lbl, clear: !!clear, afterLabel: after(lbl, inc), beforeClear: after(inc, clear) };
+  });
+  expect(order).toEqual({ label: true, clear: true, afterLabel: true, beforeClear: true });
+  expect(errors, "page errors").toEqual([]);
+});
+
+// "All designs on this estimate" was a "▾ N versions" toggle nobody opened (Carolyn 2026-09-14).
+// It is always open now: newest first, the one on the plan marked Viewing, the newest marked
+// Latest, and Open loads that version, moves Viewing, puts v= in the URL and scrolls to the plan.
+test("designs on this estimate: always open, Viewing and Latest marked, Open lands on the plan", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await expect.poll(() => !!(o.cfg && o.cfg.buildingStyles && o.cfg.buildingStyles.length)).toBe(true);
+
+  const CODE = "SS-PWLAYOUT9"; // 9 characters after SS-, the shape load_design expects
+  const st = o.cfg.buildingStyles[0];
+  const sizes = (st.sizes || []).map(sizeLabel).filter(Boolean);
+  const mk = (version, size, date) => ({
+    short_code: CODE, version, created_at: date,
+    selections: { style: st.value, size, roofType: "", roofColor: "", cladding: "" },
+    items: [], paint_colors: { body: "", trim: "" }, custom_options: [], ro_dimensions: {}, image_url: null,
+  });
+  o.versions = [mk(2, sizes[0], "2026-09-14T15:00:00Z"), mk(1, sizes[1] || sizes[0], "2026-09-12T15:00:00Z")];
+  o.design = {
+    short_code: CODE, status: "submitted", selections: o.versions[0].selections, items: [], paint_colors: { body: "", trim: "" },
+    custom_options: [], ro_dimensions: {},
+    contact: { name: "Layout Test", email: "layout-test@example.invalid", phone: "5555550188", street: "1 Test St", city: "Testville", state: "PA", zip: "17000" },
+    ghl_contact_id: null, ghl_estimate_id: null, ghl_estimate_number: null, ss_quote_number: null, inventory_unit_id: null,
+  };
+
+  await page.goto(`/?client=${CLIENT}&id=${CODE}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  const list = page.locator("[data-ss-versions]");
+  await expect(list.locator("[data-ss-version]"), "rows visible with no click").toHaveCount(2);
+  await expect(list).toHaveCount(1);
+  await expect(list).toContainText(/All designs on this estimate \(2\)/i);
+  expect(await page.evaluate(() => /▾ \d+ versions|▴ hide/.test(document.body.innerText)), "no toggle").toBe(false);
+
+  const v2 = page.locator('[data-ss-version="2"]');
+  const v1 = page.locator('[data-ss-version="1"]');
+  await expect(v2).toHaveAttribute("data-ss-viewing", "1");
+  await expect(v2).toContainText("Viewing");
+  await expect(v2).toContainText("Latest");
+  await expect(v2.getByRole("button", { name: "Open" }), "the row on the plan has no Open").toHaveCount(0);
+  await expect(v1).not.toContainText(/Viewing|Latest/);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await v1.getByRole("button", { name: "Open" }).click();
+  await expect(v1).toHaveAttribute("data-ss-viewing", "1");
+  await expect(v1).toContainText("Viewing");
+  await expect(v2).not.toContainText("Viewing");
+  await expect(v2).toContainText("Latest");
+  await expect(v2.getByRole("button", { name: "Open" })).toHaveCount(1);
+  await expect.poll(() => new URL(page.url()).searchParams.get("v")).toBe("1");
+  const planTop = () => page.evaluate(() => {
+    const svg = [...document.querySelectorAll("svg")].find((s) => [...s.querySelectorAll("text")].some((t) => / ft$/.test(t.textContent)));
+    return Math.round(svg.getBoundingClientRect().top);
+  });
+  await expect.poll(planTop, { timeout: 10_000 }).toBeGreaterThanOrEqual(-2);
+  expect(await planTop(), "Open scrolled the plan into view").toBeLessThan(120);
+  expect(errors, "page errors").toEqual([]);
 });
