@@ -48,8 +48,14 @@
 -- THIS MIGRATION FIRST, then portal-settings. portal-settings' design selects name
 -- ss_invoice_requested_at: deployed before this column exists, orders_designs returns 500 (the
 -- Orders tab goes empty) and crm_record swallows the error and shows a record with no designs.
--- customer-accept and customer-quotes tolerate the table's absence, so either order is safe
--- for those two.
+-- customer-accept and customer-quotes tolerate the table's absence, BUT DEPLOY customer-accept
+-- STRAIGHT AFTER THIS MIGRATION, then re-run statement 3 (the backfill INSERT) and the stamp
+-- UPDATE below it once more (review, 2026-09-15). The backfill runs once, at apply. A customer who
+-- accepts in the gap gets no request at all: the old customer-accept raises none, and the new one
+-- answers an already-accepted design with 'already' before it reaches the request. The order would
+-- sit in "Needs invoice" with no builder email. Both statements are idempotent (ON CONFLICT DO
+-- NOTHING; the UPDATE only fills ss_invoice_requested_at where it is null), so a second run
+-- picks up exactly the gap. customer-quotes has no such gap, so its order is free.
 --
 -- Hand-apply via `supabase db query --linked` (SQL inline, NOT --file) or the SQL editor, and
 -- record as version 229 — NEVER `supabase db push`. Rehearse inside begin … rollback first.
