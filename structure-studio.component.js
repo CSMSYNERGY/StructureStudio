@@ -12840,8 +12840,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // this bundle or the mint itself fails, which costs a round trip and nothing else.
     if (setup3d.onUploadPhotoBatch) {
       try {
+        // EACH IMAGE SHOWS UP THE MOMENT IT LANDS (2026-09-14), not when the whole batch returns.
+        // On a connection that stalls halfway the ones that made it are on screen, rather than
+        // hidden behind the ones still retrying. calTrimPhotos de-duplicates, so the full-batch
+        // add below is harmless for images already shown - and it is what persists them.
         const r = await setup3d.onUploadPhotoBatch(take, (n, total) =>
-          setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })));
+          setAdminCalPhotos((p) => ({ ...p, step: total > 1 ? `Sent ${n} of ${total}…` : "Uploading…" })),
+          (url) => calAddPhotos([url]));
         if (r && r.urls && r.urls.length) {
           calAddPhotos(r.urls);
           const next2 = calTrimPhotos((adminCal ? adminCal.photos : []).concat(r.urls));
@@ -12855,7 +12860,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setAdminCalPhotos({
           busy: false, step: null,
           err: (r && r.errs && r.errs.length)
-            ? `${(r.urls || []).length} of ${take.length} uploaded. ${r.errs.length} failed: ${r.errs[0]}`
+            ? `${(r.urls || []).length} of ${take.length} uploaded. ${r.errs.length} failed: ${r.errs[0]}${(r.urls || []).length ? " The ones that uploaded are saved \u2014 pick the rest again." : " Nothing was saved \u2014 check your connection, then pick them again."}`
             : (over2 ? `${over2} did not fit — ${CAL_PHOTO_MAX} is the most one generation reads.${rate}` : (rate ? rate.trim() : null)),
         });
         return;

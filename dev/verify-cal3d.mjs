@@ -111,12 +111,18 @@ const STYLE_ROW2 = {
 // `failNext` makes the NEXT n upload attempts reject at the transport layer (a dropped
 // connection, not a status), which is what FunctionsFetchError means and what a bad uplink
 // actually does. `attempts` counts every attempt including retries.
-const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false }
+// `stallPuts` makes the next n signed PUTs HANG - no answer at all, which is what a dead
+// connection looks like from the page and what the upload watchdog exists to notice.
+const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false, stallPuts: 0, stallMints: 0 }
 // Counted separately so a test can prove WHICH route an upload took. The signed route is the
 // fast one (raw bytes straight to storage); base64 through the edge function is the fallback.
-const attempts = { upload: 0, signedMint: 0, signedPut: 0 }
+const attempts = { upload: 0, signedMint: 0, signedPut: 0, stalledPut: 0 }
 // Raw bytes of each signed PUT. With the base64 route gone this is the wire measurement.
 const putBytes = []
+// The HOST of every PUT attempt, stalled ones included, so a test can prove where a retry went.
+const putHosts = []
+// The HOST of every mint, so a test can prove a stalled one retried through the functions side door.
+const mintHosts = []
 // MONOTONIC, never reset. attempts.signedMint is zeroed by individual tests to count one block's
 // calls, and reusing it for the URL handed back the same path twice — which calTrimPhotos then
 // correctly DE-DUPLICATED, so the image silently never appeared and the test looked like an
@@ -162,7 +168,7 @@ async function main() {
     headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(body),
   })
 
-  await page.route(`**/${REF}.supabase.co/**`, async (route) => {
+  const apiHandler = async (route) => {
     const req = route.request()
     const url = req.url()
     if (req.method() === 'OPTIONS') {
@@ -203,6 +209,12 @@ async function main() {
       }
       if (a === 'style_photo_upload_url') {
         attempts.signedMint++
+        mintHosts.push(new URL(url).host)
+        if (delay.stallMints > 0 && new URL(url).host === `${REF}.supabase.co`) {
+          delay.stallMints--
+          setTimeout(() => { route.abort('timedout').catch(() => {}) }, 8000)
+          return
+        }
         if (delay.noSignedUrl) return json(route, { ok: false, error: 'signed urls off for this test' })
         // BULK. `count` is the whole point of the 2026-09-12 change: one mint for the batch.
         // The single-object fields are still returned alongside, because an older bundle can be
@@ -263,15 +275,35 @@ async function main() {
       return json(route, { ok: true })
     }
     return json(route, { ok: true })
-  })
+  }
+  await page.route(`**/${REF}.supabase.co/**`, apiHandler)
+  // The edge-function side door: onUploadPhotoBatch mints through it when the main host stalls.
+  await page.route(`**/${REF}.functions.supabase.co/**`, apiHandler)
 
-  // The signed-URL PUT. supabase-js posts the raw file to /storage/v1/object/upload/sign/...
-  await page.route(`**/${REF}.supabase.co/storage/v1/object/upload/sign/**`, (route) => {
+  // The signed-URL PUT, on EITHER storage host. Since 2026-09-14 the portal sends it by XHR and
+  // retries a stalled one on `<ref>.storage.supabase.co`, Supabase's direct storage hostname, so
+  // both must be stubbed or a retry sails out to the real internet with a fake token.
+  const putHandler = (route) => {
+    const req = route.request()
+    if (req.method() === 'OPTIONS') {
+      return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }, body: '' })
+    }
+    putHosts.push(new URL(req.url()).host)
+    if (delay.stallPuts > 0) {
+      delay.stallPuts--
+      attempts.stalledPut++
+      // Never answered. Released later only so the route does not dangle past the run; by then
+      // the page has long since aborted it.
+      setTimeout(() => { route.abort('timedout').catch(() => {}) }, 8000)
+      return
+    }
     attempts.signedPut++
     storedCount++
-    try { putBytes.push((route.request().postDataBuffer() || Buffer.alloc(0)).length) } catch (_e) { putBytes.push(0) }
+    try { putBytes.push((req.postDataBuffer() || Buffer.alloc(0)).length) } catch (_e) { putBytes.push(0) }
     return route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify({ Key: 'branding/x' }) })
-  })
+  }
+  await page.route(`**/${REF}.supabase.co/storage/v1/object/upload/sign/**`, putHandler)
+  await page.route(`**/${REF}.storage.supabase.co/storage/v1/object/upload/sign/**`, putHandler)
 
   // A real 1x1 PNG for every uploaded image, so nothing 404s in the thumbnail strips and the
   // <img> elements the assertions count are genuinely rendering something.
@@ -464,6 +496,72 @@ async function main() {
     void before
     await page.locator('button[title="Remove this image"]').last().click()
     await page.waitForTimeout(500)
+  }
+
+  // ── REGRESSION: a STALLED upload is noticed and retried on the other storage host ────────
+  // Ahsan, 2026-09-14: "style photo batch: 0/9 in 485.5s". The connection stopped moving bytes
+  // without closing, nothing had a stall timeout, and every retry rode the same dead HTTP/2
+  // connection back into the same stall. The watchdog must give up on a silent PUT, and the retry
+  // must go to the OTHER hostname, which cannot share that connection.
+  {
+    const startCount = await imgCount()
+    await page.evaluate(() => { window.__ssUploadStallMs = 1500 })
+    putHosts.length = 0
+    attempts.stalledPut = 0
+    delay.stallPuts = 1
+    const t = Date.now()
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'stall.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('stall-photo') }])
+    await waitForImages(startCount + 1)
+    ok('A STALLED UPLOAD IS ABANDONED AND RETRIED', (await imgCount()) === startCount + 1 && attempts.stalledPut === 1,
+      `${startCount} -> ${await imgCount()}, ${attempts.stalledPut} stalled, ${Math.round((Date.now() - t) / 100) / 10}s`)
+    ok('UPLOADS START ON THE STORAGE HOST, AND A STALL RETRIES ON THE MAIN ONE',
+      putHosts.length === 2 && putHosts[0] === `${REF}.storage.supabase.co` && putHosts[1] === `${REF}.supabase.co`, putHosts.join(' -> '))
+    ok('and the builder sees no error after a recovered stall', !(await text()).includes('failed:'))
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(500)
+  }
+
+  // ── REGRESSION: a stalled MINT retries through the functions side door ─────────────────
+  // The upload URL is minted through the main host, so a wedged main connection used to stop the
+  // whole batch before a single byte moved. The second try goes to <ref>.functions.supabase.co.
+  {
+    const startCount = await imgCount()
+    await page.evaluate(() => { window.__ssUploadMintMs = 1500 })
+    mintHosts.length = 0
+    delay.stallMints = 1
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'mintstall.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('mint-stall') }])
+    await waitForImages(startCount + 1)
+    ok('A STALLED MINT RETRIES ON THE FUNCTIONS HOST',
+      mintHosts.length === 2 && mintHosts[0] === `${REF}.supabase.co` && mintHosts[1] === `${REF}.functions.supabase.co`, mintHosts.join(' -> '))
+    ok('and that image still lands with no error', !(await text()).includes('failed:'))
+    delay.stallMints = 0
+    await page.evaluate(() => { window.__ssUploadMintMs = undefined })
+    await page.locator('button[title="Remove this image"]').last().click()
+    await page.waitForTimeout(500)
+  }
+
+  // ── REGRESSION: a DEAD link fails the batch fast, and says what to do ───────────────────
+  // When nothing gets through at all, the batch must stop after two rounds over both hosts rather
+  // than walking every image through its own retries - the eight-minute wait, again.
+  {
+    const startCount = await imgCount()
+    putHosts.length = 0
+    attempts.stalledPut = 0
+    delay.stallPuts = 99
+    const t = Date.now()
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([
+      { name: 'dead1.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('dead-1') },
+      { name: 'dead2.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('dead-2') },
+      { name: 'dead3.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('dead-3') },
+    ])
+    await page.waitForFunction(() => /0 of 3 uploaded/.test(document.body.innerText), null, { timeout: 90000 })
+    const secs = Math.round((Date.now() - t) / 100) / 10
+    ok('A DEAD LINK FAILS THE BATCH IN SECONDS, NOT MINUTES', secs < 25, `${secs}s with a 1.5s stall budget`)
+    ok('it gave up after two rounds, not every retry of every image', attempts.stalledPut <= 7, `${attempts.stalledPut} PUT attempts`)
+    ok('and it tells the builder nothing was saved', (await text()).includes('Nothing was saved'), (await line('0 of 3')) || '(no line)')
+    ok('no image was added by a dead batch', (await imgCount()) === startCount, `${startCount} -> ${await imgCount()}`)
+    delay.stallPuts = 0
+    await page.evaluate(() => { window.__ssUploadStallMs = undefined })
   }
 
   // ── REGRESSION: an oversized phone photo must be SHRUNK, never sent whole ───────────────

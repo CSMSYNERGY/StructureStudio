@@ -1076,7 +1076,7 @@ function Dashboard({ session }) {
     //
     // The host owns the whole batch — shrink, mint, PUT — because only the host knows that the
     // mint is bulk-able. The designer just says "upload these" and watches the progress.
-    onUploadPhotoBatch: async (files, onProgress) => {
+    onUploadPhotoBatch: async (files, onProgress, onEach) => {
       const list = Array.prototype.slice.call(files || []).filter(Boolean);
       if (!list.length) return { urls: [], errs: [] };
       // Shrink FIRST, sequentially: each one decodes a multi-megapixel bitmap onto a canvas, and
@@ -1090,9 +1090,42 @@ function Dashboard({ session }) {
       }
       if (!prepped.length) return { urls: [], errs };
       // ONE mint for the whole batch. `count` is what makes it one round trip.
-      const { data: sig, error: sigErr } = await sb.functions.invoke("portal-settings", {
-        body: { action: "style_photo_upload_url", contentType: "image/jpeg", count: prepped.length },
-      });
+      //
+      // WITH A DEADLINE (2026-09-14). functions.invoke has no timeout of its own, and on a stalled
+      // connection a mint sat for two minutes before the browser gave up on it. The body is a few
+      // bytes and the function answers in a second or two even cold, so 25s is not slow, it is
+      // stuck. One more try on a transport failure only - a refusal would say the same thing twice.
+      const mintBody = { action: "style_photo_upload_url", contentType: "image/jpeg", count: prepped.length };
+      // Test hook, as __ssUploadStallMs below: a harness cannot wait 25s for a mint to time out.
+      const mintMs = (typeof window !== "undefined" && Number(window.__ssUploadMintMs)) || 25000;
+      const deadline = () => new Promise((res) => setTimeout(() => res({ data: null, error: { message: "Starting the upload timed out \u2014 the connection stalled." } }), mintMs));
+      // First try: the normal invoke, through 01-core's wrapper (error logging, view-as injection).
+      let minted = await Promise.race([sb.functions.invoke("portal-settings", { body: mintBody }), deadline()]);
+      // SECOND TRY THROUGH THE SIDE DOOR: `<ref>.functions.supabase.co` reaches the same function
+      // on a different hostname, so it cannot inherit the main host's wedged connection -
+      // retrying the invoke there rode straight back into the stall. It is a raw fetch, which
+      // means it skips 01-core's wrapper, so it must carry the view-as target ITSELF: without
+      // targetClientId an operator's upload would be minted into the operator's own tenant.
+      if (minted.error) {
+        minted = await Promise.race([(async () => {
+          try {
+            const { data: auth } = await sb.auth.getSession();
+            const token = auth && auth.session && auth.session.access_token;
+            if (!token) return { data: null, error: { message: "Your session has expired \u2014 sign in again." } };
+            const body = ssTargetClientId ? { ...mintBody, targetClientId: ssTargetClientId } : mintBody;
+            const r = await fetch(`${SUPABASE_URL.replace(".supabase.co", ".functions.supabase.co")}/portal-settings`, {
+              method: "POST",
+              headers: { "content-type": "application/json", apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${token}` },
+              body: JSON.stringify(body),
+            });
+            const data = await r.json().catch(() => null);
+            return data ? { data, error: null } : { data: null, error: { message: `Starting the upload failed (${r.status})` } };
+          } catch (e) {
+            return { data: null, error: { message: (e && e.message) || "Starting the upload failed" } };
+          }
+        })(), deadline()]);
+      }
+      const { data: sig, error: sigErr } = minted;
       if (sigErr || !sig || !sig.ok || !Array.isArray(sig.uploads) || !sig.uploads.length) {
         // No URLs means no fast path. Signal it rather than half-failing, and let the caller
         // fall back to the per-file route, which mints its own.
@@ -1104,35 +1137,111 @@ function Dashboard({ session }) {
       const slots = sig.uploads.slice(0, prepped.length);
       const urls = new Array(slots.length);
       let done = 0, next = 0;
-      // SIX LANES, AND IT IS AN EXPERIMENT RATHER THAN A CONCLUSION. The count has been wrong in
-      // both directions already (see ssUploadPool's header), both times because it was reasoned
-      // about instead of measured. Six is the classic browser per-origin limit and a safe upper
-      // bound; whether it beats three depends on something nobody here has measured yet —
-      // TOTAL-bandwidth-bound links gain nothing from extra lanes, PER-CONNECTION-bound ones gain
-      // a lot. The telemetry below is what settles it.
+      // TWO DOORS INTO THE SAME BUCKET, AND THE SIDE DOOR GOES FIRST. `<ref>.storage.supabase.co`
+      // is Supabase's direct storage hostname: the same service, the same signed tokens, the same
+      // objects (an identical 171KB frame fetched from each; a PUT with only the apikey header
+      // reaching token validation on each).
       //
-      // ⚠️ AND IT MAY WELL NOT HELP AT ALL, for a reason worth knowing before reading the number:
-      // Supabase storage speaks HTTP/2, so these requests MULTIPLEX OVER ONE TCP CONNECTION and
-      // share its congestion window. On HTTP/1.1 six lanes would be six sockets; here they are six
-      // streams on one, which removes most of the per-connection argument for widening at all.
+      // MEASURED IN AHSAN'S CHROME, 2026-09-14, same tab, same minute: two 300KB photos took 137s
+      // through the main host while a 1-byte read on it hung for 20s; the storage host took a
+      // 300KB upload in 1.8s and answered a read in 0.86s. The main host carries every other
+      // request the portal makes, and it is that connection which wedges. On their own hostname
+      // uploads get their own connection, and a stall there retries on the main host - a
+      // DIFFERENT connection either way, which is the whole point: a retry on the host that just
+      // stalled rides the same dead HTTP/2 connection back into the same stall.
+      const hosts = [SUPABASE_URL.replace(".supabase.co", ".storage.supabase.co"), SUPABASE_URL];
+      // Test hook in the spirit of __SS3D_DEBUG: a harness cannot wait thirty seconds per stall.
+      const stallMs = (typeof window !== "undefined" && Number(window.__ssUploadStallMs)) || 30000;
+      // XHR, NOT uploadToSignedUrl, for the one thing fetch cannot do: report upload progress.
+      // Without it a slow upload and a dead one look identical from here, so the only choices are
+      // a deadline short enough to kill honest uploads or one long enough to wait out a corpse.
+      // The request is the one supabase-js sends - same URL, same form fields, same x-upsert.
+      const putSigned = (host, s, blob) => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const fd = new FormData();
+        fd.append("cacheControl", "3600");
+        fd.append("", blob);
+        let last = Date.now();
+        const bump = () => { last = Date.now(); };
+        const fail = (msg, stalled) => {
+          clearInterval(watch);
+          const e = new Error(msg);
+          e.ssTransport = true;
+          e.ssStalled = !!stalled;
+          reject(e);
+        };
+        // A STALL, NOT A SLOW UPLOAD: thirty seconds in which NOTHING happened - no bytes out, no
+        // reply. Measured in Chrome over HTTP/2, progress fires every ~100ms while the body goes
+        // out (16KB steps) and the reply lands under a second after the last byte, so a live
+        // upload is never silent for anything like thirty seconds, even on a slow link.
+        const watch = setInterval(() => {
+          if (Date.now() - last > stallMs) {
+            try { xhr.abort(); } catch (_a) { /* already finished */ }
+            fail("The upload stalled \u2014 your connection stopped sending.", true);
+          }
+        }, 1000);
+        xhr.upload.onprogress = bump;
+        xhr.upload.onload = bump;
+        xhr.onprogress = bump;
+        xhr.onerror = () => fail("Upload failed \u2014 the connection dropped.", false);
+        xhr.onload = () => {
+          clearInterval(watch);
+          if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
+          const text = String(xhr.responseText || "");
+          // THE OBJECT IS ALREADY THERE: an attempt that looked dead had in fact landed before the
+          // watchdog gave up on it. Same path, same token, same bytes - that is success.
+          if (/Duplicate|already exists/i.test(text)) { resolve(); return; }
+          let msg = "Upload failed";
+          try { msg = JSON.parse(text).message || msg; } catch (_j) { /* not JSON */ }
+          const e = new Error(msg);
+          // A 5xx is worth another go; a 4xx would say the same thing again.
+          e.ssTransport = xhr.status >= 500;
+          reject(e);
+        };
+        xhr.open("PUT", `${host}/storage/v1/object/upload/sign/branding/${s.path}?token=${encodeURIComponent(s.token)}`);
+        xhr.setRequestHeader("apikey", SUPABASE_ANON_KEY);
+        xhr.setRequestHeader("x-upsert", "false");
+        xhr.send(fd);
+      });
+      // THREE LANES, back from the six of 352865d. Six did not cause the stall - the one-request
+      // mint failed in the same window - and it bought nothing measurable. The "10-15KB/s uplink"
+      // every earlier batch reported was never the uplink: it was the main host's connection. The
+      // same Chrome in the same minute moved 300KB to the storage host in under two seconds.
+      // Three is what the last good batches ran; widen it only on a measurement.
       const t0 = Date.now();
-      let sentBytes = 0;
-      await Promise.all(Array.from({ length: Math.min(6, slots.length) }, async () => {
+      let sentBytes = 0, retries = 0, stalls = 0, failStreak = 0, firstErr = "";
+      const landed = [0, 0];   // successes per entry in `hosts`
+      await Promise.all(Array.from({ length: Math.min(3, slots.length) }, async () => {
         for (;;) {
           const i = next++;
           if (i >= slots.length) return;
           const s = slots[i];
           for (let attempt = 0; ; attempt++) {
+            // GIVE UP ON A DEAD LINK AS A BATCH, not image by image. Six transport failures in a
+            // row across all lanes, with nothing landing in between, is two full rounds over both
+            // hosts: the connection is gone, and walking every remaining image through its own
+            // retries just to report the same thing is the eight-minute wait all over again.
+            if (failStreak >= 6) { errs.push("Your connection to the upload server dropped."); break; }
             try {
-              const put = await sb.storage.from("branding")
-                .uploadToSignedUrl(s.path, s.token, prepped[i], { contentType: prepped[i].type || "image/jpeg" });
-              if (put.error) throw new Error(put.error.message || "Upload failed");
+              await putSigned(hosts[attempt % 2], s, prepped[i]);
               urls[i] = s.url;
               sentBytes += (prepped[i] && prepped[i].size) || 0;
+              failStreak = 0;
+              landed[attempt % 2]++;
+              // Reported as it lands, so a batch that stalls halfway still shows what made it.
+              if (onEach) { try { onEach(s.url, i); } catch (_c) { /* the caller's problem, not the upload's */ } }
               break;
             } catch (e) {
-              // A signed PUT that never reached storage is safe to repeat — nothing was written.
-              if (attempt < 2) { await new Promise((r) => setTimeout(r, attempt === 0 ? 1500 : 4000)); continue; }
+              if (!firstErr) firstErr = (e && e.message) || "Upload failed";
+              if (e && e.ssStalled) stalls++;
+              if (e && e.ssTransport) failStreak++;
+              // A signed PUT that never reached storage is safe to repeat, and one that secretly
+              // did comes back as Duplicate, which putSigned already counts as success.
+              if (e && e.ssTransport && attempt < 3) {
+                retries++;
+                await new Promise((r) => setTimeout(r, [1000, 3000, 6000][attempt]));
+                continue;
+              }
               errs.push((e && e.message) || "Upload failed");
               break;
             }
@@ -1148,7 +1257,9 @@ function Dashboard({ session }) {
       const ms = Math.max(1, Date.now() - t0);
       const kbs = Math.round((sentBytes / 1024) / (ms / 1000));
       try {
-        ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 6 lanes`,
+        // The first error and the stall count ride along because the 0/9 batch logged neither,
+        // and "0KB in 485s" alone could not say whether it was the link, the token or the bucket.
+        ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 3 lanes, ${landed[0]} via storage host, ${landed[1]} via main host, ${retries} retries, ${stalls} stalls${firstErr ? `, first error: ${firstErr}` : ""}`,
           "style_upload_throughput", { fn: "storage", action: "upload_batch" }, "info");
       } catch (_t) { /* a measurement must never break the thing it measures */ }
       return { urls: urls.filter(Boolean), errs, ms, bytes: sentBytes, kbs };
