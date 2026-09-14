@@ -6,8 +6,10 @@ import { phoneKey } from "../_shared/phoneKey.ts";
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
-import { acceptanceEmail } from "../_shared/emailTemplates.ts";
+import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
+import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 
 // customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
@@ -42,6 +44,9 @@ import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney
 //   3. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
 //      orders row — failure logs loudly; sync-design-status cannot repair this in SS mode,
 //      so the error is surfaced in the response for support.
+//   3b. raise the INVOICE REQUEST (migration 229) and email the builder's owners + admins —
+//      best-effort from end to end: a failure logs and the accept still answers ok. The
+//      request is a draft; nothing is numbered or sent until the builder approves it.
 //   4. countersign the quote PDF — ONLY for a real signature. A clicked acceptance gets no
 //      certificate page, because the certificate now belongs to the invoice.
 //   5. email the confirmation — sendTenantEmail never throws; dark tenants just skip.
@@ -101,6 +106,176 @@ function orderMoney(snap: any): Record<string, unknown> {
 }
 
 // fmtMoney moved to _shared/consentSentences.ts (2026-09-15) with the sentences it formats.
+
+// ── The invoice request (migration 229) ──────────────────────────────────────────────────────
+// Ahsan, 2026-09-15 (expo plan, decision 1): "Accept → auto-DRAFT invoice, builder approves
+// with one click. No invoice number, QuickBooks push or inventory claim until the builder
+// approves." So accepting a quote records the INTENT here, and approving in the portal is
+// send_invoice exactly as it is today — which marks this row approved when it issues.
+//
+// Decision 8: the "Invoice to approve" email goes to OWNERS AND ADMINS, at most five. There is
+// no business_email column, and tenant mail is dark for every builder still on CRM email, so
+// the addresses come from client_users → auth (operator-portal's list_users pattern) and it
+// goes out from the PLATFORM sender, the way a login code does. Not ledgered in email_sends:
+// that table is the tenant's correspondence with their customers, and this is ours with them.
+
+/** Same address and domain customer-auth sends login codes from (see PLATFORM_LOGIN_FROM
+ *  there for why it is a constant and not an import from emailSend.ts). */
+const PLATFORM_NOTIFY_FROM = "StructureStudio <no-reply@mail.structurestudiosuite.com>";
+/** Owners first, then admins — never more copies of one notice than this. */
+const MAX_INVOICE_REQUEST_RECIPIENTS = 5;
+/** The customer is waiting on the accept response; the builder's notice must not hold it.
+ *  Past this the request still stands (the Orders tab shows it) and notify_error says why. */
+const INVOICE_REQUEST_NOTIFY_MS = 8_000;
+
+/** PostgREST's two spellings of "no such table" — tolerated so this function can deploy
+ *  before migration 229 is applied (the same pair portal-settings tolerates for change_orders). */
+// deno-lint-ignore no-explicit-any
+function isMissingTable(err: any): boolean {
+  const code = String(err?.code ?? "");
+  return code === "42P01" || code === "PGRST205" || /does not exist|schema cache/i.test(String(err?.message ?? ""));
+}
+
+type InvoiceRequestArgs = {
+  clientId: string;
+  shortCode: string;
+  acceptanceId: string;
+  acceptedAtIso: string;
+  quoteNumber: string;
+  businessName: string;
+  customerName: string | null;
+  styleLabel: string | null;
+  sizeLabel: string | null;
+  total: number | null;
+};
+
+/**
+ * Raise the request, stamp the design, email the builder. True when THIS call raised it.
+ *
+ * Never throws on a database refusal — every step logs and carries on or stops quietly, because
+ * the customer's acceptance is already recorded and nothing here may turn it into an error.
+ */
+// deno-lint-ignore no-explicit-any
+async function raiseInvoiceRequest(admin: any, req: Request, a: InvoiceRequestArgs): Promise<boolean> {
+  const log = (code: string, message: string) =>
+    logEdgeError({ fn: "customer-accept", req, clientId: a.clientId, code, message, context: { quoteRef: a.shortCode } }).catch(() => {});
+
+  // An invoice already out answers the request before it is asked: a rep who pushed to
+  // invoice from the designer, or a builder who invoiced a GHL-era acceptance. Created or sent
+  // only — a 'failed' or 'claimed' row issued nothing, so the builder still has to act.
+  const { data: issued, error: issuedErr } = await admin.from("invoice_sends")
+    .select("status").eq("client_id", a.clientId).eq("short_code", a.shortCode)
+    .in("status", ["created", "sent"]).limit(1);
+  if (issuedErr) { log("invoice_request_check", `invoice check failed: ${issuedErr.message}`); return false; }
+  if ((issued ?? []).length > 0) return false;
+
+  // The PK is the claim: a second accept of the same design (a double tap already returned
+  // 'already' above, but a backfilled row can exist) inserts nothing and emails nobody twice.
+  const { error: insErr } = await admin.from("invoice_requests").insert({
+    client_id: a.clientId,
+    short_code: a.shortCode,
+    status: "pending",
+    source: "customer_accept",
+    acceptance_id: a.acceptanceId,
+    requested_at: a.acceptedAtIso,
+  });
+  if (insErr) {
+    if (String(insErr.code) === "23505") return false;
+    log(isMissingTable(insErr) ? "invoice_request_table_missing" : "invoice_request_insert", `invoice request not recorded: ${insErr.message}`);
+    return false;
+  }
+
+  // The Orders tab reads `designs`, not the request table (service-role only) — this is the
+  // column that turns the order's chip into "Invoice to approve".
+  const { error: stampErr } = await admin.from("designs")
+    .update({ ss_invoice_requested_at: a.acceptedAtIso })
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode).is("ss_invoice_requested_at", null);
+  if (stampErr) log("invoice_request_stamp", `ss_invoice_requested_at not stamped: ${stampErr.message}`);
+
+  let outcome: { sent: number; error: string | null };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    outcome = await Promise.race([
+      notifyInvoiceRequest(admin, req, a),
+      new Promise<{ sent: number; error: string }>((resolve) => {
+        timer = setTimeout(() => resolve({ sent: 0, error: "timed out waiting for the email provider" }), INVOICE_REQUEST_NOTIFY_MS);
+      }),
+    ]);
+  } catch (_) {
+    // No detail: a provider error can echo a recipient address (see notifyInvoiceRequest).
+    outcome = { sent: 0, error: "notify failed unexpectedly" };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+
+  const patch = outcome.sent > 0
+    ? { notified_at: new Date().toISOString(), notify_error: outcome.error }
+    : { notify_error: outcome.error ?? "not sent" };
+  const { error: nErr } = await admin.from("invoice_requests").update(patch)
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode);
+  if (nErr) log("invoice_request_notify_stamp", `notify outcome not recorded: ${nErr.message}`);
+  if (outcome.sent === 0) log("invoice_request_notify", `builder not emailed about an invoice to approve: ${outcome.error ?? "not sent"}`);
+  return true;
+}
+
+/** Email the owners and admins. Returns how many copies went out and, if any did not, why —
+ *  in words that never carry an address (Resend's errors can echo the recipient). */
+// deno-lint-ignore no-explicit-any
+async function notifyInvoiceRequest(admin: any, req: Request, a: InvoiceRequestArgs): Promise<{ sent: number; error: string | null }> {
+  if (!resendConfigured() || Deno.env.get("PLATFORM_EMAIL_DOMAIN_READY") !== "true") {
+    return { sent: 0, error: "platform email is not configured" };
+  }
+  const { data: users, error: uErr } = await admin.from("client_users")
+    .select("user_id, role, created_at")
+    .eq("client_id", a.clientId).in("role", ["owner", "admin"])
+    .order("created_at", { ascending: true });
+  if (uErr) return { sent: 0, error: `could not read the team: ${String(uErr.message ?? "").slice(0, 200)}` };
+  // Owners before admins, oldest first within each (Array.prototype.sort is stable). A few more
+  // lookups than the cap, so a user with no confirmed address does not cost a slot.
+  // deno-lint-ignore no-explicit-any
+  const ordered = (users ?? []).slice().sort((x: any, y: any) => (x.role === "owner" ? 0 : 1) - (y.role === "owner" ? 0 : 1));
+  const emails = await Promise.all(
+    // deno-lint-ignore no-explicit-any
+    ordered.slice(0, MAX_INVOICE_REQUEST_RECIPIENTS * 2).map(async (u: any) => {
+      try {
+        const { data } = await admin.auth.admin.getUserById(u.user_id);
+        return String(data?.user?.email ?? "").trim().toLowerCase();
+      } catch {
+        return ""; // a missing auth user must not stop the others
+      }
+    }),
+  );
+  const to = [...new Set(emails.filter((e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)))].slice(0, MAX_INVOICE_REQUEST_RECIPIENTS);
+  if (!to.length) return { sent: 0, error: "no owner or admin email on file" };
+
+  const { data: ord } = await admin.from("orders").select("id")
+    .eq("client_id", a.clientId).eq("short_code", a.shortCode).maybeSingle();
+  const content = invoiceRequestEmail({
+    businessName: a.businessName,
+    quoteNumber: a.quoteNumber,
+    customerName: a.customerName,
+    styleLabel: a.styleLabel,
+    sizeLabel: a.sizeLabel,
+    total: a.total,
+    acceptedAtIso: a.acceptedAtIso,
+    reviewUrl: portalOrderUrl(ord?.id ?? null, req),
+  });
+  // One message per person, not one message to all of them: a bounced address fails alone,
+  // and nobody's address is shown to anybody else.
+  const results = await Promise.allSettled(to.map((addr) => rsSendEmail({
+    from: PLATFORM_NOTIFY_FROM,
+    to: addr,
+    subject: content.subject,
+    html: content.html,
+    text: content.text,
+    tags: [{ name: "kind", value: "invoice_request" }, { name: "client_id", value: a.clientId }],
+  })));
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (!failed.length) return { sent: to.length, error: null };
+  const why = [...new Set(failed.map((r) =>
+    r.reason instanceof ResendApiError ? `resend ${r.reason.status}/${r.reason.name_ || "unknown"}` : "send failed"))];
+  return { sent: to.length - failed.length, error: `${failed.length} of ${to.length} not sent: ${why.join(", ")}` };
+}
 
 // phoneKey moved to _shared/phoneKey.ts (174) — customer-pay needs the same comparison, and
 // three private copies of the check that decides whether a stranger can read, sign or PAY
@@ -786,6 +961,27 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     }
   }
 
+  // ── 3b. The invoice request (migration 229) — best-effort, never fails the accept ────
+  // The consent sentence the customer just agreed to ("Your invoice will follow") stays true:
+  // it follows once the builder approves. See raiseInvoiceRequest above.
+  let invoiceRequested = false;
+  try {
+    invoiceRequested = await raiseInvoiceRequest(admin, req, {
+      clientId: identity.clientId,
+      shortCode: quoteRef,
+      acceptanceId,
+      acceptedAtIso,
+      quoteNumber: String(design.ss_quote_number),
+      businessName: settings.business_name || identity.clientId,
+      customerName: String(design?.contact?.name ?? "").trim() || null,
+      styleLabel: typeof design?.selections?.style === "string" ? design.selections.style : null,
+      sizeLabel: typeof design?.selections?.size === "string" ? design.selections.size : null,
+      total,
+    });
+  } catch (e) {
+    logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: "invoice_request_failed", message: `invoice request threw: ${(e as Error)?.name ?? "error"}`, context: { quoteRef } }).catch(() => {});
+  }
+
   // ── 4. Countersign the PDF (best-effort) ─────────────────────────────────────────────
   // Only a URL in OUR storage under THIS tenant's prefix is ever fetched server-side.
   //
@@ -856,6 +1052,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     signedPdf,
     signaturePath: signaturePath ? true : method === "typed",
     mode: method === "click" ? "click" : "signature",
+    // Whether this accept raised the builder's "Invoice to approve" (migration 229). False is
+    // not an error: an invoice may already be out, or the request may already exist.
+    invoiceRequested,
     ...(promoteWarning ? { warning: promoteWarning } : {}),
   });
 }));

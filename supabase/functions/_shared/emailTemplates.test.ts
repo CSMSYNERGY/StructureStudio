@@ -1,7 +1,7 @@
 // Deliberately dependency-free (no jsr:/npm: imports) so this suite still runs on a
 // machine with no registry access -- the same rule the other _shared tests follow.
 // Preflight discovers _shared/*.test.ts automatically, so these run on every push.
-import { acceptanceEmail, changeOrderEmail, esc, estimateEmail, formatMoney, invoiceEmail, testEmail } from "./emailTemplates.ts";
+import { acceptanceEmail, changeOrderEmail, esc, estimateEmail, formatMoney, invoiceEmail, invoiceRequestEmail, testEmail } from "./emailTemplates.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg);
@@ -261,6 +261,73 @@ Deno.test("acceptanceEmail escapes a hostile signer name", () => {
   assertIncludes(o.html, "&lt;script&gt;");
 });
 
+const baseInvoiceRequest = () => ({
+  businessName: "Junior Barns",
+  quoteNumber: "JB-1041",
+  customerName: "Pat Example",
+  styleLabel: "Northwood",
+  sizeLabel: "12x24",
+  total: 10505.14,
+  acceptedAtIso: "2026-09-15T14:03:00.000Z",
+  reviewUrl: "https://app.structurestudiosuite.com/portal/orders/o-3f2b8c1e-9a4d-4e6f-8b21-5c7d9e0a1b2c",
+});
+
+Deno.test("invoiceRequestEmail: subject, rows, date and the CTA to the order", () => {
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  assertEq(o.subject, "Invoice to approve: quote JB-1041 was accepted");
+  assertIncludes(o.html, "Pat Example accepted quote JB-1041.");
+  assertIncludes(o.html, "Northwood - 12x24");
+  assertIncludes(o.html, "$10,505.14");
+  assertIncludes(o.html, "2026-09-15");
+  assertIncludes(o.html, `href="${baseInvoiceRequest().reviewUrl}"`);
+  assertIncludes(o.html, "Review &amp; send invoice");
+  assertIncludes(o.text, "Quote total: $10,505.14");
+  assertIncludes(o.text, "Accepted: 2026-09-15");
+  assertIncludes(o.text, `Review & send invoice: ${baseInvoiceRequest().reviewUrl}`);
+  // The header is the builder's own business; the reader is the builder.
+  assertIncludes(o.html, "Junior Barns");
+});
+
+Deno.test("invoiceRequestEmail never reads as though an invoice already exists", () => {
+  // Nothing is numbered, built or sent until the builder approves (migration 229).
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  const all = o.subject + o.html + o.text;
+  assertIncludes(o.text, "nothing has been sent to the customer yet");
+  assertIncludes(o.html, "nothing has been sent to the customer yet");
+  assertNotIncludes(all, "Invoice #");
+  assertNotIncludes(all, "Amount due");
+  assertNotIncludes(all.toLowerCase(), "invoice sent");
+});
+
+Deno.test("invoiceRequestEmail: optional fields absent leave no empty rows and still read", () => {
+  const o = invoiceRequestEmail({ ...baseInvoiceRequest(), customerName: null, styleLabel: null, sizeLabel: " ", total: null });
+  assertIncludes(o.html, "Your customer accepted quote JB-1041.");
+  assertNotIncludes(o.html, ">Customer<");
+  assertNotIncludes(o.html, ">Building<");
+  assertNotIncludes(o.html, "Quote total");
+  assertNotIncludes(o.text, "Customer:");
+  assertNotIncludes(o.text, "Quote total:");
+  assertIncludes(o.text, "Accepted: 2026-09-15");
+});
+
+Deno.test("invoiceRequestEmail: the wording names nothing of ours — only the portal link does", () => {
+  // Not a white-label email (the reader is the builder, and the CTA must open our portal), but
+  // the COPY carries no platform name, so a builder who forwards it forwards only a link.
+  const o = invoiceRequestEmail(baseInvoiceRequest());
+  const url = baseInvoiceRequest().reviewUrl;
+  const copy = (o.subject + o.html.split(url).join("") + o.text.split(url).join("")).toLowerCase();
+  for (const brand of ["structurestudio", "structure studio", "postmark", "csm synergy"]) {
+    assertNotIncludes(copy, brand, `platform identifier "${brand}" in the wording`);
+  }
+});
+
+Deno.test("invoiceRequestEmail escapes a hostile customer name and keeps the subject one line", () => {
+  const o = invoiceRequestEmail({ ...baseInvoiceRequest(), customerName: `Pat <script>alert(1)</script>`, quoteNumber: "JB-1\r\nBcc: x@example.com" });
+  assertNotIncludes(o.html, "<script>", "raw tag must never reach the html");
+  assertIncludes(o.html, "&lt;script&gt;");
+  assert(!/[\r\n]/.test(o.subject), `subject must be one line, got ${JSON.stringify(o.subject)}`);
+});
+
 Deno.test("white-label: no platform branding anywhere in any output", () => {
   // The whole point of the Postmark path is that the customer sees ONLY their builder.
   const outs = [
@@ -271,6 +338,8 @@ Deno.test("white-label: no platform branding anywhere in any output", () => {
     acceptanceEmail(baseAcceptance()),
     changeOrderEmail(baseChangeOrder()),
     testEmail({ businessName: "Junior Barns", fromAddress: "info@juniorbarns.example.com" }),
+    // invoiceRequestEmail is deliberately NOT here: it goes to the builder, and its button has
+    // to open OUR portal, so its link names our host by necessity. Its copy is pinned below.
   ];
   for (const o of outs) {
     const all = (o.subject + o.html + o.text).toLowerCase();

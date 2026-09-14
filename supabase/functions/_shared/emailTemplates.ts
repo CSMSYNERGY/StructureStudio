@@ -1,6 +1,8 @@
 // Subject/html/text builders for the tenant-branded emails on the Postmark send path:
 // the estimate email (submit-estimate), the invoice email (portal-settings), and the
-// Settings -> Email test send.
+// Settings -> Email test send. Plus one email that goes the OTHER way — to the builder, not
+// their customer: the "Invoice to approve" notice customer-accept sends when a customer
+// accepts a quote (migration 229). See invoiceRequestEmail for how it differs.
 //
 // WHITE-LABEL IS THE CONTRACT. The recipient is the TENANT's customer, so the only
 // identity allowed anywhere in these emails -- header, footer, copy, alt text,
@@ -125,6 +127,22 @@ export interface InvoiceEmailInput {
 export interface TestEmailInput {
   businessName: string;
   fromAddress: string;
+}
+
+export interface InvoiceRequestEmailInput {
+  /** The builder's OWN business name. The reader is the builder, so their name heads it. */
+  businessName: string;
+  quoteNumber: string | number;
+  /** The name on the design's contact. Optional — a design can arrive without one. */
+  customerName?: string | null;
+  styleLabel?: string | null;
+  sizeLabel?: string | null;
+  /** What the customer accepted. Pre-formatted string or a number to format here. */
+  total?: string | number | null;
+  /** ISO timestamp of the acceptance; rendered as a plain date. */
+  acceptedAtIso: string;
+  /** The order in the portal (/portal/orders/o-<id>), where "Approve & send invoice" lives. */
+  reviewUrl: string;
 }
 
 /**
@@ -578,6 +596,69 @@ export function invoiceEmail(input: InvoiceEmailInput): EmailContent {
       website: input.website,
       quoteTerms: input.quoteTerms,
       preheader: toSign ? `Your invoice from ${name} - ${money}. Sign to confirm.` : `Your invoice from ${name} - ${money}.`,
+      bodyHtml,
+    }),
+    text: text.join("\n") + "\n",
+  };
+}
+
+/**
+ * "Invoice to approve" — to the BUILDER's owners and admins when a customer accepts a quote
+ * (migration 229; Ahsan's decision, 2026-09-15: accept raises a DRAFT invoice and the builder
+ * approves it with one click).
+ *
+ * The one email in this file whose reader is not the tenant's customer. customer-accept sends
+ * it from the platform sender, the way a login code goes out, because it must reach a builder
+ * who has never set up their own email domain — which today is every builder. So the
+ * white-label contract above does not bind it, and it could not keep it anyway: the button
+ * has to open OUR portal. Its WORDING still names nothing of ours (the test pins the copy
+ * with the link stripped), so a builder who forwards it forwards a link and nothing else.
+ *
+ * ⚠️ IT MUST NOT READ AS THOUGH AN INVOICE EXISTS. Nothing has been numbered, built, pushed to
+ * QuickBooks or sent when this goes out — approving in the portal is what does all of that.
+ * So there is no invoice number, no "amount due", and the copy says plainly that the customer
+ * has not been sent anything yet. The figure shown is the QUOTE total they accepted.
+ */
+export function invoiceRequestEmail(input: InvoiceRequestEmailInput): EmailContent {
+  const name = oneLine(input.businessName);
+  const num = oneLine(input.quoteNumber);
+  const customer = oneLine(input.customerName ?? "");
+  const who = customer || "Your customer";
+  const money = input.total == null || input.total === "" ? "" : formatMoney(input.total);
+  const building = [input.styleLabel, input.sizeLabel]
+    .map((v) => oneLine(v ?? ""))
+    .filter(Boolean)
+    .join(" - ");
+  const d = new Date(input.acceptedAtIso);
+  const when = isNaN(d.getTime()) ? oneLine(input.acceptedAtIso) : d.toISOString().slice(0, 10);
+
+  const rows = [detailRow("Quote #", esc(num))];
+  if (customer) rows.push(detailRow("Customer", esc(customer)));
+  if (building) rows.push(detailRow("Building", esc(building)));
+  if (money) rows.push(detailRow("Quote total", esc(money)));
+  rows.push(detailRow("Accepted", esc(when)));
+
+  const leadText = `${who} accepted quote ${num}. The invoice is waiting for your approval — nothing has been sent to the customer yet.`;
+  const nextText = "Approving issues the invoice with your next invoice number and emails it to the customer to sign.";
+
+  const bodyHtml = `<p style="margin:0 0 12px 0;font-family:${FONT};font-size:15px;line-height:1.6;color:#475569;">${esc(leadText)}</p>
+            <p style="margin:0 0 16px 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;">${esc(nextText)}</p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;">
+              ${rows.join("\n")}
+            </table>
+            ${ctaButton(input.reviewUrl, "Review & send invoice")}`;
+
+  const text: string[] = [name, "", leadText, nextText, "", `Quote #: ${num}`];
+  if (customer) text.push(`Customer: ${customer}`);
+  if (building) text.push(`Building: ${building}`);
+  if (money) text.push(`Quote total: ${money}`);
+  text.push(`Accepted: ${when}`, "", `Review & send invoice: ${input.reviewUrl}`);
+
+  return {
+    subject: `Invoice to approve: quote ${num} was accepted`,
+    html: htmlShell({
+      businessName: name,
+      preheader: `${who} accepted quote ${num}. Approve the invoice when you're ready.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

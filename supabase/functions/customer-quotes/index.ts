@@ -283,6 +283,38 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
     }
   }
 
+  // The builder's answer to an accept (migration 229). customer-accept raises a DRAFT invoice
+  // request when the customer accepts, and nothing is numbered or sent until the builder
+  // approves it — so between the two the customer's panel says "Your invoice is being
+  // prepared" instead of nothing at all. Service-role table, same reason as invoice_sends.
+  //
+  // Only the status and when it was asked leave this function. dismiss_note is the team's
+  // words about this customer and never does.
+  //
+  // A missing table is not an error: this function may deploy before migration 229 is applied,
+  // and failing the whole quote list over a status line would be the wrong trade. Any OTHER
+  // read failure is logged and the list still loads without the line.
+  const reqByCode = new Map<string, { status: string; requestedAt: string | null }>();
+  if (ssMode && mine.length > 0) {
+    const { data: reqs, error: reqErr } = await admin.from("invoice_requests")
+      .select("short_code, status, requested_at")
+      .eq("client_id", identity.clientId)
+      .in("short_code", mine.map((d) => d.short_code));
+    const missingTable = reqErr && (
+      String(reqErr.code) === "42P01" || String(reqErr.code) === "PGRST205" ||
+      /does not exist|schema cache/i.test(String(reqErr.message || ""))
+    );
+    if (reqErr && !missingTable) {
+      logEdgeError({
+        fn: "customer-quotes", req, clientId: identity.clientId, code: reqErr.code ?? 500,
+        message: `read invoice requests: ${reqErr.message ?? "unknown database error"}`,
+      }).catch(() => {});
+    }
+    for (const r of reqs ?? []) {
+      reqByCode.set(String(r.short_code), { status: String(r.status), requestedAt: r.requested_at ?? null });
+    }
+  }
+
   // What each out-for-signature invoice actually bills, computed ONCE per code and used for
   // both the card's `amountDue` and the sentence the customer signs, so the two can never
   // name different money. The inputs are exactly customer-accept sign_invoice's: the AGREED
@@ -351,6 +383,10 @@ Deno.serve(withErrorLog("customer-quotes", async (req: Request) => {
           invoice: invByCode.has(d.short_code)
             ? { ...invByCode.get(d.short_code), amountDue: amountDueByCode.get(d.short_code) ?? null }
             : null,
+          // The invoice REQUEST (migration 229): {status: 'pending'|'approved'|'dismissed',
+          // requestedAt}, or null. Null whenever an invoice is out — the invoice itself is then
+          // the answer, and a stale "being prepared" line beside it would contradict the card.
+          invoiceRequest: invByCode.has(d.short_code) ? null : (reqByCode.get(d.short_code) ?? null),
           // ⚠️ THE EXACT SENTENCES THE CUSTOMER AGREES TO (2026-09-15). The designer's account
           // panel prints these beside its checkboxes instead of composing its own, because the
           // text is stored verbatim as the consent evidence and a hand-kept copy in the browser
