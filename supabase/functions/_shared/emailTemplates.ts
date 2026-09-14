@@ -52,8 +52,10 @@ export interface EstimateEmailInput {
   quoteTerms?: string | null;
   /** Which word the document goes by. StructureStudio-issued paperwork says "quote"
    *  (Carolyn's terminology, migration 121+); the GHL path keeps "estimate" so existing
-   *  tenants' emails don't change under them. Also flips the CTA to "View & Sign Your
-   *  Quote" — the SS-mode CTA leads to the customer portal where the signature lives. */
+   *  tenants' emails don't change under them. "quote" also flips the CTA to "View & Accept
+   *  Your Quote" and leaves the total OUT of the email (Carolyn, 2026-09-14 — see
+   *  estimateEmail). The signature moved to the invoice on 2026-08-26, so the quote CTA no
+   *  longer says "Sign". */
   docWord?: "estimate" | "quote";
 }
 
@@ -301,12 +303,24 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     .filter(Boolean)
     .join(" - ");
 
+  // ⚠️ NO TOTAL ON A QUOTE EMAIL (Carolyn, 2026-09-14 — she highlighted "Quote total" in the
+  // Gmail preview of a real quote and asked for it removed). The figure belongs on the quote
+  // itself — the PDF and the page the button opens — where the line items and tax that
+  // explain it sit beside it, not bare in an inbox. It leaves ALL THREE places at once: the
+  // detail row, the plain-text line and the preheader (the preview line she was looking at).
+  // The CRM-mode ESTIMATE email keeps its total: those tenants' emails don't change under them.
+  // `money` stays in the token map below, so a builder's saved wording using {total} still
+  // fills — that is their own choice of words, and a literal "{total}" would read as our bug.
+  const showTotal = word !== "quote";
+
   const rows = [detailRow(`${Word} #`, esc(num))];
   if (building) rows.push(detailRow("Building", esc(building)));
-  rows.push(detailRow(`${Word} total`, esc(money)));
+  if (showTotal) rows.push(detailRow(`${Word} total`, esc(money)));
 
+  // The quote CTA said "Sign" until 2026-09-15. The signature moved to the INVOICE on
+  // 2026-08-26 (migration 136); what the quote page asks for now is a click to accept.
   const cta = input.estimateUrl
-    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Sign Your Quote" : "View & Accept Your Estimate")
+    ? ctaButton(input.estimateUrl, word === "quote" ? "View & Accept Your Quote" : "View & Accept Your Estimate")
     : "";
   const pdfLink = input.pdfUrl
     ? `<p style="margin:18px 0 0 0;font-family:${FONT};font-size:14px;line-height:1.6;color:#475569;"><a href="${esc(input.pdfUrl)}" target="_blank" style="color:#2B4C7E;text-decoration:underline;">View your floor plan (PDF)</a></p>`
@@ -346,9 +360,10 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
     `${Word} #: ${num}`,
   ];
   if (building) text.push(`Building: ${building}`);
-  text.push(`${Word} total: ${money}`, "");
+  if (showTotal) text.push(`${Word} total: ${money}`);
+  text.push("");
   if (input.estimateUrl) {
-    text.push(word === "quote" ? `View & sign your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
+    text.push(word === "quote" ? `View & accept your quote: ${input.estimateUrl}` : `View & accept your estimate: ${input.estimateUrl}`);
   }
   if (input.pdfUrl) text.push(`Floor plan (PDF): ${input.pdfUrl}`);
   if (input.formalPdfUrl) text.push(`${Word} (PDF): ${input.formalPdfUrl}`);
@@ -362,7 +377,8 @@ export function estimateEmail(input: EstimateEmailInput): EmailContent {
       phone: input.phone,
       website: input.website,
       quoteTerms: input.quoteTerms,
-      preheader: `Your ${word} from ${name} is ready - ${money}.`,
+      // The inbox preview line — the one place a quote total would still show without the row.
+      preheader: showTotal ? `Your ${word} from ${name} is ready - ${money}.` : `Your ${word} from ${name} is ready.`,
       bodyHtml,
     }),
     text: text.join("\n") + "\n",

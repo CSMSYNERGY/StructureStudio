@@ -16,6 +16,11 @@ function assertNotIncludes(haystack: string, needle: string, msg?: string) {
     throw new Error(`${msg ?? "assertNotIncludes"}: output must not contain ${JSON.stringify(needle)}`);
   }
 }
+function assertEq(actual: unknown, expected: unknown, msg?: string) {
+  if (actual !== expected) {
+    throw new Error(`${msg ?? "assertEq"}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
 
 const baseEstimate = () => ({
   businessName: "Junior Barns",
@@ -147,12 +152,63 @@ const baseAcceptance = () => ({
 Deno.test("docWord 'quote' reworders the estimate email; default stays 'estimate'", () => {
   const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
   assertIncludes(q.subject, "Your quote JB-1041");
-  assertIncludes(q.html, "View &amp; Sign Your Quote");
+  assertIncludes(q.html, "View &amp; Accept Your Quote");
   assertNotIncludes(q.html, "Your estimate is ready");
   assertIncludes(q.text, "Quote #: JB-1041");
   const e = estimateEmail(baseEstimate());
   assertIncludes(e.subject, "Your estimate EST-1042");
   assertIncludes(e.html, "View &amp; Accept Your Estimate");
+});
+
+// ── The QUOTE email carries no total (Carolyn, 2026-09-14) ───────────────────────────
+// She highlighted "Quote total" in the Gmail preview and asked for it gone. The preview line
+// is the preheader, so the amount has to leave all three places, not just the visible row.
+
+Deno.test("quote email: no total in the html, the text, the subject or the inbox preview line", () => {
+  const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
+  for (const [label, s] of [["html", q.html], ["text", q.text], ["subject", q.subject]] as const) {
+    assertNotIncludes(s, "$12,345.50", `quote ${label} must not show the amount`);
+    assertNotIncludes(s, "12,345", `quote ${label} must not show any form of the amount`);
+    assertNotIncludes(s, "Quote total", `quote ${label} must not carry a total row`);
+  }
+  // The preheader is the hidden first div; pin its exact wording so the preview reads right.
+  assertIncludes(q.html, ">Your quote from Junior Barns is ready.</div>");
+  // Everything else in the summary survives.
+  assertIncludes(q.html, "JB-1041");
+  assertIncludes(q.html, "Northwood - 12x24");
+  assertIncludes(q.text, "Building: Northwood - 12x24");
+});
+
+Deno.test("quote email: the CTA says accept, never sign, in both halves", () => {
+  const q = estimateEmail({ ...baseEstimate(), estimateNumber: "JB-1041", docWord: "quote" });
+  assertIncludes(q.html, "View &amp; Accept Your Quote");
+  assertIncludes(q.text, "View & accept your quote: https://pay.example.com/estimate/abc123");
+  assertNotIncludes(q.html, "Sign Your Quote");
+  assertNotIncludes(q.text.toLowerCase(), "sign your quote");
+});
+
+Deno.test("estimate (CRM) email is unchanged: total row, text line and the amount in the preview", () => {
+  const e = estimateEmail(baseEstimate());
+  assertIncludes(e.html, "Estimate total");
+  assertIncludes(e.html, "$12,345.50");
+  assertIncludes(e.html, ">Your estimate from Junior Barns is ready - $12,345.50.</div>");
+  assertIncludes(e.text, "Estimate total: $12,345.50");
+});
+
+Deno.test("a builder's saved quote wording that uses {total} still fills it — never a literal token", () => {
+  // The token stays in the map on purpose: a builder who wrote "{total}" into their own
+  // subject or intro before the row was removed must not start sending customers "{total}".
+  const q = estimateEmail({
+    ...baseEstimate(),
+    estimateNumber: "JB-1041",
+    docWord: "quote",
+    templateCopy: { quote: { subject: "Quote {number} for {total}", intro: "Your {building} comes to {total}." } },
+  });
+  assertEq(q.subject, "Quote JB-1041 for $12,345.50");
+  assertIncludes(q.html, "Your Northwood - 12x24 comes to $12,345.50.");
+  assertNotIncludes(q.subject + q.html + q.text, "{total}");
+  // The builder chose to name the figure in their own words; the structural row stays gone.
+  assertNotIncludes(q.html, "Quote total");
 });
 
 Deno.test("acceptanceEmail carries the number, signer, date and signed-PDF link", () => {
