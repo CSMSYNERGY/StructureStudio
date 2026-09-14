@@ -4809,9 +4809,31 @@ function buildShed3DModel(THREE, p) {
   const porchRun = porchAxes.uAxisIsX ? bldgH : bldgW;        // the run a porch eats into
   const porchDepth = Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
   const porchOn = porchDepth > 0.5;
-  const porchAtNeg = (roofCfg.porchEnd || "front") !== "back";
+  // "FRONT" IS SOUTH for a gable or gambrel roof on a portrait footprint (2026-09-14) — the
+  // footprints whose gable ends are north/south. A shed roof swaps the axes in d3RoofAxes, so it
+  // takes the landscape branch below whatever its shape; that is unchanged. It was north, which put the porch on
+  // the end the ground label calls BACK: with no door placed, the FRONT label, the camera presets
+  // and the estimate's snapshot angle all resolve `frontWall || "south"`. Ahsan saw it beside a
+  // photo of the real building — porch and truss on one end, "FRONT - 14'" on the other.
+  //
+  // ⛔ STILL GEOMETRY, NEVER THE DOOR. The tempting fix is `porchEnd === "front" ? frontWall`,
+  // and it is exactly the bug d3RoofAxes exists to prevent: dragging the only door to the other
+  // end would carry the porch — walls, posts, truss — across a building whose framing has not
+  // moved. Carolyn, 2026-08-31: "wherever the door is, is considered the front of the building.
+  // That doesn't mean that the roof changes." A porch is framing. So "front" names the end the
+  // designer calls front BEFORE anyone places a door; a customer who puts the door under the
+  // porch sees everything agree, and one who puts it on the far end has a porch at the back,
+  // which is what that building would be.
+  //
+  // A landscape footprint's gable ends are west/east and its default front (south) is an eave
+  // side, so no gable end is "the front" there; it keeps the end it always had. No saved style
+  // carried a porch when this changed (checked across every tenant), so nothing stored moved.
+  const porchFront = (roofCfg.porchEnd || "front") !== "back";
   const porchWall = !porchOn ? null
-    : porchAxes.uAxisIsX ? (porchAtNeg ? "north" : "south") : (porchAtNeg ? "west" : "east");
+    : porchAxes.uAxisIsX ? (porchFront ? "south" : "north") : (porchFront ? "west" : "east");
+  // The name the recessed-porch block below resolves its local end from. Derived from the WALL
+  // now rather than from porchEnd, so the set-back and the posts can never pick different ends.
+  const porchAtNeg = porchWall === "north" || porchWall === "west";
   // How far each wall's ORIGIN travels, and how much length it loses. Every one of these is
   // zero without a porch, so a style that has never had one builds byte-for-byte what it did.
   const pN = porchWall === "north" ? porchDepth : 0;
@@ -5795,21 +5817,45 @@ function buildShed3DModel(THREE, p) {
       const kp = box(trimMat, TB, kpH, TD);
       kp.position.set(tRu, H + kpH / 2, zT);
       rg.add(kp);
-      // Two braces from the header out near the posts, angling up to meet the king post HIGH
-      // — around three quarters of the way, not halfway. A shallow brace reads as a flat
-      // chevron; on a real porch truss the diagonals are steep and the node sits close under
-      // the peak, which is what makes the frame look like structure rather than trim.
+      // THE BRACES ARE A V, NOT AN A (2026-09-14). They start at the FOOT of the king post, just
+      // above the header, and rise up and out until they meet the underside of the rafter. The
+      // first two versions ran them the other way — from the header near the posts up to a node
+      // high on the king post — and steepening that (e158bf1) could never make it look right,
+      // because the shape was upside down. Seen side by side with Ahsan's front photo of the real
+      // porch shed, where the struts fan out from the base at roughly 54 degrees.
+      //
+      // A FIXED ANGLE, NOT A FIXED LANDING POINT. The first cut of this landed each brace a
+      // quarter of the way along its own side's run, and review (wf_cedaa470-b84) proved that
+      // wrong on an off-centre ridge: at ridgeOffset 0.35 the short side's landing point fell
+      // inside the brace's own foot on anything 8 ft wide, so that brace vanished, and on wider
+      // spans it stood near-vertical against the king post and read as a fatter post. Holding
+      // the angle and solving for where the line meets the slope gives every side the same
+      // shape — the short, steep side simply gets a shorter brace.
+      //
+      // The clearance is not a constant either. The box is rotated, so of its two top corners
+      // one rises toward the ridge and one drops toward the eave, by (TB/2)·sin and (TB/2)·cos
+      // of the angle, while the rafter falls by `slope` per foot outward. `clr` is the smallest
+      // gap that keeps BOTH corners under the rafter for this side's slope, plus a hair, so a
+      // steep side can no longer push a corner through the roof edge on a small overhang.
       // Positioned at their midpoint and rotated, because a box is built on the x axis.
-      const meet = H + kpH * 0.76;
+      const BR_TAN = Math.tan(50 * Math.PI / 180), BR_SIN = Math.sin(50 * Math.PI / 180), BR_COS = Math.cos(50 * Math.PI / 180);
+      const foot = H + 0.2;                          // sitting on the header, beside the king post
+      const u0 = TB / 2 + 0.05;                      // the foot's distance out from the ridge line
       for (const s of [-1, 1]) {
-        // Pulled in from the eave so the brace ends stay UNDER the roof slope. At the eave
-        // itself a timber this thick pokes through the slab, which has no CSG to cut it.
-        const x0 = tRu + s * Math.max(0.6, S / 2 - 0.95);
-        const dx = tRu - x0, dy = meet - H;
-        const len = Math.hypot(dx, dy);
-        if (len < 0.3) continue;                     // a porch too small to frame
-        const br = box(trimMat, len, TB, TD);
-        br.position.set((x0 + tRu) / 2, (H + meet) / 2, zT);
+        const run = S / 2 - s * tRu;                 // ridge to this side's eave
+        if (run < 0.5) continue;
+        const slope = tRise / run;
+        const clr = 0.05 + (TB / 2) * Math.abs(slope * BR_SIN - BR_COS);
+        // Brace: y = foot + BR_TAN·(u - u0). Rafter underside: y = H + tRise - slope·u - clr.
+        const u1 = (H + tRise - clr - foot + BR_TAN * u0) / (BR_TAN + slope);
+        // A brace shorter than about a hand's width sideways is a stub, not a frame member, and
+        // one landing past the eave has left the gable — both mean this porch is too small.
+        if (u1 - u0 < 0.25 || u1 > run - 0.2) continue;
+        const x0 = tRu + s * u0, x1 = tRu + s * u1;
+        const y1 = foot + BR_TAN * (u1 - u0);
+        const dx = x1 - x0, dy = y1 - foot;
+        const br = box(trimMat, Math.hypot(dx, dy), TB, TD);
+        br.position.set((x0 + x1) / 2, (foot + y1) / 2, zT);
         br.rotation.z = Math.atan2(dy, dx);
         rg.add(br);
       }
