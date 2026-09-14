@@ -1156,19 +1156,41 @@ function Dashboard({ session }) {
       // Without it a slow upload and a dead one look identical from here, so the only choices are
       // a deadline short enough to kill honest uploads or one long enough to wait out a corpse.
       // The request is the one supabase-js sends - same URL, same form fields, same x-upsert.
-      const putSigned = (host, s, blob) => new Promise((resolve, reject) => {
+      // THE SPEED FLOOR. Measured 2026-09-14: on a connection that has been in use a while,
+      // Chrome's HTTP/2 uploads to Supabase trickle at 4-5KB/s - never silent, so the watchdog
+      // below never fires - while a FRESH connection to the other hostname lands the same photo in
+      // five seconds, and curl on the same machine in the same minute ran 50KB/s. So a first try
+      // on each host that is still under 10KB/s after 15s is abandoned for the other host.
+      //
+      // ONLY ON THE FIRST TRY PER HOST (`floor` false from the third attempt on), so a builder
+      // whose link genuinely IS that slow still gets an attempt with no floor at all: they lose
+      // up to thirty seconds to the switching and then finish, rather than failing forever.
+      const crawlMs = (typeof window !== "undefined" && Number(window.__ssUploadCrawlMs)) || 15000;
+      const putSigned = (host, s, blob, floor) => new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         const fd = new FormData();
         fd.append("cacheControl", "3600");
         fd.append("", blob);
-        let last = Date.now();
+        const began = Date.now();
+        let last = began;
+        let loaded = 0, total = 0;
         const bump = () => { last = Date.now(); };
-        const fail = (msg, stalled) => {
+        // Checked from BOTH the progress event and the interval: progress events are not held
+        // back in a background tab the way timers are, so a crawl is caught on time even there.
+        const crawling = () => floor && total > 0 && loaded < total
+          && Date.now() - began > crawlMs
+          && (loaded / ((Date.now() - began) / 1000)) < 10240;
+        const fail = (msg, stalled, crawled) => {
           clearInterval(watch);
           const e = new Error(msg);
           e.ssTransport = true;
           e.ssStalled = !!stalled;
+          e.ssCrawled = !!crawled;
           reject(e);
+        };
+        const giveUpCrawl = () => {
+          try { xhr.abort(); } catch (_a) { /* already finished */ }
+          fail("The upload slowed to a crawl \u2014 your connection could not keep up.", false, true);
         };
         // A STALL, NOT A SLOW UPLOAD: thirty seconds in which NOTHING happened - no bytes out, no
         // reply. Measured in Chrome over HTTP/2, progress fires every ~100ms while the body goes
@@ -1178,9 +1200,15 @@ function Dashboard({ session }) {
           if (Date.now() - last > stallMs) {
             try { xhr.abort(); } catch (_a) { /* already finished */ }
             fail("The upload stalled \u2014 your connection stopped sending.", true);
+          } else if (crawling()) {
+            giveUpCrawl();
           }
         }, 1000);
-        xhr.upload.onprogress = bump;
+        xhr.upload.onprogress = (ev) => {
+          bump();
+          if (ev && ev.lengthComputable) { loaded = ev.loaded; total = ev.total; }
+          if (crawling()) giveUpCrawl();
+        };
         xhr.upload.onload = bump;
         xhr.onprogress = bump;
         xhr.onerror = () => fail("Upload failed \u2014 the connection dropped.", false);
@@ -1209,7 +1237,7 @@ function Dashboard({ session }) {
       // same Chrome in the same minute moved 300KB to the storage host in under two seconds.
       // Three is what the last good batches ran; widen it only on a measurement.
       const t0 = Date.now();
-      let sentBytes = 0, retries = 0, stalls = 0, failStreak = 0, firstErr = "";
+      let sentBytes = 0, retries = 0, stalls = 0, crawls = 0, failStreak = 0, firstErr = "";
       const landed = [0, 0];   // successes per entry in `hosts`
       await Promise.all(Array.from({ length: Math.min(3, slots.length) }, async () => {
         for (;;) {
@@ -1223,7 +1251,7 @@ function Dashboard({ session }) {
             // retries just to report the same thing is the eight-minute wait all over again.
             if (failStreak >= 6) { errs.push("Your connection to the upload server dropped."); break; }
             try {
-              await putSigned(hosts[attempt % 2], s, prepped[i]);
+              await putSigned(hosts[attempt % 2], s, prepped[i], attempt < 2);
               urls[i] = s.url;
               sentBytes += (prepped[i] && prepped[i].size) || 0;
               failStreak = 0;
@@ -1234,7 +1262,11 @@ function Dashboard({ session }) {
             } catch (e) {
               if (!firstErr) firstErr = (e && e.message) || "Upload failed";
               if (e && e.ssStalled) stalls++;
-              if (e && e.ssTransport) failStreak++;
+              if (e && e.ssCrawled) crawls++;
+              // A crawl is NOT evidence of a dead link - bytes were moving - so it must not count
+              // toward the batch-wide give-up. Three lanes crawling twice each would otherwise
+              // abandon a batch on a link that was only slow.
+              if (e && e.ssTransport && !e.ssCrawled) failStreak++;
               // A signed PUT that never reached storage is safe to repeat, and one that secretly
               // did comes back as Duplicate, which putSigned already counts as success.
               if (e && e.ssTransport && attempt < 3) {
@@ -1259,7 +1291,7 @@ function Dashboard({ session }) {
       try {
         // The first error and the stall count ride along because the 0/9 batch logged neither,
         // and "0KB in 485s" alone could not say whether it was the link, the token or the bucket.
-        ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 3 lanes, ${landed[0]} via storage host, ${landed[1]} via main host, ${retries} retries, ${stalls} stalls${firstErr ? `, first error: ${firstErr}` : ""}`,
+        ssLogError("portal", `style photo batch: ${urls.filter(Boolean).length}/${slots.length} in ${Math.round(ms / 100) / 10}s, ${Math.round(sentBytes / 1024)}KB, ${kbs}KB/s, 3 lanes, ${landed[0]} via storage host, ${landed[1]} via main host, ${retries} retries, ${stalls} stalls, ${crawls} crawls${firstErr ? `, first error: ${firstErr}` : ""}`,
           "style_upload_throughput", { fn: "storage", action: "upload_batch" }, "info");
       } catch (_t) { /* a measurement must never break the thing it measures */ }
       return { urls: urls.filter(Boolean), errs, ms, bytes: sentBytes, kbs };
