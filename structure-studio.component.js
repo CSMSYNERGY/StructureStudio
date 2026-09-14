@@ -6415,6 +6415,11 @@ function buildShed3DModel(THREE, p) {
   }
   let profPeak = -Infinity;
   dedup.forEach((pt) => { if (pt[1] > profPeak) profPeak = pt[1]; });
+  // The lowest the eave finish hangs over an eave wall (fascia board or rafter tails), recorded
+  // by the slope loop as it builds them. buildElectrical3D keeps an outside lamp under it: a
+  // fixed "under the plate" cap vanished behind the fascia, whose drop grows with pitch and
+  // overhang. One number from the geometry that was actually built, not a second copy of it.
+  let eaveHangY = H;
   // A slope's endpoint is an INTERIOR JOINT when another slope shares it: a gable ridge,
   // or a gambrel knee. Everything else is a free edge that should really overhang.
   const jointPartnerAt = (pt, self) => slopes.find((o) => o !== self
@@ -6485,6 +6490,7 @@ function buildShed3DModel(THREE, p) {
         const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
         fascia.position.set(edgeU, edgeY - 0.14, L / 2);
         rg.add(fascia);
+        eaveHangY = Math.min(eaveHangY, edgeY - 0.14 - 0.2);   // the board's bottom edge
       } else {
         // OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
         // the roof deck at 24 in on centre. On the building this was measured from it is
@@ -6498,6 +6504,7 @@ function buildShed3DModel(THREE, p) {
         // [0.02, 0.22] band, so nothing pokes through the roof and no daylight shows
         // between tail and deck.
         const tailN = 0.02 - TAIL_DROP + TAIL_H / 2;
+        eaveHangY = Math.min(eaveHangY, eaveY + ny * (0.02 - TAIL_DROP));   // tails' outboard bottom
         const tailLen = OV + 0.5;             // outboard face flush with the slab end,
                                               // inboard end buried behind the wall
         const tailU = eaveU - towardLow * ux * (tailLen / 2) + nx * tailN;
@@ -6625,8 +6632,127 @@ function buildShed3DModel(THREE, p) {
   // Same isolation as buildOneWall: rebuildInterior repopulates this group
   // alone when a loft/workbench/ramp moves during a live drag.
   const interiorGroup = new THREE.Group();
+  // ── Electrical devices: drawn, never picked (2026-09-15) ──
+  // Carolyn, 2026-09-14, on the expo build: she added a Flood Light and a Ceiling Fan from "Add
+  // an electrical item", the plan showed them, and the 3D showed an empty building. No branch
+  // below drew an electrical item at all, so a customer who paid for the package saw none of it.
+  //
+  // Drawn now, and deliberately INERT:
+  //   · NO itemId on the group. pickItem3 walks past a hit without one, so a click on an outlet
+  //     selects nothing (or whatever stands behind it). Electrical is placed and moved in 2D
+  //     only -- place3 refuses it and the 3D Add row leaves it out -- and a device you could
+  //     grab here but not place here would be half a feature.
+  //   · No shadows (userData.noShadow, honoured by setShadowFlags): a 3-in cover plate throwing
+  //     a sun shadow reads as a smudge on the wall, and the shadow map has no resolution for it.
+  //   · userData.ssElec = the electrical item id, ssElecFor = the placed item's id. Nothing in
+  //     the app reads either; tests/harness/elec3d.mjs counts and measures by them.
+  // Keyed on electricalItemId rather than on a tool, because the tools exist only for the
+  // CURRENT package state (elecToolsFor): a saved design whose package was later switched off
+  // still carries its devices, and they still draw. With no tool the name is "" and the mount
+  // is "has a wall or not".
+  //
+  // Where each one goes (a wall's local +z is its exterior normal, the ramp's trick below):
+  //   wall, inside   a cover plate at heightOffFloorIn on the INTERIOR face, sized by name
+  //                  (outlet/switch 0.23x0.37, 220V 0.35x0.45, a breaker panel a grey box)
+  //   wall, outside  /flood|exterior|outdoor/ or mounted within 3 in of the plate: a lamp on the
+  //                  cladding's proudest face (trimFace). Capped under the eave on an eave wall;
+  //                  on a gable end it may rise into the gable, to half a foot under the roof.
+  //   ceiling        a light disc just under the plate line, or a fan (hub + 4 blades) 0.6 ft down
+  const buildElectrical3D = (it, c) => {
+    const name = String((c && c.label) || it.name || "");
+    const hIn = Number(it.heightOffFloorIn != null ? it.heightOffFloorIn : (c && c.heightOffFloorIn));
+    const hFt = Number.isFinite(hIn) && hIn > 0 ? hIn / 12 : null;
+    const onWall = c ? !!c.wallSnap : !!it.wall;
+    const g = new THREE.Group();
+    g.userData = { ssElec: String(it.electricalItemId), ssElecFor: it.id };   // NO itemId -- see above
+    const add = (parent, m) => { m.userData.noShadow = true; parent.add(m); return m; };
+    const glow = () => mat("#FFF6DC", { emissive: "#FFE7A3", emissiveIntensity: 0.85, roughness: 0.4 });
+    if (onWall) {
+      const wf = WALLS[it.wall];
+      if (!wf) return;          // a wall device whose wall no longer exists has nowhere to hang
+      // The same plan-frame -> wall-frame shift and porch clamp buildOneWall gives an opening.
+      const alongRaw = (wf.U[0] ? (it.x - mgX) / scale : (it.y - mgY) / scale) - (wf.a0Ft || 0);
+      const along = Math.max(0.3, Math.min(alongRaw, wf.len - 0.3));
+      g.rotation.y = Math.atan2(wf.N[0], wf.N[1]);   // local +z -> exterior, local x -> along
+      g.position.set(wf.O[0] + wf.U[0] * along, 0, wf.O[1] + wf.U[1] * along);
+      const exterior = /flood|exterior|outdoor/i.test(name) || (hFt != null && hFt >= H - 0.25);
+      if (exterior) {
+        // Profile u is the along-wall world coordinate on a gable end: world x when the ridge
+        // runs along z (north/south are the ends), world z otherwise (see the cap UV comment).
+        const gableEnd = uAxisIsX ? (it.wall === "north" || it.wall === "south") : (it.wall === "west" || it.wall === "east");
+        const u = uAxisIsX ? g.position.x : g.position.z;
+        // UNDER THE EAVE FINISH, not just under the plate. A lamp capped at H - 0.35 (the first
+        // cut) disappeared behind the fascia -- elec3d.mjs's exterior shot showed one sliver of
+        // lens under the board, which on the default roof hangs to H - 0.45 and lower on a
+        // steeper pitch or a longer overhang. So the cap reads eaveHangY, the bottom of what the
+        // slope loop actually built: 0.45 under it leaves the tipped head's top ~0.24 ft clear,
+        // and never higher than H - 0.75. The harness asserts that gap against the fascia it
+        // measures in the scene.
+        const EAVE_CAP = Math.min(H - 0.75, eaveHangY - 0.45);
+        const top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        const y = Math.min(hFt != null ? hFt : EAVE_CAP, top);
+        const dark = mat("#2B2F36", { roughness: 0.6, metalness: 0.3 });
+        // Base from just inside the bare wall face out past the cladding, so battens and lap
+        // courses never show through it; the head stands on its front.
+        const b0 = T / 2 - 0.005, b1 = trimFace + 0.05;
+        const base = add(g, box(dark, 0.42, 0.42, b1 - b0));
+        base.position.set(0, y, (b0 + b1) / 2);
+        const head = add(g, box(dark, 0.6, 0.34, 0.3));
+        head.position.set(0, y, b1 + 0.15);
+        head.rotation.x = 0.35;                       // tipped down at the yard
+        const lens = add(head, box(glow(), 0.5, 0.25, 0.02));
+        lens.position.z = 0.16;
+      } else {
+        const breaker = /breaker|panel|load ?cent/i.test(name);
+        const heavy = /220|240/.test(name);
+        const sw = /switch|dimmer/i.test(name);
+        const lamp = !breaker && !sw && /light|lamp|sconce/i.test(name);
+        const pw = breaker ? 1.0 : heavy ? 0.35 : lamp ? 0.35 : 0.23;
+        const ph = breaker ? 1.4 : heavy ? 0.45 : lamp ? 0.35 : 0.37;
+        const pd = breaker ? 0.25 : 0.04;
+        // Kept on the wall whatever the stored height says: the centre may not put the plate
+        // through the floor or above the plate line.
+        const y = Math.max(ph / 2 + 0.05, Math.min(hFt != null ? hFt : 1.5, H - ph / 2 - 0.05));
+        const zBack = -(T / 2);                        // the interior face
+        const plate = add(g, box(mat(breaker ? "#9CA3AF" : "#F1F0EA", breaker ? { roughness: 0.5, metalness: 0.4 } : { roughness: 0.55 }), pw, ph, pd));
+        plate.position.set(0, y, zBack - pd / 2);
+        const zFront = zBack - pd - 0.005;
+        const detail = (m, w, h, d, dy) => { const b = add(g, box(m, w, h, d)); b.position.set(0, y + dy, zFront + 0.005 - d / 2); return b; };
+        if (breaker) detail(mat("#6B7280", { roughness: 0.5, metalness: 0.4 }), 0.84, 1.22, 0.02, 0);   // the door
+        else if (lamp) detail(glow(), 0.28, 0.2, 0.14, 0);
+        else if (sw) detail(mat("#D6D3CB"), 0.06, 0.12, 0.06, 0);                                         // the toggle
+        else if (heavy) detail(mat("#3F3F46"), 0.17, 0.17, 0.012, 0);
+        else { const rm = mat("#3F3F46"); detail(rm, 0.12, 0.09, 0.012, 0.08); detail(rm, 0.12, 0.09, 0.012, -0.08); }  // duplex faces
+      }
+    } else {
+      g.position.set(ftX(it.x), 0, ftZ(it.y));
+      if (/fan/i.test(name)) {
+        const Y = H - 0.6;
+        const hubMat = mat("#374151", { roughness: 0.5, metalness: 0.3 });
+        const rod = add(g, cyl(hubMat, 0.03, 0.6));
+        rod.position.y = H - 0.3;
+        const hub = add(g, cyl(hubMat, 0.2, 0.22));
+        hub.position.y = Y;
+        const bladeMat = mat("#8B6B4A", { roughness: 0.8 });
+        for (let k = 0; k < 4; k++) {
+          const arm = new THREE.Group();
+          arm.rotation.y = Math.PI / 4 + (k * Math.PI) / 2;   // diagonal to the walls
+          const blade = add(arm, box(bladeMat, 1.6, 0.03, 0.38));
+          blade.position.set(0.2 + 0.8, Y, 0);
+          g.add(arm);
+        }
+      } else {
+        const lit = /light|lamp|led|bulb/i.test(name) || !name;
+        const disc = add(g, cyl(lit ? glow() : mat("#F1F0EA"), 0.45, 0.08));
+        disc.position.y = H - 0.06;
+      }
+    }
+    interiorGroup.add(g);
+  };
   const buildInterior = (itemsNow) => itemsNow.forEach((it) => {
     const c = itemTypes[it.type];
+    // Before the tool check on purpose: a device whose tool left ITEMS still draws (see above).
+    if (it.electricalItemId) { buildElectrical3D(it, c); return; }
     if (!c) return;
     // Plan annotations, one more view of them: the note's text as a plaque
     // lying at its plan position, the line as a thin strip between its
@@ -6831,7 +6957,9 @@ function buildShed3DModel(THREE, p) {
   root.add(interiorGroup);
   // Sun shadows (SmartBuild's "Show Shadows"): solid building meshes cast,
   // the grass receives. Transparent fills (glass) don't cast; labels neither.
-  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  // userData.noShadow opts a mesh out (electrical devices: see buildElectrical3D). Checked here
+  // rather than set once at build, because every scoped rebuild runs this over its group again.
+  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.userData && o.userData.noShadow) && !(o.material && o.material.transparent); o.receiveShadow = false; } });
   setShadowFlags(root);
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
