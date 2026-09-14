@@ -7566,12 +7566,21 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setMsg3((cur) => (cur === m ? cur : m));
         setTimeout(() => setMsg3((cur) => (cur === m ? null : cur)), 4000);
       };
-      const itemLabel3 = (type) => (itemTypes[type] && (itemTypes[type].shortLabel || itemTypes[type].label)) || type;
+      // The footer's "Remove …" names the item the way the customer knows it (Carolyn,
+      // 2026-09-14). It used to read the TYPE's shortLabel, and a catalog vent is a type:"window"
+      // item, so every vent offered "Remove WIN" and a workbench "Remove WB". The catalog name
+      // stamped on the item wins, then the tool's full label; the button ellipsises and carries
+      // the whole name in its title, so a long catalog name can never push the footer apart.
+      const itemLabel3 = (it) => {
+        if (!it) return "";
+        const c = itemTypes[it.type];
+        return String(it.windowName || it.doorName || it.rampName || (c && (c.label || c.shortLabel)) || it.planLabel || it.type);
+      };
       const commitPlaced3 = (ni) => {
         liveItems = liveItems.concat([ni]);
         if (onItemAdd) onItemAdd(ni);
         if (onItemSelect) { lastSentSelect = ni.id; onItemSelect(ni.id); }
-        setSel3d({ id: ni.id, label: itemLabel3(ni.type) });
+        setSel3d({ id: ni.id, label: itemLabel3(ni) });
         capturedRef.current = false;
         setShotTaken(false);
         setTool3(null);
@@ -7785,7 +7794,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           let closest = null, minDist = Infinity;
           doors.forEach((d) => { const dx = pageX - d.x, dy = pageY - d.y; const dist = Math.sqrt(dx * dx + dy * dy); if (dist < minDist) { minDist = dist; closest = d; } });
           if (!closest) return;
-          if (liveItems.find((i) => i.type === "ramp" && i.snapDoorId === closest.id)) { flash3("This door already has a ramp. Delete it first to replace."); return; }
+          if (liveItems.find((i) => i.type === "ramp" && i.snapDoorId === closest.id)) { flash3("This door already has a ramp. Remove it first to replace."); return; }
           if (cfg.isRampPicker) { setPick3({ kind: "ramp", door: closest }); setTool3(null); return; }
           if (cfg.includedFixture) { placeRamp3(cfg.includedFixture, closest); return; }
           const doorCfg = itemTypes[closest.type];
@@ -8235,7 +8244,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         // no-op and shouldn't re-render the parent (unless it moved).
         if (onItemSelect && (d.moved || d.id !== lastSentSelect)) { lastSentSelect = d.id; onItemSelect(d.id); }
         const selIt = liveItems.find((i) => i.id === d.id);
-        setSel3d(selIt ? { id: selIt.id, label: itemLabel3(selIt.type) } : null);
+        setSel3d(selIt ? { id: selIt.id, label: itemLabel3(selIt) } : null);
       };
       canvas.addEventListener("pointerdown", onPtr3Down, true);
       canvas.addEventListener("pointermove", onPtr3Move);
@@ -8493,7 +8502,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           {msg3 && <span style={{ color: "#FCA5A5", fontSize: 12, fontWeight: 700 }}>{msg3}</span>}
           {sel3d && !tool3 && (
             <button onClick={() => { const e = engineRef.current; if (e && e.delete3) e.delete3(sel3d.id); }}
-              style={{ background: "#7F1D1D", color: "#FECACA", border: "1px solid #991B1B", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              title={`Remove ${sel3d.label}`}
+              style={{ background: "#7F1D1D", color: "#FECACA", border: "1px solid #991B1B", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                maxWidth: "min(260px, 70vw)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               🗑 Remove {sel3d.label}
             </button>
           )}
@@ -11507,7 +11518,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // Check if this door already has a ramp
       const existingRamp = items.find((i) => i.type === "ramp" && i.snapDoorId === closest.id);
       if (existingRamp) {
-        setToast("This door already has a ramp. Delete it first to replace.");
+        setToast("This door already has a ramp. Remove it first to replace.");
         setTimeout(() => setToast(null), 5000);
         return;
       }
@@ -15931,7 +15942,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {selectedId && !planLocked && (
             <>
               <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
-              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>✕ Delete</button>
+              {/* "Remove", the word the 3D footer and every quote row already use (Carolyn,
+                  2026-09-14): one action should not have two names on one page. */}
+              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>🗑 Remove</button>
             </>
           )}
           {/* Note and Line sit right beside Clear floorplan, in the right-hand group (Carolyn
