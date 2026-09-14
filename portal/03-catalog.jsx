@@ -42,6 +42,9 @@ function SettingsView({ section }) {
     coFeeLabel: "Change order fee", coUnlockHours: "72",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
+    // Building styles per row on the designer (migration 228). A STRING like every other form
+    // field here; "8" is the designer's own default, so a tenant who never chose reads as 8.
+    brandStylesPerRow: "8",
   });
   const set = (k) => (e) => {
     const v = e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e;
@@ -70,7 +73,8 @@ function SettingsView({ section }) {
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
-      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg,
+      stylesPerRow: Number(form.brandStylesPerRow) };
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
     else if (clearLogo) { body.logoUrl = ""; }
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
@@ -150,6 +154,7 @@ function SettingsView({ section }) {
         coUnlockHours: data.coUnlockHours == null ? "72" : String(data.coUnlockHours),
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
+        brandStylesPerRow: b.stylesPerRow ? String(b.stylesPerRow) : "8",
       });
     })();
   }, []);
@@ -678,6 +683,27 @@ function SettingsView({ section }) {
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
               <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
+          {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 228). A ninth style
+              wrapped to a second row of her style bar; the bar now scrolls instead, and this is
+              how many photos sit side by side before it does. Four buttons, not a number box:
+              only 5-8 are valid, and a picker that cannot hold a wrong value needs no error.
+              type="button" is load-bearing — this card lives inside the page-wide <form>, and a
+              default-type button would submit it. Staged like the logo: Save Branding sends it. */}
+          <div><span id="ss-brand-spr" style={S.lbl}>Building styles per row</span>
+            <div role="group" aria-labelledby="ss-brand-spr" data-ss-styles-per-row={form.brandStylesPerRow} style={{ display: "flex", gap: 6 }}>
+              {["5", "6", "7", "8"].map((n) => {
+                const on = form.brandStylesPerRow === n;
+                return (
+                  <button key={n} type="button" aria-pressed={on} onClick={() => setForm((p) => ({ ...p, brandStylesPerRow: n }))}
+                    style={{ flex: 1, height: 34, cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 700, borderRadius: 6,
+                      border: on ? "1px solid " + ACCENT : "1px solid #CBD5E1", background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#475569" }}>
+                    {n}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How many style photos sit side by side on your designer. Extra styles scroll.</div>
+          </div>
         </div>
         <div style={{ marginBottom: 12 }}>
           <span style={S.lbl}>Logo</span>
