@@ -53,7 +53,7 @@ const BLOCK = [
   liftToComment("function d3ScopeForItemsChange(", "Structure3DPanel — the 3D docked"),
 ].join("\n");
 for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ssVentGableDefault", "ssIsGableVent", "d3ProfSpanAt", "ssPorchTrussWall", "reflowItems", "d3ScopeForItemsChange",
-  "ssVentWhere", "ssVentAt", "ssVentDragZone", "ssVentRefusal", "ssVentNudge", "ssVentSetZone"]) {
+  "ssVentWhere", "ssVentAt", "ssVentDragZone", "ssVentRefusal", "ssVentNudge", "ssVentSetZone", "ssRefitGableVents"]) {
   assert(BLOCK.includes(`function ${name}(`), `extracted block is missing ${name}`);
 }
 
@@ -62,7 +62,7 @@ type Any = any;
 const F = new Function(`${BLOCK}; return { ssGableEndWalls, ssGableVentFit, ssGableVentPlace, ssVentGableDefault, ssIsGableVent, d3ProfSpanAt,
   d3RoofAxes, d3RoofProfile, ssVentSpan, ssItemVBand, checkDoorCollision, wallSlabBlocker, checkWallSlabOverlap, reflowItems, pageGeom,
   d3ScopeForItemsChange, SS_GABLE_TOO_SMALL, SS_GABLE_VENT_MIN_RISE,
-  ssVentWhere, ssVentAt, ssVentDragZone, ssVentNudge, ssVentSetZone, SS_REFUSE_WALL, SS_REFUSE_SLAB,
+  ssVentWhere, ssVentAt, ssVentDragZone, ssVentNudge, ssVentSetZone, ssRefitGableVents, ssVentStyleDropped, SS_REFUSE_WALL, SS_REFUSE_SLAB,
   SS_VENT_NO_GABLE, SS_VENT_NO_ROOM, SS_VENT_TOP_GABLE, SS_VENT_BOTTOM_GABLE, SS_VENT_TOP_WALL, SS_VENT_TOP_WALL_GABLE, SS_VENT_FLOOR };`)() as Record<string, Any>;
 
 const GABLE = { type: "gable", pitch: 0.42 };                        // the Cabin's pitch
@@ -388,6 +388,82 @@ Deno.test("a gable vent whose gable is gone (the style became a single slant) re
   assertEquals(w.zone, "wall");
   assertAlmostEquals(w.bottomFt, TOP_SILL, 1e-9);
   assertEquals(F.ssVentSetZone(shed, 12, 32, H, stale, "wall", [], ITEMS, g.scale, g.mgX, g.mgY).patch.ventZone, null);
+});
+
+// ── A STYLE change and the 10 ft wall (review, 2026-09-15) ───────────────────────────────────────
+// Finding 1: only a SIZE change re-fitted a gable vent, so a style change at the same size left a
+// stale "gable" key the collision rules trusted. Finding 2: a lowered vent's collision band was
+// clamped to the 8 ft default plate, so on a 10 ft wall ▲ ran a vent into a window unrefused.
+Deno.test("a STYLE change at the same size: a single slant brings a gable vent down where the rules can see it; a lower pitch re-fits it", () => {
+  const g = geo(12, 32);
+  const shed = { type: "shed", pitch: 0.25 };
+  const door = { id: 51, type: "singleDoor", wall: "south", x: g.mgX + 2 * g.scale, y: g.mgY + g.pH, widthFt: 3, rotation: 0 };
+  const gv = vent(g, "south", 6, { id: 50, ventZone: "gable", ventRiseFt: 1.5, sillFt: null, sillMode: "fixed" });
+
+  const r = F.ssRefitGableVents([door, gv], shed, 12, 32, H, ITEMS);
+  assertEquals(r.dropped, 1);
+  const down = r.items.find((i: Any) => i.id === 50);
+  assertEquals([down.wall, down.ventZone, down.ventRiseFt, down.sillFt, down.sillMode], ["south", null, null, null, "fixed"]);
+  assertAlmostEquals((down.x - g.mgX) / g.scale, 6, 1e-9);                // nothing in its way: it stays put along
+  const d2 = r.items.find((i: Any) => i.id === 51);
+  assertEquals([d2.wall, d2.x, d2.y], [door.wall, door.x, door.y]);        // the door is untouched
+  // The rules see it where the 3D draws it: a second wall vent on that spot is refused now, and the
+  // stale key let exactly that through (the reviewer's reproduction).
+  const second = vent(g, "south", 6, { id: 52 });
+  assert(F.checkDoorCollision(second, { width: 1 }, r.items, ITEMS, g.scale), "the dropped vent refuses a vent on its spot");
+  assertFalse(F.checkDoorCollision(second, { width: 1 }, [door, gv], ITEMS, g.scale), "control: the stale key did not");
+  assertEquals(F.ssVentStyleDropped(1), "This style has no gable room for your vent, so it moved down to the top of the wall.");
+
+  // A window already holding the wall's top spot: the vent comes down BESIDE it, never onto it.
+  const win = { id: 53, type: "window", wall: "south", x: g.mgX + 6 * g.scale, y: g.mgY + g.pH, widthFt: 2, rotation: 0, sillFt: 5, openingHeightFt: 2 };
+  const slid = F.ssRefitGableVents([win, gv], shed, 12, 32, H, ITEMS).items.find((i: Any) => i.id === 50);
+  assertEquals(slid.ventZone, null);
+  assert(Math.abs((slid.x - g.mgX) / g.scale - 6) >= 1.5, `slid clear of the window: along ${(slid.x - g.mgX) / g.scale}`);
+  assertFalse(F.checkDoorCollision(slid, { width: 1 }, [win], ITEMS, g.scale), "and not on it");
+
+  // A lower pitch that still has room: re-fitted into the new gable, lower, never dropped or shrunk.
+  const low = F.ssRefitGableVents([gv], { type: "gable", pitch: 0.25 }, 12, 32, H, ITEMS);
+  const lv = low.items[0];
+  assertEquals([low.dropped, lv.ventZone, lv.widthFt], [0, "gable", 1]);
+  assert(lv.ventRiseFt < 1.5 - 1e-6 && lv.ventRiseFt >= MIN_RISE - 1e-9, `re-fitted rise ${lv.ventRiseFt}`);
+  assert(F.ssGableVentFit({ type: "gable", pitch: 0.25 }, 12, 32, "south", H, lv, (lv.x - g.mgX) / g.scale, lv.ventRiseFt), "what it wrote fits");
+
+  // No gable vent on the plan: an ordinary style pick touches nothing.
+  assertEquals(F.ssRefitGableVents([door, vent(g, "east", 10, { id: 54 })], shed, 12, 32, H, ITEMS), null);
+});
+
+Deno.test("a 10 ft wall: a lowered vent is measured on the real plate, so ▲ into a window is refused and a window onto the vent is too", () => {
+  const g = geo(12, 16);
+  const H10 = 10;
+  const win = { id: 60, type: "window", wall: "south", x: g.mgX + 6 * g.scale, y: g.mgY + g.pH, widthFt: 2, rotation: 0, sillFt: 8.2, sillMode: "variable", openingHeightFt: 1 };
+  const v = vent(g, "south", 6, { id: 61, sillFt: 7.5, sillMode: "variable" });   // drawn [7.5, 8.17]: just under the window
+  assertEquals(F.ssVentSpan(v, H10)[0], 7.5);
+  // The window's own band is what the elevation prints.
+  assertAlmostEquals(F.ssItemVBand(win, ITEMS.window, ITEMS, H10).bottomFt, 8.2, 1e-9);
+  // ▲ once is [7.75, 8.42], into the window's sill: refused. ▼ is clear.
+  assertEquals(F.ssVentNudge(GABLE, 12, 16, H10, v, 1, [win], ITEMS, g.scale, g.mgX, g.mgY).refuse, F.SS_REFUSE_WALL);
+  assertEquals(F.ssVentNudge(GABLE, 12, 16, H10, v, -1, [win], ITEMS, g.scale, g.mgX, g.mgY).patch.sillFt, 7.25);
+  // A window placed onto a vent drawn at 8.0 on that wall: refused when the call names the plate, and
+  // still let through on the 8 ft default — the gap every vent-moving path now closes by passing it.
+  const at8 = { ...v, sillFt: 8.0 };
+  assert(F.checkDoorCollision(win, { width: 2 }, [at8], ITEMS, g.scale, H10), "on the real plate they overlap");
+  assertFalse(F.checkDoorCollision(win, { width: 2 }, [at8], ITEMS, g.scale), "control: the 8 ft default clamps the vent under the window");
+  // The shelf guard reads the same plate: a 96 in single shelf is in the lowered vent's band at 10 ft.
+  const shelfTypes = { ...ITEMS, shelf: { wallSnap: true, modelKey: "wallShelf", width: 4, height: 1, heightOffFloorIn: 96 } };
+  const shelf = { id: 62, type: "shelf", wall: "south", x: g.mgX + 6 * g.scale, y: g.mgY + g.pH - 0.5 * g.scale, widthFt: 4, rotation: 0, heightOffFloorIn: 96 };
+  assert(F.checkWallSlabOverlap(at8, 1 * g.scale, [shelf], shelfTypes, g.scale, at8, H10), "a shelf at 8 ft is in the way of a vent at 8 ft");
+});
+
+Deno.test("both twins re-fit gable vents on a style pick, but not on a load, and pass the plate to every vent refusal", () => {
+  for (const [name, text] of [["component.js", SRC], ["jsx", JSX]] as const) {
+    assert(text.includes("const r = ssRefitGableVents(items, vr.roof, bldgW, bldgH, vr.H, ITEMS);"), `${name}: the style effect re-fits`);
+    assert(text.includes("if (ventItemsSeenRef.current !== items) return;"), `${name}: a load (style and items in one commit) is skipped`);
+    assert(text.includes("setItems((cur) => (cur === from ? r.items : cur));"), `${name}: the re-fit only lands on the plan it was computed from`);
+    const styleFx = text.indexOf("}, [sel.style]);"), tracker = text.indexOf("useEffect(() => { ventItemsSeenRef.current = items; }, [items]);");
+    assert(styleFx > 0 && tracker > styleFx, `${name}: the items tracker runs AFTER the style effect, or a load reads as a pick`);
+    assert(text.includes("const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);"), `${name}: arrows and chips pass the plate`);
+    assert(text.includes("checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale, dH3)"), `${name}: the 3D drag passes the plate`);
+  }
 });
 
 Deno.test("both twins move vents vertically in 3D and give the plan its zone chips and arrows", () => {

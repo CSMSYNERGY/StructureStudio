@@ -214,19 +214,28 @@ function getNearestWall(x, y, pW, pH, mgX, mgY) {
 // The CANDIDATE's band is read with itemTypes[ni.type], not with `nc`: most callers pass a
 // bare { width: wFt } as nc, which carries no wallOnly flag, and reading the band off that
 // would return null for every door and quietly restore the old behaviour everywhere.
-function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
+function checkDoorCollision(ni, nc, existing, itemTypes, sc, wallHeightFt) {
   if (!ni.wall) return false;
   const niw = (ni.widthFt || nc.width) * sc;
-  // wallHeightFt is deliberately not threaded in. The only band that reads it is a vent's,
-  // measured DOWN from the plate, and the 8 ft default puts a vent LOWER than a taller wall
-  // would — so a tenant on 10 ft walls errs toward refusing, which is the safe direction.
-  const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes);
-  // ⚠️ A GABLE VENT IS ABOVE THE PLATE, and this function is not told where the plate is (see
-  // the wallHeightFt note above). Its band is H + rise, measured against an 8 ft default, so on a
-  // 10 ft wall a vent in the gable would "overlap" a window at 8'4" that is really 2 ft below the
-  // plate. So a gable vent meets only other gable vents, along the wall alone — two in one gable
-  // at one spot is the one clash that can happen up there — and never a door, window, shelf or wall
-  // vent below it, which the plate is between.
+  // `wallHeightFt` is OPTIONAL, and only a vent's band reads it (ssVentSpan measures a vent's top
+  // spot down from the plate). It used to be left out on the theory that the 8 ft default puts a
+  // vent lower than a taller wall would, so a 10 ft tenant "errs toward refusing". That held only
+  // for a vent at the top spot. Once a vent could be moved down the wall (2026-09-15), its band was
+  // CLAMPED to the 8 ft plate while the 3D drew it against the real one. The review on 09-15 pressed
+  // ▲ on a 10 ft wall and ran a vent straight into a window with no refusal. So every path that moves
+  // a vent passes the plate it moves the vent against; a caller that omits it keeps the old default.
+  const niBand = ssItemVBand(ni, itemTypes[ni.type] || nc, itemTypes, wallHeightFt);
+  // ⚠️ A GABLE VENT IS ABOVE THE PLATE, and most callers do not say where the plate is (see the
+  // wallHeightFt note above). Its band is H + rise, so against an 8 ft default a vent in a 10 ft
+  // building's gable would "overlap" a window at 8'4" that is really 2 ft below the plate. So a
+  // gable vent meets only other gable vents, along the wall alone — two in one gable at one spot is
+  // the one clash that can happen up there — and never a door, window, shelf or wall vent below it,
+  // which the plate is between.
+  //
+  // ⚠️ That rule trusts the ventZone KEY, so the key must match the drawing. A style change that
+  // takes the gable away (a single slant, a lower pitch) runs ssRefitGableVents, which brings such a
+  // vent down to the wall. Before that existed a stale "gable" key let a window be placed right on
+  // top of a vent the 3D drew on the wall (review, 2026-09-15).
   const niGable = ssIsGableVent(ni);
   for (const it of existing) {
     const c = itemTypes[it.type];
@@ -260,7 +269,7 @@ function checkDoorCollision(ni, nc, existing, itemTypes, sc) {
     if (niGable) return true;   // both in the gable: along is the whole test
     // Flush is allowed (<=, not <): a loft door whose sill sits exactly on the walk door's
     // head is one framed opening over another sharing a header, which is how they are built.
-    const itBand = ssItemVBand(it, c, itemTypes);
+    const itBand = ssItemVBand(it, c, itemTypes, wallHeightFt);
     if (niBand && itBand && (niBand.topFt <= itBand.bottomFt || itBand.topFt <= niBand.bottomFt)) continue;
     return true;
   }
@@ -365,12 +374,13 @@ const SS_REFUSE_LOFT = "Lofts can't overlap — drop this one clear of the other
 //
 // ⚠️ A null band still means ASSUME CLASH, never "no overlap". An item that states no height is
 // exactly the case where guessing is unsafe, so it keeps the old full-height blocker.
-function ssCandBandIn(cand, itemTypes) {
+// `wallHeightFt` is optional and reaches only a vent's band (see checkDoorCollision's note).
+function ssCandBandIn(cand, itemTypes, wallHeightFt) {
   if (!cand) return [0, 1e4];
   const slab = ssSlabBand(cand, itemTypes);
   if (slab) return slab;
   const cfg = itemTypes && itemTypes[cand.type];
-  const v = cfg ? ssItemVBand(cand, cfg, itemTypes) : null;
+  const v = cfg ? ssItemVBand(cand, cfg, itemTypes, wallHeightFt) : null;
   if (!v || !isFinite(v.bottomFt) || !isFinite(v.topFt)) return [0, 1e4];
   return [v.bottomFt * 12, v.topFt * 12];
 }
@@ -378,11 +388,11 @@ function ssCandBandIn(cand, itemTypes) {
 // through isVentItem because this sits inside the slab block, which the stub tests lift on its
 // own; checkDoorCollision and wallSlabBlocker both call it.
 function ssIsGableVent(it) { return !!(it && it.isVent && it.ventZone === "gable"); }
-function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand) {
+function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt) {
   if (!sn.wall) return null;
   // A vent in the gable is above the plate, and no workbench or shelf reaches past it.
   if (ssIsGableVent(cand)) return null;
-  const candBand = ssCandBandIn(cand, itemTypes);
+  const candBand = ssCandBandIn(cand, itemTypes, wallHeightFt);
   const isH = sn.wall === "north" || sn.wall === "south";
   const candPos = isH ? sn.x : sn.y;
   const candHalf = widthFtPx / 2;
@@ -395,8 +405,8 @@ function wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand) {
   }
   return null;
 }
-function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand) {
-  return !!wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand);
+function checkWallSlabOverlap(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt) {
+  return !!wallSlabBlocker(sn, widthFtPx, existing, itemTypes, sc, cand, wallHeightFt);
 }
 
 // SAY WHICH THING IS IN THE WAY. Every click-to-place refusal used to read "A workbench is on
@@ -548,7 +558,8 @@ const SS_WALL_ORDER = { north: ["south", "east", "west"], south: ["north", "east
  * they do need to know.
  */
 //
-// `gablePlace(cand, sn, geom)` is optional and only the SIZE change passes it: the patch that puts
+// `gablePlace(cand, sn, geom)` is optional, passed by the SIZE change and, at unchanged dimensions,
+// by a STYLE change (ssRefitGableVents): the patch that puts
 // a gable vent (ssIsGableVent) into the gable above `sn.wall` on the NEW building, or null. A null
 // clears the zone, so a vent whose gable the new size took away (a landscape footprint's ends are
 // west/east) or made too small comes back down to the wall rather than being drawn in mid-air.
@@ -1190,7 +1201,7 @@ function ssVentGableDefault(roofCfg, bldgW, bldgH, wallHeightFt, ni, existing, i
     if (!g) return { ni, note: SS_GABLE_TOO_SMALL };
     const cand = { ...ni, ...g };
     if (!first) first = cand;
-    if (!checkDoorCollision(cand, { width: cand.widthFt }, existing, itemTypes, scale)) return { ni: cand, note: null };
+    if (!checkDoorCollision(cand, { width: cand.widthFt }, existing, itemTypes, scale, wallHeightFt)) return { ni: cand, note: null };
   }
   return { ni: first, note: null };
 }
@@ -1217,9 +1228,10 @@ const SS_VENT_TOP_WALL_GABLE = "That vent is as high as the wall allows — choo
 const SS_VENT_FLOOR = "That vent is as low as it goes.";
 const ssVentAlongFt = (it, scale, mgX, mgY) => ((it.wall === "north" || it.wall === "south") ? it.x - mgX : it.y - mgY) / scale;
 // Where a vent is NOW, as drawn: its zone, its bottom edge off the floor, and (in the gable) its
-// rise. A "gable" vent whose gable no longer fits it — a style change keeps the key, and only a
-// SIZE change reflows items — is on the WALL here, because that is where buildShed3DModel draws it;
-// the next move through these helpers writes the stale key off.
+// rise. A "gable" vent whose gable no longer fits it is on the WALL here, because that is where
+// buildShed3DModel draws it. A size or style change re-fits the key (reflowItems' gablePlace,
+// ssRefitGableVents), so that is now only a design saved before 2026-09-15 with a stale key, and the
+// next move through these helpers writes it off.
 function ssVentWhere(roofCfg, bldgW, bldgH, wallHeightFt, it, scale, mgX, mgY) {
   const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   const along = ssVentAlongFt(it, scale, mgX, mgY);
@@ -1252,12 +1264,13 @@ function ssVentDragZone(zoneNow, bottomFt, wallHeightFt) {
   const H = Math.max(1, Number(wallHeightFt) || D3.WALL_H);
   return zoneNow === "gable" ? (bottomFt > H - SS_VENT_ZONE_HYST ? "gable" : "wall") : (bottomFt > H + SS_VENT_ZONE_HYST ? "gable" : "wall");
 }
-// The drag's two guards, in the drag's order, for a vent already patched into place.
-function ssVentRefusal(cand, existing, itemTypes, scale) {
+// The drag's two guards, in the drag's order, for a vent already patched into place. Measured
+// against the plate the vent was moved on (`wallHeightFt`), not the 8 ft default: see checkDoorCollision.
+function ssVentRefusal(cand, existing, itemTypes, scale, wallHeightFt) {
   const c = itemTypes[cand.type] || { wallOnly: true, width: 1 };
   const wFt = cand.widthFt || c.width || 1;
-  if (checkDoorCollision(cand, { ...c, width: wFt }, existing, itemTypes, scale)) return SS_REFUSE_WALL;
-  if (checkWallSlabOverlap(cand, wFt * scale, existing, itemTypes, scale, cand)) return SS_REFUSE_SLAB;
+  if (checkDoorCollision(cand, { ...c, width: wFt }, existing, itemTypes, scale, wallHeightFt)) return SS_REFUSE_WALL;
+  if (checkWallSlabOverlap(cand, wFt * scale, existing, itemTypes, scale, cand, wallHeightFt)) return SS_REFUSE_SLAB;
   return null;
 }
 // One ▲ (dir +1) or ▼ (dir -1) press on the plan: 3 in within the vent's zone. Crossing the plate is
@@ -1282,7 +1295,7 @@ function ssVentNudge(roofCfg, bldgW, bldgH, wallHeightFt, it, dir, existing, ite
     if (dir < 0 && w.bottomFt <= SS_VENT_MIN_SILL + 1e-6) return { refuse: SS_VENT_FLOOR };
     patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "wall", w.bottomFt + step);
   }
-  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale);
+  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);
   return r ? { refuse: r } : { patch };
 }
 // The "In the gable" / "On the wall" chips. Into the gable at the 2 in sill, keeping the vent's place
@@ -1301,9 +1314,43 @@ function ssVentSetZone(roofCfg, bldgW, bldgH, wallHeightFt, it, zone, existing, 
     if (w.zone === "wall" && !it.ventZone) return { patch: null };
     patch = ssVentAt(roofCfg, bldgW, bldgH, w.H, it, at, scale, mgX, mgY, "wall", null);
   }
-  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale);
+  const r = ssVentRefusal({ ...it, ...patch }, existing, itemTypes, scale, w.H);
   return r ? { refuse: r } : { patch };
 }
+// A STYLE CHANGE RE-FITS THE GABLE VENTS (review, 2026-09-15). Plan 1.9 says the zone comes off
+// when a size OR a style change takes the gable away, and only the size change did it: reflowItems'
+// gablePlace ran from the [sel.size] effect alone. Pick a single slant (or a pitch the vent no
+// longer fits) at the same size and the vent kept ventZone "gable". The 3D and the toolbar readout
+// both put it on the wall under the plate, while checkDoorCollision, trusting the key, let a window,
+// a door or another vent be placed right on top of it.
+//
+// So this is the size change's own reflow at the SAME dimensions — an identity for everything
+// already legal, which repairLoaded relies on at every load — with the NEW roof's gablePlace. A vent
+// that still fits is re-fitted inside the new rakes; one that does not comes down to its wall's top
+// spot, slid clear of whatever is already there. A vent the reflow cannot seat anywhere comes back
+// untouched, so its key comes off where it stands: an overlap the customer can see beats a rule that
+// cannot see it. Null when no item is a gable vent, so an ordinary style pick never touches the plan.
+// `dropped` counts the vents that came down, for the toast.
+function ssRefitGableVents(items, roofCfg, bldgW, bldgH, wallHeightFt, itemTypes) {
+  if (!Array.isArray(items) || !items.some(ssIsGableVent)) return null;
+  const d = { w: bldgW, h: bldgH };
+  const out = reflowItems(items, d, d, itemTypes, (cand, sn, g) =>
+    ssGableVentPlace(roofCfg, bldgW, bldgH, wallHeightFt, cand, sn, g.scale, g.mgX, g.mgY, ssVentAlongFt(sn, g.scale, g.mgX, g.mgY), cand.ventRiseFt)).items;
+  const G = pageGeom(bldgW, bldgH);
+  const wasGable = new Set(items.filter(ssIsGableVent).map((i) => i.id));
+  let dropped = 0;
+  const next = out.map((it) => {
+    if (!wasGable.has(it.id)) return it;
+    if (!ssIsGableVent(it)) { dropped++; return it; }
+    if (ssGableVentFit(roofCfg, bldgW, bldgH, it.wall, wallHeightFt, it, ssVentAlongFt(it, G.scale, G.mgX, G.mgY), it.ventRiseFt)) return it;
+    dropped++;
+    return { ...it, ventZone: null, ventRiseFt: null, sillFt: null, sillMode: "fixed" };
+  });
+  return { items: next, dropped };
+}
+const ssVentStyleDropped = (n) => (n === 1
+  ? "This style has no gable room for your vent, so it moved down to the top of the wall."
+  : `This style has no gable room for ${n} of your vents, so they moved down to the top of the wall.`);
 function ventStamps(fx) {
   const fc = (fx && fx.fixedColor) || null;
   return {
@@ -8669,8 +8716,11 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             // covers both commit sites below with one check.
             const dOthers3 = liveItems.filter((i) => i.id !== it.id);
             const dCand3 = { ...it, ...sn, widthFt: wFt };
-            if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale)) { flash3(SS_REFUSE_WALL); return; }
-            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3)) { flash3(SS_REFUSE_SLAB); return; }
+            // Against the viewer's own plate, which is what a vent was just moved on (only a vent's
+            // band reads it; review 2026-09-15, a vent dragged into a window on a 10 ft wall).
+            const dH3 = spec.wallHeightFt || D3.WALL_H;
+            if (checkDoorCollision(dCand3, { ...c, width: wFt }, dOthers3, itemTypes, scale, dH3)) { flash3(SS_REFUSE_WALL); return; }
+            if (checkWallSlabOverlap(sn, wFt * scale, dOthers3, itemTypes, scale, dCand3, dH3)) { flash3(SS_REFUSE_SLAB); return; }
             if (ventMove) {
               const same = (k) => !(k in sn) || (sn[k] == null ? null : sn[k]) === (it[k] == null ? null : it[k]);
               if (!["x", "y", "wall", "ventZone", "ventRiseFt", "sillFt", "sillMode"].every(same)) {
@@ -11442,6 +11492,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Prevents the size-change effect from clearing items when we're rehydrating
   // a saved design (sel.size and items get set together).
   const prevSizeRef = useRef("");
+  // The style-change vent re-fit (ssRefitGableVents, 2026-09-15): the last style it saw, and the
+  // items of the last commit that changed them. A style that arrives WITH new items is a design
+  // being opened, and a saved design is never rewritten as it opens.
+  const ventStyleRef = useRef(null);
+  const ventItemsSeenRef = useRef(null);
   // Outcomes of a size-change reflow. `reflowNote` is advisory (items moved wall or were
   // shortened); `sizeBlock` is the refusal — { from, to, items } — shown when something
   // could not be placed at all, with the size already reverted.
@@ -11575,6 +11630,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setTimeout(() => setToast(null), 6000);
     }
   }, [sel.size]);
+
+  // A STYLE change re-fits every gable vent against the new roof (ssRefitGableVents, review
+  // 2026-09-15): the half of plan 1.9 the size effect above never covered. A style pick blanks the
+  // size, so this runs on the dimensions still on the plan, and a different size picked afterwards
+  // reflows again through the effect above.
+  //
+  // ⚠️ NOT ON A LOAD. loadDesignByCode and openVersion set sel and items in the same commit, so a
+  // style that changed while the items changed too is a design being opened, and it keeps every key
+  // exactly as saved, the way repairLoaded does. That test reads ventItemsSeenRef, which the tracker
+  // declared AFTER this effect updates, so on a shared commit this still sees the previous items.
+  // The functional setItems lands only on the plan it was computed from, never on one that replaced
+  // it in the meantime.
+  useEffect(() => {
+    const prevStyle = ventStyleRef.current;
+    ventStyleRef.current = sel.style;
+    if (prevStyle === null || prevStyle === sel.style) return;      // first render, or no change
+    if (sel.style && !selectedStyle) return;                          // a style the config does not list
+    if (ventItemsSeenRef.current !== items) return;                   // arrived with new items: a load
+    const vr = ventRoof2D();
+    const r = ssRefitGableVents(items, vr.roof, bldgW, bldgH, vr.H, ITEMS);
+    if (!r) return;
+    const from = items;
+    setItems((cur) => (cur === from ? r.items : cur));
+    if (r.dropped) { setToast(ssVentStyleDropped(r.dropped)); setTimeout(() => setToast(null), 6000); }
+  }, [sel.style]);
+  useEffect(() => { ventItemsSeenRef.current = items; }, [items]);
 
   // Snap a loaded layout back onto legal positions. Designs saved before the size-change
   // reflow existed can carry items stranded off their walls by an old style-then-size
