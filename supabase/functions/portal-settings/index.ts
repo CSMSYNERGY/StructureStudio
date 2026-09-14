@@ -8701,6 +8701,22 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (readErr) return dbFail(req, clientId, "read that invoice request", readErr);
     if (!row) return json({ error: "There's no invoice request waiting on that order." }, 404);
     if (row.status === "approved") return json({ error: "That invoice has already been issued." }, 409);
+    // THE INVOICE OUTRANKS THE REQUEST ROW (review, 2026-09-15). send_invoice answers the request
+    // best-effort after the invoice is recorded; when that write misses (logged as
+    // invoice_request_approve) the row still says 'pending' beside an issued invoice. Asking the
+    // invoice itself keeps "Not now" off an order whose invoice is already out: the stamp the
+    // Orders tab reads, or an invoice_sends row that completed ('created' = issued, email pending).
+    const [stampRes, sendRes] = await Promise.all([
+      admin.from("designs").select("ss_invoice_sent_at")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+      admin.from("invoice_sends").select("status")
+        .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+    ]);
+    if (stampRes.error) return dbFail(req, clientId, "read the order's invoice state", stampRes.error);
+    if (sendRes.error) return dbFail(req, clientId, "read the order's invoice", sendRes.error);
+    if (stampRes.data?.ss_invoice_sent_at || ["created", "sent"].includes(String(sendRes.data?.status ?? ""))) {
+      return json({ error: "That invoice has already been issued." }, 409);
+    }
     if (row.status === "pending") {
       // Guarded on status, so a send that lands between the read and this write wins: an
       // issued invoice must never be relabelled as set aside.
@@ -9395,18 +9411,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // nothing. A DISMISSED request is answered as well: "Not now" followed by sending the
         // invoice anyway is an approval, and the row should say so.
         // Written as a separate statement, never folded into the stamp above: until migration
-        // 229 is applied the table does not exist, and this must stay a no-op rather than take
+        // 229 is applied the table does not exist, and a failure here must never take
         // ss_invoice_sent_at down with it. Best-effort for the same reason as the stamp — the
         // invoice is recorded and the customer is waiting.
-        await admin.from("invoice_requests")
-          .update({
-            status: "approved",
-            decided_at: nowIso(),
-            decided_by_user_id: operator ? null : (userId ?? null),
-            decided_by_operator: operator ? operator.email : null,
-          })
-          .eq("client_id", clientId).eq("short_code", shortCode).in("status", ["pending", "dismissed"])
-          .then(() => undefined, () => undefined);
+        // …but never SILENT (review, 2026-09-15). A miss leaves the request 'pending' beside an
+        // issued invoice, so it is logged where "fix the errors" finds it; and
+        // dismiss_invoice_request checks the invoice itself, so the stale row cannot then be set
+        // aside on an order whose invoice is already out.
+        let approveErr: { message?: string; code?: string } | null = null;
+        try {
+          const { error } = await admin.from("invoice_requests")
+            .update({
+              status: "approved",
+              decided_at: nowIso(),
+              decided_by_user_id: operator ? null : (userId ?? null),
+              decided_by_operator: operator ? operator.email : null,
+            })
+            .eq("client_id", clientId).eq("short_code", shortCode).in("status", ["pending", "dismissed"]);
+          approveErr = error;
+        } catch (e) {
+          approveErr = { message: (e as Error)?.message ?? String(e) };
+        }
+        if (approveErr) {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: "invoice_request_approve",
+            message: `invoice issued but its request was not marked approved: ${approveErr.message ?? "unknown"}`,
+            context: { action, shortCode, pgCode: approveErr.code ?? null },
+          }).catch(() => {});
+        }
         // The invoiced total becomes the order's total when none is set (SS designs are
         // skipped by the GHL total sync, so nothing else ever fills it). NULL-only: a
         // rep-set or CO-acknowledged number is never clobbered.
