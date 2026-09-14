@@ -70,16 +70,24 @@ function SettingsView({ section }) {
   // rid of one: a logo could be replaced forever but never removed. An explicit empty
   // `logoUrl` is the server's own clear path (see its `else if ("logoUrl" in payload)`).
   const [clearLogo, setClearLogo] = useState(false);
+  // Styles per row AS STORED: "5".."8", or null = never chosen (the card shows that as 8).
+  // Review 2026-09-15: Save Branding used to send stylesPerRow on EVERY save, so a tenant who
+  // only swapped their logo got styles_per_row = 8 written — erasing "never chosen", changing
+  // their get_config payload (228 emits the key only when the column is set) and pinning them
+  // at 8 if the default ever moves. Same idea as the logo: the key is sent only when the owner
+  // actually picked a different number, and save_branding leaves the column alone otherwise.
+  const [brandSprStored, setBrandSprStored] = useState(null);
   const saveBranding = async () => {
     setBrandBusy(true); setBrandMsg(null);
     const body = { action: "save_branding", companyName: form.brandName, tagline: form.brandTagline,
-      accentColor: form.brandAccent, headerBg: form.brandHeaderBg,
-      stylesPerRow: Number(form.brandStylesPerRow) };
+      accentColor: form.brandAccent, headerBg: form.brandHeaderBg };
+    if (form.brandStylesPerRow !== (brandSprStored || "8")) body.stylesPerRow = Number(form.brandStylesPerRow);
     if (logoDataUrl) { body.logoBase64 = logoDataUrl; body.logoContentType = logoCt; }
     else if (clearLogo) { body.logoUrl = ""; }
     const { data, error: err } = await sb.functions.invoke("portal-settings", { body });
     setBrandBusy(false);
     if (err || (data && data.error)) { setBrandMsg({ err: (data && data.error) || err.message }); return; }
+    if ("stylesPerRow" in body) setBrandSprStored(String(body.stylesPerRow));
     setBrandMsg({ ok: clearLogo && !logoDataUrl ? "Branding saved — your logo was removed, so the designer shows your company initials." : "Branding saved — your designer link now reflects it." });
     if (data.logoUrl) setCurrentLogo(data.logoUrl);
     if (clearLogo && !logoDataUrl) setCurrentLogo(null);
@@ -122,6 +130,7 @@ function SettingsView({ section }) {
       const a = data.businessAddress || {};
       const b = data.branding || {};
       setCurrentLogo(b.logoUrl || null);
+      setBrandSprStored(b.stylesPerRow ? String(b.stylesPerRow) : null);
       setForm({
         ghlPipelineId: data.ghlPipelineId || "",
         ghlStageSendQuoteId: data.ghlStageSendQuoteId || "",
