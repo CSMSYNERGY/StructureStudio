@@ -2,7 +2,10 @@
 // login, a code never blocks designing (Ahsan 2026-09-15), and the header grows Log in /
 // Enter your code / Signed in as · Quotes · Invoices · Sign out. The account panel (cards, Review &
 // Accept, Sign invoice, deep links, saved designs) and the refresh-keeps-the-design autosave are
-// covered below the login cases.
+// covered below the login cases. The PORTAL side closes the file: Orders' "Invoice to approve"
+// (Approve is send_invoice, Not now is dismiss_invoice_request), Settings' customer login-code
+// choice, the {total} wording hint, every copy/QR link now opening the designer, and the portal
+// success screen's "Texted a login link" line — all with Supabase answered locally, no login.
 //
 // ⚠️ EVERY WRITE IS STUBBED with page.route — capture-lead, customer-auth, customer-quotes,
 // every non-get_ RPC (save_design, log_error…) and storage uploads — so this runs against beta
@@ -627,7 +630,8 @@ async function fillQuoteForm(page) {
     await expect(decline).toHaveCount(n - 1);
   }
 }
-const SUBMIT_OK = { status: 200, body: { ok: true, issuedBy: "structurestudio", quoteNumber: "JB-1050", estimateNumber: "JB-1050", quoteEmailed: true, quotePdfUrl: null } };
+// quoteTexted rides along on purpose: the public page must ignore it (the line is the rep's).
+const SUBMIT_OK = { status: 200, body: { ok: true, issuedBy: "structurestudio", quoteNumber: "JB-1050", estimateNumber: "JB-1050", quoteEmailed: true, quotePdfUrl: null, quoteTexted: true, quoteTextReason: null } };
 
 test("success screen: signed in, the new quote's Review & Accept is right there; Start New keeps the session", async ({ page }) => {
   const errors = watchConsole(page);
@@ -674,6 +678,7 @@ test("success screen: signed out, accepting asks for the code first", async ({ p
   await page.getByRole("button", { name: "Get Quote", exact: true }).click();
   await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
   await expect(page.getByRole("button", { name: "Copy customer link" })).toHaveCount(0);
+  await expect(page.locator("[data-quote-texted]")).toHaveCount(0);                          // the rep's line, never the shopper's
   await page.getByRole("button", { name: "Verify your phone to accept this quote" }).click();
   const sheet = page.getByRole("dialog");
   await expect(sheet.getByText("Log in", { exact: true })).toBeVisible();
@@ -698,3 +703,271 @@ test("the account panel fits a 390px phone", async ({ page }) => {
   await shot(page, "17-account-panel-390");
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
+
+// ── The portal ───────────────────────────────────────────────────────────────────────────────
+// No login and nothing reaches the project: a fake supabase-js session sits in storage and EVERY
+// supabase.co request is answered here (the recipe from the 2026-09-09 portal checks). The shell
+// needs client_users (else "No business linked"), portal-billing and portal-settings status;
+// portal-settings dispatches on `action`, REST GETs on the table name. Routes load as
+// /portal.html + pushState, which works on a static server with no _redirects and on beta.
+const PORTAL_USER = { id: "00000000-0000-4000-8000-0000000000e2", aud: "authenticated", role: "authenticated", email: "portal-e2e@example.invalid", app_metadata: {}, user_metadata: {}, created_at: "2026-09-15T00:00:00Z" };
+const PORTAL_STATUS = { ok: true, clientId: CLIENT, role: "owner", operatorMode: false, businessName: "Test Barns", branding: { companyName: "Test Barns" }, invoiceInGhl: false };
+
+// Copy buttons write here, so a test reads what was copied without a clipboard permission.
+async function captureClipboard(page) {
+  await page.addInitScript(() => {
+    try { Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: (t) => { window.__copied = t; return Promise.resolve(); } } }); } catch (_e) { /* the test will say so */ }
+  });
+}
+
+async function stubPortal(page, actions = {}, tables = {}) {
+  const calls = [];
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const session = { access_token: `${b64({ alg: "HS256", typ: "JWT" })}.${b64({ sub: PORTAL_USER.id, role: "authenticated", exp, aud: "authenticated" })}.sig`,
+    refresh_token: "r", token_type: "bearer", expires_in: 3600, expires_at: exp, user: PORTAL_USER };
+  await page.addInitScript((s) => { try { localStorage.setItem("sb-jzeamjbhdrsbygdnphbm-auth-token", JSON.stringify(s)); } catch (_e) {} }, session);
+  await captureClipboard(page);
+  await page.route(/^https:\/\/jzeamjbhdrsbygdnphbm\.supabase\.co\//, async (route) => {
+    const req = route.request();
+    const u = req.url();
+    const reply = (body, status = 200) => route.fulfill({ status, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (req.method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
+    if (/\/auth\/v1\/user/.test(u)) return reply(PORTAL_USER);
+    if (/\/rest\/v1\/client_users/.test(u)) return reply([{ client_id: CLIENT, role: "owner", user_id: PORTAL_USER.id }]);
+    if (/\/functions\/v1\/portal-billing/.test(u)) return reply({ entitlements: { features: { crm: true } }, features: { crm: true }, plan: "pro", status: "active" });
+    if (/\/rest\/v1\/rpc\/can_open_projects/.test(u)) return reply(true);
+    if (/\/functions\/v1\/portal-settings/.test(u)) {
+      let body = {};
+      try { body = req.postDataJSON() || {}; } catch (_e) { /* not JSON */ }
+      calls.push(body);
+      const spec = actions[body.action];
+      if (spec) {
+        const r = typeof spec === "function" ? await spec(body) : spec;
+        return reply(r.body, r.status || 200);
+      }
+      if (body.action === "status") return reply(PORTAL_STATUS);
+      return reply({ ok: true });
+    }
+    if (req.method() === "GET" && /\/rest\/v1\/[a-z_]+/.test(u)) {
+      const spec = tables[u.match(/\/rest\/v1\/([a-z_]+)/)[1]];
+      return reply(spec ? (typeof spec === "function" ? spec() : spec) : []);
+    }
+    return reply({});
+  });
+  return calls;
+}
+
+async function openPortal(page, path) {
+  await page.goto("/portal.html");
+  await page.waitForFunction(() => window.__ssAppBooted === true);
+  await expect(page.locator(".ss-nav").first()).toBeVisible({ timeout: 30_000 });
+  await page.evaluate((p) => { history.pushState({}, "", p); window.dispatchEvent(new PopStateEvent("popstate")); }, path);
+}
+
+const ORDER_CODE = "SS-APPROVE01";
+function orderFixtures() {
+  const contact = { name: "Pat Tester", phone: PHONE_SHOWN, email: "pat@example.com" };
+  return {
+    order: { id: "11111111-2222-4333-8444-555555555555", client_id: CLIENT, order_no: 1050, short_code: ORDER_CODE, ordered_at: "2026-09-14T15:00:00Z", total_cents: 900000, customer_name: "Pat Tester" },
+    list: { short_code: ORDER_CODE, contact_id: null, contact, selections: { style: "utility", size: "10x12" }, status: "accepted", image_url: null, ghl_estimate_number: null,
+      ss_quote_number: "JB-1050", ss_quote_pdf_url: null, ss_invoice_sent_at: null, ss_invoice_requested_at: null },
+    detail: { short_code: ORDER_CODE, contact_id: null, status: "accepted", accepted_at: "2026-09-15T14:00:00Z", ss_quote_number: "JB-1050", ss_quote_pdf_url: null, ss_quote_sent_at: "2026-09-14T15:00:00Z",
+      image_url: null, plan_image_url: null, view3d_image_url: null, estimate_lines: { lines: [{ name: "Utility 10x12", qty: 1, unit: 9000, total: 9000 }], discount: 0 },
+      selections: { style: "utility", size: "10x12" }, paint_colors: {}, contact },
+  };
+}
+
+test("portal Orders: a customer's Accept waits as Invoice to approve; Approve is send_invoice, Not now sets it aside", async ({ page }) => {
+  const errors = watchConsole(page);
+  const f = orderFixtures();
+  const state = { requestedAt: "2026-09-15T14:00:00Z", dismissReplies: [{ status: 409, body: { error: "That invoice has already been issued." } }] };
+  const calls = await stubPortal(page, {
+    orders_designs: (b) => ({ body: { ok: true, designs: [b.detail ? f.detail : { ...f.list, ss_invoice_requested_at: state.requestedAt }] } }),
+    order_paperwork: { body: { ok: true, business: { name: "Test Barns" }, colors: [], cladding: [], invoice: null } },
+    send_invoice: { body: { ok: true, sent: true, invoiceNumber: "SSI-2001" } },
+    dismiss_invoice_request: () => {
+      const next = state.dismissReplies.shift();
+      if (next) return next;
+      state.requestedAt = null;   // what the server does: the stamp the tab reads is cleared
+      return { body: { ok: true, status: "dismissed" } };
+    },
+  }, { orders: [f.order] });
+  page.on("dialog", (d) => d.accept());   // send_invoice's "Create invoice for …?" confirm
+  await openPortal(page, "/portal/orders");
+
+  await expect(page.getByText("customer accepted — approve to issue")).toBeVisible();          // the tile
+  await expect(page.getByRole("button", { name: "Invoice to approve", exact: true })).toBeVisible();   // the chip
+  const table = page.locator("tbody");
+  await expect(table.getByText("Invoice to approve", { exact: true })).toBeVisible();          // the row's status
+  await shot(page, "18-orders-invoice-to-approve-list");
+
+  await table.getByText("#1050").click();
+  const card = page.locator('[data-invoice-request="pending"]');
+  await expect(card).toContainText(/Customer accepted .+\. Approve to issue the invoice \(it takes the next number\)\./);
+  await expect(page.getByRole("button", { name: "Create & send invoice" })).toHaveCount(0);   // one offer, the approval
+  await card.scrollIntoViewIfNeeded();
+  await shot(page, "19-orders-invoice-to-approve-card");
+
+  // A refusal is the server's own sentence, not "non-2xx status code".
+  await card.getByRole("button", { name: "Not now" }).click();
+  await expect(page.getByText("That invoice has already been issued.", { exact: true })).toBeVisible();
+
+  // Approve IS send_invoice: exactly the body "Create & send invoice" has always sent.
+  await card.getByRole("button", { name: "Approve & send invoice" }).click();
+  await expect(page.getByText("Invoice SSI-2001 sent — awaiting the customer's signature.")).toBeVisible();
+  expect(calls.filter((c) => c.action === "send_invoice")).toEqual([{ action: "send_invoice", shortCode: ORDER_CODE }]);
+
+  // The customer link opens the designer's account panel on this order.
+  await page.getByRole("button", { name: "Copy customer link" }).click();
+  const origin = await page.evaluate(() => location.origin);
+  await expect.poll(() => page.evaluate(() => window.__copied)).toBe(`${origin}/?client=${CLIENT}&account=quotes&q=${ORDER_CODE}`);
+
+  // Not now: the request is set aside and the order is back to the plain invoice button.
+  await page.locator('[data-invoice-request="pending"]').getByRole("button", { name: "Not now" }).click();
+  await expect(page.getByText("Set aside — JB-1050 is back under Needs invoice. Create the invoice whenever you're ready.")).toBeVisible();
+  expect(calls.filter((c) => c.action === "dismiss_invoice_request").at(-1)).toEqual({ action: "dismiss_invoice_request", shortCode: ORDER_CODE });
+  await expect(page.locator("[data-invoice-request]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create & send invoice" })).toBeVisible();
+  await page.getByText("← All orders").click();
+  await expect(page.locator("tbody").getByText("Needs invoice", { exact: true })).toBeVisible();
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+test("portal Orders: with the invoice out, the customer link and the sign-on-phone QR open the designer's Invoices", async ({ page }) => {
+  const errors = watchConsole(page);
+  const f = orderFixtures();
+  await stubPortal(page, {
+    orders_designs: (b) => ({ body: { ok: true, designs: [b.detail ? f.detail : { ...f.list, ss_invoice_sent_at: "2026-09-15T15:00:00Z" }] } }),
+    order_paperwork: { body: { ok: true, business: { name: "Test Barns" }, colors: [], cladding: [],
+      invoice: { issued_by: "structurestudio", invoice_number: "SSI-2001", invoice_pdf_url: "https://jzeamjbhdrsbygdnphbm.supabase.co/storage/v1/object/public/documents/SSI-2001.pdf" } } },
+  }, { orders: [f.order] });
+  await openPortal(page, "/portal/orders");
+  await page.locator("tbody").getByText("#1050").click();
+  await expect(page.getByText(/Invoice SSI-2001 sent/)).toBeVisible();
+  const origin = await page.evaluate(() => location.origin);
+  const link = `${origin}/?client=${CLIENT}&account=invoices&q=${ORDER_CODE}`;
+  await page.getByRole("button", { name: "Copy customer link" }).click();
+  await expect.poll(() => page.evaluate(() => window.__copied)).toBe(link);
+  await page.getByRole("button", { name: "Sign on their phone" }).click();
+  await expect(page.getByText(link, { exact: true })).toBeVisible();                 // printed under the QR
+  await expect(page.getByRole("img", { name: "Signing link QR code" })).toBeVisible(); // still fits a QR
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+test("portal Settings: Customer login code shows the saved choice, saves on its own, and a refusal puts it back", async ({ page }) => {
+  const errors = watchConsole(page);
+  const saves = [];
+  let refuse = false;
+  await stubPortal(page, {
+    status: { body: { ...PORTAL_STATUS, customerLoginDefault: "email" } },
+    save: (b) => {
+      saves.push(b);
+      return refuse ? { status: 400, body: { error: "The customer login code can be sent by text or by email." } } : { body: { ok: true } };
+    },
+  });
+  await openPortal(page, "/portal/settings/connection");
+  const group = page.getByRole("group", { name: "Customer login code" });
+  await expect(group).toHaveAttribute("data-ss-login-default", "email");
+  await expect(group.getByRole("button", { name: "Email" })).toHaveAttribute("aria-pressed", "true");
+  await group.scrollIntoViewIfNeeded();
+  await shot(page, "20-settings-login-code");
+
+  await group.getByRole("button", { name: "Text" }).click();
+  await expect(page.getByText("Saved — customers are offered a texted code first.")).toBeVisible();
+  expect(saves).toEqual([{ action: "save", customerLoginDefault: "sms" }]);   // one key: nothing else on the page is touched
+  await expect(group).toHaveAttribute("data-ss-login-default", "sms");
+  await group.getByRole("button", { name: "Text" }).click();                    // already chosen: no second save
+  expect(saves.length).toBe(1);
+
+  refuse = true;
+  await group.getByRole("button", { name: "Email" }).click();
+  await expect(page.getByText("The customer login code can be sent by text or by email.")).toBeVisible();
+  await expect(group).toHaveAttribute("data-ss-login-default", "sms");        // put back
+  expect(saves.length).toBe(2);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+test("portal Settings: a status without the login-code key reads as Text", async ({ page }) => {
+  await stubPortal(page);
+  await openPortal(page, "/portal/settings/connection");
+  await expect(page.getByRole("group", { name: "Customer login code" })).toHaveAttribute("data-ss-login-default", "sms");
+});
+
+test("portal email wording: {total} is marked not recommended on the Quote wording only", async ({ page }) => {
+  const errors = watchConsole(page);
+  await stubPortal(page, {
+    email_status: { body: { platformReady: true, domainStatus: "verified", domain: "testbarns.example", fromName: "Test Barns", fromLocal: "info",
+      fromAddress: "info@testbarns.example", verifiedAt: "2026-09-01T00:00:00Z", active: true, dnsRecords: [], recentSends: [], templateCopy: {} } },
+  });
+  await openPortal(page, "/portal/settings/email");
+  const hint = page.locator('[data-token-hint="total"]');
+  const kind = (name) => page.getByRole("button", { name, exact: true });
+  await expect(kind("Quote")).toBeVisible();
+  await expect(hint).toHaveCount(0);                                               // Estimate is the first tab
+  await kind("Quote").click();
+  await expect(hint).toHaveText("{total} is not recommended for quotes — the quote email leaves the price out, so the customer sees it when they open the quote.");
+  await expect(page.getByPlaceholder("Opening line — e.g. Thanks for designing with {business}! Your quote {number} is ready.")).toBeVisible();
+  await hint.scrollIntoViewIfNeeded();
+  await shot(page, "21-wording-total-hint");
+  await kind("Invoice").click();
+  await expect(hint).toHaveCount(0);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+test("portal Designs: a quote row's Copy link opens the designer on that quote", async ({ page }) => {
+  const errors = watchConsole(page);
+  await stubPortal(page, {}, {
+    designs: [{ short_code: "SS-QUOTE0042", created_at: "2026-09-14T15:00:00Z", updated_at: "2026-09-14T15:00:00Z", status: "sent",
+      contact: { name: "Pat Tester", phone: PHONE_SHOWN, email: "pat@example.com" }, contact_id: null, sel_style: "utility", sel_size: "10x12",
+      ghl_estimate_number: null, image_url: null, inventory_unit_id: null, ss_quote_number: "JB-1050", ss_quote_pdf_url: null, total_cents: 900000, expected_close_date: null }],
+  });
+  await openPortal(page, "/portal/designs/list");
+  await page.getByRole("button", { name: "More actions for Pat Tester" }).click();
+  await page.getByText("Copy link", { exact: true }).click();
+  const origin = await page.evaluate(() => location.origin);
+  await expect.poll(() => page.evaluate(() => window.__copied)).toBe(`${origin}/?client=${CLIENT}&account=quotes&q=SS-QUOTE0042`);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+// The PORTAL's designer is this same component mounted with `embedded` (portal/06-3d.jsx
+// DesignerTab). Swapping index.html's thin mount for one that renders it that way exercises the
+// compiled component that ships, without stubbing the whole shell around the Designer tab.
+async function mountEmbedded(page) {
+  await page.route(/\/index\.mount\.compiled\.js/, (route) => route.fulfill({
+    status: 200,
+    headers: { "content-type": "application/javascript" },
+    body: `(function(){var r=ReactDOM.createRoot(document.getElementById("root"));`
+      + `r.render(React.createElement(window.StructureStudio,{clientId:${JSON.stringify(CLIENT)},embedded:true}));window.__ssAppBooted=true;})();`,
+  }));
+}
+
+for (const c of [
+  { name: "texted", res: { quoteTexted: true, quoteTextReason: null }, line: `Texted a login link to ${PHONE_SHOWN}.`, shot: "22-portal-success-texted" },
+  { name: "not texted", res: { quoteTexted: false, quoteTextReason: "not_active" }, line: "Not texted — texting isn't switched on for your business yet." },
+  { name: "a resubmit", res: { quoteTexted: false, quoteTextReason: "not_first_issue" }, line: null },
+]) {
+  test(`portal success screen, ${c.name}: the login-text line, and Copy customer link opens the designer`, async ({ page }) => {
+    const errors = watchConsole(page);
+    let code = null;
+    await mountEmbedded(page);
+    await captureClipboard(page);
+    await stubBackend(page, { rpc: { save_design: (b) => { if (b.p_image_url) code = b.p_code; return { status: 200, body: null }; }, list_design_versions: { status: 200, body: [] } } });
+    await page.route(/\/functions\/v1\/submit-estimate/, (route) => route.request().method() === "OPTIONS"
+      ? route.fulfill({ status: 200, headers: CORS, body: "ok" })
+      : route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify({ ...SUBMIT_OK.body, ...c.res }) }));
+    await boot(page);
+    await fillQuoteForm(page);
+    await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+    await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+    const line = page.locator("[data-quote-texted]");
+    if (c.line) await expect(line).toHaveText(c.line);
+    else await expect(line).toHaveCount(0);
+    if (c.shot) { await page.getByText("Quote Created!").scrollIntoViewIfNeeded(); await shot(page, c.shot); }
+    expect(code).toMatch(/^SS-[A-Z0-9]{10}$/);
+    await page.getByRole("button", { name: "Copy customer link" }).click();
+    const origin = await page.evaluate(() => location.origin);
+    await expect.poll(() => page.evaluate(() => window.__copied)).toBe(`${origin}/?client=${CLIENT}&account=quotes&q=${code}`);
+    expect(pageErrors(errors), "console errors").toEqual([]);
+  });
+}
