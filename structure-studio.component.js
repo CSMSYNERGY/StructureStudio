@@ -5782,6 +5782,106 @@ function buildShed3DModel(THREE, p) {
   // this renderer does — see d3MakeProfYAt.
   const profYAt = d3MakeProfYAt(dedup, H);
 
+  // ── THE GABLE END'S DEPTH LADDER (2026-09-15) ──────────────────────────────────────────
+  // Carolyn, 2026-09-14, drawing on the porch gable of her Cabin (12x32, king-post truss): the
+  // vent was "merging with the wood", and an extra 2x4 ran along the top of the header. MEASURED
+  // before anything moved (tests/harness/gableProbe.mjs, scene graph of the real style): the vent
+  // frame stood 0.15-0.25 ft out from the cap and the truss 0.03-0.45, so the king post and both
+  // braces ran straight THROUGH the frame; the battens (0.02-0.12) ran through the truss too; and
+  // the vent's sill board lay 0.05 ft above the porch header's top, which from the front is a
+  // second board laid on the header. Three pieces each placed from its own constant, none of
+  // them from the surface under it.
+  //
+  // So every depth on a gable end now reads one ladder, from the REAL cap plane outward — the way
+  // a wall opening's casing reads trimFace instead of a number of its own:
+  //   capStripOut(co)   centre of a batten/rib strip on a cap standing `co` out from the mid-plane
+  //   capReliefFace(co) the cladding's proudest face on that cap (the bare cap on panel and lap,
+  //                     which carry no proud geometry above the plate)
+  //   capVentFace(co)   the vent frame's front: a 0.10 ft board on the cap, and never less than
+  //                     0.03 in front of the strips that stop at it. That is the door rule —
+  //                     nothing stands proud of its own trim — and on a flush batten cap it lands
+  //                     on 0.26, the wall's own trimFace below the plate.
+  // The truss stands in front of the proudest of them (see the porch block).
+  const capStripDepth = clad.relief === "rib" ? 0.05 : 0.1;
+  const capHasStrips = clad.relief === "batten" || clad.relief === "rib";
+  // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
+  // battens would step back at the plate line exactly as the siding used to. An end that kept
+  // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
+  // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
+  // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
+  // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
+  // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
+  // (Lifted out of addCapReliefStrips' loop on 2026-09-15 so the vent and the truss read it too.)
+  const capStripOut = (co) => {
+    const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + capStripDepth / 2 + 0.02;
+    return Math.max(co + capStripDepth / 2 - 0.02, Math.min(want, OV - 0.01 - capStripDepth / 2));
+  };
+  const capReliefFace = (co) => (capHasStrips ? capStripOut(co) + capStripDepth / 2 : co);
+  const capVentFace = (co) => Math.max(co + 0.1, capReliefFace(co) + 0.03);
+
+  // Decided HERE, not inside the porch block, because the two need each other: the vent's sill
+  // has to clear the truss's brace feet, and the truss has to stand in front of the vent's frame.
+  // The same test the porch block used to apply inline.
+  const porchTrussOn = porchOn && !!roofCfg.porchTruss && (roofCfg.type || "gable") === "gable";
+  const TRUSS_FOOT = H + 0.2;                    // brace feet, sitting on the header beside the king post
+
+  // ── The style's louvered gable vent: laid out once, drawn on both ends further down ────────
+  // Laid out up here (it used to live inside the drawing block) only so the truss can ask
+  // whether there IS a vent before either is drawn. Null = no vent on this building.
+  const styleVent = (() => {
+    const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
+    if (!(gv && gv.widthFrac > 0)) return null;
+    let peak = -Infinity;
+    dedup.forEach((pt) => { if (pt[1] > peak) peak = pt[1]; });
+    if (!(peak > H + 0.9)) return null;
+    // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
+    // skews a gable and a gambrel end is a five-point pentagon, so a hard-coded
+    // (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
+    const profSpanAt = (y) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i + 1 < dedup.length; i++) {
+        const P = dedup[i], Q = dedup[i + 1];
+        if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
+        const dY = Q[1] - P[1];
+        if (Math.abs(dY) < 1e-9) {
+          lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
+        } else {
+          const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
+          lo = Math.min(lo, u); hi = Math.max(hi, u);
+        }
+      }
+      return hi > lo ? [lo, hi] : null;
+    };
+    const F = 0.12;                                      // trim board width
+    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
+    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
+    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
+    // shrink by a third to clear the rakes while the same vent on a sill fits at full
+    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
+    //
+    // ON A TRUSS END THE SILL CLEARS THE BRACE FEET (2026-09-15). A porch end's plate line is
+    // the top of the HEADER, so 2 in put the vent's sill board 0.05 ft above that beam — the
+    // "extra 2x4 along the header" Carolyn marked. Its bottom edge now sits 0.1 ft above the
+    // brace feet, with siding showing between. Both ends share the one layout (the batten
+    // splitter takes one rect, and a building's two gable vents match), so the far end's vent
+    // rises with it — 3 in more sill on a wall nobody sees beside the first.
+    const VENT_SILL = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
+    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
+    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
+    let vCy = H + VENT_SILL + vH / 2;
+    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
+    // a narrower vent is also shorter and therefore has more room above it.
+    for (let k = 0; k < 3; k++) {
+      const sp = profSpanAt(vCy + vH / 2);
+      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
+      if (vW <= avail) break;
+      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+    }
+    const spC = profSpanAt(vCy);
+    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
+    return (vW >= 0.8 && vH >= 0.35) ? { vW, vH, vCy, vCu, F } : null;
+  })();
+
   // ── LEAN-TO (2026-08-25) ──────────────────────────────────────────────────────────
   // A shed-roofed appendage off ONE eave wall: the second of the two things "lean-to"
   // means in this trade. The first -- a standalone single-slope building -- has always
@@ -5877,7 +5977,7 @@ function buildShed3DModel(THREE, p) {
     // gable above the porch at all, so drawing a triangular frame on either would be wrong
     // rather than merely approximate. `trimMat` is deliberate: the posts below it already
     // use it, and on a real porch shed the truss and the posts are the same timber.
-    if (roofCfg.porchTruss && (roofCfg.type || "gable") === "gable") {
+    if (porchTrussOn) {
       const tRise = (S / 2) * (roofCfg.pitch || 0.4);
       // Same ridge shift the roof profile applies, or a saltbox would grow a truss pointing
       // at where the peak is not.
@@ -5892,7 +5992,19 @@ function buildShed3DModel(THREE, p) {
       // it perfectly, invisibly. On a real porch shed the timbers are applied ON the gable and
       // stand out from it, so the offset has to go the other way: pzFace is the wall plane and
       // the MINUS direction is outward, because pzIn adds to reach the interior.
-      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (TD / 2 + 0.03);
+      //
+      // IN FRONT OF EVERYTHING ELSE ON THE GABLE (2026-09-15). This was `TD / 2 + 0.03` off the
+      // cap — a back face 0.03 ft out — while the vent frame stood to 0.25 and the battens to 0.12,
+      // so the king post and both braces passed straight through the frame and every batten ran
+      // through the timber: Carolyn's "vent merging with the wood", measured with gableProbe.
+      // A real porch truss is applied OVER the siding and the vent, so its back face now sits
+      // 0.02 ft in front of the proudest thing on this cap — the vent frame when the style has
+      // one, else the batten/rib face, else the bare cap (which is today's number, give or take
+      // 0.01). The porch end's cap keeps the mid-plane (capOut 0), read through the ladder
+      // rather than assumed.
+      const pzCapOut = porchAtLocalZero ? capOut0 : capOutL;
+      const trussBackOut = (styleVent ? capVentFace(pzCapOut) : capReliefFace(pzCapOut)) + 0.02;
+      const zT = pzFace - (porchAtLocalZero ? 1 : -1) * (trussBackOut + TD / 2);
       const kpH = Math.max(0.2, tRise - 0.25);       // stop just under the ridge
       const kp = box(trimMat, TB, kpH, TD);
       kp.position.set(tRu, H + kpH / 2, zT);
@@ -5919,7 +6031,7 @@ function buildShed3DModel(THREE, p) {
       // steep side can no longer push a corner through the roof edge on a small overhang.
       // Positioned at their midpoint and rotated, because a box is built on the x axis.
       const BR_TAN = Math.tan(50 * Math.PI / 180), BR_SIN = Math.sin(50 * Math.PI / 180), BR_COS = Math.cos(50 * Math.PI / 180);
-      const foot = H + 0.2;                          // sitting on the header, beside the king post
+      const foot = TRUSS_FOOT;                       // sitting on the header, beside the king post
       const u0 = TB / 2 + 0.05;                      // the foot's distance out from the ridge line
       for (const s of [-1, 1]) {
         const run = S / 2 - s * tRu;                 // ridge to this side's eave
@@ -6214,7 +6326,7 @@ function buildShed3DModel(THREE, p) {
   if (clad.relief === "batten" || clad.relief === "rib") {
     const bs = clad.stepFt;
     const halfW = clad.relief === "rib" ? 0.05 : 0.07;
-    const depth = clad.relief === "rib" ? 0.05 : 0.1;
+    const depth = capStripDepth;
     const reliefMat = clad.reliefTrim ? battenMat : wallMat;
     // ⚠️ CLIP TO THE LOWEST PROFILE ACROSS THE STRIP'S WIDTH, NEVER ITS CENTRE.
     // A batten is a BOX: its top is flat. The roof above it is not. Taking profYAt(u) at the
@@ -6236,23 +6348,14 @@ function buildShed3DModel(THREE, p) {
         if (vx > u - halfW && vx < u + halfW) yTop = Math.min(yTop, profYAt(vx));
       }
       if (yTop <= H + 0.05) continue;            // below the plate: the wall already has it
-      // At the SAME depth as the wall's own strips below the plate when the cap is flush, or the
-      // battens would step back at the plate line exactly as the siding used to. An end that kept
-      // the old cap plane (a porch, a shallow overhang) keeps the old offset from it.
-      // ...and never in front of the RAKE board, whose face is OV out from the mid-plane: with a
-      // 0.1-0.25 ft overhang the unclamped depth put each batten 0.02 ft proud of its own trim
-      // (review wf_a6073b91-18a). The floor keeps a strip standing out of the cap by at least its
-      // depth less the 0.02 embed the wall strips use, so a tiny overhang cannot bury it.
-      const stripOut = (co) => {
-        const want = co >= T / 2 - 1e-6 ? CLAD_RELIEF_OUT : co + depth / 2 + 0.02;
-        return Math.max(co + depth / 2 - 0.02, Math.min(want, OV - 0.01 - depth / 2));
-      };
+      // Depth: capStripOut, beside the ladder above the lean-to — the rake clamp and the flush rule
+      // are written there, because the vent frame and the porch truss now read the same number.
       // STOP AT THE VENT, like a wall batten stops at a window. A strip crossing the vent's frame
       // is split into the run below it and the run above it; a strip clear of it is unchanged.
       const spans = (ventRect && u + halfW > ventRect.u0 && u - halfW < ventRect.u1)
         ? [[H, Math.min(yTop, ventRect.y0)], [Math.max(H, ventRect.y1), yTop]]
         : [[H, yTop]];
-      [-stripOut(capOut0), L + stripOut(capOutL)].forEach((z) => {
+      [-capStripOut(capOut0), L + capStripOut(capOutL)].forEach((z) => {
         spans.forEach((sp) => {
           if (sp[1] - sp[0] < 0.05) return;
           const st = box(reliefMat, halfW * 2, sp[1] - sp[0], depth);
@@ -6450,72 +6553,43 @@ function buildShed3DModel(THREE, p) {
   // muntins, relief strips, fascia, rake and ridge cap are every one of them built.
   // The vent's footprint on the cap, frame included, for addCapReliefStrips. Null = no vent drawn.
   let capVentRect = null;
-  const gv = (p.styleSpec && p.styleSpec.gableVent) || null;
-  if (gv && gv.widthFrac > 0 && profPeak > H + 0.9) {
-    // Horizontal extent of the gable polygon at height y. Generic on purpose: ridgeOffset
-    // skews a gable and a gambrel end is a five-point pentagon, so a hard-coded
-    // (S/2)*(1 - (y-H)/rise) would be right for exactly one of the three roof types.
-    const profSpanAt = (y) => {
-      let lo = Infinity, hi = -Infinity;
-      for (let i = 0; i + 1 < dedup.length; i++) {
-        const P = dedup[i], Q = dedup[i + 1];
-        if ((P[1] - y) * (Q[1] - y) > 1e-12) continue;   // both ends the same side of y
-        const dY = Q[1] - P[1];
-        if (Math.abs(dY) < 1e-9) {
-          lo = Math.min(lo, P[0], Q[0]); hi = Math.max(hi, P[0], Q[0]);
-        } else {
-          const u = P[0] + (Q[0] - P[0]) * ((y - P[1]) / dY);
-          lo = Math.min(lo, u); hi = Math.max(hi, u);
-        }
-      }
-      return hi > lo ? [lo, hi] : null;
-    };
-    // The vent sits LOW in the triangle, on a short sill above the plate — not centred
-    // in it. That is what the walk-around shows, and on a shallow pitch it is the whole
-    // ballgame: an 8 ft gable at 5:12 is only 1.7 ft tall, so a mid-height vent has to
-    // shrink by a third to clear the rakes while the same vent on a sill fits at full
-    // width. Centring cost 6 inches of a 24 inch vent before this was measured.
-    const VENT_SILL = 2 / 12;
-    let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
-    let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
-    let vCy = H + VENT_SILL + vH / 2;
-    // Shrink to fit. The TOP corners are the tight point, and the passes converge because
-    // a narrower vent is also shorter and therefore has more room above it.
-    for (let k = 0; k < 3; k++) {
-      const sp = profSpanAt(vCy + vH / 2);
-      const avail = sp ? (sp[1] - sp[0]) - 0.5 : 0;      // keep 3 in clear of each rake
-      if (vW <= avail) break;
-      vW = Math.max(0, avail); vH = vW / 2; vCy = H + VENT_SILL + vH / 2;
+  // Laid out with the ladder above the lean-to (styleVent), because the porch truss needs to
+  // know about it before either is drawn. Null = no vent on this building.
+  if (styleVent) {
+    const { vW, vH, vCy, vCu, F } = styleVent;
+    const ventMat = mat("#2A2E33", { roughness: 0.9 });
+    const ltex = d3MakeTexture(THREE, "lap");            // blade lines, same trick the
+    if (ltex) {                                          // roll-up door already uses
+      ltex.repeat.set(1, Math.max(3, Math.round(vH / 0.25)));
+      ventMat.map = ltex; ventMat.needsUpdate = true;
     }
-    const spC = profSpanAt(vCy);
-    const vCu = spC ? (spC[0] + spC[1]) / 2 : 0;         // centred even on a skewed ridge
-    if (vW >= 0.8 && vH >= 0.35) {
-      const ventMat = mat("#2A2E33", { roughness: 0.9 });
-      const ltex = d3MakeTexture(THREE, "lap");          // blade lines, same trick the
-      if (ltex) {                                        // roll-up door already uses
-        ltex.repeat.set(1, Math.max(3, Math.round(vH / 0.25)));
-        ventMat.map = ltex; ventMat.needsUpdate = true;
-      }
-      const F = 0.12;                                    // trim board width
-      capVentRect = { u0: vCu - vW / 2 - F, u1: vCu + vW / 2 + F, y0: vCy - vH / 2 - F, y1: vCy + vH / 2 + F };
-      // Offsets from the wall MID-plane. Since 2026-09-14 the cap itself is flush with the wall
-      // face at 0.15, so 0.20 for the trim and 0.16 for the louvers seats the frame on the cap
-      // and leaves the blades recessed inside it, which is what reads as louvered rather than as
-      // a grey rectangle. (Before that the cap sat ON the mid-plane and the vent floated.)
-      [[0, -1], [L, 1]].forEach(function (end) {
-        const z0 = end[0], s = end[1];
-        const put = (m, w, h, d, du_, dy_, off) => {
-          const b = box(m, w, h, d);
-          b.position.set(vCu + du_, vCy + dy_, z0 + s * off);
-          rg.add(b);
-        };
-        put(ventMat, vW, vH, 0.06, 0, 0, 0.16);                        // louver face
-        put(trimMat, vW + F * 2, F, 0.10, 0, (vH + F) / 2, 0.20);      // head
-        put(trimMat, vW + F * 2, F, 0.10, 0, -(vH + F) / 2, 0.20);     // sill
-        put(trimMat, F, vH + F * 2, 0.10, -(vW + F) / 2, 0, 0.20);     // left jamb
-        put(trimMat, F, vH + F * 2, 0.10, (vW + F) / 2, 0, 0.20);      // right jamb
-      });
-    }
+    capVentRect = { u0: vCu - vW / 2 - F, u1: vCu + vW / 2 + F, y0: vCy - vH / 2 - F, y1: vCy + vH / 2 + F };
+    // DEPTHS FROM EACH END'S OWN CAP (2026-09-15). These were two constants off the wall
+    // MID-plane — 0.20 for the trim, 0.16 for the louvers — written for the flush cap at 0.15,
+    // and on that cap they sit right. The porch end keeps the mid-plane, though, so the same
+    // numbers floated the whole vent 0.13 ft off its cap, inside the truss (gableProbe measured
+    // both ends). Now each end reads its cap plane and the ladder:
+    //   frame   from the cap (embedded 0.005, so no coplanar back face flickers at a grazing
+    //           angle) out to capVentFace — never behind the battens that stop at it
+    //   louvers from the cap to 0.06 short of the frame's front, recessed inside it, which is
+    //           what reads as louvered rather than as a grey rectangle
+    // On the flush panel cap that reproduces the old faces exactly (frame 0.25, louvers 0.19).
+    [[0, -1, capOut0], [L, 1, capOutL]].forEach(function (end) {
+      const z0 = end[0], s = end[1], co = end[2];
+      const back = co - 0.005, face = capVentFace(co);
+      const trimD = face - back;
+      const louvD = Math.max(0.03, face - 0.06 - back);
+      const put = (m, w, h, d, du_, dy_, off) => {
+        const b = box(m, w, h, d);
+        b.position.set(vCu + du_, vCy + dy_, z0 + s * off);
+        rg.add(b);
+      };
+      put(ventMat, vW, vH, louvD, 0, 0, back + louvD / 2);                        // louver face
+      put(trimMat, vW + F * 2, F, trimD, 0, (vH + F) / 2, back + trimD / 2);      // head
+      put(trimMat, vW + F * 2, F, trimD, 0, -(vH + F) / 2, back + trimD / 2);     // sill
+      put(trimMat, F, vH + F * 2, trimD, -(vW + F) / 2, 0, back + trimD / 2);     // left jamb
+      put(trimMat, F, vH + F * 2, trimD, (vW + F) / 2, 0, back + trimD / 2);      // right jamb
+    });
   }
   addCapReliefStrips(capVentRect);
   if (uAxisIsX) { rg.position.z = -L / 2; }
