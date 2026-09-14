@@ -1171,11 +1171,28 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .maybeSingle();
     if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
-    const { data: cfg } = await admin
+    //
+    // ⚠️ THE FALLBACK SELECT IS LOAD-BEARING (styles_per_row, migration 228, 2026-09-15). This
+    // read swallows its error by design — status is the bootstrap every role needs — so a select
+    // naming a column the database does not have yet returns cfg = null, not a failure. The
+    // Branding card then loads BLANK, and the owner's next Save Branding sends those blanks and
+    // wipes company name, tagline and colours on beta AND production. Deploying this function a
+    // minute ahead of 228 would do exactly that to every tenant. Retrying with the pre-228 column
+    // list turns that into "stylesPerRow reads as default" instead; a save that carries
+    // stylesPerRow then fails loudly on the missing column and writes nothing (one UPDATE).
+    // Apply 228 first anyway — this is the seatbelt, not the plan.
+    let { data: cfg, error: cfgErr } = await admin
       .from("client_configs")
-      .select("company_name, tagline, logo_url, accent_color, header_bg")
+      .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
       .eq("client_id", clientId)
       .maybeSingle();
+    if (cfgErr) {
+      ({ data: cfg } = await admin
+        .from("client_configs")
+        .select("company_name, tagline, logo_url, accent_color, header_bg")
+        .eq("client_id", clientId)
+        .maybeSingle() as any);
+    }
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1273,6 +1290,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         logoUrl: cfg?.logo_url ?? null,
         accentColor: cfg?.accent_color ?? null,
         headerBg: cfg?.header_bg ?? null,
+        // Building styles per row on the designer (228). null = never chosen, which the card
+        // shows as 8 and the designer treats as 8 — the same default, stated in two places.
+        stylesPerRow: (cfg as { styles_per_row?: number | null } | null)?.styles_per_row ?? null,
       },
     });
   }
@@ -1732,6 +1752,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const val = cssColorOrNull((payload as any)[key]);
       if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
       updates[col] = val;
+    }
+    // BUILDING STYLES PER ROW (migration 228). Carolyn 2026-09-14 @7:10: a ninth style wrapped to a
+    // second row of the designer's style bar; the bar now scrolls, and each builder picks how many
+    // photos sit side by side. 5..8 because below 5 a tile is wider than the photo is worth and
+    // above 8 the photos stop reading as buildings on a laptop — the column CHECK says the same, so
+    // this message is the friendly copy of a refusal the database would make anyway.
+    //
+    // Checked BEFORE the logo upload below, so a refused value never leaves an orphan image in the
+    // bucket. null / "" clears it (the designer falls back to 8). A boolean or "6 rows" is refused
+    // rather than coerced: Number(true) is 1, and a quiet 1 would clamp to 5 on the designer.
+    if ("stylesPerRow" in payload) {
+      const raw = (payload as any).stylesPerRow;
+      if (raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "")) {
+        updates.styles_per_row = null;
+      } else {
+        const n = typeof raw === "number" ? raw
+          : (typeof raw === "string" && /^\s*\d+\s*$/.test(raw)) ? Number(raw) : NaN;
+        if (!Number.isInteger(n) || n < 5 || n > 8) return json({ error: "Styles per row must be a whole number from 5 to 8." }, 400);
+        updates.styles_per_row = n;
+      }
     }
 
     if (typeof payload.logoBase64 === "string" && payload.logoBase64.trim()) {

@@ -9887,6 +9887,159 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
   );
 }
 
+// "All designs on this estimate" — shared by the Submit Bar and the success screen so the two
+// can never drift. Always open (layout pass, 2026-09-15): it used to be one "viewing" line
+// plus a "▾ N versions" toggle, so the other designs on the estimate were one easy-to-miss
+// click away. Rows arrive newest first (list_design_versions orders them), so [0] is Latest.
+// The row being viewed is highlighted and has no Open (it is already on the plan); every
+// other row gets Open + PDF. No hooks: it is a plain module-level component, so it adds
+// nothing to StructureStudioInner's hook order.
+function SSVersionList({ versions, viewing, accent, onOpen }) {
+  const pill = (bg, fg) => ({ display: "inline-block", marginLeft: 6, padding: "1px 7px", borderRadius: 999, background: bg, color: fg, fontSize: 11, fontWeight: 700, lineHeight: "16px", verticalAlign: "1px" });
+  return (
+    <div data-ss-versions="1">
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>All designs on this estimate ({versions.length})</div>
+      {versions.length > 1 && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 2 }}>Open one to see it on the plan above.</div>}
+      <div style={{ marginTop: 6 }}>
+        {versions.map((v, i) => {
+          const vsel = v.selections || {};
+          const isViewing = v.version === viewing;
+          let dstr = ""; try { dstr = v.created_at ? new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : ""; } catch { /* ignore */ }
+          return (
+            <div key={v.version} data-ss-version={v.version} data-ss-viewing={isViewing ? "1" : undefined}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 10px", borderTop: i === 0 ? "none" : "1px solid #F1F5F9", borderLeft: `3px solid ${isViewing ? accent : "transparent"}`, background: isViewing ? "#FFFBEB" : "transparent" }}>
+              <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>
+                <span style={{ fontWeight: 700, color: "#1E293B" }}>v{v.version}</span>
+                {" · "}{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}
+                {isViewing && <span style={pill("#FEF3C7", "#92400E")}>Viewing</span>}
+                {i === 0 && <span style={pill("#F1F5F9", "#475569")}>Latest</span>}
+              </div>
+              <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
+                {!isViewing && <button type="button" onClick={() => onOpen(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>}
+                {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── STYLE STRIP ───
+// "Select Your Building Style" as ONE row of N tiles that scrolls sideways (Carolyn 2026-09-14:
+// a builder's 9th style, Playhouse, wrapped onto a second row). It was a wrapping flex row of
+// 120–160px cards. N is the builder's "styles per row", 5–8, read from
+// C.branding.stylesPerRow; anything missing or out of range falls back to 8, so a tenant that
+// never sets it gets 8. Each tile is 1/N of the row but never under 120px, so a phone shows
+// ~2.7 tiles and the rest scroll. Fewer styles than N keep the 1/N width, left-aligned,
+// rather than stretching into giant photos.
+//
+// Module level with its own hooks on purpose: a hook added inside StructureStudioInner below
+// its early returns is React #310 and a white screen.
+//
+// ⚠️ scrollLeft, NEVER scrollIntoView. scrollIntoView also scrolls every scrollable ancestor,
+// so loading a design would jump the page (and the portal's .ss-designer-host) to this row.
+// ⚠️ The padding is load-bearing: overflow-x:auto forces overflow-y to clip too, which cut off
+// the active tile's scale(1.03) and its 2px accent ring. scale(1.03) grows a tile by 1.5% of its
+// width on each side, so 12px sideways covers tiles up to ~600px wide (5 per row on a 3000px
+// screen); 8px above and 12px below cover the height. The matching negative margin keeps the
+// tiles lined up with the label above.
+const SS_STRIP_GAP = 10;
+const SS_STRIP_PAD = 12; // sideways; also the scroll-padding, so snap positions line up
+function SSStyleStrip({ styles, value, onPick, perRow, S }) {
+  const n = Math.min(8, Math.max(5, Math.round(Number(perRow)) || 8));
+  const ref = useRef(null);
+  // Which ends have tiles hidden past them. Both false = no overflow = no arrows, no fade.
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    const left = max > 1 && el.scrollLeft > 1;
+    const right = max > 1 && el.scrollLeft < max - 1;
+    setEdges((p) => (p.left === left && p.right === right ? p : { left, right }));
+  }, []);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (ro) ro.observe(el); else window.addEventListener("resize", measure);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      if (ro) ro.disconnect(); else window.removeEventListener("resize", measure);
+    };
+  }, [measure]);
+  // Keep the picked style wholly in view: on first paint, when a saved design or an older
+  // version brings in a style from past the edge, and when a half-hidden edge tile is clicked.
+  // offsetLeft is relative to the scroller (it is position:relative), so it ignores scrollLeft.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const i = styles.findIndex((s) => s.value === value);
+    const tile = i >= 0 ? el.children[i] : null;
+    if (tile) {
+      const start = tile.offsetLeft - SS_STRIP_PAD; // this tile's snap position
+      const end = tile.offsetLeft + tile.offsetWidth + SS_STRIP_PAD - el.clientWidth;
+      if (start < el.scrollLeft) el.scrollLeft = start;
+      else if (end > el.scrollLeft) {
+        // Snapping is mandatory, so a raw right-aligned offset gets re-snapped and can hide the
+        // tile again. Land on the first tile START that still shows this one whole.
+        let target = start;
+        for (let j = 0; j <= i; j++) {
+          const s = el.children[j].offsetLeft - SS_STRIP_PAD;
+          if (s >= end) { target = s; break; }
+        }
+        el.scrollLeft = target;
+      }
+    }
+    measure();
+  }, [value, styles.length, n, measure]);
+  // One page per click; the snap lands it on a tile edge.
+  const page = (dir) => {
+    const el = ref.current;
+    if (el) el.scrollBy({ left: dir * (el.clientWidth - 2 * SS_STRIP_PAD), behavior: "smooth" });
+  };
+  const side = (dir) => (dir < 0 ? "left" : "right");
+  return (
+    <div style={{ position: "relative", margin: `-8px -${SS_STRIP_PAD}px -6px` }}>
+      <div ref={ref} data-ss-style-strip={n}
+        style={{ position: "relative", display: "grid", gridAutoFlow: "column",
+          gridAutoColumns: `max(120px, calc((100% - ${(n - 1) * SS_STRIP_GAP}px) / ${n}))`,
+          gap: SS_STRIP_GAP, overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory",
+          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "thin" }}>
+        {styles.map((s) => {
+          const active = value === s.value;
+          return (
+            <div key={s.value} data-ss-style={s.value} onClick={() => onPick(s.value)}
+              style={{ ...S.card(active), minWidth: 0, scrollSnapAlign: "start" }}>
+              <div style={{ position: "relative" }}>
+                <img src={s.img} alt={s.label} style={{ width: "100%", aspectRatio: "16 / 10", minHeight: 90, maxHeight: 170, objectFit: "cover", display: "block" }} />
+                {active && <div style={S.check}>✓</div>}
+              </div>
+              <div style={S.cardLabel(active)}>{s.label}</div>
+            </div>
+          );
+        })}
+      </div>
+      {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
+        <div key={"fade" + d} aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, [side(d)]: 0, width: 36, zIndex: 1, pointerEvents: "none",
+          background: `linear-gradient(to ${side(-d)}, #FFF, rgba(255,255,255,0))` }} />
+      ))}
+      {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
+        <button key={"arrow" + d} type="button" data-ss-strip-arrow={side(d)} aria-label={d < 0 ? "Previous styles" : "More styles"}
+          onClick={() => page(d)}
+          style={{ position: "absolute", top: "50%", [side(d)]: 2, transform: "translateY(-50%)", zIndex: 2, width: 30, height: 30,
+            borderRadius: 999, border: "1px solid #CBD5E1", background: "rgba(255,255,255,0.96)", boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+            color: "#334155", fontSize: 18, fontWeight: 700, lineHeight: "26px", padding: 0, cursor: "pointer" }}>
+          {d < 0 ? "‹" : "›"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ─── MAIN COMPONENT ───
 // Custom color dropdown: a native <select> can't render a color swatch per option, so this
 // shows a color chip + name in the closed button and in each list row (matching the palette).
@@ -10989,8 +11142,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [estimateVersions, setEstimateVersions] = useState([]);
   // Which version is currently loaded in the editor (null = the latest). Marks "Viewing".
   const [viewingVersion, setViewingVersion] = useState(null);
-  // Whether the "all designs on this estimate" dropdown is expanded (collapsed by default).
-  const [versionsOpen, setVersionsOpen] = useState(false);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
   // Every enabled contact field filled, phone a real 10 digits — the same bar submitQuote
@@ -11928,11 +12079,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // Switch to another saved version in place (no page reload). Loads that version's design
   // data and keeps the current GHL refs (same estimate), marking it as the one being viewed.
+  // Returns true only when the version actually loaded (2026-09-15). A failed read used to
+  // return silently, so Open looked like a dead button and the plan kept showing the old
+  // design with nothing saying so; now it says so in the toast. The message is an object
+  // ({tone,title,text}) so it does not borrow the refusal toast's "Can't place here" headline.
   const openVersion = useCallback(async (version) => {
-    if (!supabase || !designCode) return;
+    const say = (m) => {
+      setToast(m);
+      setTimeout(() => setToast((cur) => (cur === m ? null : cur)), 4000); // stale-guard, as refuseDrag
+    };
+    if (!supabase || !designCode) return false;
     const { data: vrows, error } = await supabase.rpc("load_design_version", { p_code: designCode, p_version: version });
     const vrow = Array.isArray(vrows) ? vrows[0] : vrows;
-    if (error || !vrow) return;
+    if (error || !vrow) {
+      say({ tone: "warn", title: "Couldn't open that design", text: `v${version} didn't load, so the plan still shows the design you had. Check your connection and try again.` });
+      return false;
+    }
     const vsel = vrow.selections || {};
     // Pre-set prevSizeRef to this version's size so the size effect doesn't treat it as a
     // user size-change and wipe the items we're loading (same guard the initial load uses).
@@ -11960,6 +12122,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       p.set("v", String(version));
       window.history.replaceState({}, "", `?${p.toString()}`);
     }
+    // The list sits BELOW the plan (and on the success screen, below a page of text), so
+    // without this the plan changed off-screen and Open appeared to do nothing. setTimeout,
+    // not requestAnimationFrame: rAF never fires in a hidden tab, and this must run after the
+    // new size has committed so the scroll lands on the plan at its new height.
+    say({ tone: "info", title: "Now viewing", text: `v${version} · ${[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}` });
+    setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ block: "start", behavior: "smooth" }); } catch (_e) { /* old browsers: no options arg */ } }, 0);
+    return true;
   }, [supabase, designCode, embedded]);
 
   // ─── Page-based geometry: on-screen mirrors the 8.5"×11" export 1:1 ───
@@ -15041,7 +15210,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }),
   };
 
-  // ─── PAINT FIELDS (inline, beside Roof Options) ───
+  // ─── PAINT FIELDS (two cells of the Size/Roof/Cladding row) ───
   // Body/Trim color pickers backed by the tenant palette (portal Colors tab).
   // Moved out of renderOption so the paint option can sit beside the roof
   // colors in the Size row, while other counter options keep rendering as
@@ -15051,12 +15220,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // save/load/estimate contract and is derived from the picks: the build is
   // "Painted" once a chosen Body/Trim color differs from that side's default
   // color (or is a custom color).
+  //
+  // 2026-09-15 (Carolyn 09-14, six selects on one row): paintField now returns a whole
+  // labelled grid CELL, and renderPaintFields returns the Body/Trim pair as a fragment so each
+  // is its own cell. Only the wrappers and labels changed. Every onChange/onSel line and the
+  // sel[opt.id] "Painted"/"No Paint" derivation are byte-identical to before — do not tidy
+  // them while you are here; that value is what the estimate prices.
   const renderPaintFields = (opt) => {
     const palette = Array.isArray(C.colors) ? C.colors : [];
-    // flex-basis 170px (not flex:1) so on a phone each color field wraps onto
-    // its own full-width row instead of overflowing the page horizontally.
-    const PAINT_LBL = { display: "flex", alignItems: "center", gap: 4, flex: "1 1 170px", fontSize: 12, fontWeight: 600, color: "#475569", minWidth: 0 };
-    const PAINT_INPUT = { flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
+    const PAINT_INPUT = { display: "block", width: "100%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
     const defaultLabel = (k) => {
       const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
       return d ? d.label : "";
@@ -15066,12 +15238,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
       const val = paintColors[kind] || "";
       const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
-      const labelTxt = kind === "body" ? "Body:" : "Trim:";
+      const labelTxt = kind === "body" ? "Body Color" : "Trim Color";
       const other = kind === "body" ? "trim" : "body";
+      // The tenant's optional paint photo (opt.img) was a 100px card beside the pair; a 150px
+      // cell has no room for it, so it shrinks to a thumbnail on the Body label. Sized and
+      // aligned to the 11px label text so the Body select does not sit lower than its neighbours.
+      const cellLbl = (
+        <span style={{ ...S.lbl, display: "block", marginBottom: 8, whiteSpace: "nowrap" }}>
+          {labelTxt}
+          {kind === "body" && opt.img && <img src={opt.img} alt={opt.label} style={{ width: 18, height: 11, objectFit: "cover", borderRadius: 2, marginLeft: 6, verticalAlign: "-1px" }} />}
+        </span>
+      );
       // No palette configured for this side → free-text. Any text on either side = painted.
       if (colors.length === 0) {
         return (
-          <label style={PAINT_LBL}>{labelTxt}
+          <label key={kind} style={{ display: "block", minWidth: 0 }}>{cellLbl}
             <input type="text" value={val}
               onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
               placeholder="Enter color or leave blank" style={PAINT_INPUT} />
@@ -15092,26 +15273,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
       };
       return (
-        <div style={{ ...PAINT_LBL, gap: 4 }}>
-          <span>{labelTxt}</span>
+        <div key={kind} style={{ minWidth: 0 }}>
+          {cellLbl}
           <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
           {isCustom && (
-            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={PAINT_INPUT} />
+            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={{ ...PAINT_INPUT, marginTop: 6 }} />
           )}
         </div>
       );
     };
-    return (
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", minWidth: 0 }}>
-        {opt.img && (
-          <div style={{ flex: "0 0 auto", width: 100, borderRadius: 10, overflow: "hidden", border: "2px solid #E2E8F0" }}>
-            <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
-          </div>
-        )}
-        {paintField("body")}
-        {paintField("trim")}
-      </div>
-    );
+    return (<>{paintField("body")}{paintField("trim")}</>);
   };
 
   // ─── OPTION RENDERER ───
@@ -16246,35 +16417,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined}
           style={{ border: "none", margin: 0, minWidth: 0, background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px",
             ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) }}>
-          {/* Building Styles */}
+          {/* Building Styles — one row of N tiles that scrolls (Carolyn 2026-09-14); see
+              SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
           <div style={{ marginBottom: 14 }}>
             <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {C.buildingStyles.map((s) => {
-                const active = sel.style === s.value;
-                return (
-                  <div key={s.value} onClick={() => setSel((p) => ({ ...p, style: s.value, size: "" }))}
-                    style={{ ...S.card(active), flex: "1 1 120px", maxWidth: 160 }}>
-                    <div style={{ position: "relative" }}>
-                      <img src={s.img} alt={s.label} style={{ width: "100%", height: 100, objectFit: "cover", display: "block" }} />
-                      {active && <div style={S.check}>✓</div>}
-                    </div>
-                    <div style={S.cardLabel(active)}>{s.label}</div>
-                  </div>
-                );
-              })}
-            </div>
+            <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S}
+              onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
           </div>
 
-          {/* Building Size + Roof Options + Cladding + Paint — one row. Cladding sits between
-              the roof and the paint, which is exactly where Carolyn drew it (2026-08-18). */}
+          {/* Building Size · Roof Type · Roof Color · Cladding · Body Color · Trim Color — six
+              compact cells on ONE grid row (Carolyn 2026-09-14: all six selects on one line, and
+              they "don't need to be as wide"). It was a gap-24 flex row whose Roof and Paint groups
+              each stacked two controls under one heading. auto-FILL, not auto-fit: empty tracks
+              are kept, so on a wide screen each cell stays ~160px instead of stretching across
+              1880px; near 900px it wraps 5+1 and a phone gets two a row. Every cell is still
+              conditional, so any subset lays out. Cladding still sits between the roof and the
+              paint, which is where Carolyn drew it (2026-08-18). minWidth:0 on each cell is
+              load-bearing: a grid item defaults to min-width:auto, and a long colour name would
+              otherwise widen its track past the page on a phone. */}
           {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
-            <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start", marginBottom: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px 14px", alignItems: "start", marginBottom: 14 }}>
               {sizeOpts.length > 0 && (
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
                   <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="" disabled>Select a size…</option>
                     {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -16297,47 +16464,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   if (c && c.allowCustom) { setRoofCustom(true); setSel((p) => ({ ...p, roofColor: "" })); }
                   else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
                 };
-                return (
-                  <div style={{ flex: 1, minWidth: 240 }}>
-                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Options</span>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569" }}>Type:
-                        <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
-                          style={{ minWidth: 130, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
-                          <option value="">Select…</option>
-                          {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      </label>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#475569", flex: "1 1 200px", minWidth: 0 }}>
-                        <span>Color:</span>
-                        {sel.roofType
-                          ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
-                          : <span style={{ flex: 1, fontSize: 12, color: "#94A3B8", fontStyle: "italic", fontWeight: 500 }}>pick a roof type first</span>}
-                        {rIsCustom && sel.roofType && (
-                          <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
-                            style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                        )}
-                      </div>
-                    </div>
+                // Two cells, Type then Color. Before a type is picked the Color cell shows a greyed
+                // box the height of a select, so the row's controls still line up.
+                return (<>
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Type</span>
+                    <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
+                      style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                      <option value="">Select…</option>
+                      {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
                   </div>
-                );
+                  <div style={{ minWidth: 0 }}>
+                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Color</span>
+                    {sel.roofType
+                      ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
+                      : <div style={{ border: "1px solid #E2E8F0", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: "#94A3B8", background: "#F8FAFC", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Pick a roof type first</div>}
+                    {rIsCustom && sel.roofType && (
+                      <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
+                        style={{ display: "block", width: "100%", marginTop: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
+                    )}
+                  </div>
+                </>);
               })()}
               {claddingChoices.length > 0 && (
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Cladding</span>
                   <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
-                    style={{ minWidth: 160, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
                     <option value="">Builder's standard</option>
                     {claddingChoices.map((o) => <option key={o.id} value={o.id}>{claddingLabelOf(o, o.id)}</option>)}
                   </select>
                 </div>
               )}
-              {paintOpt && (
-                <div style={{ flex: 1, minWidth: 260 }}>
-                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{paintOpt.label}</span>
-                  {renderPaintFields(paintOpt)}
-                </div>
-              )}
+              {/* Body and Trim are two cells of this grid — renderPaintFields returns the pair. */}
+              {paintOpt && renderPaintFields(paintOpt)}
             </div>
           )}
 
@@ -16636,16 +16797,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {renderAddl()}
             </>);
           }
-          // Included items on their own row, a full-width horizontal rule, then the additional
-          // options below (width:100% children force line breaks inside the wrapping flex row).
+          // Additional options FIRST, then the included items LAST, in a light green callout right
+          // above the Wall height / Note / Line / Clear floorplan row (Carolyn 2026-09-14: move
+          // "place or decline" below Additional Options, just above the floor-plan toolbar). It
+          // used to open the palette, above a full-width rule; the callout box is the separator
+          // now and makes it read as the step still to do. The box only pads AROUND the chips —
+          // tool buttons, ✕ and Undo are the same elements at the same size — and the submit gate
+          // (every included item placed or declined, in submitQuote) is untouched. width:100%
+          // children force line breaks inside the wrapping flex row.
           return (<>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
+            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            {renderAddl()}
+            <div data-ss-included="1" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%", marginTop: 6, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "6px 10px" }}>
               <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
               {incl.map(inclBtn)}
             </div>
-            <div style={{ width: "100%", borderTop: "1px solid #CBD5E1", margin: "2px 0" }} />
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
-            {renderAddl()}
           </>);
         })()}
         {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
@@ -16837,7 +17003,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
           and the PDF export draws from state, not this DOM. */}
       {!(show3D || adminCalPreview) && (
-      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: dock3D ? "flex-start" : "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
@@ -16851,7 +17017,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             workbench/shelf stretch grips appeared on mousedown and vanished before anyone could
             drag one. The panel is gone now, so this is belt and braces: a column cannot reproduce
             it if anything is ever added here again. */}
-        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
+        {/* flex-basis = dispMaxW, not "1 1 auto" (Carolyn 2026-09-14, full-width designer). With
+            the 1080 cap gone, a GROWING column docked beside the 3D panel took the whole row and
+            left the svg (capped at dispMaxW) floating in the middle of it, a dead strip away from
+            the panel. Sized to the drawing, plan + docked panel are one centred pair, which is
+            why justifyContent is "center" in both states now. It still SHRINKS (0 1), so a narrow
+            row gives the plan less, never the page more. dispMaxW follows the frame only, never
+            the selection, so "the plan must not move when an item is selected" still holds. */}
+        <div style={{ flex: `0 1 ${dispMaxW}px`, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
           style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
@@ -17863,8 +18036,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {submitError}
             </div>
           )}
-          <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: 1 }}>
+          {/* flexWrap + a 200px basis on the hint: without them Floorplan PDF (nowrap) and Get
+              Quote (minWidth 160) could not fit beside the hint at 390px and pushed the page 17px
+              sideways (measured on beta 2026-09-15). Now the hint takes its own line on a phone
+              and the two buttons share the next; on desktop nothing wraps and nothing moves. */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: "1 1 200px" }}>
               {(inventoryNew || inventoryMaster)
                 ? (inventoryMaster && inventoryMaster.unitId
                   ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
@@ -17938,40 +18115,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             )}
           </div>
           {estimateVersions.length > 0 && (() => {
-            const cur = viewingVersion == null ? estimateVersions[0] : (estimateVersions.find((v) => v.version === viewingVersion) || estimateVersions[0]);
-            const others = estimateVersions.filter((v) => v.version !== cur.version);
-            const csel = cur.selections || {};
+            // viewingVersion null = the latest; a version no longer in the list falls back to it.
+            const viewing = viewingVersion != null && estimateVersions.some((v) => v.version === viewingVersion)
+              ? viewingVersion : estimateVersions[0].version;
             return (
               <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
-                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (viewing)</span>
-                    {others.length > 0 && (
-                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
-                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
-                      </button>
-                    )}
-                  </div>
-                  <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                    <span style={{ color: "#94A3B8", fontWeight: 700, marginRight: 12, fontSize: 13 }}>Viewing</span>
-                    {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                  </div>
-                </div>
-                {versionsOpen && others.map((v) => {
-                  const vsel = v.selections || {};
-                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                  return (
-                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
-                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
-                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                        <button onClick={() => openVersion(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                      </div>
-                    </div>
-                  );
-                })}
+                <SSVersionList versions={estimateVersions} viewing={viewing} accent={accent} onOpen={(n) => { openVersion(n); }} />
               </div>
             );
           })()}
@@ -18191,41 +18340,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
             </div>
           )}
-          {estimateVersions.length > 0 && (() => {
-            const cur = estimateVersions[0];
-            const others = estimateVersions.slice(1);
-            const csel = cur.selections || {};
-            return (
-              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>All designs on this estimate</div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 0" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{[capWords(csel.style), csel.size].filter(Boolean).join(" ") || "Design"}</span>
-                    <span style={{ fontSize: 12, color: "#94A3B8", fontWeight: 600 }}> · v{cur.version} (current)</span>
-                    {others.length > 0 && (
-                      <button onClick={() => setVersionsOpen((o) => !o)} style={{ marginLeft: 8, background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontSize: 12, fontWeight: 700 }}>
-                        {versionsOpen ? "▴ hide" : `▾ ${estimateVersions.length} versions`}
-                      </button>
-                    )}
-                  </div>
-                  {ssSafeUrl(cur.image_url) && <a href={ssSafeUrl(cur.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13, whiteSpace: "nowrap", flexShrink: 0 }}>PDF</a>}
-                </div>
-                {versionsOpen && others.map((v) => {
-                  const vsel = v.selections || {};
-                  let dstr = ""; try { dstr = new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch { /* ignore */ }
-                  return (
-                    <div key={v.version} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 0 7px 12px", borderTop: "1px solid #F1F5F9", background: "#F8FAFC" }}>
-                      <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>↳ v{v.version} · {[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}</div>
-                      <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                        <button onClick={() => { setSubmitted(false); openVersion(v.version); }} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>
-                        {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
+          {estimateVersions.length > 0 && (
+            // The success screen always shows the version just submitted ([0]) as Viewing.
+            // Open leaves the success screen FIRST, so the plan is mounted by the time
+            // openVersion scrolls to it.
+            <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+              <SSVersionList versions={estimateVersions} viewing={estimateVersions[0].version} accent={accent} onOpen={(n) => { setSubmitted(false); openVersion(n); }} />
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
             <button
               onClick={() => { setSubmitted(false); }}
@@ -18270,21 +18392,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </div>
         </div>
       )}
-      {toast && (
-        <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
+      {toast && (() => {
+        // A plain string is a placement refusal (every caller before 2026-09-15) and keeps
+        // the "Can't place here" headline. An object brings its own title and tone:
+        // openVersion's "Now viewing" (info, green) and its failed-load message (warn).
+        const t = typeof toast === "string" ? { tone: "warn", title: "Can't place here", text: toast } : toast;
+        const info = t.tone === "info";
+        return (
+        <div data-ss-toast={info ? "info" : "warn"} style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
           <div style={{
-            background: "#FFFBEB", border: "2px solid #F59E0B", borderRadius: 12, padding: "14px 20px",
+            background: info ? "#F0FDF4" : "#FFFBEB", border: `2px solid ${info ? "#22C55E" : "#F59E0B"}`, borderRadius: 12, padding: "14px 20px",
             boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 12, alignItems: "flex-start",
           }}>
-            <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>⚠️</span>
+            <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>{info ? "✅" : "⚠️"}</span>
             <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 700, fontSize: 14, color: "#92400E", marginBottom: 4 }}>Can't place here</div>
-              <div style={{ fontSize: 13, color: "#A16207", lineHeight: 1.4 }}>{toast}</div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: info ? "#166534" : "#92400E", marginBottom: 4 }}>{t.title}</div>
+              <div style={{ fontSize: 13, color: info ? "#15803D" : "#A16207", lineHeight: 1.4 }}>{t.text}</div>
             </div>
-            <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
+            <button onClick={() => setToast(null)} style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer", color: info ? "#166534" : "#92400E", flexShrink: 0, padding: 0 }}>✕</button>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {cal3dPreview}
 

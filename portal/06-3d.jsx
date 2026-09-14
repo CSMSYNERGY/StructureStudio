@@ -484,8 +484,12 @@ function DesignerTab({ clientId, onSaved, openDesign = null, setup3d = null, vie
       ? <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>The designer failed to load — refresh the page. (structure-studio.component.js must be served alongside portal.html.)</div>
       : <DesignerLoading />;
   }
+  // Full width, no 1080 cap (Carolyn 2026-09-14: she drew over the empty gutters either side
+  // of the designer). The host (.ss-designer-host) is already full-bleed, so the cap was the
+  // only thing framing it. Buttons are fixed px, so nothing grows with the page; the plan and
+  // docked 3D stay a centred pair inside the designer's own canvas row.
   return (
-    <div style={{ maxWidth: 1080, margin: "0 auto", width: "100%" }}>
+    <div style={{ width: "100%" }}>
       {/* onOpenOrder/canPushInvoice power Push to Invoice on the success screen. The host
           owns both on purpose: only the shell knows this user's Orders access, and only it
           can navigate without unmounting the designer (which would discard the design). */}
