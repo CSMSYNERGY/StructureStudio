@@ -60,7 +60,7 @@ export const FIXTURES = {
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const near = (a, b, eps = 0.012) => Math.abs(a - b) <= eps;
 
-async function pickStyle(page, label) {
+export async function pickStyle(page, label) {
   const ok = await page.evaluate((lab) => {
     const want = lab.trim().toLowerCase();
     const el = [...document.querySelectorAll("div,span,p,strong,b")]
@@ -72,18 +72,18 @@ async function pickStyle(page, label) {
   if (!ok) throw new Error(`no style tile labelled ${label}`);
   await settle(page, 500);
 }
-async function chooseSize(page) {
+export async function chooseSize(page) {
   const sel = page.locator("select").filter({ has: page.locator("option", { hasText: SIZE }) });
   await sel.first().selectOption({ label: SIZE });
   await page.waitForFunction((l) => [...document.querySelectorAll("svg text")].some((t) => t.textContent.trim() === `${l} ft`), L, { timeout: 15000 });
 }
-async function chooseCladding(page, id) {
+export async function chooseCladding(page, id) {
   const sel = page.locator("select").filter({ has: page.locator("option", { hasText: "Builder's standard" }) });
   if (!(await sel.count())) throw new Error("no Cladding control");
   await sel.first().selectOption(id);
   await settle(page, 300);
 }
-async function openEditor(page) {
+export async function openEditor(page) {
   const edit = page.getByRole("button", { name: /Edit in 3D/ });
   if (!(await edit.count()) || !(await edit.first().isVisible())) {
     const show = page.getByRole("button", { name: /Show 3D|3D View/ });
@@ -102,7 +102,7 @@ async function openEditor(page) {
 
 // Every mesh in the roof, openings and walls groups: world bbox, the BoxGeometry's own
 // width/height/depth, its rotation about z, colour, and the item group it belongs to.
-async function sceneMeshes(page) {
+export async function sceneMeshes(page) {
   return page.evaluate(() => {
     const E = window.__ss3dEngine;
     const V = E.camera.position.constructor;
@@ -175,7 +175,7 @@ function printEnd(tag, e, H) {
 }
 
 // Aim, render synchronously, screenshot the canvas. `tint` maps mesh index -> hex.
-async function shot(page, path, { eye, at, tint = {} }) {
+export async function shot(page, path, { eye, at, tint = {} }) {
   await page.evaluate(({ eye, at, tint }) => {
     const E = window.__ss3dEngine;
     window.__probeRestore = window.__probeRestore || [];
@@ -213,10 +213,22 @@ async function placeWallVent(page) {
     const c = window.__ss3dEngine.renderer.domElement.getBoundingClientRect();
     return { x: c.x, y: c.y, w: c.width, h: c.height };
   });
-  // Front view first, so the canvas centre is the long side wall... it is the gable end wall
-  // below the plate, which is the wall we want.
-  await page.evaluate(() => { const E = window.__ss3dEngine; E.setViewPreset(0, 12); });
-  for (const [fx, fy] of [[0.5, 0.62], [0.4, 0.62], [0.6, 0.62], [0.5, 0.7], [0.45, 0.55]]) {
+  // THE EAST (EAVE) WALL, not the front. This aimed at the south wall until 2026-09-15, which on
+  // a 12x32 is a GABLE END — and since 1.9 a vent placed on a gable end goes INTO the gable
+  // (ventZone), drawn on the roof's cap with no wall casing at all, so these wall-vent checks
+  // measured a gable vent and failed 24 times. A vent under the plate now lives on an eave wall;
+  // tests/harness/ventGable.mjs measures the gable one.
+  // Aimed by hand, square on to the east wall at 3.5 ft, not with setViewPreset(90, ...): that
+  // turns from the viewer's FRONT, and the first try landed the vent on the north gable instead.
+  await page.evaluate(({ W }) => {
+    const E = window.__ss3dEngine;
+    E.camera.position.set(W / 2 + 14, 3.5, 0);
+    E.controls.target.set(W / 2, 3.5, 0);
+    E.camera.lookAt(W / 2, 3.5, 0);
+    E.camera.updateProjectionMatrix();
+    E.render();
+  }, { W });
+  for (const [fx, fy] of [[0.5, 0.5], [0.4, 0.5], [0.6, 0.5], [0.5, 0.58], [0.45, 0.42]]) {
     await btn.first().click();
     await settle(page, 300);
     await page.mouse.click(box.x + fx * box.w, box.y + fy * box.h);
@@ -302,10 +314,13 @@ export async function probeVariant({ ok, shots, config, fixtures, styleLabel, cl
         result.wallVent = meshes.filter((m) => m.itemId === it.id);
         console.log(`  wall vent ${it.id} on ${it.wall}: ${result.wallVent.length} meshes`);
         result.wallVent.forEach((m) => console.log(`    ${m.color} box ${m.box && m.box.join("x")} y ${m.min[1]}..${m.max[1]} ctr ${m.ctr.join(",")}`));
-        const wz = it.wall === "south" ? 1 : it.wall === "north" ? -1 : 0;
-        if (wz) {
-          const faceZ = wz > 0 ? (porch ? L / 2 - 6 : L / 2) : -L / 2;
-          const outs = result.wallVent.map((m) => ({ ...m, back: wz > 0 ? m.min[2] - faceZ : faceZ - m.max[2], front: wz > 0 ? m.max[2] - faceZ : faceZ - m.min[2] }));
+        // Out from the wall's mid-plane along whichever world axis is its normal: z for north/south
+        // (the porch end's wall sets back 6 ft), x for east/west.
+        const ax = (it.wall === "east" || it.wall === "west") ? 0 : 2;
+        const wz = it.wall === "south" || it.wall === "east" ? 1 : -1;
+        {
+          const faceZ = ax === 0 ? wz * (W / 2) : (wz > 0 ? (porch ? L / 2 - 6 : L / 2) : -L / 2);
+          const outs = result.wallVent.map((m) => ({ ...m, back: wz > 0 ? m.min[ax] - faceZ : faceZ - m.max[ax], front: wz > 0 ? m.max[ax] - faceZ : faceZ - m.min[ax] }));
           result.wallVentOut = outs.map((m) => ({ color: m.color, box: m.box, back: +m.back.toFixed(3), front: +m.front.toFixed(3), y: [m.min[1], m.max[1]] }));
           // 1.7: the vent's own frame IS its casing. Before 2026-09-15 buildOneWall drew the three
           // generic casing boxes (front on trimFace) AND a second four-board frame recessed inside
@@ -327,10 +342,12 @@ export async function probeVariant({ ok, shots, config, fixtures, styleLabel, cl
             blades.map((m) => m.front.toFixed(3)).join(" "));
           // ssVentSpan tops a vent at H - 0.35; the frame head may reach vF (<= 0.14) above that.
           ok(`[${tag}] wall vent: nothing reaches above the frame head`, topAll <= H - 0.35 + 0.14 + 0.002, `top ${topAll} limit ${(H - 0.35 + 0.14).toFixed(3)}`);
-          const cen = outs.reduce((a, m) => ({ x: a.x + m.ctr[0], y: a.y + m.ctr[1] }), { x: 0, y: 0 });
-          const cx = cen.x / outs.length, cy = cen.y / outs.length;
-          await shot(page, `${shots}/${tag}-wallvent.png`, { eye: [cx + 1.2, cy + 0.3, faceZ + wz * 4], at: [cx, cy, faceZ] });
-          await shot(page, `${shots}/${tag}-wallvent-side.png`, { eye: [cx + 3.5, cy + 0.2, faceZ + wz * 1.2], at: [cx, cy, faceZ + wz * 0.15] });
+          const cen = outs.reduce((a, m) => ({ x: a.x + m.ctr[0], y: a.y + m.ctr[1], z: a.z + m.ctr[2] }), { x: 0, y: 0, z: 0 });
+          const cx = cen.x / outs.length, cy = cen.y / outs.length, cz = cen.z / outs.length;
+          // (along, out) -> world, for whichever axis this wall faces.
+          const P = (along, y, out) => (ax === 2 ? [cx + along, y, faceZ + wz * out] : [faceZ + wz * out, y, cz + along]);
+          await shot(page, `${shots}/${tag}-wallvent.png`, { eye: P(1.2, cy + 0.3, 4), at: P(0, cy, 0) });
+          await shot(page, `${shots}/${tag}-wallvent-side.png`, { eye: P(3.5, cy + 0.2, 1.2), at: P(0, cy, 0.15) });
         }
       }
     }
