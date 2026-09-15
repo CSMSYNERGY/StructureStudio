@@ -161,6 +161,9 @@ function SettingsView({ section }) {
         coFeeTaxable: data.coFeeTaxable !== false,
         coFeeLabel: data.coFeeLabel || "Change order fee",
         coUnlockHours: data.coUnlockHours == null ? "72" : String(data.coUnlockHours),
+        // Customer login code (migration 231). `status` sends 'sms' | 'email'; a function from
+        // before 231 sends nothing, which means text — the same thing the server defaults to.
+        customerLoginDefault: data.customerLoginDefault === "email" ? "email" : "sms",
         brandName: b.companyName || "", brandTagline: b.tagline || "",
         brandAccent: b.accentColor || "#D97706", brandHeaderBg: b.headerBg || "#1E293B",
         brandStylesPerRow: b.stylesPerRow ? String(b.stylesPerRow) : "8",
@@ -254,6 +257,29 @@ function SettingsView({ section }) {
   // Changing a signed order (migrations 209-216). Its own save, like the invoicing card
   // above and for the same reason: the fields are presence-based on the server, so sending
   // only these leaves every other setting untouched.
+  // "Customer login code: Text / Email" (migration 231; plan 3.6, Ahsan 2026-09-15). Saves the
+  // moment it is picked, through `save` with ONE key: the server writes customer_login_default
+  // only when the key is present, so nothing else on the page is touched — the same
+  // presence-based pattern as the two cards around it. A refused save puts the old choice back.
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginMsg, setLoginMsg] = useState(null);   // { ok } | { err }
+  const saveLoginDefault = async (next) => {
+    const prev = form.customerLoginDefault === "email" ? "email" : "sms";
+    if (next === prev || loginBusy) return;
+    setLoginMsg(null); setLoginBusy(true);
+    setForm((p) => ({ ...p, customerLoginDefault: next }));
+    const { data, error: err } = await sb.functions.invoke("portal-settings", { body: { action: "save", customerLoginDefault: next } });
+    setLoginBusy(false);
+    if (err || (data && data.error)) {
+      setForm((p) => ({ ...p, customerLoginDefault: prev }));
+      setLoginMsg({ err: (data && data.error) || (err ? await fnError(err) : "Couldn't save that.") });
+      return;
+    }
+    setLoginMsg({ ok: next === "email"
+      ? "Saved — customers are offered an emailed code first."
+      : "Saved — customers are offered a texted code first." });
+  };
+
   const [coBusy, setCoBusy] = useState(false);
   const [coMsg, setCoMsg] = useState(null);   // { ok } | { err }
   const saveChangeOrders = async () => {
@@ -619,6 +645,40 @@ function SettingsView({ section }) {
           )}
         </div>
       )}
+
+      {/* CUSTOMER LOGIN CODE (migration 231; plan 3.6, Ahsan 2026-09-15: "Text AND email login
+          codes before the expo"). The designer's Log in sheet offers Text | Email; this picks
+          which one comes FIRST. customer-auth login_options only ever treats it as a preference
+          among the channels the platform can actually deliver, so choosing Email before email
+          codes are switched on changes nothing a customer sees — the copy says so rather than
+          promising a route. Every tenant, CRM or not: the login is ours either way. */}
+      <div style={S.card}>
+        <div style={S.h2}>Customer login code</div>
+        <p style={{ fontSize: 12, color: "#64748B", marginTop: 6, marginBottom: 10, lineHeight: 1.5 }}>
+          How your customers get the 6-digit code that logs them in to see, accept and sign their quotes
+          and invoices. This is the option they're offered first — they can still pick the other one.
+        </p>
+        <div role="group" aria-label="Customer login code" data-ss-login-default={form.customerLoginDefault === "email" ? "email" : "sms"}
+          style={{ display: "inline-flex", border: "1px solid #E2E8F0", borderRadius: 8, overflow: "hidden" }}>
+          {[["sms", "Text"], ["email", "Email"]].map(([v, label]) => {
+            const on = (form.customerLoginDefault === "email" ? "email" : "sms") === v;
+            return (
+              <button key={v} type="button" aria-pressed={on} disabled={loginBusy} onClick={() => saveLoginDefault(v)}
+                style={{ background: on ? ACCENT : "#FFF", color: on ? "#FFF" : "#334155", border: "none", borderLeft: v === "email" ? "1px solid #E2E8F0" : "none", padding: "7px 18px", fontSize: 13, fontWeight: 700, cursor: loginBusy ? "default" : "pointer", fontFamily: "inherit", opacity: loginBusy ? 0.7 : 1 }}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>
+          If emailed codes aren't available on your account yet, customers get a text either way.
+        </div>
+        {loginMsg && (
+          <div style={{ marginTop: 10, background: loginMsg.err ? "#FEF2F2" : "#ECFDF5", border: `1px solid ${loginMsg.err ? "#FECACA" : "#A7F3D0"}`, color: loginMsg.err ? "#B91C1C" : "#065F46", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5 }}>
+            {loginMsg.err || loginMsg.ok}
+          </div>
+        )}
+      </div>
 
       {status && status.configured && (
         <div style={S.card}>

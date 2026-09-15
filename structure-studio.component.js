@@ -10080,22 +10080,201 @@ function ColorSelect({ value, colors, onPick }) {
   );
 }
 
-// Lead-capture gate shown BEFORE the designer (the customer link is a lead-gen tool).
-// Collects name + phone and fires a best-effort GHL lead capture (capture-lead edge fn) the
-// moment they continue. Rendered by StructureStudioInner as a body-portaled overlay when
-// !gatePassed && !isAdmin && !embedded — the designer renders BEHIND it, dimmed/blurred and
-// marked inert (no pointer/keyboard/focus) until the gate is passed.
-// NOTE: a phone-as-login "find my saved designs" flow was intentionally deferred — it needs
-// SMS/OTP verification, else a low-entropy phone could expose a customer's saved address.
-function LeadGate({ config, supabase, accent, onPass, onClose }) {
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
+// ─── Customer login (Carolyn 2026-09-14, plan 3.3) ──────────────────────────────────────
+// Session storage SHARED with /my-quotes — same origin, same ssq_ keys, so one texted code
+// signs the customer in on both pages. ssq_phone_ / ssq_email_ are the designer's own
+// additions: /my-quotes never had to say WHO is signed in, and the header does. Inside a
+// builder's iframe the browser partitions storage, so a new-tab /my-quotes there asks again —
+// that is the browser, not a bug to chase.
+function ssCustKeys(clientId) {
+  const id = clientId || "";
+  return {
+    token: "ssq_token_" + id, name: "ssq_name_" + id, biz: "ssq_biz_" + id,
+    phone: "ssq_phone_" + id, email: "ssq_email_" + id,
+    // sessionStorage, not localStorage: a code is good for ten minutes, and "Enter your code"
+    // must not greet the same browser tomorrow.
+    pending: "ss_code_pending_" + id,
+  };
+}
+function ssReadCustSession(clientId) {
+  const k = ssCustKeys(clientId);
+  try {
+    const token = localStorage.getItem(k.token);
+    if (!token) return null;
+    const phone = ssPhone10(localStorage.getItem(k.phone) || "");
+    const email = String(localStorage.getItem(k.email) || "").trim().toLowerCase();
+    return { token, identity: { phone: phone.length === 10 ? phone : null, email: email || null, name: localStorage.getItem(k.name) || null } };
+  } catch (_e) { return null; }
+}
+function ssClearCustSession(clientId) {
+  const k = ssCustKeys(clientId);
+  try { [k.token, k.name, k.biz, k.phone, k.email].forEach((key) => localStorage.removeItem(key)); } catch (_e) {}
+  try { sessionStorage.removeItem(k.pending); } catch (_e) {}
+}
+// Twilio Verify codes live ten minutes; a pending code older than that is not worth a pill.
+const SS_CODE_TTL_MS = 10 * 60 * 1000;
+// Draft autosave (plan 3.3): 20 s after the last change, at most 200 saves per page load — each
+// save_design writes a design_versions row, so the cap is what bounds a tab left open all day.
+const SS_DRAFT_DEBOUNCE_MS = 20 * 1000;
+const SS_DRAFT_SAVE_CAP = 200;
+function ssReadCodePending(clientId) {
+  try {
+    const p = JSON.parse(sessionStorage.getItem(ssCustKeys(clientId).pending) || "null");
+    if (p && (p.channel === "sms" || p.channel === "email") && p.to && Date.now() - Number(p.at || 0) < SS_CODE_TTL_MS) return p;
+  } catch (_e) {}
+  return null;
+}
+// ?account=quotes|invoices — the deep link the quote email and text will carry (plan 3.8).
+// A bare ?q=<code> opens the account too (Quotes first; CustomerAccount moves to Invoices when
+// that is where the card lives) — ssQuoteRefParam below is the same shape rule as my-quotes.
+function ssAccountParam() {
+  try {
+    const v = new URLSearchParams(location.search).get("account");
+    if (v === "quotes" || v === "invoices") return v;
+    return ssQuoteRefParam() ? "quotes" : null;
+  } catch (_e) { return null; }
+}
+// A shape check only (deliverability is proven by the code arriving). Mirrors isEmailish in
+// my-quotes.html and isPlausibleEmail in _shared/emailOtp.ts, so all three refuse the same
+// nonsense before a round trip.
+function ssEmailish(v) {
+  const e = String(v || "").trim().toLowerCase();
+  if (e.length < 5 || e.length > 254) return false;
+  if (/[\s<>,;"\\]/.test(e)) return false;
+  return /^[^@]+@[^@.]+(\.[^@.]+)+$/.test(e);
+}
+
+// One call shape for every customer-* edge function → {status, ok, data}.
+// supabase.functions.invoke turns EVERY non-2xx into a FunctionsHttpError whose message is
+// "Edge Function returned a non-2xx status code" — the sentence the server wrote ("That code
+// didn't match", "Too many codes requested…") is only on error.context, the raw Response. Read
+// it there, or every refusal on this sheet reads as the product being broken. status 0 = the
+// request never got an answer (offline, CORS, DNS).
+// opts.onExpired: a 401 on a call that CARRIED a token means the session is gone — the caller
+// clears ssq_* and reopens the sheet. Deliberately keyed on the token being sent: verify_code
+// also answers 401 ("That code didn't match"), and a typo must not read as "session expired".
+async function callCustomerFn(supabase, fn, body, opts) {
+  let res;
+  try {
+    const { data, error } = await supabase.functions.invoke(fn, { body });
+    if (!error) {
+      res = { status: 200, ok: true, data: data && typeof data === "object" ? data : null };
+    } else {
+      const ctx = error.context;
+      const status = ctx && typeof ctx.status === "number" ? ctx.status : 0;
+      let payload = null;
+      if (status && typeof ctx.json === "function") {
+        try { payload = await ctx.json(); } catch (_e) { /* non-JSON body — keep the status */ }
+      }
+      res = { status, ok: false, data: payload };
+    }
+  } catch (_e) {
+    res = { status: 0, ok: false, data: null };
+  }
+  if (res.status === 401 && body && body.token && opts && typeof opts.onExpired === "function") opts.onExpired();
+  return res;
+}
+// The server's own sentence wins when it sent one; otherwise an honest fallback (my-quotes'
+// wording, so the two pages say the same thing about the same refusal).
+function ssCustErrText(r, fallback) {
+  if (r && r.data && typeof r.data.error === "string" && r.data.error) return r.data.error;
+  if (r && r.status === 429) return "You've requested several codes in a short time. To prevent abuse, please wait a few minutes and try again.";
+  if (r && r.status === 0) return "Couldn't reach the server. Check your connection and try again.";
+  return fallback;
+}
+
+// The lead gate IS the login now. Shown BEFORE the designer the first time a visitor works
+// the canvas (the customer link is a lead-gen tool), and again from the header's Log in /
+// Enter your code. Rendered by StructureStudioInner as a body-portaled overlay — the designer
+// renders BEHIND it, dimmed/blurred and marked inert (no pointer/keyboard/focus) while open.
+//
+// ⚠️ THE SHEET NEVER BLOCKS A LEAD (Ahsan 2026-09-15). The order inside submit is load-bearing:
+// capture-lead first (payload unchanged), THEN onPass — the design unlocks — and only then the
+// code request. A code that never arrives (texting not switched on for this builder, Twilio
+// down, a landline) costs the builder nothing: the visitor keeps designing and can still press
+// Get Quote, which needs no code. The code only unlocks Quotes/Invoices and accept/sign.
+//
+// The NOTE that used to sit here deferred phone-as-login because a low-entropy phone could
+// expose a customer's saved address. That is why the code exists: nothing account-shaped opens
+// on a TYPED phone, only on the token customer-auth mints after the OTP proves it.
+//
+// mode: "gate" (the interaction gate: name + phone always, it is the lead), "login" (header,
+// gate already passed), "code" (reopened from "Enter your code" with `pending`), "account"
+// (a ?account= / ?q= link — the rep's Copy customer link or sign-on-phone QR — opened signed out).
+//
+// "account" is NOT the gate (review 2026-09-15): the person holding that link is already the
+// builder's customer, on their own phone, there to see a quote or sign an invoice. Treating them
+// as a new lead titled the sheet "Log in to design your building", demanded a name, showed the
+// lead-gen consent box and filed capture-lead a second time for someone the CRM already has.
+// So it asks for the phone (or email) only, like /my-quotes always did, files no lead, and the
+// design gate opens when the code is verified (onVerified), not before.
+function LoginSheet({ config, supabase, accent, mode, notice, pending, initialName, initialPhone, onPass, onCodeSent, onVerified, onClose }) {
+  const [name, setName] = useState(initialName || (pending && pending.name) || "");
+  const [phone, setPhone] = useState(initialPhone ? formatPhoneDisplay(initialPhone) : "");
+  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   // ⚠️ UNCHECKED BY DEFAULT, AND IT MUST STAY THAT WAY. A pre-ticked box is not consent under
   // the TCPA — the customer has to act. Do not "help conversion" by defaulting it on.
   const [smsConsent, setSmsConsent] = useState(false);
+  // Which routes customer-auth can send a code by for this builder. null = still asking;
+  // anything but a clean answer (the live function predating login_options says "Unknown
+  // action", a cold start, offline) falls back to TEXT ONLY — the one route that has always
+  // worked, so this sheet can only ever add a route, never lose one.
+  const [channels, setChannels] = useState(null);
+  const [channel, setChannel] = useState(pending && pending.channel === "email" ? "email" : "sms");
+  const [step, setStep] = useState(mode === "code" && pending ? "code" : "details"); // details | code | unavailable
+  const [sentTo, setSentTo] = useState(mode === "code" && pending ? pending : null); // {channel, to, name, at}
+  const [code, setCode] = useState("");
+  const [err, setErr] = useState("");
+  const [resendAt, setResendAt] = useState(mode === "code" && pending ? Number(pending.at || 0) + 30000 : 0);
+  const [now, setNow] = useState(() => Date.now());
+  const sendFailsRef = useRef(0);
+  const passedRef = useRef(false);
+  // The {name, phone, consent} capture-lead last filed from this sheet. A refused code request
+  // (a 429 on shared expo Wi-Fi, a 400) leaves the details step open, and every retry used to
+  // file the same person again — another captured_leads row and CRM write each press.
+  const lastLeadRef = useRef(null);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const r = await callCustomerFn(supabase, "customer-auth", { action: "login_options", clientId: config.clientId });
+      if (!live) return;
+      const list = r.ok && r.data && Array.isArray(r.data.channels)
+        ? r.data.channels.filter((c) => c === "sms" || c === "email")
+        : null;
+      if (!list) { setChannels(["sms"]); return; }
+      setChannels(list);
+      if (mode === "code" && pending) return; // the code already out decides the route
+      setChannel(r.data.defaultChannel === "email" && list.includes("email") ? "email" : (list.includes("sms") ? "sms" : (list[0] || "sms")));
+    })();
+    return () => { live = false; };
+  }, [supabase, config.clientId]);
+  // The resend countdown ticks only while there is something to count.
+  useEffect(() => {
+    if (step !== "code" || resendAt <= Date.now()) return;
+    const t = setInterval(() => { const n = Date.now(); setNow(n); if (n >= resendAt) clearInterval(t); }, 500);
+    return () => clearInterval(t);
+  }, [step, resendAt]);
+  const resendLeft = Math.max(0, Math.ceil((resendAt - now) / 1000));
+
   const digits = ssPhone10(phone); // a "+1" preserved by formatPhoneDisplay still counts as 10
-  const valid = name.trim().length > 0 && digits.length === 10;
+  // The gate always takes the phone: it is the builder's lead, and the consent disclosure has
+  // to sit where the number is collected. Only a returning visitor signing in by email skips it.
+  const needPhone = mode === "gate" || channel === "sms";
+  const needEmail = channel === "email";
+  // An account link files no lead (see "account" above), so it has no reason to insist on a name.
+  const isLead = mode !== "account";
+  // Name is required wherever the phone is: capture-lead quietly skips a lead with no name,
+  // and a ticked consent box that silently records nothing is worse than asking for a name.
+  //
+  // ⚠️ THE GATE UNLOCKS ON NAME + PHONE ALONE, whatever the code route (review 2026-09-15).
+  // With the builder's Settings default on Email, `valid` used to demand an email too, so a
+  // visitor who typed a name and phone could neither design nor be captured until they also
+  // gave an address — the lead blocked on the CODE's route, which decision 2 forbids. The email
+  // is only where the code goes: submit() files the lead and unlocks first, then asks for it.
+  const valid = mode === "gate"
+    ? name.trim().length > 0 && digits.length === 10
+    : (!needPhone || ((!isLead || name.trim().length > 0) && digits.length === 10)) && (!needEmail || ssEmailish(email));
   const brand = (config && config.branding) || {};
   const acc = accent || "#3D3672";
   // ⚠️ CONSENT IS NOT REQUIRED TO CONTINUE, and that is deliberate. This gate is the builder's
@@ -10114,27 +10293,123 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
     "your quote and your building. Message frequency varies. Message and data rates may apply. " +
     "Reply STOP to opt out at any time.";
 
-  const start = () => {
-    if (!valid || busy) return;
-    setBusy(true);
-    // Best-effort lead capture to the tenant's GHL — never block entry on it.
-    // smsConsent + the verbatim sentence ride along: capture-lead writes the consent record,
-    // and it is the only moment this page can prove WHAT was shown and WHERE.
-    try {
-      supabase.functions.invoke("capture-lead", { body: {
-        clientId: config.clientId, name: name.trim(), phone,
-        smsConsent: smsConsent,
-        consentText: smsConsent ? consentText : null,
-        consentUrl: typeof location !== "undefined" ? String(location.href).slice(0, 500) : null,
-      } });
-    } catch (_e) {}
-    onPass({ name: name.trim(), phone });
+  // Ask customer-auth for a code. target = {channel:"sms", to:<10 digits>} | {channel:"email", to:<address>}.
+  const sendCode = async (target, isResend) => {
+    const payload = { action: "request_code", clientId: config.clientId, name: name.trim() || undefined };
+    if (target.channel === "email") { payload.channel = "email"; payload.email = target.to; }
+    else payload.phone = "+1" + target.to; // E.164, the form both request_code and verify_code expect
+    const r = await callCustomerFn(supabase, "customer-auth", payload);
+    if (r.ok && r.data && r.data.ok) {
+      sendFailsRef.current = 0;
+      const p = { channel: target.channel, to: target.to, name: name.trim() || null, at: Date.now() };
+      setSentTo(p); setCode(""); setErr(""); setStep("code");
+      setNow(p.at); setResendAt(p.at + 30000);
+      if (onCodeSent) onCodeSent(p);
+      return;
+    }
+    // NOT AVAILABLE is not an error the visitor can fix, so it must not read like one: 503 is
+    // customer-auth's deliberate refusal (texting not switched on for this deployment, or the
+    // email route closed), and a provider that fails twice running is as good as down. Either
+    // way the honest answer is "keep designing" — the design is already unlocked.
+    const transient = r.status === 0 || r.status === 502;
+    if (transient) sendFailsRef.current += 1;
+    if (r.status === 503 || (transient && sendFailsRef.current >= 2)) {
+      setSentTo(target); setErr(""); setStep("unavailable");
+      return;
+    }
+    setErr(ssCustErrText(r, "Something went wrong sending your code. Please try again."));
+    if (isResend) { const n = Date.now(); setNow(n); setResendAt(n + 30000); } // a failed resend still waits
   };
+
+  const submit = async () => {
+    if (!valid || busy) return;
+    setBusy(true); setErr("");
+    // Best-effort lead capture to the tenant's GHL — never block entry on it. The payload is
+    // EXACTLY what the gate always sent. smsConsent + the verbatim sentence ride along:
+    // capture-lead writes the consent record, and it is the only moment this page can prove
+    // WHAT was shown and WHERE.
+    const leadKey = JSON.stringify([name.trim(), digits, smsConsent]);
+    if (needPhone && isLead && lastLeadRef.current !== leadKey) {
+      lastLeadRef.current = leadKey;
+      try {
+        supabase.functions.invoke("capture-lead", { body: {
+          clientId: config.clientId, name: name.trim(), phone,
+          smsConsent: smsConsent,
+          consentText: smsConsent ? consentText : null,
+          consentUrl: typeof location !== "undefined" ? String(location.href).slice(0, 500) : null,
+        } });
+      } catch (_e) {}
+    }
+    // The design unlocks HERE, before a code is even requested — see the ⚠️ above. Once per
+    // sheet: "Use a different number" comes back through submit, and the gate is already open.
+    // An account link never unlocks here: it is not a lead, and the verified code opens the gate.
+    if (isLead && !passedRef.current) {
+      passedRef.current = true;
+      onPass({ name: name.trim(), phone: needPhone ? phone : "" });
+    }
+    // The gate let an Email default through without an address (see `valid`): the lead is in and
+    // the design is open, so this is the one thing left to ask for, and closing the sheet is fine.
+    if (needEmail && !ssEmailish(email)) {
+      setErr(email.trim()
+        ? "That email doesn't look right. Check it and we'll send your code there."
+        : "Add your email and we'll send your code there — your design is already unlocked.");
+      setBusy(false);
+      return;
+    }
+    const list = channels || ["sms"];
+    if (!list.includes(channel)) {
+      setSentTo({ channel, to: "" }); setStep("unavailable"); setBusy(false);
+      return;
+    }
+    await sendCode(channel === "email" ? { channel: "email", to: email.trim().toLowerCase() } : { channel: "sms", to: digits }, false);
+    setBusy(false);
+  };
+
+  const resend = async () => {
+    if (busy || resendLeft > 0 || !sentTo) return;
+    setBusy(true); setErr("");
+    await sendCode({ channel: sentTo.channel, to: sentTo.to }, true);
+    setBusy(false);
+  };
+
+  const verify = async (typed) => {
+    if (busy || !sentTo) return;
+    const c = String(typed != null ? typed : code).replace(/\D/g, "");
+    if (c.length !== 6) {
+      setErr(sentTo.channel === "email" ? "Enter the 6-digit code from the email." : "Enter the 6-digit code from the text message.");
+      return;
+    }
+    setBusy(true); setErr("");
+    const payload = { action: "verify_code", clientId: config.clientId, code: c, name: name.trim() || sentTo.name || undefined };
+    if (sentTo.channel === "email") { payload.channel = "email"; payload.email = sentTo.to; }
+    else payload.phone = "+1" + sentTo.to;
+    const r = await callCustomerFn(supabase, "customer-auth", payload);
+    setBusy(false);
+    if (r.ok && r.data && r.data.token) {
+      onVerified({
+        token: r.data.token, name: r.data.name || null,
+        phone: sentTo.channel === "sms" ? sentTo.to : null,
+        email: sentTo.channel === "email" ? sentTo.to : null,
+      });
+      return;
+    }
+    setCode("");
+    setErr(ssCustErrText(r, "That code didn't work. Check it and try again."));
+  };
+
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
+  const lbl = { fontSize: 12, fontWeight: 700, color: "#475569" };
+  const primaryBtn = (on) => ({ width: "100%", background: on ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: on ? "pointer" : "default", fontFamily: "inherit" });
+  const linkBtn = (on) => ({ background: "transparent", border: "none", padding: 0, fontSize: 13, fontWeight: 700, color: on ? acc : "#94A3B8", cursor: on ? "pointer" : "default", fontFamily: "inherit" });
+  const byEmail = (sentTo ? sentTo.channel : channel) === "email";
+  const offerChoice = Array.isArray(channels) && channels.includes("sms") && channels.includes("email");
+  const title = step === "code" ? "Enter your code"
+    : step === "unavailable" ? "Keep designing"
+    : (mode === "gate" ? "Log in to design your building" : mode === "account" ? "Log in to see your quotes and invoices" : "Log in");
 
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(15,23,42,0.42)", backdropFilter: "blur(2.5px)", WebkitBackdropFilter: "blur(2.5px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-      <div style={{ position: "relative", background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="ss-login-title" style={{ position: "relative", background: "#FFF", borderRadius: 16, maxWidth: 420, width: "100%", maxHeight: "calc(100vh - 32px)", overflowY: "auto", boxSizing: "border-box", padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
         {onClose && (
           <button type="button" onClick={onClose} aria-label="Close" title="Close"
             style={{ position: "absolute", top: 10, right: 12, background: "transparent", border: "none", fontSize: 20, color: "#94A3B8", cursor: "pointer", lineHeight: 1, padding: 4 }}>
@@ -10144,22 +10419,704 @@ function LeadGate({ config, supabase, accent, onPass, onClose }) {
         {brand.logo
           ? <img src={brand.logo} alt={brand.companyName || "logo"} style={{ height: 40, objectFit: "contain", marginBottom: 12 }} />
           : <div style={{ fontWeight: 800, fontSize: 18, color: acc, marginBottom: 12 }}>{brand.companyName || "Design Studio"}</div>}
-        <div style={{ fontSize: 20, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>Let's design your building</div>
-        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 18 }}>Enter your name and phone to get started.</div>
-        <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Name</label>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" style={inp} autoFocus />
-        <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Phone</label>
-        <input type="tel" inputMode="tel" value={formatPhoneDisplay(phone)} onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
-          onKeyDown={(e) => e.key === "Enter" && start()} placeholder="(555) 555-5555" style={{ ...inp, margin: "4px 0 16px" }} />
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
-          <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
-            style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
-          <span style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>{consentText}</span>
-        </label>
-        <button onClick={start} disabled={!valid || busy}
-          style={{ width: "100%", background: valid && !busy ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: valid && !busy ? "pointer" : "default" }}>
-          {busy ? "Starting…" : "Start Designing →"}
-        </button>
+        <div id="ss-login-title" style={{ fontSize: 20, fontWeight: 800, color: "#0F172A", marginBottom: 4 }}>{title}</div>
+
+        {step === "details" && (
+          <>
+            <div style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>
+              {mode === "gate"
+                ? (channel === "email" ? "We'll email you a code — keep designing while it arrives." : "We'll text you a code — keep designing while it arrives.")
+                : (channel === "email" ? "We'll email you a code to open your quotes and invoices." : "We'll text you a code to open your quotes and invoices.")}
+            </div>
+            {notice && (
+              <div role="status" style={{ background: "#FEF3C7", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, fontWeight: 600, marginBottom: 14 }}>{notice}</div>
+            )}
+            {offerChoice && (
+              <div role="group" aria-label="Send my code by" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                <span style={lbl}>Send my code by</span>
+                {["sms", "email"].map((c) => (
+                  <button key={c} type="button" aria-pressed={channel === c} onClick={() => { setChannel(c); setErr(""); }}
+                    style={{ border: `1.5px solid ${channel === c ? acc : "#CBD5E1"}`, background: channel === c ? acc : "#FFF", color: channel === c ? "#FFF" : "#334155", borderRadius: 999, padding: "5px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    {c === "sms" ? "Text" : "Email"}
+                  </button>
+                ))}
+              </div>
+            )}
+            <label style={lbl}>{needPhone && isLead ? "Name" : "Name (optional)"}</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="Your name" autoComplete="name" style={inp} autoFocus />
+            {needPhone && (
+              <>
+                <label style={lbl}>Phone</label>
+                <input type="tel" inputMode="tel" autoComplete="tel" value={formatPhoneDisplay(phone)} onChange={(e) => setPhone(formatPhoneDisplay(e.target.value))}
+                  onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="(555) 555-5555" style={{ ...inp, margin: needEmail ? "4px 0 12px" : "4px 0 16px" }} />
+              </>
+            )}
+            {needEmail && (
+              <>
+                <label style={lbl}>Email</label>
+                <input type="email" inputMode="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="you@example.com" style={{ ...inp, margin: "4px 0 16px" }} />
+              </>
+            )}
+            {/* The texting-consent box belongs to the LEAD form, where capture-lead records it. An
+                account link files no lead, so a box there would record nothing it claims to. */}
+            {needPhone && isLead && (
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
+                <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
+                  style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
+                <span style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>{consentText}</span>
+              </label>
+            )}
+            {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", fontWeight: 600, margin: "0 0 12px" }}>{err}</div>}
+            {/* "Log in", not "Start Designing" (Carolyn 2026-09-14): the button is the login now. */}
+            <button type="button" onClick={submit} disabled={!valid || busy} style={primaryBtn(valid && !busy)}>
+              {busy ? "Sending your code…" : "Log in →"}
+            </button>
+          </>
+        )}
+
+        {step === "code" && sentTo && (
+          <>
+            <div style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>
+              {byEmail ? `We emailed a 6-digit code to ${sentTo.to}.` : `We texted a 6-digit code to ${formatPhoneDisplay(sentTo.to)}.`}
+            </div>
+            <label htmlFor="ss-login-code" style={lbl}>Code</label>
+            {/* one-time-code lets iOS/Android offer the texted code above the keyboard; a full
+                six digits submits on its own (my-quotes does the same). */}
+            <input id="ss-login-code" type="text" inputMode="numeric" pattern="[0-9]*" maxLength={6} autoComplete="one-time-code" autoFocus
+              value={code} placeholder="123456"
+              onChange={(e) => { const v = e.target.value.replace(/\D/g, "").slice(0, 6); setCode(v); if (v.length === 6) verify(v); }}
+              onKeyDown={(e) => e.key === "Enter" && verify()}
+              style={{ ...inp, fontSize: 22, letterSpacing: "0.3em", textAlign: "center", margin: "4px 0 14px" }} />
+            {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", fontWeight: 600, margin: "0 0 12px" }}>{err}</div>}
+            <button type="button" onClick={() => verify()} disabled={busy || code.length !== 6} style={primaryBtn(!busy && code.length === 6)}>
+              {busy ? "Checking…" : "Verify"}
+            </button>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginTop: 12 }}>
+              <button type="button" onClick={resend} disabled={busy || resendLeft > 0} style={linkBtn(!busy && resendLeft === 0)}>
+                {resendLeft > 0 ? `Send again (${resendLeft}s)` : "Send again"}
+              </button>
+              <button type="button" onClick={() => { setStep("details"); setChannel(sentTo.channel); setErr(""); setCode(""); }} style={linkBtn(true)}>
+                {byEmail ? "Use a different email" : "Use a different number"}
+              </button>
+            </div>
+            {/* The code is never the price of designing: close, keep going, and the header
+                keeps an "Enter your code" pill until they come back to it. */}
+            <button type="button" onClick={onClose}
+              style={{ width: "100%", marginTop: 16, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1", borderRadius: 10, padding: "10px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+              Keep designing, I'll enter it later
+            </button>
+          </>
+        )}
+
+        {step === "unavailable" && (
+          <>
+            <div style={{ fontSize: 14, color: "#334155", lineHeight: 1.5, margin: "6px 0 18px" }}>
+              {mode === "account"
+                ? (byEmail
+                  ? "We couldn't email you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes."
+                  : "We couldn't text you a code right now, so your quotes and invoices can't open yet. Please try again in a few minutes.")
+                : byEmail
+                  ? "We couldn't email you a code right now — you can keep designing and still get your quote."
+                  : "We couldn't text you a code right now — you can keep designing and still get your quote."}
+            </div>
+            <button type="button" onClick={onClose} style={primaryBtn(true)}>Keep designing →</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── The customer's account, in the designer (plan 3.3, Carolyn 2026-09-14) ──────────────
+// Carolyn at 23:23 on the 09-14 call, looking at the portal's "Quote Created!": she wants
+// my-quotes' accept / invoice / sign blocks HERE, not on a second page. So this is a port of
+// my-quotes.html's quoteCard / invoiceBlock / toggleAcceptPanel / toggleSignPanel /
+// applyDeepLink into React, and my-quotes stays as the fallback page for old emails.
+//
+// ⚠️ THE CONSENT SENTENCES ARE THE SERVER'S, NEVER COMPOSED HERE. customer-quotes sends
+// acceptConsentText / signConsentText — the exact words customer-accept stores as the legal
+// evidence (_shared/consentSentences.ts). my-quotes keeps a hand-mirrored copy and that is the
+// drift the plan refuses to repeat: a third copy in this file is how "what they ticked" and
+// "what the record says" come apart. When a sentence is missing (a customer-quotes deploy older
+// than 2026-09-15), the panel does NOT fall back to a local sentence — it links to my-quotes,
+// which still works on the same session.
+//
+// Pay and change-order sign-off are NOT ported yet (plan "Later"): both link to /my-quotes on
+// the same ssq_token_, so the customer is not asked for a second code.
+const SS_ACCT_STATUS = {
+  sent: { bg: "#EEF2FF", fg: "#3D3672", label: "Sent" },
+  accepted: { bg: "#F0FDF4", fg: "#15803D", label: "Accepted" },
+  invoiced: { bg: "#FFFBEB", fg: "#B45309", label: "Invoiced" },
+  delivered: { bg: "#ECFEFF", fg: "#0E7490", label: "Delivered" },
+};
+function ssAcctMoney(v) {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (!isFinite(n)) return null;
+  try { return n.toLocaleString("en-US", { style: "currency", currency: "USD" }); } catch (_e) { return "$" + n.toFixed(2); }
+}
+function ssAcctDate(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return null;
+  try { return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch (_e) { return d.toDateString(); }
+}
+// GHL's hosted estimate page lives off-site, which ssSafeUrl (our storage + this origin only)
+// refuses by design — that link only has to be https, the same bar my-quotes' safeUrl sets.
+function ssHttpsUrl(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  return /^https:\/\//i.test(s) ? s : null;
+}
+// ?q=<short code> — the card a quote email / text link was built for. Same shape rule as
+// my-quotes' readDeepRef, so a link that focuses a card there focuses the same card here.
+function ssQuoteRefParam() {
+  try {
+    const v = (new URLSearchParams(location.search).get("q") || "").trim();
+    return /^[A-Za-z0-9_-]{4,32}$/.test(v) ? v : null;
+  } catch (_e) { return null; }
+}
+function ssMyQuotesLink(clientId, ref) {
+  return `/my-quotes?client=${encodeURIComponent(clientId || "")}${ref ? `&q=${encodeURIComponent(ref)}` : ""}`;
+}
+// The link a REP hands a customer (plan 3.8, 2026-09-15): this designer's own account panel,
+// focused on one quote — the ?account=/?q= boot above lands it on the card. It replaced
+// /my-quotes?client= in the portal's Copy customer link; my-quotes stays up for links already
+// sent, and for Pay and change orders (ssMyQuotesLink) until those are ported.
+function ssDesignerAccountLink(clientId, ref, view) {
+  const v = view === "invoices" ? "invoices" : "quotes";
+  return `${window.location.origin}/?client=${encodeURIComponent(clientId || "")}&account=${v}${ref ? `&q=${encodeURIComponent(ref)}` : ""}`;
+}
+// submit-estimate's quoteTextReason (plan 3.7) in words a rep can act on. The codes are the
+// server's: decided there (not_first_issue | test_mode | no_phone | timeout) or sendTenantSms's
+// refusals. not_first_issue is never shown — a resubmit not texting again is not news.
+function ssQuoteTextReasonText(reason) {
+  switch (reason) {
+    case "test_mode": return "beta mode is on, so quotes go to your test inbox instead";
+    case "no_phone": return "there's no phone number on this quote";
+    case "timeout": return "the text service didn't answer in time, so it may still arrive";
+    case "not_active": return "texting isn't switched on for your business yet";
+    case "no_consent": return "the customer hasn't agreed to texts";
+    case "opted_out": return "the customer has opted out of texts";
+    case "quiet_hours": return "it's outside texting hours (8am to 9pm) where the customer is";
+    case "bad_number": return "that isn't a US mobile number we can text";
+    case "damaged_number": return "the phone number looks damaged, so re-enter it on the contact";
+    case "failed": return "the text couldn't be sent";
+    default: return reason ? String(reason).replace(/_/g, " ") : "";
+  }
+}
+// Invoices tab = a quote with an invoice out OR one being prepared (migration 229's request);
+// Quotes tab = everything else. One rule, used by the tabs, the counts and the deep link.
+const ssIsInvoiceCard = (q) => Boolean(q && (q.invoice || q.invoiceRequest));
+const SS_ACCT_BTN = { border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", textDecoration: "none", display: "inline-block", fontFamily: "inherit", lineHeight: 1.2 };
+
+// Review & Accept (migration 136): a name and a tick, no signature pad. Accepting a quote is not
+// signing for it, so it must not look like signing — the signature comes later, on the invoice.
+function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
+  const [name, setName] = useState(defaultName || "");
+  const [agree, setAgree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const sentence = typeof q.acceptConsentText === "string" && q.acceptConsentText.trim() ? q.acceptConsentText : null;
+  if (!sentence) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
+        Review and accept this quote on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+      </div>
+    );
+  }
+  const submit = async () => {
+    setErr("");
+    const signerName = name.trim();
+    if (!signerName) { setErr("Enter your full name."); return; }
+    if (!agree) { setErr("Please tick the agreement box to accept."); return; }
+    setBusy(true);
+    const r = await call("customer-accept", { action: "accept_quote", quoteRef: q.quoteRef, signerName, consent: true, method: "click" });
+    if (r.status === 401) return;   // the session is gone — the sheet has already reopened
+    if (r.ok && r.data && r.data.ok) { onDone(r.data); return; }
+    setBusy(false);
+    setErr(ssCustErrText(r, "Couldn't record your acceptance. Please try again."));
+  };
+  return (
+    <div data-panel="accept" style={{ marginTop: 12, borderTop: "1px solid #E2E8F0", paddingTop: 12 }}>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Your full name</label>
+      <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
+        onChange={(e) => setName(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
+        <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+        <span>{sentence}</span>
+      </label>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
+      <button type="button" disabled={busy} onClick={submit}
+        style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF", opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Accepting…" : "Accept Quote"}
+      </button>
+    </div>
+  );
+}
+
+// Sign the invoice (migration 136): draw OR type, plus the server's sentence. Same pad as
+// my-quotes — a canvas backed at devicePixelRatio so the stored PNG is crisp, pointer events so
+// mouse, finger and stylus all work, and a single dot counts (tap-signers exist).
+function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
+  const [mode, setMode] = useState("drawn");
+  const [name, setName] = useState(defaultName || "");
+  const [typed, setTyped] = useState("");
+  const [agree, setAgree] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const canvasRef = useRef(null);
+  const inkRef = useRef(false);
+  const drawingRef = useRef(false);
+  const setupPad = () => {
+    const c = canvasRef.current;
+    if (!c) return;
+    const rect = c.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.max(1, Math.round(rect.width * dpr));
+    c.height = Math.max(1, Math.round(rect.height * dpr));
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 2.25; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.strokeStyle = "#0F172A";
+    inkRef.current = false;
+  };
+  // The canvas only has a size once it is in the document. It stays mounted (hidden) while
+  // "Type my name" is showing, so switching tabs back and forth never wipes the ink.
+  useEffect(() => { setupPad(); }, []);
+  const sentence = typeof q.signConsentText === "string" && q.signConsentText.trim() ? q.signConsentText : null;
+  if (!sentence) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 13, color: "#334155" }}>
+        Sign this invoice on <a href={ssMyQuotesLink(clientId, q.quoteRef)} target="_blank" rel="noopener" style={{ color: accent, fontWeight: 700 }}>your quotes page ↗</a>
+      </div>
+    );
+  }
+  const padPos = (e) => { const r = canvasRef.current.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  const submit = async () => {
+    setErr("");
+    const signerName = name.trim();
+    if (!signerName) { setErr("Enter your full name."); return; }
+    if (!agree) { setErr("Please tick the agreement box to sign."); return; }
+    const payload = { action: "sign_invoice", quoteRef: q.quoteRef, signerName, consent: true, method: mode };
+    if (mode === "drawn") {
+      if (!inkRef.current) { setErr("Draw your signature in the box (or switch to typing your name)."); return; }
+      payload.signatureDataUrl = canvasRef.current.toDataURL("image/png");
+    } else {
+      const t = typed.trim();
+      if (!t) { setErr("Type your name to sign."); return; }
+      payload.typedName = t;
+    }
+    setBusy(true);
+    const r = await call("customer-accept", payload);
+    if (r.status === 401) return;
+    if (r.ok && r.data && r.data.ok) { onDone(r.data); return; }
+    setBusy(false);
+    setErr(ssCustErrText(r, "Couldn't record your signature. Please try again."));
+  };
+  const tab = (id, label) => (
+    <button type="button" aria-pressed={mode === id} onClick={() => setMode(id)}
+      style={{ flex: 1, fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: 8, borderRadius: 8, cursor: "pointer",
+        border: `1px solid ${mode === id ? accent : "#CBD5E1"}`, background: mode === id ? "#EEF2FF" : "#FFF", color: mode === id ? "#1E293B" : "#475569" }}>
+      {label}
+    </button>
+  );
+  return (
+    <div data-panel="sign" style={{ marginTop: 12, borderTop: "1px solid #BBF7D0", paddingTop: 12 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>{tab("drawn", "Draw my signature")}{tab("typed", "Type my name")}</div>
+      <div hidden={mode !== "drawn"}>
+        <canvas ref={canvasRef} aria-label="Signature pad"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_e) {}
+            const ctx = canvasRef.current.getContext("2d");
+            drawingRef.current = true;
+            const p = padPos(e);
+            ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + 0.01, p.y + 0.01); ctx.stroke();
+            inkRef.current = true;
+          }}
+          onPointerMove={(e) => {
+            if (!drawingRef.current) return;
+            e.preventDefault();
+            const ctx = canvasRef.current.getContext("2d");
+            const p = padPos(e);
+            ctx.lineTo(p.x, p.y); ctx.stroke();
+          }}
+          onPointerUp={() => { drawingRef.current = false; }}
+          onPointerCancel={() => { drawingRef.current = false; }}
+          onPointerLeave={() => { drawingRef.current = false; }}
+          style={{ width: "100%", height: 140, border: "1px dashed #94A3B8", borderRadius: 8, background: "#FFF", touchAction: "none", display: "block", cursor: "crosshair" }} />
+        <div style={{ textAlign: "right", marginTop: 4 }}>
+          <button type="button" onClick={setupPad} style={{ background: "none", border: "none", color: "#475569", fontSize: 12, fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}>Clear</button>
+        </div>
+      </div>
+      <div hidden={mode !== "typed"}>
+        <input type="text" value={typed} maxLength={120} autoComplete="name" placeholder="Type your full name" aria-label="Type your full name"
+          onChange={(e) => setTyped(e.target.value)}
+          style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+        <div style={{ fontStyle: "italic", fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 26, minHeight: 40, padding: "6px 2px", color: "#0F172A", borderBottom: "1px solid #CBD5E1" }}>{typed}</div>
+      </div>
+      <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", margin: "12px 0 4px" }}>Your full name</label>
+      <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
+        onChange={(e) => setName(e.target.value)}
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
+        <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
+        <span>{sentence}</span>
+      </label>
+      {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
+      <button type="button" disabled={busy} onClick={submit}
+        style={{ ...SS_ACCT_BTN, background: "#15803D", color: "#FFF", opacity: busy ? 0.6 : 1 }}>
+        {busy ? "Signing…" : "Sign Invoice"}
+      </button>
+    </div>
+  );
+}
+
+// One quote, as my-quotes' quoteCard draws it. `panel` is lifted to CustomerAccount so a deep
+// link can open Review & Accept / Sign for the card it names.
+function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, highlight, onChanged, onOpenDesign }) {
+  const [thumbBroken, setThumbBroken] = useState(false);
+  const ref = q.quoteRef || null;
+  const statusKey = String(q.status || "").toLowerCase();
+  const chip = SS_ACCT_STATUS[statusKey];
+  const rawNum = q.estimateNumber != null ? String(q.estimateNumber).trim() : "";
+  // EST- belongs on BARE GHL numbers only; an SS number carries the builder's own prefix.
+  const numText = rawNum ? (/^\d+$/.test(rawNum) ? "EST-" + rawNum : rawNum) : "Quote";
+  const thumb = !thumbBroken && ssSafeUrl(q.view3dImageUrl);
+  const hasTax = q.tax != null && q.taxable != null && q.nonTaxable != null;
+  const dateStr = ssAcctDate(q.createdAt);
+  const totalStr = hasTax ? null : ssAcctMoney(q.total);
+  const inv = q.invoice || null;
+  const req = !inv && q.invoiceRequest ? q.invoiceRequest : null;
+  const pdfUrl = ssSafeUrl(q.pdfUrl);
+  const acceptUrl = ssHttpsUrl(q.acceptUrl);
+  const canAccept = q.canAccept === true && ref;
+  const acceptOpen = canAccept && panel && panel.ref === ref && panel.kind === "accept";
+  const signOpen = inv && q.canSignInvoice === true && ref && panel && panel.ref === ref && panel.kind === "sign";
+  const toggle = (kind) => setPanel((p) => (p && p.ref === ref && p.kind === kind ? null : { ref, kind }));
+  const cos = Array.isArray(q.changeOrders) ? q.changeOrders : [];
+  const row = (label, value, extra) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 13, color: "#334155", ...(extra || {}) }}><div>{label}</div><div>{value}</div></div>
+  );
+  return (
+    <div data-ref={ref || undefined}
+      style={{ background: "#FFF", border: highlight ? `2px solid ${accent}` : "1px solid #E2E8F0", borderRadius: 12, padding: highlight ? 13 : 14, textAlign: "left", boxShadow: highlight ? "0 0 0 4px rgba(59,130,246,0.12)" : "none", transition: "box-shadow .3s" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A", fontFamily: "monospace" }}>{numText}</div>
+        {statusKey && (
+          <span style={{ fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", background: chip ? chip.bg : "#F1F5F9", color: chip ? chip.fg : "#475569" }}>
+            {chip ? chip.label : statusKey.charAt(0).toUpperCase() + statusKey.slice(1)}
+          </span>
+        )}
+      </div>
+      {thumb && (
+        <img src={thumb} alt="" loading="lazy" onError={() => setThumbBroken(true)}
+          style={{ display: "block", width: "100%", maxHeight: 190, objectFit: "cover", borderRadius: 10, marginTop: 10, background: "#F1F5F9" }} />
+      )}
+      {(q.style || q.size) && (
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#1E293B", marginTop: 8 }}>{[q.style ? capWords(q.style) : null, q.size].filter(Boolean).join(" · ")}</div>
+      )}
+      {(dateStr || totalStr) && (
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+          <div style={{ fontSize: 12.5, color: "#64748B" }}>{dateStr || ""}</div>
+          {totalStr && <div style={{ fontSize: 15, fontWeight: 800, color: "#0F172A" }}>{totalStr}</div>}
+        </div>
+      )}
+      {/* Sales tax (migration 148): the same pools the PDF prints, the charged amount beside
+          the rate label — never rate × base recomputed here. */}
+      {hasTax && (
+        <div style={{ marginTop: 8, display: "grid", gap: 2 }}>
+          {row("Taxable", ssAcctMoney(q.taxable))}
+          {row("Non-taxable", ssAcctMoney(q.nonTaxable))}
+          {q.discount != null && q.discount > 0 && row("Discount", "-" + ssAcctMoney(q.discount), { color: "#15803D" })}
+          {row(`${q.taxLabel || "Sales tax"}${typeof q.taxRate === "number" && q.taxRate > 0 ? ` (${String(Math.round(q.taxRate * 10000) / 100).replace(/\.0+$/, "")}%)` : ""}`, ssAcctMoney(q.tax))}
+          {row("Total", ssAcctMoney(q.total), { fontWeight: 800, color: "#0F172A", borderTop: "1px solid #E2E8F0", paddingTop: 4, marginTop: 2 })}
+        </div>
+      )}
+      {/* A change to a signed order needs its own signature. Not ported yet — the card names
+          the change, its fee and the new total, and hands off to my-quotes on this session. */}
+      {cos.map((co, i) => {
+        const feeTotal = (Number(co.feeCents) || 0) + (Number(co.feeTaxCents) || 0);
+        let desc = String(co.description || "");
+        if (co.totalBefore != null || co.totalAfter != null) {
+          const lines = desc.split("\n");
+          if (lines.length > 1 && /^Total:/.test(lines[lines.length - 1])) lines.pop();
+          desc = lines.join("\n");
+        }
+        return (
+          <div key={co.id || i} style={{ marginTop: 12, border: "1px solid #FDE68A", background: "#FFFBEB", borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#B45309" }}>Change order CO-{co.coNo != null ? co.coNo : "?"} — needs your approval</div>
+            {desc && <div style={{ fontSize: 13, color: "#334155", whiteSpace: "pre-wrap", marginTop: 6 }}>{desc}</div>}
+            {(co.totalBefore != null || co.totalAfter != null) && (
+              <div style={{ fontSize: 13, fontWeight: 700, marginTop: 6 }}>{ssAcctMoney(co.totalBefore) || "—"} → {ssAcctMoney(co.totalAfter) || "—"}</div>
+            )}
+            {feeTotal > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 6 }}>+ {co.feeLabel || "Change order fee"}: {ssAcctMoney(feeTotal / 100)}</div>}
+            {feeTotal > 0 && ssAcctMoney(co.newTotal) && <div style={{ fontSize: 13, fontWeight: 800, marginTop: 4, color: "#92400E" }}>New order total: {ssAcctMoney(co.newTotal)}</div>}
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, marginTop: 10, background: accent, color: "#FFF" }}>Review &amp; sign the change ↗</a>
+          </div>
+        );
+      })}
+      {inv && inv.signedAt && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>Invoice signed ✓{ssAcctDate(inv.signedAt) ? ` · ${ssAcctDate(inv.signedAt)}` : ""}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            {ssSafeUrl(inv.pdfUrl) && (
+              <a href={ssSafeUrl(inv.pdfUrl)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
+                Invoice {inv.number ? `${inv.number} ` : ""}(PDF)
+              </a>
+            )}
+            {/* Paying stays on my-quotes until the tokenizer is ported (plan "Later"). */}
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>Pay or see payments ↗</a>
+          </div>
+        </div>
+      )}
+      {inv && !inv.signedAt && (
+        <div style={{ marginTop: 12, border: "1px solid #BBF7D0", background: "#F0FDF4", borderRadius: 10, padding: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#15803D" }}>Invoice {inv.number ? String(inv.number) : ""} — ready for your signature</div>
+          {/* The INVOICE's amount: an approved change moves what is owed without touching the quote. */}
+          {ssAcctMoney(inv.amountDue == null ? q.total : inv.amountDue) && (
+            <div style={{ fontSize: 15, fontWeight: 700, marginTop: 6, color: "#0F172A" }}>{ssAcctMoney(inv.amountDue == null ? q.total : inv.amountDue)}</div>
+          )}
+          {inv.stale && (
+            <div style={{ fontSize: 13, color: "#92400E", marginTop: 8 }}>This invoice was issued before your latest approved change. Your builder needs to resend it before you can sign.</div>
+          )}
+          {!inv.stale && cos.length > 0 && (
+            <div style={{ fontSize: 13, color: "#92400E", marginTop: 8 }}>Approve the change order above first — then you can sign this invoice.</div>
+          )}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {ssSafeUrl(inv.pdfUrl) && (
+              <a href={ssSafeUrl(inv.pdfUrl)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>Invoice (PDF)</a>
+            )}
+            {q.canSignInvoice === true && ref && (
+              <button type="button" data-sign-invoice="1" aria-expanded={Boolean(signOpen)} onClick={() => toggle("sign")}
+                style={{ ...SS_ACCT_BTN, background: "#15803D", color: "#FFF" }}>
+                Review &amp; Sign Invoice
+              </button>
+            )}
+          </div>
+          {signOpen && (
+            <SSSignPanel q={q} inv={inv} call={call} accent={accent} defaultName={custName} clientId={clientId}
+              onDone={() => { setPanel(null); onChanged(); }} />
+          )}
+        </div>
+      )}
+      {/* Accept → a DRAFT invoice the builder approves (Ahsan 2026-09-15, migration 229). Between
+          the two the customer is told what is happening instead of seeing nothing at all. */}
+      {req && req.status === "pending" && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#334155" }}>
+          Your invoice is being prepared — you'll get it here to sign.
+        </div>
+      )}
+      {req && req.status === "dismissed" && (
+        <div style={{ marginTop: 12, border: "1px solid #E2E8F0", background: "#F8FAFC", borderRadius: 10, padding: "10px 12px", fontSize: 13, color: "#334155" }}>
+          Your builder will be in touch about your invoice.
+        </div>
+      )}
+      {q.acceptedAt && (
+        <div style={{ marginTop: 10, fontSize: 13, fontWeight: 700, color: "#15803D" }}>
+          Accepted ✓{ssAcctDate(q.acceptedAt) ? ` · ${ssAcctDate(q.acceptedAt)}` : ""}
+          {!inv && !req ? <span style={{ fontWeight: 500, color: "#334155" }}> — your invoice will follow for you to sign.</span> : null}
+        </div>
+      )}
+      {(canAccept || (acceptUrl && !q.acceptedAt) || pdfUrl || (ref && onOpenDesign)) && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {canAccept ? (
+            <button type="button" aria-expanded={Boolean(acceptOpen)} onClick={() => toggle("accept")}
+              style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>
+              Review &amp; Accept
+            </button>
+          ) : acceptUrl && !q.acceptedAt ? (
+            <a href={acceptUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>View &amp; Accept ↗</a>
+          ) : null}
+          {pdfUrl && (
+            <a href={pdfUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
+              {q.ssQuote ? "Quote (PDF)" : "Floor plan (PDF)"}
+            </a>
+          )}
+          {ref && onOpenDesign && (
+            <button type="button" onClick={() => onOpenDesign(ref)}
+              style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#1E293B", border: `1px solid ${accent}` }}>
+              Open design
+            </button>
+          )}
+        </div>
+      )}
+      {acceptOpen && (
+        <SSAcceptPanel q={q} call={call} accent={accent} defaultName={custName} clientId={clientId}
+          onDone={() => { setPanel(null); onChanged(); }} />
+      )}
+    </div>
+  );
+}
+
+// CustomerAccount — the header's Quotes / Invoices panel, and (inline) the success screen's
+// "accept this quote" block. Module-level on purpose: its hooks stay out of
+// StructureStudioInner's order (React #310), and it remounts cleanly when the token changes.
+//   call          StructureStudioInner's callCustomer — adds clientId + token, and turns a 401
+//                 into "session expired" (clears ssq_*, reopens the sheet)
+//   view          "quotes" | "invoices"; onViewChange keeps the header buttons in step
+//   focusRef      a short code to land on (?q=, or the quote just created): its tab opens, the
+//                 card is highlighted and Review & Accept / Sign opens for them — once
+//   inline        the success screen: only the focused card, no tabs, no saved designs
+//   onOpenDesign  loads a design into the canvas (resolves true when it loaded)
+function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, accent, call, custName, onViewChange, onOpenDesign, onFocusDone, onExpired, onClose }) {
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  const [reload, setReload] = useState(0);
+  const [panel, setPanel] = useState(null);         // { ref, kind: "accept" | "sign" }
+  const [flashRef, setFlashRef] = useState(null);
+  // Saved designs (plan 3.6): null = not offered (the customer-designs function is absent, or it
+  // refused) — the section simply is not there. [] = offered, nothing saved.
+  const [saved, setSaved] = useState(null);
+  const [savedErr, setSavedErr] = useState("");
+  const focusDoneRef = useRef(false);
+  const rootRef = useRef(null);
+  const liveRef = useRef(true);
+  useEffect(() => () => { liveRef.current = false; }, []);
+  useEffect(() => {
+    let live = true;
+    setState((s) => ({ ...s, loading: true, error: "" }));
+    (async () => {
+      const r = await call("customer-quotes", { action: "list" });
+      if (!live) return;
+      if (r.status === 401) return;       // signed out by call(); this panel is unmounting
+      if (!r.ok || !r.data || r.data.error) {
+        setState((s) => ({ loading: false, error: ssCustErrText(r, "Couldn't load your quotes. Please try again."), data: s.data }));
+        return;
+      }
+      setState({ loading: false, error: "", data: r.data });
+    })();
+    return () => { live = false; };
+  }, [token, reload]);
+  // Saved designs degrade SILENTLY. The function ships separately (migration 231 + its deploy),
+  // and until then the browser's CORS preflight gets a 404 and the call reports status 0 — the
+  // Quotes tab must look exactly as it did, with no error line about a feature nobody asked for.
+  // A 401 only counts as "session expired" when the function itself said so: a gateway refusal
+  // must never sign a customer out.
+  useEffect(() => {
+    if (inline || !supabase) return;
+    let live = true;
+    (async () => {
+      const r = await callCustomerFn(supabase, "customer-designs", { action: "list", clientId, token });
+      if (!live) return;
+      if (r.status === 401 && r.data && /session/i.test(String(r.data.error || ""))) { if (onExpired) onExpired(); return; }
+      const list = r.ok && r.data ? (Array.isArray(r.data.designs) ? r.data.designs : Array.isArray(r.data.items) ? r.data.items : null) : null;
+      setSaved(list ? list.filter((d) => d && typeof d.ref === "string" && d.ref) : null);
+    })();
+    return () => { live = false; };
+  }, [token, reload, inline]);
+  const quotes = state.data && Array.isArray(state.data.quotes) ? state.data.quotes.filter(Boolean) : [];
+  const ssMode = state.data ? state.data.ssMode !== false : true;
+  // Deep link: land on the card, open its panel. Once — a later reload (after accepting) must
+  // not yank the page back. Silent when nothing matches: a link opened on a different login
+  // reveals nothing about whether that code exists (my-quotes' applyDeepLink rule).
+  useEffect(() => {
+    if (!focusRef || focusDoneRef.current || !state.data) return;
+    focusDoneRef.current = true;
+    if (!inline && onFocusDone) onFocusDone();
+    const q = quotes.find((x) => x.quoteRef === focusRef);
+    if (!q) return;
+    const tab = ssIsInvoiceCard(q) ? "invoices" : "quotes";
+    if (!inline && view !== tab && onViewChange) onViewChange(tab);
+    if (q.invoice && q.canSignInvoice === true) setPanel({ ref: focusRef, kind: "sign" });
+    else if (q.canAccept === true) setPanel({ ref: focusRef, kind: "accept" });
+    if (inline) return;
+    setFlashRef(focusRef);
+    setTimeout(() => { if (liveRef.current) setFlashRef(null); }, 2600);
+    setTimeout(() => {
+      const root = rootRef.current;
+      const sel = `[data-ref="${window.CSS && CSS.escape ? CSS.escape(focusRef) : focusRef}"]`;
+      const el = root && root.querySelector(sel);
+      if (el) { try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_e) { el.scrollIntoView(); } }
+    }, 80);
+  }, [state.data, focusRef]);
+  const refresh = () => setReload((n) => n + 1);
+  const card = (q, i) => (
+    <SSQuoteCard key={q.quoteRef || `q${i}`} q={q} clientId={clientId} accent={accent} call={call} custName={custName}
+      panel={panel} setPanel={setPanel} highlight={flashRef && q.quoteRef === flashRef}
+      onChanged={refresh} onOpenDesign={inline ? null : onOpenDesign} />
+  );
+
+  if (inline) {
+    const q = quotes.find((x) => x.quoteRef === focusRef);
+    return (
+      <div ref={rootRef} role="region" aria-label="Your quote" style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "left" }}>
+        {q ? card(q, 0) : (
+          <div style={{ background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, fontSize: 13, color: state.error ? "#B91C1C" : "#475569" }}>
+            {state.loading ? "Loading your quote…"
+              : state.error ? <>{state.error} <button type="button" onClick={refresh} style={{ background: "none", border: "none", color: accent, fontWeight: 700, cursor: "pointer", padding: 0 }}>Try again</button></>
+              : "This quote isn't showing under your login yet — you'll find it under Quotes once it's ready."}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const inTab = quotes.filter((q) => (view === "invoices" ? ssIsInvoiceCard(q) : !ssIsInvoiceCard(q)));
+  const nQuotes = quotes.filter((q) => !ssIsInvoiceCard(q)).length;
+  const nInvoices = quotes.length - nQuotes;
+  const tabBtn = (v, label, n) => (
+    <button type="button" aria-pressed={view === v} onClick={() => onViewChange && onViewChange(v)}
+      style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 700, borderRadius: 8, padding: "7px 14px", cursor: "pointer",
+        border: `1px solid ${view === v ? accent : "#CBD5E1"}`, background: view === v ? accent : "#FFF", color: view === v ? "#FFF" : "#334155" }}>
+      {label}{state.data ? ` · ${n}` : ""}
+    </button>
+  );
+  const removeSaved = async (ref) => {
+    setSavedErr("");
+    const before = saved;
+    setSaved((s) => (s || []).filter((d) => d.ref !== ref));
+    const r = await callCustomerFn(supabase, "customer-designs", { action: "hide", clientId, token, code: ref });
+    if (!liveRef.current) return;
+    if (r.status === 401 && r.data && /session/i.test(String(r.data.error || ""))) { if (onExpired) onExpired(); return; }
+    if (!r.ok) { setSaved(before); setSavedErr(ssCustErrText(r, "Couldn't remove that design. Please try again.")); }
+  };
+  return (
+    <div ref={rootRef} role="region" aria-label={view === "invoices" ? "Your invoices" : "Your quotes"}
+      style={{ background: "#F8FAFC", borderBottom: "1px solid #E2E8F0", padding: "14px 20px 18px" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {tabBtn("quotes", "Quotes", nQuotes)}
+          {tabBtn("invoices", "Invoices", nInvoices)}
+          {state.loading && state.data && <span style={{ fontSize: 12, color: "#94A3B8" }}>Updating…</span>}
+          <button type="button" onClick={onClose} aria-label="Close" title="Close"
+            style={{ marginLeft: "auto", background: "transparent", border: "none", fontSize: 22, color: "#94A3B8", cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
+        </div>
+        {state.error && (
+          <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 10 }}>
+            {state.error} <button type="button" onClick={refresh} style={{ background: "none", border: "none", color: accent, fontWeight: 700, cursor: "pointer", padding: 0, fontSize: 13 }}>Try again</button>
+          </div>
+        )}
+        {state.loading && !state.data ? (
+          <div style={{ fontSize: 13, color: "#64748B" }}>Loading your {view === "invoices" ? "invoices" : "quotes"}…</div>
+        ) : state.data && inTab.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748B", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10, padding: 14 }}>
+            {view === "invoices"
+              ? (ssMode ? "No invoices yet. When you accept a quote, your invoice appears here for you to sign." : "Your builder sends invoices by email.")
+              : "No quotes yet — press Get Quote when your design is ready."}
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 300px), 1fr))", gap: 12, alignItems: "start" }}>
+            {inTab.map(card)}
+          </div>
+        )}
+        {view === "quotes" && saved && saved.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Saved designs</div>
+            {savedErr && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 6 }}>{savedErr}</div>}
+            <div style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 10 }}>
+              {saved.map((d, i) => (
+                <div key={d.ref} data-saved-ref={d.ref} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderTop: i ? "1px solid #F1F5F9" : "none", flexWrap: "wrap" }}>
+                  <div style={{ flex: "1 1 180px", minWidth: 0, fontSize: 13, color: "#1E293B" }}>
+                    <b>{[d.style ? capWords(d.style) : null, d.size].filter(Boolean).join(" ") || "Design"}</b>
+                    {ssAcctDate(d.updatedAt) && <span style={{ color: "#94A3B8" }}> · saved {ssAcctDate(d.updatedAt)}</span>}
+                  </div>
+                  <button type="button" onClick={() => onOpenDesign && onOpenDesign(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 12px", background: accent, color: "#FFF" }}>Open</button>
+                  <button type="button" onClick={() => removeSaved(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 10px", background: "#FFF", color: "#64748B", border: "1px solid #E2E8F0" }}>Remove</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -10985,11 +11942,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // computeSelectionRows either way, and only an explicit decline ever credits.
   const actionableIncludedKeys = includedItemKeys.filter((k) => ITEMS[k] && (embedded || !ITEMS[k].internalOnly));
 
-  const [contact, setContact] = useState({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+  // A remembered visitor comes back with the name and phone they gave the gate (review
+  // 2026-09-15). Only ss_gate_ and the name used to survive a reload, so the contact came back
+  // blank — and the draft autosave, which needs a name and a 10-digit phone, never started again
+  // for anyone whose draft wasn't restored (a reload inside the first 20 s, a dropped pointer).
+  // Public page only, and not on an ?id= reopen (that loads its own contact). Sign out and
+  // "Not you? Start over" clear all three keys.
+  const [contact, setContact] = useState(() => {
+    const blank = { name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" };
+    if (embedded) return blank;
+    try {
+      const params = new URLSearchParams(location.search);
+      const id = C.clientId || "";
+      if (params.get("id") || params.get("admin") === "1" || !localStorage.getItem("ss_gate_" + id)) return blank;
+      const phone = ssPhone10(localStorage.getItem("ss_gate_phone_" + id) || "");
+      return { ...blank, name: (localStorage.getItem("ss_gate_name_" + id) || "").trim(), phone: phone.length === 10 ? formatPhoneDisplay(phone) : "" };
+    } catch (_e) { return blank; }
+  });
   // Lead-capture gate: shoppers give name + phone before designing (the customer link is a
   // lead-gen tool). Bypassed for a returning shopper arriving via a saved-design link (?id=,
   // which loads their contact), the operator preview (?admin=1), and once remembered in this
-  // browser. See <LeadGate/> rendered at the top of the return.
+  // browser. See <LoginSheet/> rendered at the top of the return.
   const [gatePassed, setGatePassed] = useState(() => {
     try {
       const params = new URLSearchParams(location.search);
@@ -11007,6 +11980,38 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // const→var). The useState is still unconditional top-level, so hook order is stable.
   const gateRequired = !gatePassed && !isAdmin && !embedded;
   const [gateOpen, setGateOpen] = useState(false);
+  // ── Customer session (plan 3.3, Ahsan 2026-09-15) ──────────────────────────────────────
+  // Declared HERE beside gatePassed for the same temporal-dead-zone reason as gateRequired:
+  // the header, the contact form and the sheet read them, and handlers far below close over
+  // them. PUBLIC PAGE ONLY — an embedded mount is a signed-in builder, and their tab must
+  // never pick up a shopper's ssq_ token left in the same origin's storage.
+  //   custToken     the opaque bearer customer-auth minted (ssq_token_<clientId>, shared with /my-quotes)
+  //   custIdentity  {phone, email, name} the token was PROVEN for — phone as 10 digits
+  //   accountView   null | "quotes" | "invoices" — the account tab open under the header
+  //   loginSheet    null | {mode:"gate"|"login"|"code"|"account", notice?, afterLogin?} — a sheet opened on
+  //                 purpose; the interaction gate still opens through gateOpen
+  //   codePending   {channel, to, name, at} while a code is out but not entered — the header's
+  //                 amber "Enter your code"
+  const [custToken, setCustToken] = useState(() => (embedded ? null : ((ssReadCustSession(C.clientId) || {}).token || null)));
+  const [custIdentity, setCustIdentity] = useState(() => (embedded ? null : ((ssReadCustSession(C.clientId) || {}).identity || null)));
+  const [accountView, setAccountView] = useState(() => (embedded || isAdmin || !ssReadCustSession(C.clientId) ? null : ssAccountParam()));
+  // A ?account= link opened signed out goes straight to the sheet, then to the tab it named.
+  // Always "account", gate passed on this device or not: the rep's link and QR land on the
+  // CUSTOMER's phone, and "gate" there asked an existing customer to be a lead again.
+  const [loginSheet, setLoginSheet] = useState(() => {
+    if (embedded || isAdmin || ssReadCustSession(C.clientId)) return null;
+    const v = ssAccountParam();
+    return v ? { mode: "account", afterLogin: v } : null;
+  });
+  const [codePending, setCodePending] = useState(() => (embedded || ssReadCustSession(C.clientId) ? null : ssReadCodePending(C.clientId)));
+  //   accountFocus  the short code ?q= named — CustomerAccount lands on that card once, then clears it
+  //   custNotice    {text, tone} — a small bottom toast for account moments ("Your quote … is saved
+  //                 under Quotes."). NOT `toast`: that one is titled "Can't place here".
+  //   custTokenRef  the live token for async work that outlives a render (draft links)
+  const [accountFocus, setAccountFocus] = useState(() => (embedded || isAdmin ? null : ssQuoteRefParam()));
+  const [custNotice, setCustNotice] = useState(null);
+  const custTokenRef = useRef(custToken);
+  custTokenRef.current = custToken;
   // Default each side to the tenant's default palette color (e.g. "Unpainted"); a saved
   // design overrides this from design.paint_colors on load.
   const [paintColors, setPaintColors] = useState(() => {
@@ -11190,8 +12195,76 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // rendered, no URL is rewritten, nothing changes for the visitor.
   const draftStateRef = useRef(null);  // JSON of the last draft-saved payload (skip no-op re-saves)
   const isDraftRef = useRef(false);    // the row behind currentDesignIdRef is a draft, safe to re-save
-  const saveDraftSilently = () => {
+  // ── Refresh keeps the design (plan 3.3, Ahsan 2026-09-15) ────────────────────────────────
+  // The same silent draft now also AUTOSAVES (effect below) and leaves a pointer,
+  // localStorage ss_draft_<clientId> = the draft's short code, so a reload — or a tablet that
+  // went to sleep at the expo — reopens the building instead of a blank plan.
+  //   draftBusyRef / draftAgainRef  one save in flight at a time. Two overlapping FIRST saves
+  //                                 would each mint a code and leave an orphan row; a change
+  //                                 that arrives mid-flight re-runs with the latest state after.
+  //   draftGenRef                   bumped whenever the canvas stops being "this draft" (submit,
+  //                                 Start New, Sign out, opening another design). A save that
+  //                                 lands after that must NOT adopt its code: adopting after a
+  //                                 submit would mark a sent quote as a draft again, and the
+  //                                 next autosave would rewrite the customer's quote.
+  //   draftSavesRef                 saves this page load. Every save_design writes a
+  //                                 design_versions row, so a tab left open all day stops at
+  //                                 SS_DRAFT_SAVE_CAP instead of writing thousands.
+  //   draftAdoptRef                 set for one call right after a restore: record what was
+  //                                 loaded as "already saved" rather than writing it straight back.
+  //   draftSaveFnRef                the latest saveDraftSilently, for timers and pagehide.
+  const draftBusyRef = useRef(false);
+  const draftAgainRef = useRef(false);
+  const draftGenRef = useRef(0);
+  const draftSavesRef = useRef(0);
+  const draftAdoptRef = useRef(false);
+  const draftSaveFnRef = useRef(null);
+  const draftKey = "ss_draft_" + (C.clientId || "");
+  // Saved designs (plan 3.6): a verified customer's autosaved draft is linked to their login
+  // through customer-designs, once per code. The function is written (ss/login-srv-0914, commit
+  // 6e837e1, with migration 231) and deploys separately — until it is live the browser gets
+  // status 0 (its CORS preflight 404s) and linking switches itself off for this page load,
+  // silently. Never through callCustomer: a background save must not pop the login sheet over
+  // someone's drawing; the Quotes panel catches an expired session instead.
+  // ⚠️ A 404 WITH THE SERVER'S SENTENCE IS NOT "MISSING" (review 2026-09-15): customer-designs
+  // answers 404 "That design wasn't found on your account." when the draft's contact names a
+  // different phone/email than the login proved — e.g. the gate took number P, the code was
+  // verified for Q. That refusal forgets only that code, so the next save (contact now Q, via
+  // the verified-contact lock) links it; switching linking off there lost every later draft.
+  const designLinksRef = useRef({ codes: new Set(), off: false });
+  const linkSavedDesign = (code) => {
+    const token = custTokenRef.current;
+    const st = designLinksRef.current;
+    if (embedded || !supabase || !token || !code || st.off || st.codes.has(code)) return;
+    st.codes.add(code);
+    callCustomerFn(supabase, "customer-designs", { action: "link", clientId: C.clientId, token, code }).then((r) => {
+      if (r.ok) return;
+      if (r.status >= 500) { st.codes.delete(code); return; }   // transient — the next save retries
+      const refused = r.data && typeof r.data.error === "string";
+      if (r.status === 404 && refused) { st.codes.delete(code); return; }   // not yours YET — see ⚠️
+      if (r.status === 0 || r.status === 404 || r.status === 401) st.off = true;
+    });
+  };
+  //   draftCodeInflightRef          the code a FIRST save is minting while it is still in flight,
+  //                                 so an unload flush racing it writes the same row, not an orphan.
+  //   draftRestoringRef             true while a reload's restore is reading the pointed-at draft.
+  //                                 A save then would mint a fresh code over the pointer and make
+  //                                 the restore stand down ("something else was opened").
+  const draftCodeInflightRef = useRef(null);
+  const draftRestoringRef = useRef(false);
+  // opts.unload: the page is going away (pagehide, or hidden — a phone's version of leaving).
+  // ⚠️ AN ORDINARY FETCH DOES NOT SURVIVE THAT (review 2026-09-15; proven in Chrome: on a real
+  // reload the plain request never arrived and the keepalive one did, and this exact cross-origin
+  // POST, headers and all, reached a local server as the page went away). supabase.rpc cannot ask
+  // for keepalive, so the unload save is a direct PostgREST POST with keepalive:true, anon
+  // headers exactly as supabase-js sends them for this page, and the refresh pointer written
+  // BEFORE the answer — there may be no page left to receive it. A pointer to a save that then
+  // failed is harmless: the restore finds no row and drops it. Browsers cap keepalive bodies at
+  // 64 KiB, so a bigger design falls back to the ordinary save (best effort, as before).
+  const saveDraftSilently = (opts) => {
     if (!customerFacing || !supabase) return;
+    const unload = Boolean(opts && opts.unload);
+    if (draftRestoringRef.current) return;
     // Never write over a row we didn't create as a draft: someone re-opening a SUBMITTED
     // design from a share link must not have it silently rewritten by browsing further.
     if (currentDesignIdRef.current && !isDraftRef.current) return;
@@ -11207,8 +12280,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       p_bldg_h: bldgH,
     };
     const snapshot = JSON.stringify(body);
+    if (draftAdoptRef.current) { draftStateRef.current = snapshot; return; }
     if (snapshot === draftStateRef.current) return; // unchanged since the last draft save
-    const code = currentDesignIdRef.current || genShortCode();
+    // An unload cannot wait for the save in flight: that request dies with the page.
+    if (draftBusyRef.current && !unload) { draftAgainRef.current = true; return; }
+    if (draftSavesRef.current >= SS_DRAFT_SAVE_CAP) return;
+    const code = currentDesignIdRef.current || draftCodeInflightRef.current || genShortCode();
+    const gen = draftGenRef.current;
+    if (unload) {
+      const payload = JSON.stringify({ p_code: code, p_client_id: C.clientId, ...body, p_image_url: null, p_status: "draft" });
+      let bytes = payload.length * 3;
+      try { bytes = new TextEncoder().encode(payload).length; } catch (_e) {}
+      if (bytes < 60000) {
+        draftSavesRef.current += 1;
+        currentDesignIdRef.current = code;
+        isDraftRef.current = true;
+        draftStateRef.current = snapshot;
+        try { localStorage.setItem(draftKey, code); } catch (_e) {}
+        const forget = () => { if (draftStateRef.current === snapshot) draftStateRef.current = null; };
+        try {
+          fetch(SUPABASE_URL + "/rest/v1/rpc/save_design", {
+            method: "POST", keepalive: true,
+            headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+            body: payload,
+          }).then((res) => {
+            if (!res.ok) { forget(); return; }   // the next save (if the page lives on) tries again
+            if (gen === draftGenRef.current) linkSavedDesign(code);
+          }, forget);
+        } catch (_e) { forget(); }
+        return;
+      }
+      if (draftBusyRef.current) return;   // too big for keepalive, and a save is already out
+    }
+    draftSavesRef.current += 1;
+    draftBusyRef.current = true;
+    if (!currentDesignIdRef.current) draftCodeInflightRef.current = code;
     (async () => {
       try {
         const { error } = await supabase.rpc("save_design", {
@@ -11219,12 +12325,94 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           p_status: "draft",   // the ONLY status the RPC accepts from an anon caller
         });
         if (error) return;     // best-effort: a failed draft save is invisible by design
+        if (gen !== draftGenRef.current) return;   // the canvas moved on (see draftGenRef)
         currentDesignIdRef.current = code;
         isDraftRef.current = true;
         draftStateRef.current = snapshot;
+        try { localStorage.setItem(draftKey, code); } catch (_e) {}
+        linkSavedDesign(code);
       } catch (_e) { /* draft save must never break the designer */ }
+      finally {
+        draftBusyRef.current = false;
+        if (draftCodeInflightRef.current === code) draftCodeInflightRef.current = null;
+        if (draftAgainRef.current) {
+          draftAgainRef.current = false;
+          setTimeout(() => { if (draftSaveFnRef.current) draftSaveFnRef.current(); }, 0);
+        }
+      }
     })();
   };
+  draftSaveFnRef.current = saveDraftSilently;
+  // Autosave: 20 s after the last change, and on the way out (pagehide, or the tab going to the
+  // background — phones rarely fire pagehide). Only once the visitor is a lead we could call
+  // back — gate passed, a name and a 10-digit phone — because a nameless draft is a row nobody
+  // can ever connect to a person. Get Quote still needs none of this (decision 5).
+  const autosaveReady = customerFacing && !isAdmin && gatePassed && !submitted && !submitting
+    && Boolean(String(contact.name || "").trim()) && ssPhone10(contact.phone).length === 10;
+  const autosaveReadyRef = useRef(false);
+  autosaveReadyRef.current = autosaveReady;
+  useEffect(() => {
+    if (!autosaveReady) return;
+    const t = setTimeout(() => { if (draftSaveFnRef.current) draftSaveFnRef.current(); }, SS_DRAFT_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [autosaveReady, sel, items, paintColors, customOptions, roDimensions, bldgW, bldgH, contact]);
+  useEffect(() => {
+    if (!customerFacing) return;
+    const flush = () => { if (autosaveReadyRef.current && draftSaveFnRef.current) draftSaveFnRef.current({ unload: true }); };
+    const onVis = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("pagehide", flush); document.removeEventListener("visibilitychange", onVis); };
+  }, [customerFacing]);
+  // Signing in after the draft already exists links it then, not only on the next save.
+  useEffect(() => {
+    if (custToken && isDraftRef.current && currentDesignIdRef.current) linkSavedDesign(currentDesignIdRef.current);
+  }, [custToken]);
+  // Restore: a reload with no ?id= reopens the pointed-at draft — ONLY while it is still a
+  // draft. Submitted since (another tab, the rep), gone, or another tenant's: the pointer is
+  // dropped and the page starts blank as before. A failed READ keeps the pointer (offline for a
+  // moment is not a reason to lose someone's building). The gate flag is required too: Sign out
+  // and "Not you? Start over" clear both, so a pointer without a gate is not this visitor's.
+  useEffect(() => {
+    if (!supabase || embedded || isAdmin || !gatePassed) return;
+    let code = null;
+    try {
+      if (new URLSearchParams(window.location.search).get("id")) return;
+      code = localStorage.getItem(draftKey);
+    } catch (_e) { return; }
+    if (!code) return;
+    const dropPointer = () => { try { localStorage.removeItem(draftKey); } catch (_e) {} };
+    if (!/^SS-[A-Za-z0-9]{6,12}$/.test(code)) { dropPointer(); return; }
+    let cancelled = false;
+    // No saves until this settles (see draftRestoringRef). The contact now comes back on boot,
+    // so autosave is ready from the first render — a quick second reload used to be able to
+    // mint a new code over the pointer mid-restore.
+    draftRestoringRef.current = true;
+    (async () => {
+      let adopting = false;
+      try {
+        const { data: rows, error } = await supabase.rpc("load_design", { p_code: code });
+        if (cancelled || error) return;
+        const row = Array.isArray(rows) ? rows[0] : rows;
+        if (!row || row.status !== "draft" || (row.client_id && row.client_id !== C.clientId)) { dropPointer(); return; }
+        if (currentDesignIdRef.current) return;   // something else was opened meanwhile
+        const ok = await loadDesignByCode(code, NaN, () => cancelled);
+        if (!ok || cancelled) return;
+        // Let the load settle (size reflow, the verified-contact lock), then adopt it as saved.
+        adopting = true;
+        setTimeout(() => {
+          draftRestoringRef.current = false;
+          if (cancelled || !draftSaveFnRef.current) return;
+          draftAdoptRef.current = true;
+          try { draftSaveFnRef.current(); } finally { draftAdoptRef.current = false; }
+          linkSavedDesign(code);   // a draft saved on the way out never got its link answer
+        }, 1500);
+      } catch (_e) { /* restore is best-effort; the page simply starts blank */ }
+      finally { if (!adopting) draftRestoringRef.current = false; }
+    })();
+    return () => { cancelled = true; draftRestoringRef.current = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase, embedded]);
   // ─── Inventory (migration 075) — embedded-only ───
   // inventoryUnitRef: the unit a "Send estimate" flow came from; the submit success path
   // links the new design back to it. inventoryMaster: non-null while an inventory MASTER
@@ -14729,6 +15917,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // — from here on it is a submitted design and draft saves must leave it alone.
       isDraftRef.current = false;
       draftStateRef.current = null;
+      // …and the refresh pointer goes: the URL's ?id= reopens a sent quote now. The generation
+      // bump stops an autosave already in flight from re-adopting this code as a draft.
+      draftGenRef.current += 1;
+      if (!embedded) { try { localStorage.removeItem(draftKey); } catch (_e) {} }
       // Estimate sent from an inventory unit ("Send estimate"): tie the new design to its
       // unit so the Inventory tab lists it. Best-effort — a link failure must never break
       // a submitted estimate; the fire-and-forget catch keeps it silent.
@@ -15086,6 +16278,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         quotePdfUrl: result.quotePdfUrl || null,
         quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
         quoteEmailReason: result.quoteEmailReason || null,
+        // The quote-created login text (plan 3.7): the portal success screen says whether it
+        // went. A submit-estimate from before 3.7 sends neither field, which renders nothing.
+        quoteTexted: result.issuedBy === "structurestudio" ? result.quoteTexted === true : null,
+        quoteTextReason: result.quoteTextReason || null,
         changeOrder: result.changeOrder || null,
       });
       setSubmitted(true);
@@ -15355,6 +16551,168 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // gateRequired + gateOpen are declared up beside gatePassed (search "temporal-dead-zone"):
   // they are read by handleClick/onPtrDown's useCallback dependency arrays far above here.
   const showGate = gateRequired && gateOpen;
+  // The login sheet is open for the interaction gate OR because something opened it on purpose
+  // (header Log in, Enter your code, an expired session, a ?account= link). One element for
+  // both, so when onPass flips gatePassed mid-submit — which closes the GATE — the sheet itself
+  // stays mounted and walks on to the code step instead of vanishing with its state.
+  const sheetMode = embedded || isAdmin ? null : (loginSheet ? loginSheet.mode : (showGate ? "gate" : null));
+  const sheetOpen = Boolean(sheetMode);
+  const custKeys = ssCustKeys(C.clientId);
+  const closeLoginSheet = () => { setGateOpen(false); setLoginSheet(null); };
+  const openLoginSheet = (extra) => setLoginSheet({ mode: gatePassed ? "login" : "gate", ...(extra || {}) });
+  const openCodeSheet = () => {
+    // A code past Twilio's ten minutes cannot be entered any more; ask for a fresh one.
+    if (!codePending || Date.now() - Number(codePending.at || 0) >= SS_CODE_TTL_MS) {
+      setCodePending(null);
+      try { sessionStorage.removeItem(custKeys.pending); } catch (_e) {}
+      openLoginSheet();
+      return;
+    }
+    setLoginSheet({ mode: "code" });
+  };
+  // Any 401 on a call that carried the token: the session is gone server-side (expired or
+  // revoked). Same words as /my-quotes, and the sheet reopens rather than a dead panel.
+  const expireCustSession = () => {
+    ssClearCustSession(C.clientId);
+    setCustToken(null); setCustIdentity(null); setAccountView(null);
+    setLoginSheet({ mode: gatePassed ? "login" : "gate", notice: "Your session expired. Enter your number and we'll text you a new code." });
+  };
+  // Every signed-in call goes through here so the token and the 401 rule are never forgotten.
+  const callCustomer = (fn, body) => callCustomerFn(supabase, fn, { clientId: C.clientId, ...(body || {}), token: custToken }, { onExpired: expireCustSession });
+  const flashCustNotice = (text, tone) => {
+    const n = { text, tone: tone || "ok", at: Date.now() };
+    setCustNotice(n);
+    setTimeout(() => setCustNotice((cur) => (cur === n ? null : cur)), 5000);
+  };
+  // "Open design" / a saved design's Open, from the account panel. The work on the canvas is
+  // flushed first (a draft ≤20 s stale would otherwise lose those seconds), then the generation
+  // moves on so that flush can never re-adopt the old code over the design being opened.
+  // A DRAFT keeps autosaving and becomes the refresh pointer; anything already sent reopens by
+  // ?id= in the URL, exactly as a quote email link would, and draft saves leave it alone.
+  const openCustomerDesign = async (ref) => {
+    if (!ref) return false;
+    if (autosaveReady && draftSaveFnRef.current) draftSaveFnRef.current();
+    draftGenRef.current += 1;
+    const ok = await loadDesignByCode(ref);
+    if (!ok) { flashCustNotice("That design couldn't be opened. Check your connection and try again.", "err"); return false; }
+    setAccountView(null);
+    const p = new URLSearchParams(window.location.search);
+    p.delete("account"); p.delete("q"); p.delete("v");
+    try {
+      if (isDraftRef.current) { p.delete("id"); localStorage.setItem(draftKey, ref); }
+      else { p.set("id", ref); localStorage.removeItem(draftKey); }
+    } catch (_e) {}
+    window.history.replaceState({}, "", window.location.pathname + (p.toString() ? "?" + p.toString() : ""));
+    try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (_e) { window.scrollTo(0, 0); }
+    flashCustNotice(isDraftRef.current ? "Your saved design is open — keep designing." : "Your design is open.");
+    return true;
+  };
+  const onCustCodeSent = (p) => {
+    setCodePending(p);
+    try { sessionStorage.setItem(custKeys.pending, JSON.stringify(p)); } catch (_e) {}
+  };
+  const onCustVerified = (v) => {
+    try {
+      localStorage.setItem(custKeys.token, v.token);
+      if (v.name) localStorage.setItem(custKeys.name, v.name);
+      if (v.phone) localStorage.setItem(custKeys.phone, v.phone); else localStorage.removeItem(custKeys.phone);
+      if (v.email) localStorage.setItem(custKeys.email, v.email); else localStorage.removeItem(custKeys.email);
+      sessionStorage.removeItem(custKeys.pending);
+    } catch (_e) {}
+    const after = loginSheet && loginSheet.afterLogin;
+    // A verified code is more than the gate ever asked for, so it opens the design gate too. That
+    // is the only way an "account" sheet (the rep's link on a customer's phone) passes it: it
+    // files no lead and skips onPass, and a customer who just proved their number must not be
+    // stopped by "Log in to design your building" the first time they touch the plan.
+    if (!gatePassed) {
+      try {
+        localStorage.setItem("ss_gate_" + (C.clientId || ""), "1");
+        if (v.name) localStorage.setItem("ss_gate_name_" + (C.clientId || ""), v.name);
+        if (v.phone) localStorage.setItem("ss_gate_phone_" + (C.clientId || ""), v.phone);
+      } catch (_e) {}
+      setGatePassed(true);
+    }
+    setCustToken(v.token);
+    setCustIdentity({ phone: v.phone || null, email: v.email || null, name: v.name || null });
+    setCodePending(null);
+    setLoginSheet(null); setGateOpen(false);
+    if (after) setAccountView(after);
+  };
+  // Sign out keeps the BUILDING on screen and lets go of the PERSON (Carolyn's expo kiosk: the
+  // next shopper sits down at the same tablet). Contact, gate flag, and the design code all
+  // go: a code left in currentDesignIdRef would let the next visitor's Get Quote rewrite the
+  // previous customer's quote under their own name. The server revoke is fire-and-forget —
+  // customer-auth answers {ok:true} either way, and the token dies at its TTL regardless.
+  const signOutCustomer = () => {
+    if (custToken) callCustomerFn(supabase, "customer-auth", { action: "logout", token: custToken });
+    ssClearCustSession(C.clientId);
+    try {
+      localStorage.removeItem("ss_gate_" + (C.clientId || ""));
+      localStorage.removeItem("ss_gate_name_" + (C.clientId || ""));
+      localStorage.removeItem("ss_gate_phone_" + (C.clientId || ""));
+      localStorage.removeItem("ss_draft_" + (C.clientId || ""));
+    } catch (_e) {}
+    setCustToken(null); setCustIdentity(null); setAccountView(null); setCodePending(null); setLoginSheet(null);
+    setGatePassed(false); setGateOpen(false);
+    setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+    currentDesignIdRef.current = null;
+    isDraftRef.current = false;
+    draftStateRef.current = null;
+    draftGenRef.current += 1;           // an autosave in flight must not re-adopt their draft
+    designLinksRef.current = { codes: new Set(), off: false };
+    setAccountFocus(null);
+    leadCapturedRef.current = false;
+    ghlContactIdRef.current = null;
+    ghlEstimateIdRef.current = null;
+    ghlEstimateNumberRef.current = null;
+    setSubmitted(false); setSavedDesign(null);
+    setHasExistingEstimate(false);
+    setDesignCode(null); setEstimateVersions([]); setViewingVersion(null);
+    const p = new URLSearchParams(window.location.search);
+    p.delete("id"); p.delete("v"); p.delete("account"); p.delete("q");
+    window.history.replaceState({}, "", window.location.pathname + (p.toString() ? "?" + p.toString() : ""));
+  };
+  // A session that arrived from /my-quotes carries a token but no stored identity (that page
+  // never needed one). Ask customer-quotes once for who it belongs to; a 401 here is a stale
+  // token found at boot, so it signs out QUIETLY — nobody asked to log in yet.
+  useEffect(() => {
+    if (embedded || !custToken || (custIdentity && (custIdentity.phone || custIdentity.email))) return;
+    let live = true;
+    (async () => {
+      const r = await callCustomerFn(supabase, "customer-quotes", { action: "list", clientId: C.clientId, token: custToken });
+      if (!live) return;
+      if (r.status === 401) { ssClearCustSession(C.clientId); setCustToken(null); setCustIdentity(null); setAccountView(null); return; }
+      const idn = r.ok && r.data && r.data.identity;
+      if (!idn) return;
+      const phone = ssPhone10(idn.phone || "");
+      const email = String(idn.email || "").trim().toLowerCase();
+      const next = { phone: phone.length === 10 ? phone : null, email: email || null, name: (r.data && r.data.name) || (custIdentity && custIdentity.name) || null };
+      if (!next.phone && !next.email) return;
+      try {
+        if (next.phone) localStorage.setItem(custKeys.phone, next.phone);
+        if (next.email) localStorage.setItem(custKeys.email, next.email);
+      } catch (_e) {}
+      setCustIdentity(next);
+    })();
+    return () => { live = false; };
+  }, [custToken, embedded]);
+  // Get Quote needs no code (Ahsan 2026-09-15) — but once a phone or email IS verified, that is
+  // the contact the quote files under, and the field goes read-only. Quotes attach to the
+  // customer by contact phone/email, so a quote typed under a different number would never
+  // appear in the Quotes tab of the person who just proved theirs. Re-asserted after any
+  // change (a loaded design, a restored draft), not only at sign-in.
+  useEffect(() => {
+    if (embedded || !custIdentity) return;
+    setContact((p) => {
+      let n = p;
+      // The name is NOT locked (it isn't what was verified) — only filled when empty, so a
+      // signed-in customer with no gate name on this device still has a contact autosave can use.
+      if (custIdentity.name && !String(p.name || "").trim()) n = { ...n, name: custIdentity.name };
+      if (custIdentity.phone && ssPhone10(p.phone) !== custIdentity.phone) n = { ...n, phone: formatPhoneDisplay(custIdentity.phone) };
+      if (custIdentity.email && String(p.email || "").trim().toLowerCase() !== custIdentity.email) n = { ...n, email: custIdentity.email };
+      return n;
+    });
+  }, [custIdentity, contact.phone, contact.email, embedded]);
   // Gate identity chip (public page only): who this browser is remembered as, plus a
   // reset. contact.name is live right after passing the gate; the localStorage copy
   // covers return visits (the gate flag alone carries no name).
@@ -15367,7 +16725,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     try {
       localStorage.removeItem("ss_gate_" + (C.clientId || ""));
       localStorage.removeItem("ss_gate_name_" + (C.clientId || ""));
+      localStorage.removeItem("ss_gate_phone_" + (C.clientId || ""));
+      // "Not you?" — then the building restored on the next load isn't yours either.
+      localStorage.removeItem(draftKey);
     } catch (_e) {}
+    // Nor the code still out: sessionStorage survives the reload below, and the next person at a
+    // shared tablet was greeted by an amber "Enter your code" for the previous visitor's number.
+    try { sessionStorage.removeItem(custKeys.pending); } catch (_e) {}
     // Strip the design code (and version) from the URL — a bare reload would keep
     // ?id=, which re-passes the gate and rehydrates the same contact, making the
     // button a no-op on share-link reopens and post-submit pages.
@@ -15378,21 +16742,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const gateBgRef = useRef(null);
   useEffect(() => {
     const el = gateBgRef.current;
-    if (el) { if (showGate) el.setAttribute("inert", ""); else el.removeAttribute("inert"); }
-    document.body.style.overflow = showGate ? "hidden" : "";
+    if (el) { if (sheetOpen) el.setAttribute("inert", ""); else el.removeAttribute("inert"); }
+    document.body.style.overflow = sheetOpen ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
-  }, [showGate]);
-  const gateEl = showGate ? (
-    <LeadGate config={C} supabase={supabase} accent={accent}
-      onClose={() => setGateOpen(false)}
+  }, [sheetOpen]);
+  const gateEl = sheetOpen ? (
+    <LoginSheet key="ss-login-sheet" config={C} supabase={supabase} accent={accent}
+      mode={sheetMode}
+      notice={loginSheet ? loginSheet.notice : null}
+      pending={sheetMode === "code" ? codePending : null}
+      initialName={contact.name || (codePending && codePending.name) || ""}
+      initialPhone={contact.phone || (codePending && codePending.channel === "sms" ? codePending.to : "")}
+      onClose={closeLoginSheet}
+      onCodeSent={onCustCodeSent}
+      onVerified={onCustVerified}
       onPass={(info) => {
         if (info && (info.name || info.phone)) setContact((p) => ({ ...p, name: info.name || p.name, phone: info.phone || p.phone }));
         try {
           localStorage.setItem("ss_gate_" + (C.clientId || ""), "1");
           if (info && info.name) localStorage.setItem("ss_gate_name_" + (C.clientId || ""), info.name);
+          // The phone too, so a reload brings the contact back and autosave keeps going (see contact).
+          const gatePhone = info ? ssPhone10(info.phone || "") : "";
+          if (gatePhone.length === 10) localStorage.setItem("ss_gate_phone_" + (C.clientId || ""), gatePhone);
         } catch (_e) {}
         setGatePassed(true);
         setGateOpen(false);
+        // Keep the sheet mounted past the gate: the code step is still to come.
+        setLoginSheet((s) => s || { mode: "gate" });
       }} />
   ) : null;
   // ── 3D Style Calibration ───────────────────────────────────────────────
@@ -16279,27 +17655,90 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
       {!embedded && (
-      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        {C.branding.logo
-          ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
-          : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 }}>
-          {gatePassed && !isAdmin && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-              <span style={{ fontSize: 12, color: "#E2E8F0" }}>{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
-              <button type="button" onClick={resetGate} title="Clear this browser's saved visitor and start fresh"
-                style={{ fontSize: 11, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "4px 10px", cursor: "pointer" }}>
-                Not you? Start over
-              </button>
+      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px 6px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {C.branding.logo
+            ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
+            : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
+          <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
+            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
+          </div>
+          {/* The account corner (Carolyn 2026-09-14, drawn in red across this header): signed
+              out → Log in; a code out → amber "Enter your code"; signed in → who, Quotes,
+              Invoices, Sign out. Wraps under the name on a phone rather than squeezing it. */}
+          {!isAdmin && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", marginLeft: "auto" }}>
+              {custToken ? (
+                <>
+                  <span style={{ fontSize: 12, color: "#E2E8F0", whiteSpace: "nowrap" }}>
+                    {custIdentity && custIdentity.phone ? `Signed in as ${formatPhoneDisplay(custIdentity.phone)}`
+                      : custIdentity && custIdentity.email ? `Signed in as ${custIdentity.email}`
+                      : "Signed in"}
+                  </span>
+                  {[["quotes", "Quotes"], ["invoices", "Invoices"]].map(([v, label]) => (
+                    <button key={v} type="button" aria-pressed={accountView === v}
+                      onClick={() => setAccountView((cur) => (cur === v ? null : v))}
+                      style={{ fontSize: 12, fontWeight: 700, color: accountView === v ? "#0F172A" : "#FFF", background: accountView === v ? "#FFF" : "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "5px 12px", cursor: "pointer" }}>
+                      {label}
+                    </button>
+                  ))}
+                  <button type="button" onClick={signOutCustomer} title="Sign out of this browser"
+                    style={{ fontSize: 11, fontWeight: 700, color: "#CBD5E1", background: "transparent", border: "none", padding: "4px 2px", cursor: "pointer", textDecoration: "underline" }}>
+                    Sign out
+                  </button>
+                </>
+              ) : (
+                <>
+                  {gatePassed && (
+                    <span style={{ fontSize: 12, color: "#E2E8F0", whiteSpace: "nowrap" }}>{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
+                  )}
+                  {codePending ? (
+                    <button type="button" onClick={openCodeSheet} title="Enter the code we sent you"
+                      style={{ fontSize: 12, fontWeight: 800, color: "#422006", background: "#FBBF24", border: "1px solid #F59E0B", borderRadius: 999, padding: "5px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                      Enter your code
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => openLoginSheet()}
+                      style={{ fontSize: 12, fontWeight: 700, color: "#0F172A", background: "#FFF", border: "1px solid #FFF", borderRadius: 8, padding: "5px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                      Log in
+                    </button>
+                  )}
+                  {gatePassed && (
+                    <button type="button" onClick={resetGate} title="Clear this browser's saved visitor and start fresh"
+                      style={{ fontSize: 11, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
+                      Not you? Start over
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           )}
-          <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap" }}>Powered by Structure Studio</div>
         </div>
+        {/* Its own slim row now, so the account corner above has the room. */}
+        <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap", textAlign: "right", marginTop: 6 }}>Powered by Structure Studio</div>
       </div>
+      )}
+      {!embedded && custToken && accountView && (
+        <CustomerAccount key={custToken} supabase={supabase} clientId={C.clientId} token={custToken}
+          view={accountView} focusRef={accountFocus} accent={accent} call={callCustomer}
+          custName={contact.name || (custIdentity && custIdentity.name) || ""}
+          onViewChange={setAccountView} onFocusDone={() => setAccountFocus(null)}
+          onOpenDesign={openCustomerDesign} onExpired={expireCustSession}
+          onClose={() => setAccountView(null)} />
+      )}
+      {/* Account moments ("Your quote … is saved under Quotes.") — fixed at the bottom so it
+          never covers the header's account buttons, and polite so a screen reader hears it. */}
+      {!embedded && custNotice && (
+        <div role="status" aria-live="polite"
+          style={{ position: "fixed", left: "50%", bottom: 20, transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "calc(100% - 32px)",
+            background: custNotice.tone === "err" ? "#FEF2F2" : "#F0FDF4", border: `1px solid ${custNotice.tone === "err" ? "#FECACA" : "#BBF7D0"}`,
+            color: custNotice.tone === "err" ? "#991B1B" : "#166534", borderRadius: 12, padding: "12px 16px", fontSize: 14, fontWeight: 600,
+            boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 10, alignItems: "center", boxSizing: "border-box" }}>
+          <span style={{ flex: 1 }}>{custNotice.text}</span>
+          <button type="button" onClick={() => setCustNotice(null)} aria-label="Dismiss"
+            style={{ background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "inherit", padding: 0 }}>✕</button>
+        </div>
       )}
 
       {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
@@ -17500,16 +18939,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
               </div>
             )}
+            {/* A VERIFIED phone/email is read-only (Ahsan 2026-09-15): it is who the quote files
+                under, and the Quotes tab finds quotes by it. Public page only — custIdentity is
+                always null when embedded, so a rep's form is untouched. */}
             {C.contactFields.includes("email") && (
               <div style={{ flex: "1 1 200px" }}>
-                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *</span>
-                <input type="email" value={contact.email} onChange={(e) => setContact((p) => ({ ...p, email: e.target.value }))} placeholder="email@example.com" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *{custIdentity && custIdentity.email ? " ✓ verified" : ""}</span>
+                <input type="email" value={contact.email} readOnly={Boolean(custIdentity && custIdentity.email)}
+                  title={custIdentity && custIdentity.email ? "The email you signed in with — sign out to use another" : undefined}
+                  onChange={(e) => { if (custIdentity && custIdentity.email) return; setContact((p) => ({ ...p, email: e.target.value })); }} placeholder="email@example.com"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", ...(custIdentity && custIdentity.email ? { background: "#F1F5F9", color: "#475569" } : {}) }} />
               </div>
             )}
             {C.contactFields.includes("phone") && (
               <div style={{ flex: "1 1 140px" }}>
-                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *</span>
-                <input type="tel" inputMode="tel" autoComplete="tel" value={formatPhoneDisplay(contact.phone)} onChange={(e) => setContact((p) => ({ ...p, phone: formatPhoneDisplay(e.target.value) }))} placeholder="(555) 555-5555" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *{custIdentity && custIdentity.phone ? " ✓ verified" : ""}</span>
+                <input type="tel" inputMode="tel" autoComplete="tel" value={formatPhoneDisplay(contact.phone)} readOnly={Boolean(custIdentity && custIdentity.phone)}
+                  title={custIdentity && custIdentity.phone ? "The number you signed in with — sign out to use another" : undefined}
+                  onChange={(e) => { if (custIdentity && custIdentity.phone) return; setContact((p) => ({ ...p, phone: formatPhoneDisplay(e.target.value) })); }} placeholder="(555) 555-5555"
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", ...(custIdentity && custIdentity.phone ? { background: "#F1F5F9", color: "#475569" } : {}) }} />
               </div>
             )}
           </div>
@@ -18141,7 +19589,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <p style={{ margin: 0, fontSize: 14, color: "#15803D", maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
             {savedDesign && savedDesign.ssQuote
               ? (savedDesign.quoteEmailed
-                ? `Thank you, ${contact.name || ""}! The quote has been emailed with a link to view and sign it.`
+                /* "accept", not "sign" (Carolyn 2026-09-14): the signature moved to the invoice
+                   on 08-26, and the quote email's button now reads View & Accept. */
+                ? `Thank you, ${contact.name || ""}! The quote has been emailed with a link to view and accept it.`
                 : `Thank you, ${contact.name || ""}! The quote is ready — print it or share the link below.`)
               : (savedDesign && savedDesign.updated
                 ? `Thank you, ${contact.name || ""}! Your existing estimate has been updated and re-sent by email.`
@@ -18212,6 +19662,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
             </div>
           )}
+          {/* THE LOGIN TEXT (plan 3.7, Ahsan 2026-09-15: "only when the builder can text").
+              Portal only — it answers the REP's question "did they get the link on their phone?",
+              and a shopper on the public page has no use for a carrier refusal code. Not for a
+              draft change (nothing went out) and never for not_first_issue (a resubmit does not
+              text again, and saying so on every update would be noise). */}
+          {embedded && savedDesign && savedDesign.ssQuote && !(savedDesign.changeOrder && savedDesign.changeOrder.draft)
+            && (savedDesign.quoteTexted === true || (savedDesign.quoteTextReason && savedDesign.quoteTextReason !== "not_first_issue")) && (
+            <div data-quote-texted={savedDesign.quoteTexted === true ? "yes" : "no"}
+              style={{ maxWidth: 520, margin: "10px auto 0", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left",
+                ...(savedDesign.quoteTexted === true
+                  ? { background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#065F46" }
+                  : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569" }) }}>
+              {savedDesign.quoteTexted === true
+                ? `Texted a login link to ${contact.phone || "the customer"}.`
+                : `Not texted — ${ssQuoteTextReasonText(savedDesign.quoteTextReason)}.`}
+            </div>
+          )}
           {savedDesign && (
             <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
@@ -18233,9 +19700,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       Print quote (PDF)
                     </a>
                   )}
+                  {/* The PORTAL keeps Copy customer link (a rep sends it on). The public page
+                      shows the customer's own account block below instead (Carolyn 2026-09-14). */}
+                  {embedded && (
                   <button type="button"
                     onClick={(e) => {
-                      const link = `${window.location.origin}/my-quotes?client=${encodeURIComponent(C.clientId)}`;
+                      // The designer's account panel focused on this quote (plan 3.8), not the
+                      // bare /my-quotes list: the customer logs in and lands on Review & Accept.
+                      const link = ssDesignerAccountLink(C.clientId, savedDesign.code, "quotes");
                       const btn = e.currentTarget;
                       const done = () => { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy customer link"; }, 2000); };
                       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
@@ -18244,6 +19716,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
                     Copy customer link
                   </button>
+                  )}
                   {/* PUSH TO INVOICE (Carolyn 2026-09-01) — the rep closes the sale here
                       instead of leaving for the portal and waiting on the customer.
 
@@ -18342,7 +19815,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               )}
             </div>
           )}
-          {estimateVersions.length > 0 && (
+          {/* ACCEPT IT RIGHT HERE (Carolyn 2026-09-14 @23:23 — my-quotes' blocks on this screen).
+              Public page, SS quotes only: a GHL-mode estimate is accepted on GHL's hosted page and
+              the portal keeps its Copy link + Push to Invoice above. Signed in → the card for the
+              quote just created, Review & Accept already open. Signed out → the code first; Get
+              Quote never needed one (decision 5), accepting does. Keyed on the token so signing
+              in mounts a fresh list that contains this quote. */}
+          {!embedded && savedDesign && savedDesign.ssQuote && !savedDesign.changeOrder && (
+            custToken ? (
+              <CustomerAccount key={`${savedDesign.code}:${custToken}`} inline supabase={supabase} clientId={C.clientId} token={custToken}
+                view="quotes" focusRef={savedDesign.code} accent={accent} call={callCustomer}
+                custName={contact.name || (custIdentity && custIdentity.name) || ""}
+                onExpired={expireCustSession} />
+            ) : (
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+                <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this quote right here.</div>
+                <button type="button" onClick={() => openLoginSheet()}
+                  style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13 }}>
+                  Verify your phone to accept this quote
+                </button>
+              </div>
+            )
+          )}
+                    {estimateVersions.length > 0 && (
             // The success screen always shows the version just submitted ([0]) as Viewing.
             // Open leaves the success screen FIRST, so the plan is mounted by the time
             // openVersion scrolls to it.
@@ -18359,17 +19854,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </button>
             <button
               onClick={() => {
+                // START NEW KEEPS THE SESSION (plan 3.3). A signed-in customer is still the same
+                // person, so their contact stays too (the verified phone is locked to it anyway);
+                // only the building goes. The quote they just made is not lost — say where it is.
+                const keepPerson = !embedded && Boolean(custToken);
+                const madeQuote = savedDesign && savedDesign.ssQuote && savedDesign.estimateNumber;
                 setSubmitted(false);
                 setSavedDesign(null);
                 setItems([]);
                 setSel((p) => { const n = { ...p }; Object.keys(n).forEach((k) => n[k] = ""); return n; });
-                setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
+                if (!keepPerson) setContact({ name: "", phone: "", email: "", street: "", city: "", state: "", zip: "" });
                 setPaintColors({ body: "", trim: "" });
                 setCustomOptions([]);
                 setRoDimensions({});
                 currentDesignIdRef.current = null;
                 isDraftRef.current = false;
                 draftStateRef.current = null;
+                draftGenRef.current += 1;
+                if (!embedded) {
+                  try { localStorage.removeItem(draftKey); } catch (_e) {}
+                  if (madeQuote) {
+                    flashCustNotice(custToken
+                      ? `Your quote ${savedDesign.estimateNumber} is saved under Quotes.`
+                      : `Your quote ${savedDesign.estimateNumber} is saved. Log in any time to find it under Quotes.`);
+                  }
+                }
                 ghlContactIdRef.current = null;
                 ghlEstimateIdRef.current = null;
                 ghlEstimateNumberRef.current = null;
