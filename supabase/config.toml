@@ -144,6 +144,12 @@ verify_jwt = true
 # added 2026-07-30. Kept true so a bare unauthenticated request is still refused early.
 verify_jwt = true
 
+[functions.delivery-quote]
+# Same posture as capture-lead (2026-09-14): the customer designer asks it for delivery miles
+# and fee as the address is typed. Real guards are body validation, a tenant existence check,
+# and per-tenant + per-IP caps in rate_buckets. Kept true so a bare request is refused early.
+verify_jwt = true
+
 [functions.customer-auth]
 # Public in practice — the anon key passes the gateway — so this is NOT auth. Its real
 # protections are the Twilio Verify OTP (the caller proves control of the phone), the

@@ -30,6 +30,9 @@ import { phoneKey } from "../_shared/phoneKey.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
+import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
+import { quoteDelivery } from "../_shared/deliveryQuote.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
 import {
@@ -139,6 +142,13 @@ const GATES: GateTable = {
   set_layout_item_internal_only:  { area: "settings_options", level: "edit" },
   set_layout_item_taxable:        { area: "settings_options", level: "edit" },
   save_ramp_settings:             { area: "settings_options", level: "edit" },
+  // ── Services (233–239): Delivery and Foundation, under the same Options area ──
+  // `delivery_test_address` reads like a read and IS one: it prices an address the builder
+  // typed against their own rules and may call Google, but writes nothing but a cache row.
+  delivery_settings:              { area: "settings_options", level: "view" },
+  save_delivery_settings:         { area: "settings_options", level: "edit" },
+  delivery_test_address:          { area: "settings_options", level: "view" },
+  save_foundation:                { area: "settings_options", level: "edit" },
   // (save_doors / save_ramps / save_windows were here until 2026-08-07. They were legacy
   // full-replace writers with no caller anywhere, each of which DELETED every fixture_items
   // row of its category absent from the payload — so the endpoints, and these gates with
@@ -1834,7 +1844,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // Per-client catalog for the CSV/pricing UI (JWT-scoped to this tenant) — feeds
   // the downloadable template (styles × sizes + active items + current inclusions).
   if (action === "catalog") {
-    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes] = await Promise.all([
+    const [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes] = await Promise.all([
       // d3 / d3_photos (086): the per-style 3D spec, so the Structures tab can show which
       // styles are calibrated and the editor can reopen one for tuning.
       // updated_at (2026-09-14): the style's version, which the 3D editor sends back with its
@@ -1866,13 +1876,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       admin.from("insulation_offerings").select("id, ins_type, area, rate_per_sqft, taxable, active, internal_only").eq("client_id", clientId),
       admin.from("electrical_settings").select("*").eq("client_id", clientId).maybeSingle(),
       admin.from("electrical_items").select("*").eq("client_id", clientId).order("sort_order").order("name"),
+      // Foundation services (237). The card renders a FIXED four rows, so a tenant with no rows
+      // is simply one offering no site work yet.
+      admin.from("foundation_items").select("id, item_id, label_override, rate, basis, taxable, internal_only, active, sort_order").eq("client_id", clientId).order("sort_order"),
     ]);
     // csRamp is in this list. It used to be the one query of the nine whose error was not
     // checked, and its defaults are not neutral: `rs` would come back undefined and the
     // block below would fall through to `mode: "simple", enabled: true` — i.e. a tenant who
     // had deliberately turned ramps OFF would be shown, and would sell, as offering one.
     // Failing the request is right for a settings read; a half-true catalog is not.
-    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
+    for (const r of [styles, sizes, items, types, incl, lpRows, colorsRes, fixturesRes, csRamp, windowColorsRes, wallHeightsRes, claddingRes, insulationRes, electricalRes, elecItemsRes, foundationRes]) if (r.error) return dbFail(req, clientId, "load your catalog", r.error);
     const labelByKey: Record<string, string> = {};
     const typeByKey: Record<string, any> = {};
     (types.data ?? []).forEach((t: any) => { labelByKey[t.item_key] = t.label; typeByKey[t.item_key] = t; });
@@ -1918,6 +1931,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // defaults the table declares, so the form is never blank.
       electrical: electricalRes.data ?? null,
       electricalItems: elecItemsRes.data ?? [],
+      foundation: foundationRes.data ?? [],
       insulationEnabled: (csRamp.data as { insulation_enabled?: boolean } | null)?.insulation_enabled === true, rampSettings, aiReady: Boolean(Deno.env.get("ANTHROPIC_API_KEY")), wallet });
   }
 
@@ -3812,11 +3826,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (!Number.isFinite(n) || n < 0) { skipped.push(`+${deltaIn} in: "${bosRateRaw}" is not a usable build-on-site fee${unchanged}`); i++; continue; }
         bosFeeRate = n;
       }
-      const BOS_BASES = ["each", "sqft_building", "perimeter_building"];
+      // All seven pricing methods since 228 — the same list the DB check constraint enforces.
+      const BOS_BASES = ["each", "lineal_ft", "sqft_option", "sqft_building", "perimeter_building", "pct_building_price", "pct_estimate_total"];
       const bosBasisRaw = String(row?.bosFeeBasis ?? "").trim();
       // An unrecognised basis is refused rather than defaulted: defaulting would price the fee
-      // by a rule the builder did not choose, and the three shapes differ by orders of
-      // magnitude on the same number.
+      // by a rule the builder did not choose, and the shapes differ by orders of magnitude on
+      // the same number.
       if (buildOnSite && bosBasisRaw !== "" && !BOS_BASES.includes(bosBasisRaw)) {
         skipped.push(`+${deltaIn} in: "${bosBasisRaw}" is not a build-on-site fee basis${unchanged}`); i++; continue;
       }
@@ -3924,6 +3939,146 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       saved++; i++;
     }
     return json({ ok: true, saved, skipped });
+  }
+
+  // ── Foundation services (237) ─────────────────────────────────────────────────────────
+  // The save_cladding shape without the style check: four fixed ids per TENANT, upserted by
+  // (client_id, item_id). Blank rate → NULL (not offered) and the row is KEPT, so a builder can
+  // park a rate for a season; 0 = included; unknown basis or id is skipped, never defaulted.
+  if (action === "save_foundation") {
+    if (!Array.isArray(payload.rows)) return json({ error: "rows[] required" }, 400);
+    { const e = tooMany(payload.rows, "rows"); if (e) return json({ error: e }, 400); }
+    const FOUNDATION_IDS = new Set(["gravel_pad", "fence_removal", "piers", "concrete_slab"]);
+    const BASES = new Set(["each", "lineal_ft", "sqft_option", "sqft_building",
+                           "perimeter_building", "pct_building_price", "pct_estimate_total"]);
+    let saved = 0; const skipped: string[] = [];
+    const seen = new Set<string>();
+    let i = 0;
+    for (const raw of payload.rows) {
+      const row = raw as Record<string, unknown>;
+      const fid = String(row?.itemId ?? "").trim();
+      if (!FOUNDATION_IDS.has(fid)) { skipped.push(`row ${i}: "${row?.itemId}" is not a foundation item we ship`); i++; continue; }
+      if (seen.has(fid)) { skipped.push(`${fid}: listed twice`); i++; continue; }
+      seen.add(fid);
+      const rateRaw = String(row?.rate ?? "").trim();
+      let rate: number | null = null;
+      if (rateRaw !== "") {
+        const n = Number(rateRaw);
+        if (!Number.isFinite(n) || n < 0) { skipped.push(`${fid}: "${rateRaw}" is not a usable dollar amount`); i++; continue; }
+        rate = n;
+      }
+      const basisRaw = String(row?.basis ?? "").trim();
+      if (basisRaw !== "" && !BASES.has(basisRaw)) { skipped.push(`${fid}: "${basisRaw}" is not a pricing basis`); i++; continue; }
+      const patch = {
+        label_override: String(row?.labelOverride ?? "").trim().slice(0, 60) || null,
+        rate,
+        basis: basisRaw || "each",
+        taxable: row?.taxable !== false,
+        active: row?.active !== false,
+        internal_only: row?.internalOnly === true,
+        sort_order: i,
+        updated_at: new Date().toISOString(),
+      };
+      const up = await admin.from("foundation_items")
+        .upsert({ client_id: clientId, item_id: fid, ...patch }, { onConflict: "client_id,item_id" });
+      if (up.error) { skipped.push(`${fid}: ${up.error.message}`); i++; continue; }
+      saved++; i++;
+    }
+    return json({ ok: true, saved, skipped });
+  }
+
+  // ── Delivery (233–236) ─────────────────────────────────────────────────────────────────
+  // Its own read rather than a sixteenth query in `catalog`: the card also needs the origin
+  // addresses on file and whether distance lookups are configured, and neither belongs in the
+  // catalog every other Options card loads.
+  if (action === "delivery_settings") {
+    const [ds, cs, locs] = await Promise.all([
+      admin.from("delivery_settings").select("*").eq("client_id", clientId).maybeSingle(),
+      admin.from("client_settings").select("business_name, business_address, ss_tax_delivery").eq("client_id", clientId).maybeSingle(),
+      admin.from("builder_locations").select("id, name, street, city, state, zip").eq("client_id", clientId).eq("active", true).order("sort_order"),
+    ]);
+    for (const r of [ds, cs, locs]) if (r.error) return dbFail(req, clientId, "load your delivery settings", r.error);
+    return json({
+      ok: true,
+      settings: ds.data ?? null,
+      businessName: cs.data?.business_name ?? null,
+      businessAddress: cs.data?.business_address ?? null,
+      ssTaxDelivery: cs.data?.ss_tax_delivery === true,
+      locations: locs.data ?? [],
+      distanceConfigured: deliveryDistanceConfigured(),
+    });
+  }
+
+  if (action === "save_delivery_settings") {
+    const p = payload as Record<string, unknown>;
+    // One validator for the rule shape, shared with every reader (deliveryFee.ts), so a rule
+    // the card could save is a rule the estimate can price. Refuses with the field named.
+    const norm = normalizeRules(p);
+    if (norm.error || !norm.rules) return json({ error: norm.error || "Those delivery rules can't be saved." }, 400);
+    const rules = norm.rules;
+    const originMode = String(p.originMode ?? "business").trim();
+    if (!["business", "rep", "nearest"].includes(originMode)) return json({ error: "Choose where delivery is measured from." }, 400);
+    const automate = p.automate === true;
+    if (automate) {
+      // Automatic delivery must be able to price SOMETHING before it is switched on — the
+      // ss_tax_rate posture (158): refuse rather than let every quote silently go out without
+      // a line the builder believes is being added.
+      const probe = feeFor(rules, rules.ruleType === "flat" ? null : 1, null);
+      if (probe.reason === "rule_incomplete") return json({ error: "Fill in the fee before turning automatic delivery on." }, 400);
+      if (rules.ruleType !== "flat" && !deliveryDistanceConfigured()) {
+        return json({ error: "Distance lookups aren't configured on this server yet, so a mileage rule can't run automatically. A flat fee can, or ask CSM Synergy to add the Google key." }, 400);
+      }
+      if (rules.ruleType !== "flat") {
+        const cs = await admin.from("client_settings").select("business_address").eq("client_id", clientId).maybeSingle();
+        const ba = (cs.data?.business_address ?? null) as Record<string, unknown> | null;
+        const bizOk = !!(ba && ba.city && ba.state && ba.postalCode);
+        const locs = await admin.from("builder_locations").select("id").eq("client_id", clientId).eq("active", true).not("city", "is", null).not("zip", "is", null).limit(1);
+        const anyLot = (locs.data ?? []).length > 0;
+        if (originMode === "business" && !bizOk) return json({ error: "Add your business address under Settings → Company before measuring delivery from it." }, 400);
+        if (originMode !== "business" && !bizOk && !anyLot) return json({ error: "Add a business address or a location with a city, state and zip before measuring delivery from it." }, 400);
+      }
+    }
+    const up = await admin.from("delivery_settings").upsert({
+      client_id: clientId,
+      automate,
+      origin_mode: originMode,
+      rule_type: rules.ruleType,
+      flat_fee: rules.flatFee,
+      base_fee: rules.baseFee,
+      per_mile: rules.perMile,
+      free_miles: rules.freeMiles,
+      per_mile_counts: rules.perMileCounts,
+      bands: rules.bands,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "client_id" });
+    if (up.error) return dbFail(req, clientId, "save your delivery settings", up.error);
+    // Taxable rides along, presence-guarded. It is client_settings.ss_tax_delivery (158) — the
+    // same switch the Company card shows — written here too because Delivery now lives under
+    // Options and Carolyn wants every Services line to carry Taxable like everything else.
+    // UPSERT with a minimal payload, the save_insulation lesson: a tenant with no settings row
+    // must not be told "saved" by a zero-row update.
+    if (Object.prototype.hasOwnProperty.call(p, "ssTaxDelivery")) {
+      const tx = await admin.from("client_settings")
+        .upsert({ client_id: clientId, ss_tax_delivery: p.ssTaxDelivery === true, updated_at: new Date().toISOString() }, { onConflict: "client_id" });
+      if (tx.error) return dbFail(req, clientId, "save the delivery tax switch", tx.error);
+    }
+    await auditStrict("portal_delivery_settings", 1, `automate=${automate} origin=${originMode} rule=${rules.ruleType}`);
+    return json({ ok: true });
+  }
+
+  // "Test an address" on the Delivery card: the same quoteDelivery the customer designer and
+  // submit-estimate use, so what the builder sees here is what the customer will be charged.
+  if (action === "delivery_test_address") {
+    const a = ((payload as Record<string, unknown>).address ?? {}) as Record<string, unknown>;
+    const address = {
+      street: String(a.street ?? "").trim().slice(0, 200),
+      city: String(a.city ?? "").trim().slice(0, 100),
+      state: String(a.state ?? "").trim().slice(0, 60),
+      zip: String(a.zip ?? "").trim().slice(0, 12),
+    };
+    if (!address.city || !address.state || !address.zip) return json({ error: "Enter at least a city, state and zip to test." }, 400);
+    const quote = await quoteDelivery(admin, { clientId, address, repUserId: userId ?? null });
+    return json({ ok: true, quote });
   }
 
   // Insulation rates (177). A fixed 2x3 matrix rather than a free row list, so this is an

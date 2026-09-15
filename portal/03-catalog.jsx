@@ -3105,6 +3105,18 @@ const LP_METHODS = [
   { value: "pct_building_price", label: "pct building price" },
   { value: "pct_estimate_total", label: "pct estimate total" },
 ];
+// The build-on-site fee's basis, shown inline on the row (Carolyn 2026-09-14). The same seven
+// methods as LP_METHODS, with "each" spelled the way she reads it: "All these but each is
+// flat rate." Values must match the style_wall_heights check constraint (228).
+const WH_BOS_BASES = [
+  ["each", "flat rate"],
+  ["lineal_ft", "lineal ft"],
+  ["sqft_option", "sqft option"],
+  ["sqft_building", "sqft building"],
+  ["perimeter_building", "perimeter building"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
 // -- Wall Height Upgrades (172) ----------------------------------------------------------
 // One card, one section per building style -- the ColorsView pattern, and for the reason
 // Carolyn liked it there: a builder reads down their own styles rather than across a matrix.
@@ -3480,6 +3492,365 @@ function Insulation({ viewingLabel = null, clientId = null }) {
   );
 }
 
+// ── Foundation (237) ──────────────────────────────────────────────────────────────────────
+// Site work done before the building arrives (Carolyn 2026-09-14: "gravel pad, Fence removal,
+// piers, and concrete slab. ALL of these should have multiple ways of charging for them").
+// A FIXED four rows with a label override — the cladding shape — per TENANT, not per style.
+const SS_FOUNDATION_ROWS = [
+  { id: "gravel_pad",    label: "Gravel pad",    basis: "sqft_option" },
+  { id: "fence_removal", label: "Fence removal", basis: "lineal_ft" },
+  { id: "piers",         label: "Piers",         basis: "each" },
+  { id: "concrete_slab", label: "Concrete slab", basis: "sqft_option" },
+];
+// The seven shared methods. `each` is labelled each here, NOT "flat rate" as on the wall-height
+// fee: piers are "each" and DO take a count the customer enters (starting at 1).
+const SS_FOUNDATION_BASES = [
+  ["each", "each"],
+  ["lineal_ft", "lineal ft"],
+  ["sqft_option", "sqft option"],
+  ["sqft_building", "sqft building"],
+  ["perimeter_building", "perimeter building"],
+  ["pct_building_price", "pct building price"],
+  ["pct_estimate_total", "pct estimate total"],
+];
+
+function Foundation({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [cat, setCat] = useState(null);
+  const [rows, setRows] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+
+  const load = async () => {
+    const body = scoped({ action: "catalog" });
+    const { data, error } = await window.__ssCatalogFlight(
+      () => sb.functions.invoke("portal-settings", { body }),
+      String(body.targetClientId == null ? (ssTargetClientId || "") : body.targetClientId));
+    if (error || (data && data.error)) { setMsg({ err: (error && error.message) || data.error }); return; }
+    setCat(data);
+    const saved = {};
+    (data.foundation || []).forEach((r) => { saved[r.item_id] = r; });
+    const m = {};
+    SS_FOUNDATION_ROWS.forEach((d) => {
+      const r = saved[d.id];
+      m[d.id] = {
+        labelOverride: r && r.label_override ? String(r.label_override) : "",
+        rate: r && r.rate != null ? String(r.rate) : "",
+        basis: (r && r.basis) || d.basis,
+        taxable: !r || r.taxable !== false,
+        active: !r || r.active !== false,
+        internalOnly: !!r && r.internal_only === true,
+      };
+    });
+    setRows(m);
+  };
+  useEffect(() => { load(); }, []);
+  const rowOf = (id) => rows[id] || { labelOverride: "", rate: "", basis: "each", taxable: true, active: true, internalOnly: false };
+  const setRow = (id, field, val) => setRows((p) => ({ ...p, [id]: { ...rowOf(id), [field]: val } }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const out = SS_FOUNDATION_ROWS.map((d) => {
+        const r = rowOf(d.id);
+        return { itemId: d.id, labelOverride: r.labelOverride, rate: String(r.rate ?? "").trim(), basis: r.basis, taxable: r.taxable, active: r.active, internalOnly: r.internalOnly };
+      });
+      // Refuse, never coerce — a silently-zeroed rate would pour a slab for free.
+      const bad = out.filter((r) => r.rate !== "" && (!Number.isFinite(Number(r.rate)) || Number(r.rate) < 0));
+      if (bad.length) throw new Error("Nothing was saved \u2014 fix these rate(s) first: " + bad.map((r) => r.itemId.replace("_", " ")).join(", ") + ".");
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "save_foundation", rows: out }) });
+      if (error || (data && data.error)) throw new Error((error && error.message) || data.error);
+      await load();
+      const skipped = data.skipped || [];
+      setMsg({ ok: "Saved " + (data.saved || 0) + " item(s)" + (skipped.length ? ", " + skipped.length + " skipped" : "") + ".", skipped });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Foundation</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 8px", maxWidth: 680 }}>
+        Site work you do before the building arrives. <b>Leave a rate blank and that item isn&rsquo;t
+        offered</b>; 0 means it is included; anything else is a charge, worked out by the method you pick.
+        Each one the customer chooses lands as its own line on the quote.
+      </p>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        <b>each</b> = rate &times; a count the customer enters (piers, starting at 1); <b>lineal ft</b> = rate &times; the
+        feet they enter (fence); <b>sqft option</b> = rate &times; the square feet they enter, pre-filled with the
+        building&rsquo;s footprint (pad, slab); <b>sqft building</b> = rate &times; (width &times; depth);
+        <b> perimeter building</b> = rate &times; 2 &times; (width + depth); <b>pct building price</b> = (rate &divide; 100)
+        &times; base building price; <b>pct estimate total</b> = (rate &divide; 100) &times; subtotal of all other lines, resolved last.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}{Array.isArray(msg.skipped) && msg.skipped.length > 0 && <div style={{ marginTop: 6, fontWeight: 500 }}>{msg.skipped.join(" \u00b7 ")}</div>}</div>}
+      {!cat ? <SkelBar /> : (
+        <>
+          <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 900 }}>
+            <thead><tr>
+              <th style={S.th}>Item</th>
+              <th style={S.th} title="How it reads on the designer and the quote. Blank keeps the built-in name.">Shown as</th>
+              <th style={S.th} title="Which of the seven methods prices it. Three of them ask the customer for a number.">How it&rsquo;s priced</th>
+              <th style={S.th} title="Dollars, or a percent for the two pct methods. Blank = not offered; 0 = included.">Rate</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick to park this item without losing its rate. Customers never see it while unticked.">Offer</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Available in the rep designer only — hidden from the customer-facing page. A rep-selected item still prices normally.">Internal only</th>
+              <th style={{ ...S.th, textAlign: "center" }} title="Untick if you don't charge sales tax on this service.">Taxable</th>
+            </tr></thead>
+            <tbody>
+              {SS_FOUNDATION_ROWS.map((d) => {
+                const r = rowOf(d.id);
+                return (
+                  <tr key={d.id}>
+                    <td style={{ ...S.td, fontWeight: 700, whiteSpace: "nowrap" }}>{d.label}</td>
+                    <td style={S.td}><input type="text" value={r.labelOverride} placeholder={d.label} maxLength={60}
+                      onChange={(e) => setRow(d.id, "labelOverride", e.target.value)} style={{ ...S.input, width: 170 }} /></td>
+                    <td style={S.td}>
+                      <select value={r.basis} onChange={(e) => setRow(d.id, "basis", e.target.value)} style={{ ...S.input, width: 190 }}>
+                        {SS_FOUNDATION_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      </select>
+                    </td>
+                    <td style={S.td}><input type="number" min="0" step="0.01" value={r.rate} placeholder="not offered"
+                      onChange={(e) => setRow(d.id, "rate", e.target.value)} style={{ ...S.input, width: 120 }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(d.id, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.internalOnly} onChange={(e) => setRow(d.id, "internalOnly", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                    <td style={{ ...S.td, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(d.id, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save foundation"}</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Delivery (233–236) ────────────────────────────────────────────────────────────────────
+// Carolyn 2026-09-14: "the option for them to setup their delivery fees and the option for them
+// to set it up for the fees to be charged based on the miles from either the main builder
+// address or any location address. They should specify whether they want the delivery fee to
+// automatically add based on their rules.. or not automate it." Four rule shapes, three origins,
+// one switch. Miles are driving miles from Google, whole and rounded up; the "Test an address"
+// box at the bottom prices an address exactly as the customer designer and the estimate will.
+const SS_DELIVERY_RULES = [
+  ["flat", "One flat fee", "The same delivery fee on every job."],
+  ["base_plus", "Base fee + per mile", "A call-out fee plus a rate for every mile from your origin."],
+  ["free_radius", "Free within a radius, then per mile", "No charge up to N miles; beyond that, a rate per mile."],
+  ["bands", "Mileage bands", "A flat fee for each range of miles — 0–25, 26–50, and so on."],
+];
+const SS_DELIVERY_ORIGINS = [
+  ["business", "Our business address", "From the address under Settings → Company."],
+  ["nearest", "The nearest of our locations", "Whichever of your business address and Locations is closest to the customer."],
+  ["rep", "The rep's home lot", "The location set for whoever is quoting (Settings → Company → Team). The customer designer, which has no rep, uses the nearest location."],
+];
+
+function DeliveryView({ viewingLabel = null, clientId = null }) {
+  const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
+  const [data, setData] = useState(null);
+  const [f, setF] = useState({ automate: false, originMode: "business", ruleType: "flat", flatFee: "", baseFee: "", perMile: "", freeMiles: "", perMileCounts: "beyond", bands: [], ssTaxDelivery: false });
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [test, setTest] = useState({ street: "", city: "", state: "", zip: "" });
+  const [testRes, setTestRes] = useState(null);
+  const [testing, setTesting] = useState(false);
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e && e.target ? (e.target.type === "checkbox" ? e.target.checked : e.target.value) : e }));
+
+  const load = async () => {
+    const { data: d, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delivery_settings" }) });
+    if (error || (d && d.error)) { setMsg({ err: (error && error.message) || d.error }); return; }
+    setData(d);
+    const s = d.settings || null;
+    const num = (v) => (v == null ? "" : String(v));
+    setF({
+      automate: !!(s && s.automate),
+      originMode: (s && s.origin_mode) || "business",
+      ruleType: (s && s.rule_type) || "flat",
+      flatFee: num(s && s.flat_fee), baseFee: num(s && s.base_fee), perMile: num(s && s.per_mile), freeMiles: num(s && s.free_miles),
+      perMileCounts: (s && s.per_mile_counts) || "beyond",
+      bands: Array.isArray(s && s.bands) ? s.bands.map((b) => ({ minMiles: num(b.minMiles), maxMiles: num(b.maxMiles), fee: num(b.fee) })) : [],
+      ssTaxDelivery: d.ssTaxDelivery === true,
+    });
+  };
+  useEffect(() => { load(); }, []);
+
+  // Bands: min follows the previous band's max + 1, so the builder only ever types the top of
+  // each range and a fee — contiguity is by construction here and checked again on the server.
+  const bandsFixed = (list) => {
+    let next = 0;
+    return list.map((b) => { const out = { ...b, minMiles: String(next) }; const mx = Number(b.maxMiles); if (Number.isFinite(mx)) next = Math.floor(mx) + 1; return out; });
+  };
+  const setBand = (i, k, v) => setF((p) => ({ ...p, bands: bandsFixed(p.bands.map((b, j) => (j === i ? { ...b, [k]: v } : b))) }));
+  const addBand = () => setF((p) => ({ ...p, bands: bandsFixed([...p.bands, { minMiles: "", maxMiles: "", fee: "" }]) }));
+  const delBand = (i) => setF((p) => ({ ...p, bands: bandsFixed(p.bands.filter((_, j) => j !== i)) }));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const body = scoped({
+        action: "save_delivery_settings",
+        automate: f.automate, originMode: f.originMode, ruleType: f.ruleType,
+        flatFee: f.flatFee, baseFee: f.baseFee, perMile: f.perMile, freeMiles: f.freeMiles, perMileCounts: f.perMileCounts,
+        bands: f.bands.map((b) => ({ minMiles: b.minMiles, maxMiles: b.maxMiles, fee: b.fee })),
+        ssTaxDelivery: f.ssTaxDelivery,
+      });
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body });
+      if (error || (d && d.error)) throw new Error((error && error.message) || d.error);
+      await load();
+      setMsg({ ok: "Delivery settings saved." });
+    } catch (e) { setMsg({ err: e.message }); }
+    setBusy(false);
+  };
+
+  const runTest = async () => {
+    setTesting(true); setTestRes(null);
+    try {
+      const { data: d, error } = await sb.functions.invoke("portal-settings", { body: scoped({ action: "delivery_test_address", address: test }) });
+      if (error || (d && d.error)) throw new Error((error && error.message) || d.error);
+      setTestRes(d.quote);
+    } catch (e) { setTestRes({ error: e.message }); }
+    setTesting(false);
+  };
+
+  const addrLine = (a) => a ? [a.street || a.addressLine1, a.city, a.state, a.zip || a.postalCode].filter(Boolean).join(", ") : "";
+  const money = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const numBox = (k, ph, w = 110) => <input type="number" min="0" step="0.01" value={f[k]} placeholder={ph} onChange={set(k)} style={{ ...S.input, width: w }} />;
+  const needsMiles = f.ruleType !== "flat";
+  const reasonText = (r) => ({
+    beyond_last_band: "beyond your last mileage band — left for the rep",
+    no_distance: "no driving distance could be found",
+    no_route: "no driving route could be found",
+    rule_incomplete: "the rule above is missing a number",
+    no_origin: "no origin has a full address",
+    distance_not_configured: "distance lookups aren't configured on this server",
+    not_configured: "no delivery rules saved yet",
+  })[r] || r;
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Delivery</div>
+      <p style={{ fontSize: 12.5, color: "#64748B", margin: "0 0 14px", maxWidth: 680 }}>
+        How delivery is charged. Pick where it is measured from and how the fee is worked out, then
+        choose whether it is <b>added automatically</b> — the customer sees it in the designer as soon as
+        they enter their address, and it lands on the quote — or left for the rep, who sees the figure
+        these rules suggest and decides. Miles are <b>driving miles</b>, rounded up to the next whole mile.
+      </p>
+      {msg && msg.err && <div style={S.err}>{msg.err}</div>}
+      {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {!data ? <SkelBar /> : (
+        <>
+          {!data.distanceConfigured && (
+            <div style={{ ...S.err, background: "#FFFBEB", color: "#92400E", border: "1px solid #FDE68A" }}>
+              Distance lookups aren&rsquo;t configured on this server yet, so only a flat fee can run automatically.
+              Mileage rules can still be saved; ask CSM Synergy to add the Google key.
+            </div>
+          )}
+
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+            <input type="checkbox" checked={f.automate} onChange={set("automate")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Add the delivery fee automatically
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; off means the rep types it, with this figure suggested</span>
+          </label>
+
+          <div style={{ ...S.lbl, marginBottom: 6 }}>Measured from</div>
+          <div style={{ display: "grid", gap: 6, marginBottom: 6, maxWidth: 680 }}>
+            {SS_DELIVERY_ORIGINS.map(([v, l, hint]) => (
+              <label key={v} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, cursor: "pointer" }}>
+                <input type="radio" name="ss-dlv-origin" checked={f.originMode === v} onChange={() => setF((p) => ({ ...p, originMode: v }))} style={{ marginTop: 2, accentColor: DOOR_MINT }} />
+                <span><b style={{ color: "#1E293B" }}>{l}</b> <span style={{ color: "#64748B" }}>&mdash; {hint}</span></span>
+              </label>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 16, maxWidth: 680 }}>
+            On file: <b>{addrLine(data.businessAddress) || "no business address yet"}</b>
+            {(data.locations || []).length > 0 && <> &middot; locations: {data.locations.map((l) => l.name + (l.city ? " (" + l.city + ")" : "")).join(", ")}</>}
+            {" "}&middot; <a href="/portal/settings/company" style={{ color: "#1B7895" }}>Company</a> &middot; <a href="/portal/settings/locations" style={{ color: "#1B7895" }}>Locations</a>
+          </div>
+
+          <div style={{ ...S.lbl, marginBottom: 6 }}>How the fee is worked out</div>
+          <div style={{ display: "grid", gap: 6, marginBottom: 10, maxWidth: 680 }}>
+            {SS_DELIVERY_RULES.map(([v, l, hint]) => (
+              <label key={v} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, cursor: "pointer" }}>
+                <input type="radio" name="ss-dlv-rule" checked={f.ruleType === v} onChange={() => setF((p) => ({ ...p, ruleType: v }))} style={{ marginTop: 2, accentColor: DOOR_MINT }} />
+                <span><b style={{ color: "#1E293B" }}>{l}</b> <span style={{ color: "#64748B" }}>&mdash; {hint}</span></span>
+              </label>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "flex-end", marginBottom: 16, padding: "10px 12px", background: "#F8FAFC", borderRadius: 8, maxWidth: 680 }}>
+            {f.ruleType === "flat" && <div><span style={S.lbl}>Delivery fee ($)</span>{numBox("flatFee", "0.00")}</div>}
+            {f.ruleType === "base_plus" && (<>
+              <div><span style={S.lbl}>Base fee ($)</span>{numBox("baseFee", "0.00")}</div>
+              <div><span style={S.lbl}>Per mile ($)</span>{numBox("perMile", "0.00")}</div>
+            </>)}
+            {f.ruleType === "free_radius" && (<>
+              <div><span style={S.lbl}>Free within (miles)</span>{numBox("freeMiles", "25")}</div>
+              <div><span style={S.lbl}>Then per mile ($)</span>{numBox("perMile", "0.00")}</div>
+              <div><span style={S.lbl}>Per-mile rate counts</span>
+                <select value={f.perMileCounts} onChange={set("perMileCounts")} style={{ ...S.input, width: 220 }}>
+                  <option value="beyond">only the miles beyond the radius</option>
+                  <option value="all">every mile from the origin</option>
+                </select></div>
+            </>)}
+            {f.ruleType === "bands" && (
+              <div style={{ width: "100%" }}>
+                <table style={{ borderCollapse: "collapse" }}>
+                  <thead><tr><th style={S.th}>From (mi)</th><th style={S.th}>To (mi)</th><th style={S.th}>Fee ($)</th><th style={S.th}></th></tr></thead>
+                  <tbody>
+                    {f.bands.map((b, i) => (
+                      <tr key={i}>
+                        <td style={S.td}><input type="number" value={b.minMiles} readOnly style={{ ...S.input, width: 80, background: "#F1F5F9" }} /></td>
+                        <td style={S.td}><input type="number" min="0" step="1" value={b.maxMiles} onChange={(e) => setBand(i, "maxMiles", e.target.value)} style={{ ...S.input, width: 80 }} /></td>
+                        <td style={S.td}><input type="number" min="0" step="0.01" value={b.fee} onChange={(e) => setBand(i, "fee", e.target.value)} style={{ ...S.input, width: 100 }} /></td>
+                        <td style={S.td}><button onClick={() => delBand(i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>&#x2715;</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <button onClick={addBand} style={{ background: "transparent", border: "none", color: "#1B7895", fontWeight: 700, fontSize: 13, cursor: "pointer", padding: "8px 0 0" }}>+ Add band</button>
+                <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Ranges follow on from each other automatically. An address beyond the last band is not priced automatically &mdash; it is left for the rep.</div>
+              </div>
+            )}
+          </div>
+
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
+            <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
+            Taxable
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as Company &rarr; Business details)</span>
+          </label>
+
+          <div>
+            <button onClick={save} disabled={busy} style={S.btn(DOOR_MINT, "#0F4C46")}>{busy ? "Saving\u2026" : "Save delivery"}</button>
+          </div>
+
+          <div style={{ marginTop: 22, paddingTop: 14, borderTop: "1px solid #E2E8F0", maxWidth: 680 }}>
+            <div style={{ ...S.lbl, marginBottom: 6 }}>Test an address</div>
+            <div style={{ fontSize: 11.5, color: "#64748B", marginBottom: 8 }}>Prices an address against the rules <b>as saved</b> &mdash; save first. This is exactly what the customer will see and be charged.</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: "2 1 200px" }}><span style={S.lbl}>Street</span><input value={test.street} onChange={(e) => setTest((p) => ({ ...p, street: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "1 1 120px" }}><span style={S.lbl}>City</span><input value={test.city} onChange={(e) => setTest((p) => ({ ...p, city: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "0 1 90px" }}><span style={S.lbl}>State</span><input value={test.state} onChange={(e) => setTest((p) => ({ ...p, state: e.target.value }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <div style={{ flex: "0 1 90px" }}><span style={S.lbl}>Zip</span><input value={test.zip} onChange={(e) => setTest((p) => ({ ...p, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} style={{ ...S.input, width: "100%", boxSizing: "border-box" }} /></div>
+              <button onClick={runTest} disabled={testing || !test.city || !test.state || !test.zip} style={S.btn("#F1F5F9", "#334155")}>{testing ? "Checking\u2026" : "Check"}</button>
+            </div>
+            {testRes && (
+              <div style={{ marginTop: 10, fontSize: 12.5, color: "#1E293B" }}>
+                {testRes.error ? <span style={{ color: "#DC2626" }}>{testRes.error}</span>
+                  : testRes.autoPriced
+                    ? <><b>{money(testRes.amount)}</b> &mdash; {testRes.desc}{needsMiles && testRes.miles != null ? "" : ""}</>
+                    : <>Not priced automatically &mdash; {reasonText(testRes.reason)}{testRes.miles != null ? " (" + testRes.miles + " mi" + (testRes.originName ? " from " + testRes.originName : "") + ")" : ""}.</>}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function WallHeights({ viewingLabel = null, clientId = null }) {
   // Operator view-as: state the effective tenant explicitly, same as every sibling card here.
   const scoped = (body) => (viewingLabel && clientId ? { ...body, targetClientId: clientId } : body);
@@ -3628,8 +3999,8 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
             No taller-wall option offered on this style — customers see no wall-height choice.
           </p>
         ) : (
-          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 760, tableLayout: "fixed" }}>
-            <colgroup><col style={{ width: "13%" }} /><col style={{ width: "14%" }} /><col style={{ width: "24%" }} /><col style={{ width: "11%" }} /><col style={{ width: "12%" }} /><col style={{ width: "10%" }} /><col style={{ width: "9%" }} /><col style={{ width: "7%" }} /></colgroup>
+          <table style={{ borderCollapse: "collapse", width: "100%", maxWidth: 980, tableLayout: "fixed" }}>
+            <colgroup><col style={{ width: "10%" }} /><col style={{ width: "10%" }} /><col style={{ width: "19%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "8%" }} /><col style={{ width: "7%" }} /><col style={{ width: "26%" }} /><col style={{ width: "4%" }} /></colgroup>
             <thead><tr>
               <th style={thB} title="How much taller than this style's standard wall, in whole inches.">Increase (in)</th>
               <th style={thB} title="Charged per lineal foot of the building's perimeter. Leave blank to keep the row without offering it yet.">$ / lineal ft</th>
@@ -3638,6 +4009,7 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
               <th style={thWrap} title="Walls this tall can't go under a bridge, so a building with this increase is assembled on the customer's site instead of hauled. Tick it to set the upcharge for sending a crew out.">Built on site</th>
               <th style={thC} title="Untick if you don't charge sales tax on this upgrade.">Taxable</th>
               <th style={thC}>Active</th>
+              <th style={thB} title="The upcharge for sending a crew out, on rows ticked Built on site. Amount, then how it is charged — flat rate is one fee for the job; the rest use the same methods as layout items. Leave the amount blank if you don't charge extra: the building is still marked built on site.">On-site fee</th>
               <th style={thB}></th>
             </tr></thead>
             <tbody>
@@ -3664,27 +4036,26 @@ function WallHeights({ viewingLabel = null, clientId = null }) {
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={!!r.buildOnSite} onChange={(e) => setRow(st.id, i, "buildOnSite", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.taxable} onChange={(e) => setRow(st.id, i, "taxable", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
                   <td style={{ ...tdMid, textAlign: "center" }}><input type="checkbox" checked={r.active} onChange={(e) => setRow(st.id, i, "active", e.target.checked)} style={{ width: 16, height: 16, cursor: "pointer", accentColor: DOOR_MINT }} /></td>
+                  {/* The build-on-site fee lives ON the row, to the right of Active (Carolyn
+                      2026-09-14: "instead of having it drop down, lets have it appear on the
+                      right side of the active button"). It used to be a band under the row,
+                      which pushed everything below it down the moment the box was ticked. A
+                      row that is not built on site shows a dash, so the table never jumps. */}
+                  <td style={tdMid}>
+                    {r.buildOnSite ? (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                        <span style={{ color: "#94A3B8", fontSize: 12.5 }}>$</span>
+                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="none"
+                          title="Leave blank if you don't charge extra — the building is still marked built on site."
+                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 78 }} />
+                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 132, fontSize: 12 }}>
+                          {WH_BOS_BASES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                        </select>
+                      </span>
+                    ) : <span style={{ color: "#CBD5E1" }}>—</span>}
+                  </td>
                   <td style={{ ...tdMid, textAlign: "right" }}><button onClick={() => delRow(st.id, i)} title="Remove" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800 }}>✕</button></td>
                 </tr>,
-                r.buildOnSite ? (
-                  <tr key={(r.id || ("new-" + i)) + "-bos"}>
-                    <td colSpan={8} style={{ ...S.td, background: "#F8FAFC" }}>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
-                        <span style={{ fontWeight: 700, color: "#0F766E" }}>Built on site — upcharge</span>
-                        <select value={r.bosFeeBasis || "each"} onChange={(e) => setRow(st.id, i, "bosFeeBasis", e.target.value)} style={{ ...S.input, width: 190 }}>
-                          <option value="each">Flat fee for the job</option>
-                          <option value="sqft_building">Per sq ft of floor</option>
-                          <option value="perimeter_building">Per lineal ft of perimeter</option>
-                        </select>
-                        <input type="number" min="0" step="0.01" value={r.bosFeeRate} placeholder="no upcharge"
-                          onChange={(e) => setRow(st.id, i, "bosFeeRate", e.target.value)} style={{ ...S.input, width: 130 }} />
-                        <span style={{ color: "#64748B" }}>
-                          Leave blank if you don’t charge extra — the building is still marked built on site.
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
-                ) : null,
               ])}
             </tbody>
           </table>

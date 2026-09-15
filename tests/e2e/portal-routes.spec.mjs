@@ -35,6 +35,7 @@ const ROUTES = [
   "/portal/settings/options", "/portal/settings/doors", "/portal/settings/windows",
   "/portal/settings/vents", "/portal/settings/ramps", "/portal/settings/cladding",
   "/portal/settings/interior", "/portal/settings/electrical", "/portal/settings/insulation",
+  "/portal/settings/delivery", "/portal/settings/foundation",
   // Your own settings
   "/portal/settings/myprofile",
   // LEGACY, kept for the same reason as /portal/releases above: "myview" was renamed to
