@@ -871,6 +871,113 @@ test("success screen: signed out, accepting asks for the code first", async ({ p
   expect(pageErrors(errors), "console errors").toEqual([]);
 });
 
+// ── A refused Get Quote (2026-09-15) ─────────────────────────────────────────────────────────
+// submit-estimate can REFUSE without issuing anything: a 400 carrying a sentence for a person
+// (SS-TRJNVZJW5Z got "no user to assign it to"). Nothing went out, so the design is still a draft:
+// the refresh pointer stays and autosave keeps saving it as a draft. The refusal is still logged,
+// because submit-estimate files no row for its own 4xx and the designer's row is the only record,
+// but as severity info with the status as its code. A 500 is a fault and stays error. Every write
+// is stubbed by stubBackend, log_error included.
+const NO_USER = "Can't create the estimate: this business's CRM location has no user to assign it to. Add a user to the location, then resubmit.";
+// The page's own console.error for the failed submit, and Chrome's line for the stubbed 500.
+const quoteErrors = (errors) => pageErrors(errors).filter((e) => !/^Submit error:|status of 500\b/.test(e));
+const logRows = (calls) => calls.filter((c) => c.fn === "rpc:log_error").map((c) => c.body);
+async function routeSubmit(page, status, body) {
+  await page.route(/\/functions\/v1\/submit-estimate/, (route) => route.request().method() === "OPTIONS"
+    ? route.fulfill({ status: 200, headers: CORS, body: "ok" })
+    : route.fulfill({ status, headers: { ...CORS, "content-type": "application/json" }, body: JSON.stringify(body) }));
+}
+// The tab goes to the background, so autosave flushes now instead of in 20 s. It is visible again
+// straight after, so the Get Quote that follows never runs in a page that thinks it is hidden.
+async function flushDraft(page) {
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+  });
+}
+
+test("a refused Get Quote (400) shows the reason, logs as info, and the design stays a draft autosave keeps saving", async ({ page }) => {
+  test.setTimeout(180_000);   // a whole quote PDF is rendered; the baseline run came close to 90 s
+  const errors = watchConsole(page);
+  await seedSession(page);
+  const saves = [];
+  const calls = await stubBackend(page, {
+    rpc: { save_design: (b) => { saves.push(b); return { status: 200, body: null }; }, list_design_versions: { status: 200, body: [] } },
+  });
+  await routeSubmit(page, 400, { error: NO_USER });
+  await boot(page);
+  await fillQuoteForm(page);
+  await flushDraft(page);
+  await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
+  const code = await ls(page, "ss_draft_" + CLIENT);
+  expect(saves.filter((s) => s.p_code === code && s.p_status === "draft").length).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+  await expect(page.getByText(NO_USER)).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText("Quote Created!")).toHaveCount(0);
+  expect(saves.find((s) => s.p_image_url).p_code).toBe(code);                  // the submit saved the same row
+  await expect.poll(() => logRows(calls).length).toBe(1);
+  expect(logRows(calls)[0]).toMatchObject({
+    p_source: "designer", p_message: NO_USER, p_code: "http_400", p_severity: "info",
+    p_context: { phase: "submitQuote", status: 400, fn: "submit-estimate", embedded: false, designCode: code },
+  });
+  await shot(page, "19-quote-refused");
+
+  // Still a draft: the pointer survives, and the next autosave saves the same code as a draft.
+  expect(await ls(page, "ss_draft_" + CLIENT)).toBe(code);
+  await page.getByPlaceholder("City").fill("Independence");
+  await flushDraft(page);
+  await expect.poll(() => saves.filter((s) => s.p_contact && s.p_contact.city === "Independence").length).toBe(1);
+  expect(saves.find((s) => s.p_contact && s.p_contact.city === "Independence")).toMatchObject({ p_code: code, p_status: "draft", p_image_url: null });
+  expect(quoteErrors(errors), "console errors").toEqual([]);
+});
+
+test("a submit-estimate 500 is a fault: the reason shows and the row logs as error", async ({ page }) => {
+  test.setTimeout(180_000);
+  const errors = watchConsole(page);
+  await seedSession(page);
+  const calls = await stubBackend(page, { rpc: { list_design_versions: { status: 200, body: [] } } });
+  const FAULT = "We couldn't create this estimate in the business's CRM just now. Please try again in a few minutes.";
+  await routeSubmit(page, 500, { error: FAULT });
+  await boot(page);
+  await fillQuoteForm(page);
+  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+  await expect(page.getByText(FAULT)).toBeVisible({ timeout: 45_000 });
+  await expect.poll(() => logRows(calls).length).toBe(1);
+  expect(logRows(calls)[0]).toMatchObject({
+    p_source: "designer", p_message: FAULT, p_code: "http_500", p_severity: "error",
+    p_context: { phase: "submitQuote", status: 500, fn: "submit-estimate" },
+  });
+  expect(quoteErrors(errors), "console errors").toEqual([]);
+});
+
+test("a Get Quote that issues drops the draft: the pointer goes, nothing is logged, and autosave stops", async ({ page }) => {
+  test.setTimeout(180_000);
+  const errors = watchConsole(page);
+  await seedSession(page);
+  const saves = [];
+  const calls = await stubBackend(page, {
+    rpc: { save_design: (b) => { saves.push(b); return { status: 200, body: null }; }, list_design_versions: { status: 200, body: [] } },
+  });
+  await routeSubmit(page, 200, SUBMIT_OK.body);
+  await boot(page);
+  await fillQuoteForm(page);
+  await flushDraft(page);
+  await expect.poll(() => ls(page, "ss_draft_" + CLIENT)).toMatch(/^SS-[A-Z0-9]{10}$/);
+  const code = await ls(page, "ss_draft_" + CLIENT);
+  await page.getByRole("button", { name: "Get Quote", exact: true }).click();
+  await expect(page.getByText("Quote Created!")).toBeVisible({ timeout: 45_000 });
+  expect(await ls(page, "ss_draft_" + CLIENT)).toBeNull();                      // a sent quote needs no pointer
+  expect(saves.find((s) => s.p_image_url).p_code).toBe(code);
+  const after = saves.length;
+  await flushDraft(page);
+  await page.waitForTimeout(1500);
+  expect(saves.length, "no draft save after the quote was issued").toBe(after);
+  expect(logRows(calls)).toEqual([]);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
 test("the account panel fits a 390px phone", async ({ page }) => {
   const errors = watchConsole(page);
   await seedSession(page);
