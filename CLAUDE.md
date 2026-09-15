@@ -574,7 +574,7 @@ The edge function returns GHL ids (`contactId`, `estimateId`, `estimateNumber`, 
 
 ### Draft designs (migration 063)
 
-The PUBLIC designer silently saves a browsing lead's in-progress design as a `designs` row with `status='draft'` the moment they open quote Details — the same trigger as the capture-lead call, in `saveDraftSilently` next to `captureLeadSilently`. No PDF is rendered (`image_url` null), no URL rewrite, nothing visible to the visitor. The draft's short code lands in `currentDesignIdRef`, so a later real submit **reuses the same row** and `save_design` promotes it to `'sent'`.
+The PUBLIC designer silently saves a browsing lead's in-progress design as a `designs` row with `status='draft'` the moment they open quote Details — the same trigger as the capture-lead call, in `saveDraftSilently` next to `captureLeadSilently`. No PDF is rendered (`image_url` null), no URL rewrite, nothing visible to the visitor. The draft's short code lands in `currentDesignIdRef`, so a later real submit **reuses the same row**. Since migration 241 (2026-09-15) **no `save_design` call moves status, for any caller**: new rows are born `'draft'`, and `submit-estimate` promotes a draft to `'sent'` (`_shared/designPromotion.ts`, guarded on `status='draft'` inside the UPDATE) at the moment the CRM estimate or quote number exists, before any customer email. A refused, thrown or abandoned Get Quote therefore leaves an honest draft. **Do not put promotion back into `save_design`**: before 241 it promoted on the browser's save, ahead of every refusal in `submit-estimate`, so a refused quote stayed `'sent'` with nothing issued — listed on the customer's quotes page and held by 240's contact lock.
 
 Rules that keep this safe — do not loosen them:
 
