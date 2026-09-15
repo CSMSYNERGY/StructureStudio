@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, Component } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo, Component } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 // NOTE: the bug/feature feedback widget deliberately does NOT live here any more.
@@ -10391,6 +10391,10 @@ const SSD_CSS = [
   '.ssd-hd-btn.is-small{height:22px;padding:0 8px;font-size:11px}',
   '.ssd-hd-signout{font-family:inherit;margin:0;padding:4px 2px;border:0;background:transparent;color:var(--ss-on-header-muted);font-size:11px;font-weight:700;text-decoration:underline;white-space:nowrap;cursor:pointer}',
   '.ssd-hd-powered{flex:0 0 100%;text-align:right;font-size:10.5px;font-weight:500;line-height:1.2;color:var(--ss-on-header-muted);white-space:nowrap}',
+  // A focus ring in the header is drawn ON the header, whose gradient ends on the accent at the right,
+  // where the account buttons sit. An accent-fill ring there is invisible (unbranded, green, slate…).
+  // onHeader is the colour the palette already keeps readable over every header stop.
+  '.ssd-frame .ssd-header button:focus-visible,.ssd-frame .ssd-header a:focus-visible,.ssd-frame .ssd-header [role="button"]:focus-visible{outline-color:var(--ss-on-header)}',
   // Sticky progress bar (below xl)
   '.ssd-progress{position:sticky;top:0;z-index:20;background:var(--ss-surface);border-bottom:1px solid var(--ss-line-card)}',
   '.ssd-frame[data-ssd-bp="xl"] .ssd-progress{display:none}',
@@ -10399,6 +10403,10 @@ const SSD_CSS = [
   '.ssd-pb-step{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;margin:0;padding:6px 4px;border:0;background:none;color:inherit;white-space:nowrap;cursor:pointer}',
   '.ssd-pb-dot{width:22px;height:22px;box-sizing:border-box;border-radius:11px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;line-height:1;background:var(--ss-surface);border:1px solid var(--ss-line);color:var(--ss-subtle)}',
   '.ssd-pb-label{font-size:12px;font-weight:500;color:var(--ss-muted)}',
+  '.ssd-pb-label.is-short{display:none}',
+  // The short step names are CSS text (data-short), never DOM text. A hidden "Details" or "Quote" text
+  // node would be the first thing a find-by-text lands on, ahead of the real heading or button.
+  '.ssd-pb-label.is-short::before,.ssd-pb-v.is-short::before,.ssd-step-label.is-short::before{content:attr(data-short)}',
   '.ssd-pb-step.is-done .ssd-pb-dot{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent)}',
   '.ssd-pb-step.is-done .ssd-pb-label{font-weight:700;color:var(--ss-accent-text)}',
   '.ssd-pb-step.is-current .ssd-pb-dot{background:var(--ss-primary);border-color:var(--ss-primary);color:var(--ss-on-primary)}',
@@ -10409,8 +10417,12 @@ const SSD_CSS = [
   '.ssd-pb-text{display:flex;align-items:baseline;gap:8px;min-width:0;overflow:hidden}',
   '.ssd-pb-count{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
   '.ssd-pb-cur{font-size:13px;font-weight:700;color:var(--ss-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}',
-  '.ssd-pb-dots{display:flex;gap:6px;flex:0 0 auto}',
-  '.ssd-pb-hit{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;margin:0;padding:0;border:0;background:none;cursor:pointer}',
+  // Each dot's button is 30 wide and as tall as the bar, with no gap between them, so a finger that
+  // misses a dot lands on a button instead of dead space. The -3px margins keep every dot exactly where
+  // the old 24px-plus-6px-gap row put it, and the row takes no more width from the step name.
+  '.ssd-pb-dots{display:flex;gap:0;flex:0 0 auto;margin:0 -3px}',
+  '.ssd-pb-hit{width:30px;height:40px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;margin:0;padding:0;border:0;border-radius:6px;background:none;cursor:pointer}',
+  '.ssd-frame .ssd-pb-hit:focus-visible{outline-offset:-4px}',
   '.ssd-pb-mini{display:block;width:8px;height:8px;border-radius:50%;background:var(--ss-line)}',
   '.ssd-pb-hit.is-done .ssd-pb-mini{background:var(--ss-accent-fill)}',
   '.ssd-pb-hit.is-current .ssd-pb-mini{width:10px;height:10px;background:var(--ss-primary)}',
@@ -10419,6 +10431,21 @@ const SSD_CSS = [
   '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-full,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-full{display:none}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-compact,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-compact{display:flex}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-track,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-track{display:block}',
+  // Fitted to the bar's real width by ssdFitProgress, which writes two attributes on .ssd-progress. The
+  // step bar never scrolls sideways with a hidden scrollbar: full labels if they fit, else short labels,
+  // else the compact form. The compact step name sits beside "Step N of M" if it fits, else under it,
+  // else under it in its short form.
+  '.ssd-progress[data-ssd-pb-form="short"] .ssd-pb-label.is-full{display:none}',
+  '.ssd-progress[data-ssd-pb-form="short"] .ssd-pb-label.is-short{display:inline}',
+  '.ssd-progress[data-ssd-pb-form="compact"] .ssd-pb-full{display:none}',
+  '.ssd-progress[data-ssd-pb-form="compact"] .ssd-pb-compact{display:flex}',
+  '.ssd-progress[data-ssd-pb-form="compact"] .ssd-pb-track{display:block}',
+  '.ssd-pb-v.is-short{display:none}',
+  '.ssd-progress[data-ssd-pb-cur^="stack"] .ssd-pb-text{flex-direction:column;align-items:stretch;gap:1px}',
+  '.ssd-progress[data-ssd-pb-cur^="stack"] .ssd-pb-count{line-height:1.2}',
+  '.ssd-progress[data-ssd-pb-cur^="stack"] .ssd-pb-cur{line-height:1.25}',
+  '.ssd-progress[data-ssd-pb-cur="stack-short"] .ssd-pb-v.is-full{display:none}',
+  '.ssd-progress[data-ssd-pb-cur="stack-short"] .ssd-pb-v.is-short{display:inline}',
   // Section rows: a 62px rail cell at xl, one column below it
   '.ssd-row{display:grid;grid-template-columns:minmax(0,1fr);scroll-margin-top:var(--ssd-sticky-top)}',
   '.ssd-row svg{scroll-margin-top:var(--ssd-sticky-top)}',
@@ -10436,7 +10463,13 @@ const SSD_CSS = [
   '.ssd-step:hover{background:var(--ss-primary-faint)}',
   '.ssd-step.is-current{padding-top:14px;background:var(--ss-primary-wash);box-shadow:inset 3px 0 0 var(--ss-primary)}',
   '.ssd-step-dot{flex:0 0 auto;width:26px;height:26px;box-sizing:border-box;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;line-height:1;background:var(--ss-surface);border:1px solid var(--ss-line);color:var(--ss-subtle)}',
-  '.ssd-step-label{flex:0 1 auto;min-height:0;overflow:hidden;text-overflow:ellipsis;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;letter-spacing:.02em;font-size:11.5px;font-weight:500;line-height:1.2;color:var(--ss-muted)}',
+  '.ssd-step-label{flex:0 1 auto;min-height:0;overflow:hidden;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;letter-spacing:.02em;font-size:11.5px;font-weight:500;line-height:1.2;color:var(--ss-muted)}',
+  // Fitted to the row's height by ssdFitRailCell (data-ssd-fit on the button): the full label, else the
+  // short one, else no label at all. Never an ellipsis. The dot and the accessible name stay either way.
+  '.ssd-step-label.is-short{display:none}',
+  '.ssd-step[data-ssd-fit="short"] .ssd-step-label.is-full{display:none}',
+  '.ssd-step[data-ssd-fit="short"] .ssd-step-label.is-short{display:block}',
+  '.ssd-step[data-ssd-fit="none"] .ssd-step-label{display:none}',
   '.ssd-step-conn{flex:1 1 0;width:2px;min-height:10px;background:var(--ss-line-card)}',
   '.ssd-step.is-done .ssd-step-dot{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent)}',
   '.ssd-step.is-done .ssd-step-label{font-weight:700;color:var(--ss-accent-text)}',
@@ -10863,6 +10896,79 @@ function ssdVarsFor(pal) {
 function ssdBreakpoint(w) {
   return w >= 1180 ? "xl" : w >= 1000 ? "lg" : w >= 740 ? "md" : w >= 560 ? "sm" : "xs";
 }
+// Writes the frame's breakpoint attribute from its width now. Width 0 is a hidden portal tab: keep the last.
+function ssdSyncBreakpoint(frameEl) {
+  const w = frameEl.clientWidth;
+  if (!w) return;
+  const bp = ssdBreakpoint(w);
+  if (frameEl.getAttribute("data-ssd-bp") !== bp) frameEl.setAttribute("data-ssd-bp", bp);
+}
+
+// Tries each value of a data-* attribute in turn and keeps the first one fits(value) accepts; the last
+// value is kept without a test, and null means no attribute. The writes and the layout reads all happen
+// in one go before the browser paints, so the variants tried along the way never show.
+function ssdFitAttr(el, name, values, fits) {
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v) { if (el.getAttribute(name) !== v) el.setAttribute(name, v); }
+    else if (el.hasAttribute(name)) el.removeAttribute(name);
+    if (i === values.length - 1 || fits(v)) return v;
+  }
+  return null;
+}
+
+// Fits an element's text to the room it really has: runs fit(el) after every render that changes `deps`,
+// whenever the element changes size, and when the web fonts finish loading (DM Sans is wider than the
+// fallback face). Returns a callback ref. fit only writes data-* attributes that React never renders, so
+// fitting never re-renders the designer. The ResizeObserver only SCHEDULES the fit, one frame later, for
+// the reason SSDesignerFrame gives: a layout write inside the callback is a window "ResizeObserver loop"
+// error, and an app_errors row, on every change.
+function useSsdFit(fit, deps) {
+  const elRef = useRef(null);
+  const fitRef = useRef(fit);
+  fitRef.current = fit;
+  const offRef = useRef(null);
+  const attach = useCallback((el) => {
+    if (offRef.current) { offRef.current(); offRef.current = null; }
+    elRef.current = el;
+    if (!el) return;
+    let raf = 0;
+    const run = () => { raf = 0; fitRef.current(el); };
+    const later = () => { if (!raf) raf = requestAnimationFrame(run); };
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(later) : null;
+    if (ro) ro.observe(el);
+    const fonts = typeof document !== "undefined" ? document.fonts : null;
+    if (fonts && fonts.addEventListener) fonts.addEventListener("loadingdone", later);
+    offRef.current = () => {
+      if (ro) ro.disconnect();
+      if (fonts && fonts.removeEventListener) fonts.removeEventListener("loadingdone", later);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, []);
+  useLayoutEffect(() => { if (elRef.current) fitRef.current(elRef.current); }, deps);
+  return attach;
+}
+
+// Rail cell: the full label if the row is tall enough, else the short label, else none.
+function ssdFitRailCell(btn) {
+  if (!btn.clientHeight) return;   // the rail is hidden below xl, or the portal tab is
+  ssdFitAttr(btn, "data-ssd-fit", [null, "short", "none"], (v) => {
+    const label = btn.querySelector(v ? ".ssd-step-label.is-short" : ".ssd-step-label.is-full");
+    return !label || label.scrollHeight <= label.clientHeight + 1;
+  });
+}
+
+// Progress bar: see the data-ssd-pb-form / data-ssd-pb-cur rules in SSD_CSS.
+function ssdFitProgress(bar) {
+  if (!bar.clientWidth) return;    // xl hides the bar; so does a hidden portal tab
+  // Which form shows depends on the frame's breakpoint, and the frame's own observer may not have run
+  // yet this frame. Bring it up to date first, or this fit measures the form that is about to hide.
+  const frameEl = bar.closest(".ssd-frame");
+  if (frameEl) ssdSyncBreakpoint(frameEl);
+  const fits = (el) => !el || el.scrollWidth <= el.clientWidth + 1;   // a hidden form measures 0 and fits
+  ssdFitAttr(bar, "data-ssd-pb-form", [null, "short", "compact"], () => fits(bar.querySelector(".ssd-pb-full")));
+  ssdFitAttr(bar, "data-ssd-pb-cur", [null, "stack", "stack-short"], () => fits(bar.querySelector(".ssd-pb-cur")));
+}
 
 // Wraps the whole designer. A callback ref, the canvasRowRef pattern: it runs during commit, so the
 // first breakpoint is on the element before the browser paints, and it is an attribute, not React
@@ -10882,10 +10988,7 @@ function SSDesignerFrame({ pal, embedded, children }) {
     if (!el) return;
     const apply = () => {
       rafRef.current = 0;
-      const w = el.clientWidth;
-      if (!w) return;
-      const bp = ssdBreakpoint(w);
-      if (el.getAttribute("data-ssd-bp") !== bp) el.setAttribute("data-ssd-bp", bp);
+      ssdSyncBreakpoint(el);
     };
     apply();
     if (typeof ResizeObserver !== "undefined") {
@@ -10917,14 +11020,18 @@ function SSSecHead({ text, sub, right, className, tProps }) {
 // One cell of the stepper rail. Presentation only: done/current come from the designer's existing
 // state, and a click only scrolls to the section. No href — a "#…" link would rewrite the URL, and
 // the designer reads ?v= and friends from it.
-function SSStepRailCell({ step, total, label, done, current, first, last, onGo }) {
+// Both labels render; ssdFitRailCell shows the one the row has room for (a short section cannot hold
+// "Select your building style" upright), and hides both when neither fits.
+function SSStepRailCell({ step, total, label, short, done, current, first, last, onGo }) {
+  const fitRef = useSsdFit(ssdFitRailCell, [label, short, done, current, last]);
   const cls = "ssd-step" + (first ? " is-first" : "") + (done ? " is-done" : "") + (current ? " is-current" : "");
   return (
-    <button type="button" className={cls} onClick={onGo}
+    <button ref={fitRef} type="button" className={cls} onClick={onGo}
       aria-label={`Step ${step} of ${total}: ${label}${current ? " (current)" : done ? " (done)" : ""}`}
       aria-current={current ? "step" : undefined}>
       <span className="ssd-step-dot" aria-hidden="true">{done ? "✓" : step}</span>
-      <span className="ssd-step-label" aria-hidden="true">{label}</span>
+      <span className="ssd-step-label is-full" aria-hidden="true">{label}</span>
+      <span className="ssd-step-label is-short" aria-hidden="true" data-short={short || label} />
       {!last && <span className="ssd-step-conn" aria-hidden="true" />}
     </button>
   );
@@ -10933,7 +11040,7 @@ function SSStepRailCell({ step, total, label, done, current, first, last, onGo }
 // A section row: rail cell + main cell. With no stepKey it is an empty-rail row (banners, warnings).
 // id="ss-step-<key>" and data-ss-step="<shown number>" are new hooks; the number closes up when a
 // section does not render.
-function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, children, mainClass }) {
+function SSRow({ stepKey, step, total, label, short, done, current, first, last, onGo, children, mainClass }) {
   if (!stepKey) {
     return (
       <div className="ssd-row is-note">
@@ -10945,7 +11052,7 @@ function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, 
   return (
     <div className="ssd-row" id={"ss-step-" + stepKey} data-ss-step={String(step)}>
       <div className="ssd-rail">
-        <SSStepRailCell step={step} total={total} label={label} done={done} current={current} first={first} last={last} onGo={onGo} />
+        <SSStepRailCell step={step} total={total} label={label} short={short} done={done} current={current} first={first} last={last} onGo={onGo} />
       </div>
       <div className={"ssd-main" + (mainClass ? " " + mainClass : "")}>{children}</div>
     </div>
@@ -10953,9 +11060,13 @@ function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, 
 }
 
 // The rail's stand-in below xl: a sticky bar of steps (md/lg) or "Step N of M" + dots (sm/xs). CSS
-// picks the form from data-ssd-bp, so both render and one is display:none.
+// picks the form from data-ssd-bp, so both render and one is display:none. Within that, ssdFitProgress
+// measures the real room: the step bar swaps to short labels, then to the compact form, rather than
+// scroll sideways with no cue, and the compact step name moves under the count, then shortens, rather
+// than shrink to a couple of letters beside the portal's side menu.
 function SSProgressBar({ steps, current, onGo }) {
   const fullRef = useRef(null);
+  const fitRef = useSsdFit(ssdFitProgress, [current, steps.map((s) => s.key + (s.done ? "+" : "")).join(",")]);
   // Keep the current step visible inside the bar. scrollLeft, never scrollIntoView (that would also
   // scroll the page to the bar) — the same rule as SSStyleStrip.
   useEffect(() => {
@@ -10974,21 +11085,22 @@ function SSProgressBar({ steps, current, onGo }) {
   const nameOf = (s) => `Step ${s.n} of ${total}: ${s.label}${s.key === current ? " (current)" : s.done ? " (done)" : ""}`;
   const cls = (base, s) => base + (s.done ? " is-done" : "") + (s.key === current ? " is-current" : "");
   return (
-    <div className="ssd-progress">
+    <div className="ssd-progress" ref={fitRef}>
       <div className="ssd-pb-full" ref={fullRef}>
         {steps.flatMap((s, i) => [
           i > 0 ? <span key={"c-" + s.key} className={"ssd-pb-conn" + (steps[i - 1].done ? " is-done" : "")} aria-hidden="true" /> : null,
           <button key={s.key} type="button" data-ssd-pb={s.key} className={cls("ssd-pb-step", s)} aria-label={nameOf(s)}
             aria-current={s.key === current ? "step" : undefined} onClick={() => onGo(s.key)}>
             <span className="ssd-pb-dot" aria-hidden="true">{s.done ? "✓" : s.n}</span>
-            <span className="ssd-pb-label" aria-hidden="true">{s.label}</span>
+            <span className="ssd-pb-label is-full" aria-hidden="true">{s.label}</span>
+            <span className="ssd-pb-label is-short" aria-hidden="true" data-short={s.short || s.label} />
           </button>,
         ])}
       </div>
       <div className="ssd-pb-compact">
         <div className="ssd-pb-text">
           <span className="ssd-pb-count">{`Step ${cur.n} of ${total}`}</span>
-          <span className="ssd-pb-cur">{cur.label}</span>
+          <span className="ssd-pb-cur"><span className="ssd-pb-v is-full">{cur.label}</span><span className="ssd-pb-v is-short" data-short={cur.short || cur.label} /></span>
         </div>
         <div className="ssd-pb-dots">
           {steps.map((s) => (
@@ -11015,6 +11127,28 @@ function SSProgressBar({ steps, current, onGo }) {
 // per page, so one module-level slot is enough.
 let SSD_STEP_HOLD = null;
 function ssdHoldStep(key) { SSD_STEP_HOLD = { key, t: Date.now(), lastPos: null, settledAt: null }; }
+
+// A rail or progress-bar click: brings the section to the top of the designer's OWN scroller, just under
+// the sticky bar (.ss-designer-host in the portal, the window on the public page).
+// ⚠️ scrollTo, NEVER scrollIntoView. scrollIntoView also scrolls every scrollable ancestor, and when a
+// builder frames the designer on their website that includes THEIR page: it jumps, and the sticky bar the
+// customer just tapped is pushed off the top of the screen. The scroller must actually overflow: a wrapper
+// with overflow-x:hidden reports overflow-y "auto" without being able to scroll.
+function ssdScrollToSection(el) {
+  let scroller = null;
+  for (let p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+    const oy = getComputedStyle(p).overflowY;
+    if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight + 1) { scroller = p; break; }
+  }
+  const frameEl = el.closest(".ssd-frame");
+  const sticky = frameEl ? (parseFloat(getComputedStyle(frameEl).getPropertyValue("--ssd-sticky-top")) || 0) : 0;
+  const r = el.getBoundingClientRect();
+  const top = Math.max(0, Math.round(scroller
+    ? scroller.scrollTop + r.top - scroller.getBoundingClientRect().top - scroller.clientTop - sticky
+    : window.scrollY + r.top - sticky));
+  try { (scroller || window).scrollTo({ top, behavior: "smooth" }); }
+  catch (_e) { if (scroller) scroller.scrollTop = top; else window.scrollTo(0, top); }
+}
 
 function SSStepWatcher({ ids, onChange }) {
   const markRef = useRef(null);
@@ -18854,13 +18988,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     quote: false,
   };
   const ssSteps = [
-    ["style", "Select your building style", "Select your building style"],
-    ssSizeShown && ["size", "Size, roof & cladding", "Size, roof & cladding"],
-    ["options", "Options, openings & layout", "Options & layout"],
-    !submitted && ["customer", "Customer information", "Customer information"],
-    !submitted && ["details", "Details & charges", "Details"],
-    ["quote", "Get quote", ""],
-  ].filter(Boolean).map(([key, label, title], i) => ({ key, label, title, n: i + 1, done: submitted || ssDoneOf[key] }));
+    // [key, rail/progress label, section heading, short label for when the full one has no room]
+    ["style", "Select your building style", "Select your building style", "Style"],
+    ssSizeShown && ["size", "Size, roof & cladding", "Size, roof & cladding", "Size & roof"],
+    ["options", "Options, openings & layout", "Options & layout", "Options"],
+    !submitted && ["customer", "Customer information", "Customer information", "Customer"],
+    !submitted && ["details", "Details & charges", "Details", "Details"],
+    ["quote", "Get quote", "", "Quote"],
+  ].filter(Boolean).map(([key, label, title, short], i) => ({ key, label, title, short, n: i + 1, done: submitted || ssDoneOf[key] }));
   const ssStepIds = ssSteps.map((s) => s.key);
   const ssCur = ssStepIds.includes(ssStepCur) ? ssStepCur : (ssSteps.find((s) => !s.done) || ssSteps[ssSteps.length - 1]).key;
   const ssGo = (key) => {
@@ -18868,11 +19003,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!el) return;
     ssdHoldStep(key);
     setSsStepCur(key);
-    try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_e) { el.scrollIntoView(); }
+    ssdScrollToSection(el);
   };
   const ssRowProps = (key) => {
     const s = ssSteps.find((x) => x.key === key) || ssSteps[0];
-    return { stepKey: key, step: s.n, total: ssSteps.length, label: s.label, done: s.done, current: ssCur === key,
+    return { stepKey: key, step: s.n, total: ssSteps.length, label: s.label, short: s.short, done: s.done, current: ssCur === key,
       first: s.n === 1, last: s.n === ssSteps.length, onGo: () => ssGo(key) };
   };
   // Section 05's toggle (redesign S6): the header row, its right-slot button and the public "see your price"
