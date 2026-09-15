@@ -10562,13 +10562,29 @@ const SSD_CSS = [
   '.ssd-frame{--ssd-chip-h:28px}',
   // The palette row is a wrapping flex row; the sub-head, the grid and the callout each take a full line.
   '.ssd-sechead.ssd-pal-sub{flex:0 0 100%;margin:0 0 4px}',
-  '.ssd-og{flex:0 0 100%;min-width:0;display:grid;gap:11px;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch}',
+  // A WRAPPING FLEX ROW, not a grid. A grid keeps its tracks on the last row, so any tenant whose
+  // options do not divide by the column count left a card stranded beside empty space — with the four
+  // demo groups, Insulation sat alone with 1115px of nothing to its right on a 1600 designer. Flex
+  // items on the last row share out what is left, so the row ends flush whatever a tenant has.
+  // The basis is a quarter minus the gap, plus 3px of slack so a sub-pixel width can never drop the
+  // fourth card onto a line of its own; flex-grow then spends the remainder.
+  '.ssd-og{flex:0 0 100%;min-width:0;display:flex;flex-wrap:wrap;gap:11px;align-items:stretch}',
+  '.ssd-og > .ssd-ogc{flex:1 1 calc(25% - 9px)}',
   // lg (a 1000–1179 designer): four cards only when each is at least 250px wide, else three, so a label like
   // "Rough Opening (Window)" with its WALL tag stays on one line on a 1024 laptop.
-  '.ssd-frame[data-ssd-bp="lg"] .ssd-og{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}',
-  '.ssd-frame[data-ssd-bp="md"] .ssd-og,.ssd-frame[data-ssd-bp="sm"] .ssd-og{grid-template-columns:repeat(2,minmax(0,1fr))}',
-  '.ssd-frame[data-ssd-bp="xs"] .ssd-og{grid-template-columns:minmax(0,1fr)}',
-  '.ssd-og > .is-solo{grid-column:1/-1}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-og > .ssd-ogc{flex:1 1 250px}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-og > .ssd-ogc,.ssd-frame[data-ssd-bp="sm"] .ssd-og > .ssd-ogc{flex:1 1 calc(50% - 7px)}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-og > .ssd-ogc{flex:1 1 100%}',
+  '.ssd-og > .is-solo{flex-basis:100%}',
+  // Insulation and Foundation are SELECTIONS rather than placeable tools, and the mockup draws them as
+  // a full-width bar under the cards: the heading inline on the left, one line of chips beside it. Only
+  // on a wide designer — narrower than xl the bar would wrap into something taller than the card it
+  // replaced, so there they stay cards like the rest. At lg the card is already wide enough for the
+  // type segment to sit beside the areas instead of taking a line of its own.
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar{flex-basis:100%;display:flex;align-items:center;gap:14px;padding:9px 13px}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar > .ssd-ogc-t{flex:0 0 auto;margin:0}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar > .ssd-ogc-b{flex:1 1 auto}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar .ssd-ogc-line,.ssd-frame[data-ssd-bp="lg"] .ssd-og > .is-bar .ssd-ogc-line{flex:0 0 auto}',
   '.ssd-ogc{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
   '.ssd-ogc-t{display:block;margin:0 0 10px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.ssd-ogc-b{display:flex;flex-wrap:wrap;align-items:center;gap:7px;min-width:0}',
@@ -10608,8 +10624,11 @@ const SSD_CSS = [
   '.ssd-fd-q{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--ss-muted);white-space:nowrap}',
   '.ssd-fd-q .ssd-input{display:inline-block;width:58px;height:var(--ssd-select-h);padding:0 7px;font-size:12.5px}',
   // Included callout (after the option cards, above the toolbar: Carolyn 2026-09-14).
-  '.ssd-incl{flex:0 0 100%;min-width:0;box-sizing:border-box;margin-top:5px;padding:13px 14px;border:1px solid var(--ss-accent-line);border-left:3px solid var(--ss-accent-fill);border-radius:4px;background:var(--ss-accent-wash)}',
-  '.ssd-incl-head{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:9px;row-gap:2px;margin:0 0 10px;min-width:0}',
+  // The padding here, in the toolbar and above the drawing is a few px tighter than elsewhere in the
+  // redesign: everything between the option chips and the plan pushes the plan down the page, and on a
+  // 1440x1000 laptop arming a tool left the building's top wall below the fold with nothing to click.
+  '.ssd-incl{flex:0 0 100%;min-width:0;box-sizing:border-box;margin-top:5px;padding:10px 12px;border:1px solid var(--ss-accent-line);border-left:3px solid var(--ss-accent-fill);border-radius:4px;background:var(--ss-accent-wash)}',
+  '.ssd-incl-head{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:9px;row-gap:2px;margin:0 0 7px;min-width:0}',
   '.ssd-incl-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-accent-deep)}',
   '.ssd-incl-sub{font-size:11.5px;font-weight:400;line-height:1.3;color:var(--ss-accent-muted)}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-incl-sub,.ssd-frame[data-ssd-bp="sm"] .ssd-incl-sub,.ssd-frame[data-ssd-bp="xs"] .ssd-incl-sub{flex-basis:100%}',
@@ -10637,7 +10656,7 @@ const SSD_CSS = [
   '.ssd-frame{--ssd-tb-h:26px}',
   // Wall height hard left, the actions hard right and ending with 3D (Carolyn 2026-09-02: "same line as
   // the 3D button"). Both halves wrap, so a phone stacks them instead of pushing the page sideways.
-  '.ssd-tb{flex:0 0 100%;min-width:0;box-sizing:border-box;display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:10px;padding:11px 13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
+  '.ssd-tb{flex:0 0 100%;min-width:0;box-sizing:border-box;display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:7px;padding:9px 13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
   '.ssd-tb.is-empty{display:none}',
   '.ssd-tb-l{display:inline-flex;flex-wrap:wrap;align-items:center;gap:10px;min-width:0;max-width:100%}',
   '.ssd-tb-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap}',
@@ -10694,9 +10713,9 @@ const SSD_CSS = [
   // Plan card. ⚠️ No transform, filter, opacity, contain or positioned z-index here: the plan svg must
   // rise over the pick scrim. The plan column's flex-basis is dispMaxW + 34 (16px padding and a 1px
   // border each side), so plan and dock stay a centred pair.
-  '.ssd-plan{width:100%;min-width:0;box-sizing:border-box;padding:14px 16px 16px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
+  '.ssd-plan{width:100%;min-width:0;box-sizing:border-box;padding:11px 16px 14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-plan{padding:10px 10px 12px}',
-  '.ssd-plan-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;margin:0 0 8px}',
+  '.ssd-plan-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;margin:0 0 6px}',
   '.ssd-plan-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
   '.ssd-plan-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11.5px;font-weight:500;line-height:1.3;color:var(--ss-subtle);white-space:nowrap}',
   // Docked 3D card: its look is inline (the calibration surface renders it outside this stylesheet); only hover lives here.
@@ -19570,10 +19589,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (by[""] && by[""].length) out.push(["Annotate", by[""]]);
             return out;
           };
-          // Groups are cards in one grid (redesign S3): 4 columns on a wide designer, 2 at tablet widths,
-          // 1 on a phone — the old two-column split with a rule down the centre never collapsed, so a
-          // phone got two cramped columns. Order: the groups, the electrical-only card, Insulation,
-          // Foundation. The breakpoint is the frame's data-ssd-bp, so the columns are classes.
+          // Groups are cards in one wrapping row (redesign S3): 4 across a wide designer, 2 at tablet
+          // widths, 1 on a phone — the old two-column split with a rule down the centre never collapsed,
+          // so a phone got two cramped columns. Order: the groups, the electrical-only card, Insulation,
+          // Foundation. The breakpoint is the frame's data-ssd-bp, so the widths are classes, and the
+          // last row shares out whatever is left rather than stranding a card beside empty space.
+          // Insulation and Foundation carry is-bar: on a wide designer they are a full-width strip.
           // One type for the whole building, then the areas — which is how it is sold. The data
           // model keeps a type PER AREA so a mixed job stays expressible, but offering that in
           // the UI would mean three type pickers in one grid cell.
@@ -19598,7 +19619,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           });
           const insAll = insAreas.length > 1 && insAreas.every(insHas);
           const insCell = insAreas.length ? (
-            <div key="ss-insulation" className="ssd-ogc">
+            <div key="ss-insulation" className="ssd-ogc is-bar">
               <span className="ssd-ogc-t">Insulation</span>
               <div className="ssd-ogc-b">
                 {insTypes.length > 1 && (
@@ -19637,7 +19658,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           });
           const fdSetQty = (id, v) => setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).map((f) => (f.id === id ? { ...f, qty: v === "" ? null : v } : f)) }));
           const fdCell = fdOffered.length ? (
-            <div key="ss-foundation" className="ssd-ogc">
+            <div key="ss-foundation" className="ssd-ogc is-bar">
               <span className="ssd-ogc-t">Foundation</span>
               <div className="ssd-ogc-b">
                 {fdOffered.map((o) => {
