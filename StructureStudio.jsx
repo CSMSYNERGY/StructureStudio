@@ -10800,12 +10800,19 @@ function ssdBreakpoint(w) {
 // Wraps the whole designer. A callback ref, the canvasRowRef pattern: it runs during commit, so the
 // first breakpoint is on the element before the browser paints, and it is an attribute, not React
 // state — a resize never re-renders the designer. Width 0 is a hidden portal tab: keep the last one.
+// The observer only SCHEDULES the write, one frame later. Writing the attribute inside the callback
+// re-lays-out elements other observers already measured this frame, so the browser fires a window
+// "ResizeObserver loop completed with undelivered notifications" error on every breakpoint change,
+// and the global error hooks turn each one into an app_errors row.
 function SSDesignerFrame({ pal, children }) {
   const roRef = useRef(null);
+  const rafRef = useRef(0);
   const attach = useCallback((el) => {
     if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = 0; }
     if (!el) return;
     const apply = () => {
+      rafRef.current = 0;
       const w = el.clientWidth;
       if (!w) return;
       const bp = ssdBreakpoint(w);
@@ -10813,7 +10820,7 @@ function SSDesignerFrame({ pal, children }) {
     };
     apply();
     if (typeof ResizeObserver !== "undefined") {
-      roRef.current = new ResizeObserver(apply);
+      roRef.current = new ResizeObserver(() => { if (!rafRef.current) rafRef.current = requestAnimationFrame(apply); });
       roRef.current.observe(el);
     }
   }, []);
