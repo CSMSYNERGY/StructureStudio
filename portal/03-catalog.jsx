@@ -4113,7 +4113,8 @@ const SS_CLADDING_ROWS = [
   { id: "panel", label: "Panel Siding" },
   { id: "lap", label: "Lap Siding" },
   { id: "batten", label: "Board & Batten" },
-  { id: "agpanel", label: "Metal" },
+  // The profile name, not "Metal" (Carolyn 09-11: "they can type in here metal").
+  { id: "agpanel", label: "AG Panel" },
 ];
 // The product's SHARED pricing vocabulary, all seven of it (Carolyn 2026-09-07: "add all these
 // as options for the pricing"). Same names and same meanings as the Options header, which is

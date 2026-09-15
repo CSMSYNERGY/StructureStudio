@@ -112,6 +112,7 @@ export type D3Spec = {
   colors: Record<string, string>;
   wallHeightFt?: number;
   roofMaterial?: string;
+  roofProfile?: string;
   gableVent?: { widthFrac: number };
   foundation?: string;
   claddingChoices?: string[];
@@ -207,6 +208,12 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // roof with it before any customer roof-type pick. Same posture as siding —
   // anything unknown means "unset".
   if (src.roofMaterial === "shingle" || src.roofMaterial === "metal") d3.roofMaterial = src.roofMaterial;
+  // Which METAL a metal roof is drawn in (2026-09-15). ABSENT means AG Panel, the profile
+  // Carolyn's shed builders install, so only a post-frame style's "standingseam" ever needs
+  // storing and every row that predates this key renders as the renderer's default. Never
+  // emit a default here: that would pin a tenant's column to whatever the default was on the
+  // day they happened to save. Anything unrecognised is dropped, the roofMaterial posture.
+  if (src.roofProfile === "agpanel" || src.roofProfile === "standingseam") d3.roofProfile = src.roofProfile;
 
   // A louvered gable vent at both ends, sized as a fraction of the span. Absent means
   // no vent, which is what every row that predates this field says by omission.

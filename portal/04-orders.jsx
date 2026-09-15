@@ -2352,7 +2352,7 @@ const ssUsd = (n) => {
 // validated against the matching server list and `next.cladding` defaults to the design's
 // CURRENT value — so a design saved as Board & Batten made every attribute change on its order
 // fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
-const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "Metal" };
+const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
 const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
 // `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
 // null. An empty/absent list means "this tenant has not configured cladding", which reads as

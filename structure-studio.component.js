@@ -3931,7 +3931,10 @@ const D3_DEFAULT_ROOF = { type: "gable", pitch: 0.4 };
 const D3_CLADDING = {
   lap:     { id: "lap",     label: "Lap Siding",     tex: "lap",     relief: "lap",    stepFt: 0.5,  tileFtU: 8.0, tileFtV: 4.0, bump: 0.45 },
   panel:   { id: "panel",   label: "Panel Siding",   tex: "groove",  relief: null,                   tileFtU: 4.0, tileFtV: 8.0, bump: 0.40 },
-  agpanel: { id: "agpanel", label: "Metal",          tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
+  // "AG Panel", not "Metal", since 2026-09-15. Carolyn 09-11 @07:30: "You don't have to call it
+  // metal. You can just call it agpanel because they can type in here metal". The id never
+  // changed, and a builder's own label_override still wins everywhere it is set.
+  agpanel: { id: "agpanel", label: "AG Panel",       tex: "agpanel", relief: "rib",    stepFt: 0.75, tileFtU: 3.0, tileFtV: 3.0, bump: 0.60, metal: true },
   // reliefTrim: the proud strip takes TRIM colour instead of body. NOTHING SETS IT TODAY --
   // the flag stays because it is the seam a future cladding would opt in through, and
   // because `rib` must never take it (a metal rib is the same sheet of steel, not a second
@@ -3974,6 +3977,43 @@ function d3NormalizeCladding(v) {
   if (s === "batten" || s === "board-and-batten" || s === "bnb") return "batten";
   if (s === "agpanel" || s === "ag" || s === "metal" || s === "panel-loc" || s === "panelloc") return "agpanel";
   return "panel"; // null / "" / "groove" / "panel" / "t111" / anything unrecognised
+}
+
+// ── METAL ROOF PROFILE ────────────────────────────────────────────────────────────
+// Which metal a METAL roof is drawn in. Carolyn asked for AG Panel on 07-08 ("what you're going
+// to need here is the AgPanel and the shingles", @18:25), again on 09-11 ("standing seam is used
+// in the post frame. It is not really used in the portable in the building, the sheds. So let's
+// leave it ... but we need this for sheds", @07:30) and again on 09-15 ("What about the roof?
+// Remember the ag panel?", @12:44). Until then every metal roof drew standing seam, because the
+// "metal" raster was the only one the roof had.
+//
+// ABSENT MEANS AG PANEL, deliberately (Ahsan 2026-09-15). Every tenant today sells sheds, so every
+// existing metal roof switches to the profile their builders install, and a post-frame style opts
+// back into standing seam with d3.roofProfile = "standingseam". The default is never written to a
+// row, so the column only ever records the exception.
+//
+// A PROPERTY OF THE STYLE, never the customer's pick. The customer chooses Shingle or Metal and a
+// colour; a builder does not sell both profiles on one building. So only styleSpec is read.
+//
+// AG Panel draws the "agroof" raster: the Advantage Panel profile Ahsan sent (36 in coverage,
+// trapezoid major ribs 9 in apart and 3/4 in tall, two low stiffening ribs between, a lap at the
+// sheet edge). It is the same product as the AG Panel wall, but DRAWN in full, because a roof slab
+// has none of the rib geometry the wall stands out of; the wall's own hint-only "agpanel" raster
+// read as a busier standing seam on a roof. Both profiles run their ribs eave to
+// ridge ("metal runs up and down", 08-24 @23:45): d3RoofSlabUVs puts u along the ridge, so any
+// raster drawn at constant canvas-x lands down the slope.
+//
+// tileFtU/tileFtV are FEET per 512px tile as (along the ridge, down the slope). Both rasters are
+// uniform down the pan, so the second number only bounds anisotropy.
+//   agpanel       4 major ribs per tile over 3 ft: a rib every 9 in, a full sheet per tile.
+//   standingseam  4 pans per tile over 6 ft: a seam every 18 in, a real pan width.
+const D3_METAL_ROOF_PROFILES = {
+  agpanel:      { id: "agpanel",      label: "AG Panel",      tex: "agroof",  tileFtU: 3.0, tileFtV: 8.0, bump: 0.60 },
+  standingseam: { id: "standingseam", label: "Standing Seam", tex: "metal",   tileFtU: 6.0, tileFtV: 8.0, bump: 0.50 },
+};
+function d3NormalizeRoofProfile(v) {
+  const s = String(v == null ? "" : v).trim().toLowerCase().replace(/[\s_-]+/g, "");
+  return s === "standingseam" ? "standingseam" : "agpanel";
 }
 
 // The ONE rule for roof orientation, and it is GEOMETRY -- never the door.
@@ -4358,6 +4398,10 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
     // The style's default roof MATERIAL (shingle|metal) — texture + surface
     // response even before the customer picks a roof type; their pick wins.
     roofMaterial: o.roofMaterial === "metal" || o.roofMaterial === "shingle" ? o.roofMaterial : (base.roofMaterial || null),
+    // Which metal a metal roof draws (D3_METAL_ROOF_PROFILES). Named here for the gableVent
+    // reason below: the calibration panel round-trips through this resolver, and a key the
+    // literal omits is erased from the column the first time a builder saves. null = AG Panel.
+    roofProfile: o.roofProfile === "agpanel" || o.roofProfile === "standingseam" ? o.roofProfile : (base.roofProfile || null),
     // A louvered gable vent, tenant override over the built-in default. This MUST be
     // named here: the literal drops what it does not list, and because openCalEditor
     // seeds from this resolver and onSaveSpec writes the draft back, a dropped key is
@@ -4615,7 +4659,10 @@ function d3CssColor(v, fallback) {
 // THREE.CanvasTexture that MULTIPLIES the material's base color (Lambert
 // map × color), so the chosen paint / roof color still drives the hue while
 // the pattern adds relief:
-//   metal   → vertical standing-seam ribs (AgPanel / Panel-Loc look)
+//   metal   → vertical standing-seam pans (the Standing Seam roof profile)
+//   agpanel → raised ribs 9 in apart, hinted only (the AG Panel WALL, whose ribs are geometry)
+//   agroof  → trapezoid ribs 9 in apart, drawn in full (the AG Panel ROOF, 2026-09-15: a roof
+//             slab has no relief geometry -- see D3_METAL_ROOF_PROFILES)
 //   shingle → staggered horizontal shingle courses (Owens Corning Duration look)
 //   lap     → horizontal lap-siding boards
 //   groove  → vertical groove / board-and-batten panel (the standard siding look)
@@ -4629,7 +4676,7 @@ function d3CssColor(v, fallback) {
 // stays white-based) and a BUMP canvas (grayscale relief) at 512px, with a
 // seeded PRNG so the variegation is identical every session — a quote PDF
 // captured today must match one captured tomorrow.
-const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "bnb"]);
+const D3_TEX_KINDS = new Set(["metal", "groove", "lap", "shingle", "agpanel", "agroof", "bnb"]);
 const _d3TexCanvases = {};
 function _d3Rng(seed) {
   let a = seed >>> 0;
@@ -4725,6 +4772,46 @@ function _d3RasterKind(kind) {
     // side-lap rib at the seam: wider, because that is where two sheets overlap
     g.fillStyle = "rgba(0,0,0,0.28)"; g.fillRect(N - 3, 0, 3, N);
     b.fillStyle = "#f5f5f5"; b.fillRect(N - 3, 0, 3, N);
+  } else if (kind === "agroof") {
+    // AG Panel as a ROOF sheet (2026-09-15), drawn to the Advantage Panel profile Ahsan sent:
+    // 36 in coverage, trapezoid major ribs 9 in on centre and 3/4 in tall, a flat pan between
+    // them with two low stiffening ribs, and the sheet edge lapped under the next sheet's rib.
+    //
+    // Why the roof does not reuse "agpanel": an AG Panel WALL has physical ribs standing out of
+    // it (the clad.relief "rib" boxes), so its raster only has to hint at them. A roof slab has no
+    // relief geometry, and the same thin-line raster read as a busier standing seam on the first
+    // render. So the rib is DRAWN here -- lit face, flat crown, shadow face -- with a bump ramp
+    // that rises and falls with it.
+    const bay = N / 4;              // 128 px = 9 in, about 14.2 px per inch
+    const base = 36, crown = 12;    // ~2.5 in across the rib's foot, ~0.85 in flat crown
+    const sh = (base - crown) / 2;  // each sloped face
+    for (let x0 = 0; x0 < N; x0 += bay) {
+      const pg = g.createLinearGradient(x0 + base, 0, x0 + bay, 0);   // the pan's sheen
+      pg.addColorStop(0, "rgba(0,0,0,0.10)"); pg.addColorStop(0.25, "rgba(255,255,255,0.06)");
+      pg.addColorStop(0.75, "rgba(255,255,255,0.02)"); pg.addColorStop(1, "rgba(0,0,0,0.04)");
+      g.fillStyle = pg; g.fillRect(x0 + base, 0, bay - base, N);
+      const lit = g.createLinearGradient(x0, 0, x0 + sh, 0);
+      lit.addColorStop(0, "rgba(255,255,255,0.12)"); lit.addColorStop(1, "rgba(255,255,255,0.42)");
+      g.fillStyle = lit; g.fillRect(x0, 0, sh, N);
+      g.fillStyle = "rgba(255,255,255,0.60)"; g.fillRect(x0 + sh, 0, crown, N);
+      const dk = g.createLinearGradient(x0 + sh + crown, 0, x0 + base, 0);
+      dk.addColorStop(0, "rgba(0,0,0,0.48)"); dk.addColorStop(1, "rgba(0,0,0,0.16)");
+      g.fillStyle = dk; g.fillRect(x0 + sh + crown, 0, sh, N);
+      const bu = b.createLinearGradient(x0, 0, x0 + sh, 0);            // bump: up, flat, down
+      bu.addColorStop(0, "#808080"); bu.addColorStop(1, "#f0f0f0");
+      b.fillStyle = bu; b.fillRect(x0, 0, sh, N);
+      b.fillStyle = "#f0f0f0"; b.fillRect(x0 + sh, 0, crown, N);
+      const bd = b.createLinearGradient(x0 + sh + crown, 0, x0 + base, 0);
+      bd.addColorStop(0, "#f0f0f0"); bd.addColorStop(1, "#808080");
+      b.fillStyle = bd; b.fillRect(x0 + sh + crown, 0, sh, N);
+      for (let k = 1; k <= 2; k++) {                                   // the stiffening ribs
+        const mx = Math.round(x0 + base + ((bay - base) * k) / 3);
+        g.fillStyle = "rgba(255,255,255,0.16)"; g.fillRect(mx - 1, 0, 2, N);
+        g.fillStyle = "rgba(0,0,0,0.14)"; g.fillRect(mx + 1, 0, 2, N);
+        b.fillStyle = "#a0a0a0"; b.fillRect(mx - 1, 0, 3, N);
+      }
+    }
+    g.fillStyle = "rgba(0,0,0,0.25)"; g.fillRect(0, 0, 2, N);          // the lap
   } else if (kind === "lap") {
     // Horizontal lap boards: per-board tone, butt shadow, faint grain.
     const board = 64;
@@ -6853,37 +6940,41 @@ function buildShed3DModel(THREE, p) {
     }
   }
   };
-  // Roof texture: metal standing-seam vs shingle courses. The customer's
+  // Roof texture: shingle courses, or a metal PROFILE. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
   // "this looks fake" tell. Metal also gets a metal SURFACE (lower roughness,
   // some metalness) so the sun actually glints off the pans.
-  const roofKind = p.roofType === "Metal" ? "metal"
-    : p.roofType === "Shingle" ? "shingle"
-    : (p.styleSpec && (p.styleSpec.roofMaterial === "metal" || p.styleSpec.roofMaterial === "shingle") ? p.styleSpec.roofMaterial : "shingle");
+  //
+  // WHICH metal is the style's alone (D3_METAL_ROOF_PROFILES): AG Panel unless the style says
+  // standing seam. The customer's pick only decides metal vs shingle, exactly as before.
+  const roofIsMetal = p.roofType === "Metal" ? true
+    : p.roofType === "Shingle" ? false
+    : !!(p.styleSpec && p.styleSpec.roofMaterial === "metal");
+  const roofProfile = roofIsMetal ? D3_METAL_ROOF_PROFILES[d3NormalizeRoofProfile(p.styleSpec && p.styleSpec.roofProfile)] : null;
+  const roofKind = roofProfile ? roofProfile.tex : "shingle";
   // Roof tile size in FEET, as (along the ridge, down the slope), paired with the
   // world-feet UV rewrite on each slab. A `repeat` without that rewrite anchors nothing --
   // the same lesson the walls learned in the 2026-08-19 audit, where a repeat whose comment
   // claimed world anchoring was in fact dividing each face's own 0..1 span.
   //
-  // metal: the raster lays 4 standing-seam pans across one 512px tile, so 6 ft along the
-  //   ridge puts a seam every 18 inches -- a real pan width. It is uniform down the pan,
-  //   so the second number only bounds anisotropy.
+  // metal: each profile carries its own tile in D3_METAL_ROOF_PROFILES -- AG Panel a rib every
+  //   9 inches, standing seam a seam every 18. Both are uniform down the pan.
   // shingle: 6 tabs across and 8 courses down per tile, so 6 x 4 ft gives 12-inch tabs and
   //   a 6-inch course exposure.
   //
   // The old expression was Math.round(S / 1.5) into the u slot -- a tile COUNT derived from
   // the profile span, fed to an axis that was itself the wrong one. On a 12 ft half-span
   // that packed about 9 tiles x 4 pans into the slope: a line every 2.4 inches. Corduroy.
-  const roofTileU = 6.0;                               // along the ridge
-  const roofTileV = roofKind === "metal" ? 8.0 : 4.0;  // down the slope
+  const roofTileU = roofProfile ? roofProfile.tileFtU : 6.0;  // along the ridge
+  const roofTileV = roofProfile ? roofProfile.tileFtV : 4.0;  // down the slope
   const roofTex = d3MakeTexture(THREE, roofKind);
   if (roofTex) {
     roofTex.repeat.set(1 / roofTileU, 1 / roofTileV);
     roofMat.map = roofTex; roofMat.needsUpdate = true;
     const roofBump = d3MakeBumpTexture(THREE, roofKind);
-    if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofKind === "metal" ? 0.5 : 0.35; }
-    if (roofKind === "metal") { roofMat.roughness = 0.45; roofMat.metalness = 0.35; }
+    if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofProfile ? roofProfile.bump : 0.35; }
+    if (roofProfile) { roofMat.roughness = 0.45; roofMat.metalness = 0.35; }
     else { roofMat.roughness = 0.95; roofMat.metalness = 0.0; }
   }
   let profPeak = -Infinity;
@@ -17424,6 +17515,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="metal">Metal</option>
                   </select>
                 </label>
+                {/* METAL ROOF PROFILE (2026-09-15). Which metal a metal roof is drawn in: AG Panel
+                    for sheds, Standing Seam for post-frame (Carolyn 09-11 @07:30: "standing seam
+                    is used in the post frame ... but we need this for sheds").
+
+                    Only "standingseam" is ever stored. AG Panel is the renderer's default, so
+                    picking it writes null and the style goes on saying nothing, exactly like every
+                    row that predates the field.
+
+                    ALWAYS SHOWN, whatever the roof material. The renderer reads this whenever the
+                    roof ends up metal, and a CUSTOMER can pick Metal on a style whose own material
+                    is Shingle or Not set -- so hiding it there left a stored Standing Seam in force
+                    with no control to see or clear it (review 2026-09-15). Both previews on this
+                    panel pin the customer's pick to nothing and so only draw the profile once Roof
+                    material is Metal; the hint says that rather than letting the choice look broken. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Metal roof profile
+                  <select value={d3NormalizeRoofProfile(adminCal.spec.roofProfile)} onChange={(e) => calSet({ roofProfile: e.target.value === "standingseam" ? "standingseam" : null })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="agpanel">AG Panel (sheds)</option>
+                    <option value="standingseam">Standing Seam (post-frame)</option>
+                  </select>
+                  {adminCal.spec.roofMaterial !== "metal" && (
+                    <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>Used when a customer picks a metal roof. The preview shows it once Roof material is Metal.</span>
+                  )}
+                </label>
                 {/* PITCH IS ENTERED AS THE RISE, which is the only way a builder states a
                     roof. Carolyn, 2026-08-28 @44:17-46:36: she typed 10 expecting a 10:12,
                     and the drawing came back "120:12" with a 76'6" peak, because this field
@@ -17462,7 +17576,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="panel">Panel siding (SmartSide, DuraTemp, T1-11)</option>
                     <option value="lap">Lap siding</option>
                     <option value="batten">Board &amp; batten</option>
-                    <option value="agpanel">Metal</option>
+                    <option value="agpanel">AG Panel (metal)</option>
                   </select>
                 </label>
               </div>

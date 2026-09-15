@@ -19,6 +19,7 @@ import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } fr
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { cladLineName } from "../_shared/claddingLineName.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
@@ -1129,9 +1130,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         : /* each / pct_* */               { qty: 1,                 unit: "" };
       // The tenant's own name for it, falling back to the built-in — the customer must read the
       // same words on the estimate that they read on the designer.
-      const cladName = (sc.label_override || "").trim()
-        || (String((selections as Record<string, unknown>).cladding ?? "").trim())
-        || claddingId;
+      // ...except on a SIGNED order whose cladding is unchanged, which keeps the name the customer
+      // agreed to: a cladding line's name is its change-order identity, so relabelling a built-in
+      // (Metal -> AG Panel, 2026-09-15) must not raise a change order nobody made. The id decides,
+      // so a real swap still reads as one. See _shared/claddingLineName.ts.
+      const cladName = cladLineName({
+        override: sc.label_override,
+        browserLabel: (selections as Record<string, unknown>).cladding,
+        claddingId,
+        accepted: !!(existingDesign.accepted_at || existingDesign.accepted_snapshot),
+        agreed: agreedBaseline(existingDesign),
+      });
       if (cladShape.qty > 0) {
         // pct_building_price resolves here (the base price is already known). pct_estimate_total
         // CANNOT: it is a share of every OTHER line, so it goes out at 0 and joins the existing

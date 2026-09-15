@@ -3082,6 +3082,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const found = await findStyleFor3D(styleValue, styleId);
     if (found.err) return found.err;
     if (found.style!.model_status === "locked") return json({ error: LOCKED_MSG }, 409);
+    // roofProfile (2026-09-15): ABSENCE IS NOT A CLEAR, the d3VideoFrames rule above. A bundle
+    // that predates the key (production until the Monday promotion) sends a d3 without it, so
+    // sanitizeD3Spec leaves it out and this write would silently put a post-frame style back to
+    // AG Panel. Carry the stored value forward. The current editor always sends the key (null
+    // for AG Panel), which is how a real clear still lands. Done BEFORE the guard, so a save that
+    // only omits the key compares as the duplicate it is.
+    {
+      const sentD3 = payload.d3 as Record<string, unknown> | null | undefined;
+      const stored = (found.style!.d3 as Record<string, unknown> | null)?.roofProfile;
+      if (sentD3 && typeof sentD3 === "object" && !("roofProfile" in sentD3) && (stored === "agpanel" || stored === "standingseam")) {
+        clean.d3.roofProfile = stored;
+      }
+    }
     // THE LATE-SAVE GUARD, BY VERSION (see _shared/styleSaveGuard.ts, and why content alone was
     // not enough). A caller that sent no baseVersion — an older bundle, the operator ?admin=1
     // page — writes unconditionally, exactly as before. A DUPLICATE (this exact save already

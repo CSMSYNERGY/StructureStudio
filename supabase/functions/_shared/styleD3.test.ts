@@ -130,6 +130,23 @@ Deno.test("all four claddings round-trip; anything else collapses to null", () =
   }
 });
 
+Deno.test("roofProfile: both metal profiles round-trip, absent stays absent, junk is dropped", () => {
+  // Absent is every row that predates the key and it must STAY absent: the renderer reads
+  // absent as AG Panel, and a default written here would pin each tenant's column to whatever
+  // the default was on the day they saved. The editor only ever sends "standingseam" or null.
+  const absent = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, roofMaterial: "metal" });
+  assert(absent.ok && !("roofProfile" in absent.d3), "absent stays absent");
+  for (const id of ["agpanel", "standingseam"]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, roofMaterial: "metal", roofProfile: id });
+    assert(r.ok, `${id} should be accepted`);
+    if (r.ok) assertEquals(r.d3.roofProfile, id, `${id} must survive the round trip`);
+  }
+  for (const junk of ["Standing Seam", "corrugated", "", 3, null, { id: "agpanel" }]) {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, roofProfile: junk });
+    assert(r.ok && !("roofProfile" in r.d3), `${JSON.stringify(junk)} must not persist`);
+  }
+});
+
 Deno.test("claddingChoices is rebuilt in canonical order, never echoed back", () => {
   const r = sanitizeD3Spec({
     roof: { type: "gable", pitch: 0.4 },
