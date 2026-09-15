@@ -10269,29 +10269,32 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
 // The row being viewed is highlighted and has no Open (it is already on the plan); every
 // other row gets Open + PDF. No hooks: it is a plain module-level component, so it adds
 // nothing to StructureStudioInner's hook order.
-function SSVersionList({ versions, viewing, accent, onOpen }) {
-  const pill = (bg, fg) => ({ display: "inline-block", marginLeft: 6, padding: "1px 7px", borderRadius: 999, background: bg, color: fg, fontSize: 11, fontWeight: 700, lineHeight: "16px", verticalAlign: "1px" });
+function SSVersionList({ versions, viewing, onOpen }) {
+  // Redesign S6 (DESIGN-SPEC 4.3): a card whose look is ssd-ver-* classes, so the builder's palette reaches it
+  // through the frame's CSS variables. The Viewing / Latest tags are uppercased by CSS only; tests read their
+  // textContent, which keeps the words as written.
   return (
-    <div data-ss-versions="1">
-      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>All designs on this estimate ({versions.length})</div>
-      {versions.length > 1 && <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 2 }}>Open one to see it on the plan above.</div>}
-      <div style={{ marginTop: 6 }}>
+    <div data-ss-versions="1" className="ssd-ver">
+      <div className="ssd-ver-t">All designs on this estimate ({versions.length})</div>
+      {versions.length > 1 && <div className="ssd-ver-sub">Open one to see it on the plan above.</div>}
+      <div className="ssd-ver-rows">
         {versions.map((v, i) => {
           const vsel = v.selections || {};
           const isViewing = v.version === viewing;
           let dstr = ""; try { dstr = v.created_at ? new Date(v.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : ""; } catch { /* ignore */ }
           return (
             <div key={v.version} data-ss-version={v.version} data-ss-viewing={isViewing ? "1" : undefined}
-              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "7px 10px", borderTop: i === 0 ? "none" : "1px solid #F1F5F9", borderLeft: `3px solid ${isViewing ? accent : "transparent"}`, background: isViewing ? "#FFFBEB" : "transparent" }}>
-              <div style={{ minWidth: 0, fontSize: 13, color: "#64748B" }}>
-                <span style={{ fontWeight: 700, color: "#1E293B" }}>v{v.version}</span>
-                {" · "}{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}{dstr ? ` · ${dstr}` : ""}
-                {isViewing && <span style={pill("#FEF3C7", "#92400E")}>Viewing</span>}
-                {i === 0 && <span style={pill("#F1F5F9", "#475569")}>Latest</span>}
+              className={"ssd-ver-row" + (isViewing ? " is-viewing" : "")}>
+              <div className="ssd-ver-name">
+                <span className="ssd-ver-v">v{v.version}</span>
+                {" · "}{[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}
+                {dstr ? <span className="ssd-ver-meta">{` · ${dstr}`}</span> : null}
+                {isViewing && <span className="ssd-ver-tag is-viewing">Viewing</span>}
+                {i === 0 && <span className="ssd-ver-tag">Latest</span>}
               </div>
-              <div style={{ whiteSpace: "nowrap", flexShrink: 0 }}>
-                {!isViewing && <button type="button" onClick={() => onOpen(v.version)} style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: accent, fontWeight: 700, marginRight: 12, fontSize: 13 }}>Open</button>}
-                {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" style={{ color: "#334155", fontWeight: 700, textDecoration: "none", fontSize: 13 }}>PDF</a>}
+              <div className="ssd-ver-act">
+                {!isViewing && <button type="button" onClick={() => onOpen(v.version)} className="ssd-ver-open">Open</button>}
+                {ssSafeUrl(v.image_url) && <a href={ssSafeUrl(v.image_url)} target="_blank" rel="noopener" className="ssd-ver-pdf">PDF</a>}
               </div>
             </div>
           );
@@ -10655,6 +10658,117 @@ const SSD_CSS = [
   '.ssd-cf-vp:hover{box-shadow:inset 0 0 0 1px var(--ss-accent-fill)}',
   '.ssd-cf-vp:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-vp,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-vp{flex:1 1 100%}',
+  // ── Section 05: Details (header toggle, lock card, "see your price" bar, the table card) ──
+  // Height tokens. The Details editors and the row × are 28 (the × measured 30, the + Add buttons 28, the
+  // editors' inputs 28); the footer buttons are 43 (Floorplan PDF and Get Quote measured 47, Request this build 43).
+  '.ssd-frame{--ssd-dt-ctl-h:28px;--ssd-cta-h:43px}',
+  '.ssd-dt-head.is-toggle{cursor:pointer;-webkit-user-select:none;user-select:none}',
+  '.ssd-dt-tog{font-family:inherit;flex:0 0 auto;margin:0;padding:2px 0;border:0;background:none;color:var(--ss-accent-text);font-size:11.5px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}',
+  '.ssd-dt-tog:hover{text-decoration:underline}',
+  '.ssd-dt-lock{box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
+  '.ssd-dt-cta{font-family:inherit;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:2px;width:100%;min-height:48px;box-sizing:border-box;margin:0;padding:8px 18px;border:0;border-radius:4px;background:var(--ss-cta);color:var(--ss-on-cta);box-shadow:0 2px 8px var(--ss-accent-shadow);text-align:left;cursor:pointer;transition:box-shadow .15s ease}',
+  '.ssd-dt-cta:hover{box-shadow:0 3px 12px var(--ss-accent-shadow)}',
+  '.ssd-dt-cta-t{font-size:14.5px;font-weight:700;line-height:1.3}',
+  '.ssd-dt-cta-s{margin-left:auto;font-size:13px;font-weight:700;line-height:1.3;text-align:right}',
+  '.ssd-dt{min-width:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface);overflow:hidden}',
+  // Every row draws a hairline above itself; the card clips the first one.
+  '.ssd-dt-in{margin-top:-1px}',
+  '.ssd-dt-row{display:flex;flex-wrap:wrap;align-items:center;column-gap:12px;row-gap:6px;min-width:0;padding:11px 14px;border-top:1px solid var(--ss-line-faint);background:var(--ss-panel)}',
+  '.ssd-dt-row.is-bldg{padding:13px 14px;background:var(--ss-surface)}',
+  '.ssd-dt-row.is-edit{column-gap:8px}',
+  // The name block wraps above its amounts once a phone leaves it less than 150px.
+  '.ssd-dt-name{flex:1 1 150px;min-width:0}',
+  '.ssd-dt-n{font-size:13px;font-weight:700;line-height:1.3;color:var(--ss-ink);overflow-wrap:anywhere}',
+  '.ssd-dt-row.is-main .ssd-dt-n{font-size:13.5px}',
+  '.ssd-dt-d{margin-top:2px;font-size:11.5px;font-weight:400;line-height:1.4;color:var(--ss-subtle);white-space:pre-line;overflow-wrap:anywhere}',
+  '.ssd-dt-d:empty{display:none}',
+  '.ssd-dt-r{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin-left:auto;min-width:0}',
+  '.ssd-dt-qty{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:28px;box-sizing:border-box;padding:0 8px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);font-size:13px;font-weight:700;color:var(--ss-ink);font-variant-numeric:tabular-nums}',
+  '.ssd-dt-amt{min-width:92px;text-align:right;font-size:13.5px;font-weight:700;line-height:1.3;color:var(--ss-ink);font-variant-numeric:tabular-nums;white-space:nowrap}',
+  '.ssd-dt-amt.is-incl{font-weight:500;color:var(--ss-muted)}',
+  '.ssd-dt-amt.is-disc{color:#15803D}',
+  '.ssd-dt-sp{flex:0 0 auto;width:28px}',
+  '.ssd-dt-x{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;box-sizing:border-box;margin:0;padding:0;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:17px;font-weight:700;line-height:1;cursor:pointer;transition:border-color .15s ease}',
+  '.ssd-dt-x:hover{border-color:var(--ss-danger)}',
+  '.ssd-dt-h{padding:12px 14px 6px;border-top:1px solid var(--ss-line-faint);background:var(--ss-panel);font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted)}',
+  // Editors: rough-opening size / Ht / Sill, custom options, discounts and the delivery fee.
+  '.ssd-dt-rolbl{flex:0 0 auto;min-width:60px;font-size:13px;font-weight:700;color:var(--ss-ink)}',
+  '.ssd-dt-f{display:block;min-width:0;height:var(--ssd-dt-ctl-h);box-sizing:border-box;margin:0;padding:0 9px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);font-family:inherit;font-size:13px;font-weight:400;line-height:normal;color:var(--ss-ink);transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-dt-f::placeholder{color:var(--ss-placeholder);opacity:1}',
+  '.ssd-dt-f:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-dt-f.is-name{flex:1 1 0px}',
+  '.ssd-dt-f.is-ro{flex:1 1 180px;min-width:120px}',
+  '.ssd-dt-f.is-qty{flex:0 0 auto;width:50px;padding:0 4px;text-align:center}',
+  '.ssd-dt-f.is-num{flex:0 0 auto;width:58px;padding:0 6px}',
+  '.ssd-dt-f.is-invalid{border-color:#DC2626;background:#FEF2F2}',
+  '.ssd-dt-numl{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;font-size:11px;font-weight:500;color:var(--ss-muted)}',
+  '.ssd-dt-money{display:flex;align-items:center;flex:0 0 auto;width:92px;height:var(--ssd-dt-ctl-h);box-sizing:border-box;padding:0 8px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-dt-money:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-dt-money:focus-within{border-color:var(--ss-accent-fill);box-shadow:0 0 0 3px var(--ss-accent-shadow)}',
+  '.ssd-dt-cur{flex:0 0 auto;margin-right:2px;font-size:12.5px;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-dt-money-in{flex:1 1 auto;width:100%;min-width:0;height:100%;box-sizing:border-box;margin:0;padding:0;border:0;background:transparent;font-family:inherit;font-size:13px;color:var(--ss-ink);outline:none}',
+  '.ssd-dt-money-in::placeholder{color:var(--ss-placeholder);opacity:1}',
+  '.ssd-frame .ssd-dt-money-in:focus-visible{box-shadow:none}',
+  // Tax chip. TAX (taxed, the default) is a quiet accent chip; NO keeps its amber, because an untaxed line is
+  // the exception a rep has to spot at a glance. The text stays "TAX" / "NO".
+  '.ssd-dt-tax{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:24px;box-sizing:border-box;margin:0;padding:0 7px;border:1px solid var(--ss-accent-line);border-radius:3px;background:var(--ss-accent-wash);color:var(--ss-accent-deep);font-size:10px;font-weight:700;line-height:1;letter-spacing:.06em;text-transform:uppercase;cursor:pointer}',
+  '.ssd-dt-tax.is-off{border-color:#FDE68A;background:#FEF3C7;color:#B45309}',
+  '.ssd-dt-suggest{font-family:inherit;margin:0 0 0 6px;padding:0;border:0;background:none;color:var(--ss-accent-text);font-size:11.5px;font-weight:700;cursor:pointer}',
+  '.ssd-dt-suggest:hover{text-decoration:underline}',
+  '.ssd-dt-sub{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:4px;padding:14px;border-top:1px solid var(--ss-line-card);background:var(--ss-surface)}',
+  '.ssd-dt-sub-l{font-size:15px;font-weight:700;line-height:1.3;color:var(--ss-ink)}',
+  '.ssd-dt-sub-note{font-size:12px;font-weight:400;color:var(--ss-subtle)}',
+  '.ssd-dt-sub-amt{margin-left:auto;font-family:' + SSD_DISPLAY_FONT + ';font-size:21px;font-weight:700;line-height:1.2;color:var(--ss-ink);font-variant-numeric:tabular-nums;white-space:nowrap}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-dt-sub-amt{font-size:20px}',
+  '.ssd-dt-add{display:flex;flex-wrap:wrap;align-items:center;gap:9px;padding:12px 14px;border-top:1px solid var(--ss-line-faint);background:var(--ss-panel)}',
+  '.ssd-dt-addb{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;height:28px;box-sizing:border-box;margin:0;padding:0 13px;border:1px solid var(--ss-primary-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-primary);font-size:12.5px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .15s ease}',
+  '.ssd-dt-addb:hover{background:var(--ss-primary-faint)}',
+  '.ssd-dt-note{flex:1 1 240px;min-width:0;font-size:11.5px;font-weight:400;line-height:1.45;color:var(--ss-subtle)}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-dt-addb{flex:1 1 100%}',
+  // ── Row 06: the footer bar (Submit Bar) and the versions list ──
+  // The row's main cell IS the bar (a panel strip under a hairline), so the rail beside it runs on unbroken.
+  '.ssd-main.ssd-foot{margin-top:20px;padding:14px 24px;border-top:1px solid var(--ss-line-card);background:var(--ss-panel)}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-main.ssd-foot{padding:14px 20px}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="sm"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="xs"] .ssd-main.ssd-foot{padding:14px 16px}',
+  '.ssd-ft-err{margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
+  '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0}',
+  '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
+  '.ssd-ft-hint strong{font-weight:700;color:var(--ss-ink)}',
+  '.ssd-ft-btns{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:10px;min-width:0;max-width:100%}',
+  '.ssd-ft-inv{display:flex;flex-wrap:wrap;align-items:center;gap:10px;min-width:0;max-width:100%}',
+  '.ssd-select.ssd-ft-loc{width:auto;max-width:210px;height:var(--ssd-cta-h);padding-left:12px;font-size:13.5px;font-weight:700}',
+  '.ssd-ft-pdf,.ssd-ft-cta{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:var(--ssd-cta-h);box-sizing:border-box;margin:0;border-radius:4px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-ft-pdf{padding:0 18px;border:1px solid var(--ss-line);background:var(--ss-surface);color:var(--ss-ink);font-size:13.5px}',
+  '.ssd-ft-pdf:hover{background:var(--ss-panel);border-color:var(--ss-primary-line)}',
+  '.ssd-ft-cta{padding:0 26px;border:0;background:var(--ss-cta);color:var(--ss-on-cta);font-size:14.5px;box-shadow:0 2px 8px var(--ss-accent-shadow)}',
+  '.ssd-ft-cta:hover{box-shadow:0 3px 12px var(--ss-accent-shadow)}',
+  '.ssd-ft-cta:disabled{background:var(--ss-line-card);color:var(--ss-subtle);box-shadow:none;cursor:wait}',
+  '.ssd-ft-ver{margin-top:12px}',
+  // A phone: the hint takes its own line; Floorplan PDF and Get Quote share the next.
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-ft-hint{flex-basis:100%;max-width:none}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-ft-btns{flex:1 1 100%;margin-left:0}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-ft-inv{flex:1 1 100%}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-select.ssd-ft-loc{flex:1 1 0px;max-width:none;min-width:0}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-ft-pdf{flex:1 1 0px;padding:0 12px}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-ft-cta{flex:1.4 1 0px;padding:0 12px;white-space:normal;text-align:center;line-height:1.1}',
+  '.ssd-ver{box-sizing:border-box;min-width:0;padding:10px 13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);text-align:left}',
+  '.ssd-foot .ssd-ver{background:var(--ss-surface)}',
+  '.ssd-ver-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted)}',
+  '.ssd-ver-sub{margin-top:2px;font-size:11.5px;font-weight:400;line-height:1.4;color:var(--ss-subtle)}',
+  '.ssd-ver-rows{margin-top:6px}',
+  '.ssd-ver-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--ss-line-faint)}',
+  '.ssd-ver-row:first-child{border-top:0}',
+  '.ssd-ver-name{min-width:0;font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-ink);overflow-wrap:anywhere}',
+  '.ssd-ver-v{font-weight:700}',
+  '.ssd-ver-meta{font-size:11.5px;font-weight:400;color:var(--ss-subtle)}',
+  '.ssd-ver-tag{display:inline-block;margin-left:6px;padding:2px 5px;border-radius:3px;background:var(--ss-line-faint);color:var(--ss-muted);font-size:9px;font-weight:700;line-height:1.2;letter-spacing:.08em;text-transform:uppercase;vertical-align:1px}',
+  '.ssd-ver-tag.is-viewing{background:var(--ss-accent-wash);color:var(--ss-accent-deep)}',
+  '.ssd-ver-act{display:flex;align-items:center;gap:10px;flex:0 0 auto;white-space:nowrap}',
+  // Open stays a text button at the 15px it measured before the redesign (buttons must not grow).
+  '.ssd-ver-open{font-family:inherit;display:inline-flex;align-items:center;height:15px;box-sizing:border-box;margin:0;padding:0 2px;border:0;border-radius:3px;background:none;color:var(--ss-accent-text);font-size:12px;font-weight:700;line-height:15px;cursor:pointer}',
+  '.ssd-ver-open:hover{text-decoration:underline}',
+  '.ssd-ver-pdf{font-size:12px;font-weight:700;color:var(--ss-accent-text);text-decoration:none}',
+  '.ssd-ver-pdf:hover{text-decoration:underline}',
 ].join("\n");
 
 // The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
@@ -10743,7 +10857,7 @@ function SSStepRailCell({ step, total, label, done, current, first, last, onGo }
 // A section row: rail cell + main cell. With no stepKey it is an empty-rail row (banners, warnings).
 // id="ss-step-<key>" and data-ss-step="<shown number>" are new hooks; the number closes up when a
 // section does not render.
-function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, children }) {
+function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, children, mainClass }) {
   if (!stepKey) {
     return (
       <div className="ssd-row is-note">
@@ -10757,7 +10871,7 @@ function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, 
       <div className="ssd-rail">
         <SSStepRailCell step={step} total={total} label={label} done={done} current={current} first={first} last={last} onGo={onGo} />
       </div>
-      <div className="ssd-main">{children}</div>
+      <div className={"ssd-main" + (mainClass ? " " + mainClass : "")}>{children}</div>
     </div>
   );
 }
@@ -18684,6 +18798,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return { stepKey: key, step: s.n, total: ssSteps.length, label: s.label, done: s.done, current: ssCur === key,
       first: s.n === 1, last: s.n === ssSteps.length, onGo: () => ssGo(key) };
   };
+  // Section 05's toggle (redesign S6): the header row, its right-slot button and the public "see your price"
+  // bar all run this one function, which is exactly what the old Details bar's onClick did.
+  const ssToggleDetails = () => { if (!detailsLocked) setAdditionalOpen((o) => !o); };
   const ssHead = (key) => {
     const s = ssSteps.find((x) => x.key === key) || ssSteps[0];
     return `${String(s.n).padStart(2, "0")} · ${s.title}`;
@@ -18826,8 +18943,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div role="status" aria-live="polite"
           style={{ position: "fixed", left: "50%", bottom: 20, transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "calc(100% - 32px)",
             background: custNotice.tone === "err" ? "#FEF2F2" : "#F0FDF4", border: `1px solid ${custNotice.tone === "err" ? "#FECACA" : "#BBF7D0"}`,
-            color: custNotice.tone === "err" ? "#991B1B" : "#166534", borderRadius: 12, padding: "12px 16px", fontSize: 14, fontWeight: 600,
-            boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 10, alignItems: "center", boxSizing: "border-box" }}>
+            color: custNotice.tone === "err" ? "#991B1B" : "#166534", borderRadius: 4, padding: "12px 16px", fontSize: 14, fontWeight: 600,
+            boxShadow: "0 8px 24px var(--ssd-primary-a14, rgba(61, 54, 114, 0.14))", display: "flex", gap: 10, alignItems: "center", boxSizing: "border-box" }}>
           <span style={{ flex: 1 }}>{custNotice.text}</span>
           <button type="button" onClick={() => setCustNotice(null)} aria-label="Dismiss"
             style={{ background: "none", border: "none", fontSize: 16, cursor: "pointer", color: "inherit", padding: 0 }}>✕</button>
@@ -20247,42 +20364,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {!submitted && (
         <SSRow {...ssRowProps("details")}>
         <div style={{ background: "#FFF" }}>
-          {/* ONE text node ("05 · Details") until the Details slice splits it: snap.mjs openDetails
-              falls back to an element whose text is exactly "Details", which must stay the bar's title. */}
-          <SSSecHead text={ssHead("details")} />
-          {/* Public gate: Details opens only once the contact form is complete — the moment
-              a shopper asks to see prices with full contact info, they are silently saved
-              as a lead (and their design as a draft). Customer-facing this is a REAL bar
-              in the tenant's accent: it is the page's "see your price" affordance and the
-              capture moment, so it must not read as a footnote — and it keeps a right-side
-              label in EVERY state (locked explains how to unlock, unlocked invites the
-              click; an empty right side made the bar look broken the moment the form was
-              completed). Embedded keeps the quiet header business users know. */}
-          <div onClick={() => { if (!detailsLocked) setAdditionalOpen((o) => !o); }}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
-              cursor: detailsLocked ? "default" : "pointer", userSelect: "none",
-              ...(customerFacing ? {
-                // Unlocked = a SOLID accent bar with the submit button's shadow — it is the
-                // page's "see your price" call to action and reads like one. Locked stays
-                // quiet: the contact form is the customer's current job, not this bar.
-                background: detailsLocked ? "#F8FAFC" : accent,
-                border: `1.5px solid ${detailsLocked ? "#E2E8F0" : accent}`,
-                borderRadius: 10, padding: "14px 18px",
-                boxShadow: detailsLocked ? "none" : `0 4px 14px ${accent}50`,
-                transition: "all 0.2s",
-              } : {}),
-            }}>
-            {/* Text color comes from textOnAccent(): the accent is tenant-configured, so a
-                fixed color fails someone — white vanished on structure-studio's mint,
-                dark slate would vanish on a navy. Luminance decides per tenant. */}
-            <span style={{ fontSize: customerFacing ? 14.5 : 12, fontWeight: customerFacing ? 800 : 700, color: customerFacing && !detailsLocked ? textOnAccent(accent) : "#64748B", letterSpacing: 0.2 }}>Details</span>
-            {detailsLocked
-              ? <span style={{ fontSize: customerFacing ? 12.5 : 11.5, fontWeight: 600, color: customerFacing ? "#64748B" : "#94A3B8", textAlign: "right" }}>🔒 Enter all your contact information to see the quote details.</span>
-              : customerFacing
-                ? <span style={{ fontSize: 13, fontWeight: 800, color: textOnAccent(accent), textAlign: "right" }}>{additionalOpen ? "Hide quote details ▾" : "See your quote details ▸"}</span>
-                : <span style={{ fontSize: 11, color: "#94A3B8" }}>{additionalOpen ? "▾" : "▸"}</span>}
+          {/* Section 05 header (redesign S6). The eyebrow is split so "Details" is an exact span of its own
+              (snap.mjs openDetails falls back to it), and the WHOLE header runs ssToggleDetails, the toggle the
+              old bar ran, so lead capture and the draft save still fire once, from their effect, on the first
+              open. The right slot is the mockup's "Collapse ▴": "Hide quote details ▴" on the public page once
+              open, "Show details ▾" / "Hide details ▴" in the portal, and nothing while locked. */}
+          <div className={"ssd-sechead ssd-dt-head" + (detailsLocked ? "" : " is-toggle")} onClick={ssToggleDetails}>
+            <span className="ssd-sechead-t"><span aria-hidden="true">{ssHead("details").replace(/Details$/, "")}</span><span>Details</span></span>
+            <span className="ssd-sechead-rule" aria-hidden="true" />
+            {!detailsLocked && (!customerFacing || additionalOpen) && (
+              <button type="button" className="ssd-dt-tog" aria-expanded={additionalOpen}
+                onClick={(e) => { e.stopPropagation(); ssToggleDetails(); }}>
+                {customerFacing ? "Hide quote details ▴" : (additionalOpen ? "Hide details ▴" : "Show details ▾")}
+              </button>
+            )}
           </div>
+          {/* Public gate: Details opens only once the contact form is complete — the moment a shopper asks to
+              see prices with full contact info, they are silently saved as a lead (and their design as a draft).
+              Locked: the lock message in a quiet panel card, because the contact form is the customer's job right
+              now. Unlocked and closed: the "see your price" bar, a real call to action in the builder's CTA
+              colour; its text colour comes from the palette (onCta), so it reads on a light or a dark brand. */}
+          {detailsLocked && (
+            <div className="ssd-dt-lock"><span>🔒 Enter all your contact information to see the quote details.</span></div>
+          )}
+          {customerFacing && !detailsLocked && !additionalOpen && (
+            <button type="button" className="ssd-dt-cta" onClick={ssToggleDetails}>
+              <span className="ssd-dt-cta-t">Details</span>
+              <span className="ssd-dt-cta-s">See your quote details ▸</span>
+            </button>
+          )}
           {additionalOpen && !detailsLocked && (() => {
             // ── Invoice-style detail rows ─────────────────────────────────────────
             // Every row shares the same right-anchored grid: [qty 50px] [amount 85px]
@@ -20333,28 +20443,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               + priceRows.reduce((s, r) => s + (Number(r.total) || 0), 0)
               + (C.showPricing ? roTotal : 0)
               + customTotal + deliveryAmt - discountTotal);
-            const qtyCell = { width: 50, flex: "0 0 auto", textAlign: "center", fontSize: 12, color: "#64748B", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 0", background: "#F8FAFC", boxSizing: "border-box" };
-            const amtCell = { width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 12, fontWeight: 600, color: "#334155", border: "1px solid #E2E8F0", borderRadius: 6, padding: "6px 8px", background: "#F8FAFC", boxSizing: "border-box" };
-            const amtInputWrap = { display: "flex", alignItems: "center", border: "1px solid #CBD5E1", borderRadius: 6, padding: "0 6px", background: "#FFF", width: 85, flex: "0 0 auto", boxSizing: "border-box" };
-            const actSpacer = { width: 28, flex: "0 0 auto" };
-            const delBtn = { background: "#FEF2F2", color: "#DC2626", border: "1px solid #FECACA", borderRadius: 6, width: 28, height: 30, cursor: "pointer", fontSize: 14, fontWeight: 700, flexShrink: 0 };
+            // Row cells, the row ×, the editors and the add buttons are ssd-dt-* classes in SSD_CSS (redesign S6).
+            // Every amount sits in one right-hand column, and a row with no action keeps a 28px spacer.
             // A compact "Tax" toggle for the discount and custom-option rows (migration 148).
             // Deliberately a button, not a checkbox: the rows are already tight and a labelled
             // control would not fit, so the state is carried by colour + the title text. ON is
-            // the default and reads as quiet grey; OFF is amber, because "no tax on this line"
+            // the default and reads as a quiet accent chip; OFF is amber, because "no tax on this line"
             // is the exceptional state a rep should be able to spot at a glance.
             const taxBtn = (taxable, onToggle) => (
               <button type="button" onClick={onToggle}
                 title={taxable
                   ? "Sales tax is charged on this line. Click to make it non-taxable."
                   : "NOT taxed — this line sits under the non-taxable subtotal on the quote and invoice. Click to tax it."}
-                style={{
-                  flex: "0 0 auto", width: 34, height: 30, borderRadius: 6, cursor: "pointer",
-                  fontSize: 10, fontWeight: 800, letterSpacing: 0.2,
-                  border: "1px solid " + (taxable ? "#CBD5E1" : "#FDE68A"),
-                  background: taxable ? "#F8FAFC" : "#FEF3C7",
-                  color: taxable ? "#64748B" : "#B45309",
-                }}>{taxable ? "TAX" : "NO"}</button>
+                className={"ssd-dt-tax" + (taxable ? "" : " is-off")}>{taxable ? "TAX" : "NO"}</button>
             );
 
 
@@ -20398,12 +20499,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <span title="Not taxed — this line sits under the non-taxable subtotal on the quote and invoice."
                 style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 800, letterSpacing: 0.3, textTransform: "uppercase",
                          background: "#FEF3C7", color: "#B45309", border: "1px solid #FDE68A",
-                         borderRadius: 5, padding: "1px 5px", whiteSpace: "nowrap", verticalAlign: "middle" }}>no tax</span>
+                         borderRadius: 3, padding: "1px 5px", whiteSpace: "nowrap", verticalAlign: "middle" }}>no tax</span>
             ) : null;
 
-            const dashBtn = { background: "#F1F5F9", color: "#334155", border: "1px dashed #94A3B8", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" };
             return (
-          <div style={{ marginTop: 8 }}>
+          <div className="ssd-dt"><div className="ssd-dt-in">
             {/* The quote reads in Carolyn's order (2026-09-02): the building, then CLADDING and
                 its colours, then the ROOF and its colours, then a DOORS & WINDOWS section with
                 doors before windows, then everything else — taller walls and electrical
@@ -20447,20 +20547,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 .sort((a, b) => ssOpeningRank(a.key) - ssOpeningRank(b.key));
               // A layout row carries a qty and can be removed from the plan; a selection row
               // (cladding, taller walls, the electrical package) carries neither.
-              const line = (r) => {
+              const line = (r, inBuilding) => {
                 const onPlan = r.qty != null;
+                // The mockup's "Included": in the unheaded building group only, a line priced at exactly $0 is part
+                // of the building's price (cladding, roof). Everywhere else a $0.00 stays a number.
+                const included = inBuilding && r.total != null && Number(r.total) === 0;
                 return (
-                  <div key={r.key} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>{r.label}{noTaxPill(r)}</div>
-                      <div style={{ fontSize: 10.5, color: "#94A3B8", whiteSpace: "pre-line" }}>{r.detail || r.unit}</div>
+                  <div key={r.key} className={"ssd-dt-row" + (inBuilding ? " is-bldg" : "") + (r.key === "building" ? " is-main" : "")}>
+                    <div className="ssd-dt-name">
+                      <div className="ssd-dt-n">{r.label}{noTaxPill(r)}</div>
+                      <div className="ssd-dt-d">{r.detail || r.unit}</div>
                     </div>
-                    {onPlan && <div style={qtyCell}>{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>}
-                    {r.total != null ? <div style={amtCell}>{fmtMoney2(r.total)}</div> : <div style={amtCell} />}
-                    {onPlan && !planLocked
-                      ? <button title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
-                          onClick={() => removePlaced(r)} style={delBtn}>&times;</button>
-                      : <div style={actSpacer} />}
+                    <div className="ssd-dt-r">
+                      {/* Qty is read-only (it changes by placing or removing on the plan), so it is a boxed number
+                          in the stepper's shape with no − / + (redesign plan §0.2). */}
+                      {onPlan && <div className="ssd-dt-qty">{Number.isInteger(r.qty) ? r.qty : Number(r.qty).toFixed(1)}</div>}
+                      {r.total != null
+                        ? <div className={"ssd-dt-amt" + (included ? " is-incl" : "")}>{included ? "Included" : fmtMoney2(r.total)}</div>
+                        : <div className="ssd-dt-amt" />}
+                      {onPlan && !planLocked
+                        ? <button type="button" className="ssd-dt-x" title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
+                            aria-label={`Remove ${r.label}`} onClick={() => removePlaced(r)}>&times;</button>
+                        : <div className="ssd-dt-sp" />}
+                    </div>
                   </div>
                 );
               };
@@ -20468,16 +20577,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 const rows = key === "openings" ? openings : inSection(key);
                 if (!rows.length) return null;
                 return (
-                  <div key={key} style={{ marginTop: 14 }}>
-                    <div style={{ ...S.lbl, marginBottom: 8 }}>{SS_SECTION_HEADING[key]}</div>
-                    {rows.map(line)}
+                  <div key={key} className="ssd-dt-g">
+                    <div className="ssd-dt-h">{SS_SECTION_HEADING[key]}</div>
+                    {rows.map((r) => line(r, false))}
                   </div>
                 );
               };
               return (<>
                 {/* Building, cladding and roof carry no heading — they ARE the building. */}
-                <div style={{ marginBottom: 4 }}>
-                  {["building", "cladding", "roof"].map((s) => inSection(s).map(line))}
+                <div className="ssd-dt-b">
+                  {["building", "cladding", "roof"].map((s) => inSection(s).map((r) => line(r, true)))}
                 </div>
                 {section("openings")}
                 {section("options")}
@@ -20486,7 +20595,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             })()}
 
             {roList.length > 0 && (
-              <div style={{ marginTop: 14 }}>
+              <div className="ssd-dt-g">
                 {roList.map((ro) => {
                   const dim = roDimensions[ro.id] || "";
                   const invalid = !dim.trim();
@@ -20508,37 +20617,39 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     if (t !== "" && (!isFinite(n) || n < 0)) return;   // refuse, never coerce to 0
                     setItems((p) => p.map((i) => (i.id === ro.id ? { ...i, [field]: t === "" ? roDef[field] : n } : i)));
                   };
-                  const roNumBox = { width: 58, flex: "0 0 auto", border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px", fontSize: 12, outline: "none", background: "#FFF" };
-                  const roNumLbl = { display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748B", flex: "0 0 auto" };
+                  // The size, Ht and Sill fields are ssd-dt-f inputs (SSD_CSS), at the row controls' 28px.
                   const roVal = (field) => (ro[field] != null ? ro[field] : (roDef[field] != null ? roDef[field] : ""));
                   return (
-                    <div key={ro.id} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
-                      <span style={{ flex: "0 0 auto", fontSize: 12, fontWeight: 700, color: "#334155", minWidth: 60 }}>{ssRoLabel(ro, items)}</span>
+                    <div key={ro.id} className="ssd-dt-row is-edit">
+                      <span className="ssd-dt-rolbl">{ssRoLabel(ro, items)}</span>
                       <input type="text" value={dim} placeholder='Enter Rough Opening size: e.g. 3 x 6 or 29⅞ × 34½"'
                         readOnly={planLocked || undefined}
                         onChange={(e) => { if (planLocked) return; setRoDimensions((p) => ({ ...p, [ro.id]: e.target.value })); }}
-                        style={{ flex: 1, minWidth: 120, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF" }} />
-                      <label style={roNumLbl} title="How tall the opening is, in feet">
+                        className={"ssd-dt-f ssd-field is-ro" + (invalid ? " is-invalid" : "")} />
+                      <label className="ssd-dt-numl" title="How tall the opening is, in feet">
                         Ht
                         <input type="number" min="0" step="0.5" value={roVal("openingHeightFt")}
                           readOnly={planLocked || undefined}
-                          onChange={(e) => setRoNum("openingHeightFt", e.target.value)} style={roNumBox} />
+                          onChange={(e) => setRoNum("openingHeightFt", e.target.value)} className="ssd-dt-f ssd-field is-num" />
                       </label>
                       {ssIsWindowRO(ro.type) && (
-                        <label style={roNumLbl} title="How far the bottom of the opening sits off the floor, in feet">
+                        <label className="ssd-dt-numl" title="How far the bottom of the opening sits off the floor, in feet">
                           Sill
                           <input type="number" min="0" step="0.5" value={roVal("sillFt")}
                             readOnly={planLocked || undefined}
-                            onChange={(e) => setRoNum("sillFt", e.target.value)} style={roNumBox} />
+                            onChange={(e) => setRoNum("sillFt", e.target.value)} className="ssd-dt-f ssd-field is-num" />
                         </label>
                       )}
-                      {C.showPricing && (<>
-                        <div style={qtyCell}>1</div>
-                        <div style={amtCell}>{fmtMoney2(roRateOf(ro.type))}</div>
-                      </>)}
-                      {!planLocked && <button title="Remove this rough opening from the plan"
-                        onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}
-                        style={delBtn}>×</button>}
+                      <div className="ssd-dt-r">
+                        {C.showPricing && (<>
+                          <div className="ssd-dt-qty">1</div>
+                          <div className="ssd-dt-amt">{fmtMoney2(roRateOf(ro.type))}</div>
+                        </>)}
+                        {!planLocked
+                          ? <button type="button" className="ssd-dt-x" title="Remove this rough opening from the plan" aria-label={`Remove ${ssRoLabel(ro, items)}`}
+                              onClick={() => { setItems((p) => p.filter((i) => i.id !== ro.id)); setSelectedId(null); }}>×</button>
+                          : <div className="ssd-dt-sp" />}
+                      </div>
                     </div>
                   );
                 })}
@@ -20547,25 +20658,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
             {/* Custom options — added charges, one invoice row each. */}
             {customOptions.length > 0 && (
-              <div style={{ marginTop: 14 }}>
+              <div className="ssd-dt-g">
                 {customOptions.map((row, idx) => {
                   const invalid = !row.name || !row.name.trim();
                   return (
-                    <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                    <div key={idx} className="ssd-dt-row is-edit">
                       <input type="text" value={row.name} placeholder="Item name (required)"
                         onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, name: e.target.value } : r))}
-                        style={{ flex: 1, minWidth: 0, border: `1px solid ${invalid ? "#DC2626" : "#CBD5E1"}`, borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: invalid ? "#FEF2F2" : "#FFF", wordBreak: "break-word" }} />
+                        className={"ssd-dt-f ssd-field is-name" + (invalid ? " is-invalid" : "")} />
                       <input type="number" min="0" value={row.qty} placeholder="Qty"
                         onChange={(e) => { const v = e.target.value.replace(/[^0-9]/g, ""); setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, qty: v } : r)); }}
-                        style={{ width: 50, flex: "0 0 auto", border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 4px", fontSize: 12, outline: "none", textAlign: "center", boxSizing: "border-box" }} />
-                      <div style={amtInputWrap}>
-                        <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
+                        className="ssd-dt-f ssd-field is-qty" />
+                      <div className="ssd-dt-money">
+                        <span className="ssd-dt-cur">$</span>
                         <input type="number" min="0" value={row.amount} placeholder="0.00"
                           onChange={(e) => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, amount: e.target.value.replace(/[^0-9.]/g, "") } : r))}
-                          style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                          className="ssd-dt-money-in ssd-field" />
                       </div>
                       {embedded && taxBtn(row.taxable !== false, () => setCustomOptions((p) => p.map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r)))}
-                      <button onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))} style={delBtn}>×</button>
+                      <button type="button" className="ssd-dt-x" aria-label={`Remove ${row.name && row.name.trim() ? row.name.trim() : "this custom option"}`}
+                        onClick={() => setCustomOptions((p) => p.filter((_, i) => i !== idx))}>×</button>
                     </div>
                   );
                 })}
@@ -20577,30 +20689,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 row would let a shopper reopen their share link, inflate their own discount
                 and resubmit — the estimate is rebuilt from these values. */}
             {(sel.discounts || []).length > 0 && (
-              <div style={{ marginTop: 14 }}>
+              <div className="ssd-dt-g">
                 {(sel.discounts || []).map((row, idx) => (
-                  <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                  <div key={idx} className="ssd-dt-row is-edit">
                     {embedded ? (
                       <input type="text" value={row.description || ""} placeholder="Discount description"
                         onChange={(e) => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, description: e.target.value } : r) }))}
-                        style={{ flex: 1, minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "6px 8px", fontSize: 12, outline: "none", background: "#FFF", wordBreak: "break-word" }} />
+                        className="ssd-dt-f ssd-field is-name" />
                     ) : (
-                      <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "#334155", padding: "6px 0", wordBreak: "break-word" }}>{row.description || "Discount"}</div>
+                      <div className="ssd-dt-name"><div className="ssd-dt-n">{row.description || "Discount"}</div></div>
                     )}
                     {embedded ? (
-                      <div style={amtInputWrap}>
-                        <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0, whiteSpace: "nowrap" }}>−$</span>
+                      <div className="ssd-dt-money">
+                        <span className="ssd-dt-cur">−$</span>
                         <input type="number" min="0" value={row.amount || ""} placeholder="0.00"
                           onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, amount: v } : r) })); }}
-                          style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
+                          className="ssd-dt-money-in ssd-field" />
                       </div>
                     ) : (
-                      <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#059669", flexShrink: 0 }}>−${Number(row.amount || 0).toFixed(2)}</div>
+                      <div className="ssd-dt-amt is-disc">−${Number(row.amount || 0).toFixed(2)}</div>
                     )}
                     {embedded && taxBtn(row.taxable !== false, () => setSel((p) => ({ ...p, discounts: (p.discounts || []).map((r, i) => i === idx ? { ...r, taxable: r.taxable === false } : r) })))}
                     {embedded
-                      ? <button onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))} style={delBtn}>×</button>
-                      : <span style={{ width: 28, flexShrink: 0 }} />}
+                      ? <button type="button" className="ssd-dt-x" aria-label={`Remove ${row.description && String(row.description).trim() ? String(row.description).trim() : "this discount"}`}
+                          onClick={() => setSel((p) => ({ ...p, discounts: (p.discounts || []).filter((_, i) => i !== idx) }))}>×</button>
+                      : <span className="ssd-dt-sp" />}
                   </div>
                 ))}
               </div>
@@ -20611,74 +20724,73 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 not price this address the line says so with no amount — the same words the
                 issued quote will carry. */}
             {(autoDlv || dlvPending) && (
-              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery{autoDlv ? noTaxPill({ key: "delivery", total: Number(autoDlv.fee) || 0 }) : null}</div>
-                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{autoDlv ? autoDlv.desc : `To be confirmed — ${ssDeliveryReason(dlvPending.reason)}`}</div>
+              <div className="ssd-dt-row">
+                <div className="ssd-dt-name">
+                  <div className="ssd-dt-n">Delivery{autoDlv ? noTaxPill({ key: "delivery", total: Number(autoDlv.fee) || 0 }) : null}</div>
+                  <div className="ssd-dt-d">{autoDlv ? autoDlv.desc : `To be confirmed — ${ssDeliveryReason(dlvPending.reason)}`}</div>
                 </div>
-                {autoDlv && C.showPricing && autoDlv.fee != null ? <div style={amtCell}>{fmtMoney2(autoDlv.fee)}</div> : <div style={amtCell} />}
-                <div style={actSpacer} />
+                <div className="ssd-dt-r">
+                  {autoDlv && C.showPricing && autoDlv.fee != null ? <div className="ssd-dt-amt">{fmtMoney2(autoDlv.fee)}</div> : <div className="ssd-dt-amt" />}
+                  <div className="ssd-dt-sp" />
+                </div>
               </div>
             )}
 
             {/* Delivery fee — last line before the subtotal (below the discounts); rendered once
                 "+ Add Delivery Fee" is clicked or a fee is already set; × clears and hides it. */}
             {showDelivery && (
-              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
-                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>
+              <div className="ssd-dt-row is-edit">
+                <div className="ssd-dt-name">
+                  <div className="ssd-dt-n">Delivery Fee</div>
+                  <div className="ssd-dt-d">
                     {C.delivery && C.delivery.taxable ? "Taxed with the estimate" : "Non-taxable line on the estimate"}
                     {dlvSuggest != null && String(sel.deliveryFee || "") !== dlvSuggest.toFixed(2) && (
-                      <button onClick={() => setSel((p) => ({ ...p, deliveryFee: dlvSuggest.toFixed(2) }))}
-                        style={{ marginLeft: 6, background: "none", border: "none", color: "#1B7895", cursor: "pointer", fontSize: 10.5, fontWeight: 700, padding: 0 }}>
+                      <button type="button" className="ssd-dt-suggest" onClick={() => setSel((p) => ({ ...p, deliveryFee: dlvSuggest.toFixed(2) }))}>
                         Use {fmtMoney2(dlvSuggest)}{deliveryQuote.miles != null ? ` (${deliveryQuote.miles} mi${deliveryQuote.originName ? " from " + deliveryQuote.originName : ""})` : ""}
                       </button>
                     )}
                   </div>
                 </div>
-                {embedded ? (
-                  <div style={amtInputWrap}>
-                    <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
-                    <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder={dlvSuggest != null ? dlvSuggest.toFixed(2) : "0.00"}
-                      onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                      style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
-                  </div>
-                ) : (
-                  <div style={{ width: 85, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#334155", flexShrink: 0 }}>${Number(sel.deliveryFee || 0).toFixed(2)}</div>
-                )}
-                {embedded
-                  ? <button title="Remove the delivery fee"
-                      onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}
-                      style={delBtn}>×</button>
-                  : <span style={{ width: 28, flexShrink: 0 }} />}
+                <div className="ssd-dt-r">
+                  {embedded ? (
+                    <div className="ssd-dt-money">
+                      <span className="ssd-dt-cur">$</span>
+                      <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder={dlvSuggest != null ? dlvSuggest.toFixed(2) : "0.00"}
+                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                        className="ssd-dt-money-in ssd-field" />
+                    </div>
+                  ) : (
+                    <div className="ssd-dt-amt">${Number(sel.deliveryFee || 0).toFixed(2)}</div>
+                  )}
+                  {embedded
+                    ? <button type="button" className="ssd-dt-x" title="Remove the delivery fee" aria-label="Remove the delivery fee"
+                        onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}>×</button>
+                    : <span className="ssd-dt-sp" />}
+                </div>
               </div>
             )}
 
             {/* Subtotal — pre-tax; tax is address-based and applied on the estimate. */}
             {C.showPricing && (
-              <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: "2px solid #E2E8F0", marginTop: 12, paddingTop: 8 }}>
-                <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 800, color: "#1E293B" }}>
-                  Subtotal <span style={{ fontWeight: 600, color: "#94A3B8", fontSize: 10.5 }}>(before tax)</span>
-                </div>
-                <div style={{ width: 85, flex: "0 0 auto", textAlign: "right", fontSize: 13, fontWeight: 800, color: "#1E293B", padding: "6px 8px", boxSizing: "border-box" }}>{fmtMoney2(subtotal)}</div>
-                <div style={actSpacer} />
+              <div className="ssd-dt-sub">
+                <div className="ssd-dt-sub-l">Subtotal <span className="ssd-dt-sub-note">before tax</span></div>
+                <div className="ssd-dt-sub-amt">{fmtMoney2(subtotal)}</div>
               </div>
             )}
 
-            {/* Add buttons — below the subtotal, invoice-footer style. */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-              <button onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "", taxable: true }])} style={dashBtn}>+ Add Custom Option</button>
+            {/* Add buttons — below the subtotal, invoice-footer style, with today's footnote beside them. */}
+            <div className="ssd-dt-add">
+              <button type="button" className="ssd-dt-addb" onClick={() => setCustomOptions((p) => [...p, { name: "", qty: "", amount: "", taxable: true }])}>+ Add custom option</button>
               {/* Business-only: a shopper must not be able to discount their own quote or
                   invent a delivery fee. Rows already ON a reopened design still render —
                   a rep-applied discount is part of the customer's real quote. */}
-              {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))} style={dashBtn}>+ Add Discount</button>}
-              {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee{dlvSuggest != null ? ` · ${fmtMoney2(dlvSuggest)} suggested` : ""}</button>}
+              {embedded && <button type="button" className="ssd-dt-addb" onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))}>+ Add discount</button>}
+              {embedded && !showDelivery && <button type="button" className="ssd-dt-addb" onClick={() => setDeliveryOpen(true)}>+ Add delivery fee{dlvSuggest != null ? ` · ${fmtMoney2(dlvSuggest)} suggested` : ""}</button>}
+              <div className="ssd-dt-note">
+                Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
+              </div>
             </div>
-            <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
-              Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
-            </div>
-          </div>
+          </div></div>
             );
           })()}
         </div>
@@ -20690,7 +20802,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <div onClick={() => setInvDialog(null)}
           style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
           <div onClick={(e) => e.stopPropagation()}
-            style={{ background: "#FFF", borderRadius: 14, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+            style={{ background: "#FFF", borderRadius: 4, width: "min(440px, 96vw)", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
             {invDialog.done ? (
               <>
                 <div style={{ fontSize: 17, fontWeight: 800, color: "#15803D", marginBottom: 6 }}>
@@ -20707,7 +20819,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button type="button" onClick={() => setInvDialog(null)}
-                    style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
+                    style={{ background: "#1E293B", color: "#FFF", border: "none", borderRadius: 4, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
                 </div>
               </>
             ) : (
@@ -20721,7 +20833,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : "No customer needed. This goes on your Inventory list as a REQUEST and takes the next serial number automatically — it isn't on the lot yet, and won't show as available to sell until it's built and brought to a location."}
                 </div>
                 {invDialog.err && (
-                  <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
+                  <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 4, padding: "8px 12px", marginBottom: 12, color: "#DC2626", fontSize: 12.5, fontWeight: 600 }}>{invDialog.err}</div>
                 )}
                 {(() => { const loc = invLocations.find((l) => String(l.id) === String(invLocationId)); const name = loc ? (loc.city && loc.city !== loc.name ? `${loc.name} — ${loc.city}` : loc.name) : "none yet"; return (
                   <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 12 }}>Location: <b>{name}</b></div>
@@ -20730,7 +20842,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <input value={invDialog.price} inputMode="decimal" placeholder="0.00"
                   onChange={(e) => setInvDialog((d) => d && { ...d, price: e.target.value })}
                   disabled={invDialog.busy}
-                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 10px", fontSize: 13.5, background: "#FFF", color: "#1E293B" }} />
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #E2E8F0", borderRadius: 4, padding: "9px 10px", fontSize: 13.5, background: "#FFF", color: "#1E293B" }} />
                 <div style={{ fontSize: 11, color: "#94A3B8", margin: "5px 0 14px" }}>
                   Starts at this design's quoted price — a markdown here never changes your catalog.
                 </div>
@@ -20739,9 +20851,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       full-screen overlay with unsaved canvas work. Closing only drops the
                       dialog — an in-flight save still completes on the server. */}
                   <button type="button" onClick={() => setInvDialog(null)}
-                    style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+                    style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 4, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   <button type="button" onClick={saveInventory} disabled={invDialog.busy}
-                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: invDialog.busy ? "#FFF" : pal.onAccent, border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
+                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: invDialog.busy ? "#FFF" : pal.onAccent, border: "none", borderRadius: 4, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
                     {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Send request")}
                   </button>
                 </div>
@@ -20751,21 +20863,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
-      {/* Submit Bar */}
+      {/* Submit Bar — row 06's footer (redesign S6, DESIGN-SPEC 4.11): a panel bar with the hint on the left and the
+          buttons on the right. It wraps: on a phone the hint takes its own line and Floorplan PDF and Get Quote share
+          the next (Get Quote lost its minWidth 160, the known 17px overflow at 390). The buttons are --ssd-cta-h
+          (43px; Floorplan PDF and Get Quote measured 47 before, Request this build 43), so nothing grows. */}
       {!submitted && (
-        <SSRow {...ssRowProps("quote")}>
-        <div style={{ background: "#FFF", padding: "0 0 16px" }}>
+        <SSRow {...ssRowProps("quote")} mainClass="ssd-foot">
           {submitError && (
-            <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#DC2626", fontSize: 13, fontWeight: 600 }}>
+            <div className="ssd-ft-err">
               {submitError}
             </div>
           )}
-          {/* flexWrap + a 200px basis on the hint: without them Floorplan PDF (nowrap) and Get
-              Quote (minWidth 160) could not fit beside the hint at 390px and pushed the page 17px
-              sideways (measured on beta 2026-09-15). Now the hint takes its own line on a phone
-              and the two buttons share the next; on desktop nothing wraps and nothing moves. */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-            <p style={{ margin: 0, fontSize: 12, color: "#64748B", flex: "1 1 200px" }}>
+          <div className="ssd-ft">
+            <p className="ssd-ft-hint">
               {(inventoryNew || inventoryMaster)
                 ? (inventoryMaster && inventoryMaster.unitId
                   ? <>Design the building and pick its location, then click <strong>Update Inventory Building</strong>.</>
@@ -20774,88 +20884,73 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 ? <>Update your selections, then click <strong>Resubmit for Updated Estimate</strong> to refresh and re-send your quote.</>
                 : <>Place your options on the layout above, then click <strong>Get Quote</strong> to receive a detailed estimate.</>}
             </p>
-            {/* Business users can send this design to the lot instead of a customer.
-                Embedded-only: inventory is a portal feature; customers never see it. */}
-            {embedded && (inventoryNew || inventoryMaster) && (
-              <div style={{ display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>
-                {/* Where this building sits — inline so it's set right beside the Save button. */}
-                <select
-                  value={invLocationId}
-                  onChange={(e) => setInvLocationId(e.target.value)}
-                  title="Location — where this building sits on your lot"
-                  style={{
-                    border: "1.5px solid #CBD5E1", borderRadius: 10, padding: "12px 12px",
-                    fontSize: 14, fontWeight: 700, color: "#334155", background: "#FFF",
-                    cursor: "pointer", maxWidth: 210,
-                  }}
-                >
-                  <option value="">{invLocations.length ? "No location yet" : "Loading locations…"}</option>
-                  {invLocations.map((l) => (
-                    <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={openInventoryDialog}
-                  disabled={submitting || Boolean(invDialog && invDialog.busy)}
-                  style={{
-                    background: (submitting || (invDialog && invDialog.busy)) ? "#9CA3AF" : accent, color: (submitting || (invDialog && invDialog.busy)) ? "#FFF" : pal.onAccent,
-                    border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 14, fontWeight: 800,
-                    cursor: (submitting || (invDialog && invDialog.busy)) ? "wait" : "pointer",
-                    letterSpacing: "-0.01em", whiteSpace: "nowrap",
-                    boxShadow: (submitting || (invDialog && invDialog.busy)) ? "none" : `0 4px 14px ${accent}50`,
-                  }}
-                >
-                  {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Request this build"}
-                </button>
-              </div>
-            )}
-            {/* Floorplan PDF — was the toolbar's 📷 Export (Carolyn 2026-09-12: "move the Export
-                button down to the left of the Get quote and label Floorplan PDF"). Opens the
-                same preview (Download PDF / PNG / Copy). Not gated by the plan lock — printing
-                the plan changes nothing about it. */}
-            <button type="button" onClick={exportPNG}
-              style={{ background: "#FFF", color: "#334155", border: "2px solid #E2E8F0", borderRadius: 10, padding: "12px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
-              📄 Floorplan PDF
-            </button>
-            {/* Get Quote is a customer action — hidden while building/editing an inventory unit
-                (a lot building is quoted later via "Send estimate" on the Inventory tab). */}
-            {!(inventoryNew || inventoryMaster) && (
-              <button
-                onClick={submitQuote}
-                disabled={submitting}
-                style={{
-                  background: submitting ? "#9CA3AF" : accent, color: submitting ? "#FFF" : pal.onAccent, border: "none", borderRadius: 10,
-                  padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
-                  letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
-                  transition: "all 0.2s", minWidth: 160,
-                }}
-              >
-                {submitting
-                  ? (amendment ? "Saving..." : "Submitting...")
-                  : amendment ? "Save the change"
-                    : hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote"}
+            <div className="ssd-ft-btns">
+              {/* Business users can send this design to the lot instead of a customer.
+                  Embedded-only: inventory is a portal feature; customers never see it. */}
+              {embedded && (inventoryNew || inventoryMaster) && (
+                <div className="ssd-ft-inv">
+                  {/* Where this building sits — inline so it's set right beside the Save button. */}
+                  <select
+                    value={invLocationId}
+                    onChange={(e) => setInvLocationId(e.target.value)}
+                    title="Location — where this building sits on your lot"
+                    className="ssd-select ssd-field ssd-ft-loc"
+                  >
+                    <option value="">{invLocations.length ? "No location yet" : "Loading locations…"}</option>
+                    {invLocations.map((l) => (
+                      <option key={l.id} value={l.id}>{l.name}{l.city ? ` — ${l.city}` : ""}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={openInventoryDialog}
+                    disabled={submitting || Boolean(invDialog && invDialog.busy)}
+                    className="ssd-ft-cta"
+                  >
+                    {inventoryMaster && inventoryMaster.unitId ? "Update Inventory Building" : "Request this build"}
+                  </button>
+                </div>
+              )}
+              {/* Floorplan PDF — was the toolbar's 📷 Export (Carolyn 2026-09-12: "move the Export
+                  button down to the left of the Get quote and label Floorplan PDF"). Opens the
+                  same preview (Download PDF / PNG / Copy). Not gated by the plan lock — printing
+                  the plan changes nothing about it. */}
+              <button type="button" onClick={exportPNG} className="ssd-ft-pdf">
+                📄 Floorplan PDF
               </button>
-            )}
+              {/* Get Quote is a customer action — hidden while building/editing an inventory unit
+                  (a lot building is quoted later via "Send estimate" on the Inventory tab). */}
+              {!(inventoryNew || inventoryMaster) && (
+                <button
+                  onClick={submitQuote}
+                  disabled={submitting}
+                  className="ssd-ft-cta is-quote"
+                >
+                  {submitting
+                    ? (amendment ? "Saving..." : "Submitting...")
+                    : amendment ? "Save the change"
+                      : hasExistingEstimate ? "Resubmit for Updated Estimate" : "Get Quote"}
+                </button>
+              )}
+            </div>
           </div>
           {estimateVersions.length > 0 && (() => {
             // viewingVersion null = the latest; a version no longer in the list falls back to it.
             const viewing = viewingVersion != null && estimateVersions.some((v) => v.version === viewingVersion)
               ? viewingVersion : estimateVersions[0].version;
             return (
-              <div style={{ marginTop: 14, borderTop: "1px solid #F1F5F9", paddingTop: 12 }}>
-                <SSVersionList versions={estimateVersions} viewing={viewing} accent={accent} onOpen={(n) => { openVersion(n); }} />
+              <div className="ssd-ft-ver">
+                <SSVersionList versions={estimateVersions} viewing={viewing} onOpen={(n) => { openVersion(n); }} />
               </div>
             );
           })()}
-        </div>
         </SSRow>
       )}
 
       {/* Success Screen */}
       {submitted && (
         <SSRow {...ssRowProps("quote")}>
-        <div style={{ background: "#F0FDF4", borderTop: "2px solid #BBF7D0", padding: "32px 20px", textAlign: "center" }}>
+        <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 4, marginBottom: 16, padding: "32px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>
             {savedDesign && savedDesign.ssQuote
@@ -20877,14 +20972,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               2026-09-12 wants the plan still printable from here. One row, every branch. */}
           <div style={{ marginTop: 14 }}>
             <button type="button" onClick={exportPNG}
-              style={{ background: "#FFF", color: "#334155", border: "2px solid #BBF7D0", borderRadius: 10, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              style={{ background: "#FFF", color: "#334155", border: "2px solid #BBF7D0", borderRadius: 4, padding: "10px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "17px", fontWeight: 700, cursor: "pointer" }}>
               📄 Floorplan PDF
             </button>
           </div>
           {savedDesign && savedDesign.changeOrder && !savedDesign.changeOrder.draft && (
             /* This revision changed a SIGNED order (migration 126): the customer must
                acknowledge it before the order can be invoiced. */
-            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
               This changes an order the customer already signed — change order
               {savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} needs their
               approval (they sign from their quote page, or record their verbal OK on the order). Invoicing
@@ -20897,7 +20992,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               saved change sits on the order with the customer hearing nothing and the rep
               believing it was sent. Three ways forward, and "keep editing" is one of them. */}
           {savedDesign && savedDesign.changeOrder && savedDesign.changeOrder.draft && (
-            <div style={{ maxWidth: 560, margin: "14px auto 0", background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 10, padding: "12px 16px", fontSize: 13, textAlign: "left", lineHeight: 1.55 }}>
+            <div style={{ maxWidth: 560, margin: "14px auto 0", background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 4, padding: "12px 16px", fontSize: 13, textAlign: "left", lineHeight: 1.55 }}>
               <div style={{ fontWeight: 800, marginBottom: 4 }}>
                 Change{savedDesign.changeOrder.coNo != null ? ` CO-${savedDesign.changeOrder.coNo}` : ""} saved — the customer hasn't been told yet
               </div>
@@ -20908,17 +21003,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
                 <button type="button" disabled={amendBusy}
                   onClick={() => finishAmendment("send")}
-                  style={{ ...S.btn(accent, pal.onAccent), padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
+                  style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "8px 14px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px", opacity: amendBusy ? 0.6 : 1 }}>
                   {amendBusy ? "Working…" : "Send it for signature"}
                 </button>
                 <button type="button" disabled={amendBusy}
                   onClick={() => finishAmendment("attest")}
-                  style={{ ...S.btn("#FFF", "#92400E"), border: "2px solid #FCD34D", padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
+                  style={{ ...S.btn("#FFF", "#92400E"), border: "2px solid #FCD34D", borderRadius: 4, padding: "8px 14px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px", opacity: amendBusy ? 0.6 : 1 }}>
                   Record their OK verbally
                 </button>
                 <button type="button" disabled={amendBusy}
                   onClick={() => { setSubmitted(false); setAmendMsg(null); }}
-                  style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", padding: "8px 14px", fontSize: 13 }}>
+                  style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", borderRadius: 4, padding: "8px 14px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px" }}>
                   Keep editing
                 </button>
               </div>
@@ -20934,7 +21029,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             && !(savedDesign.changeOrder && savedDesign.changeOrder.draft) && (
             /* The quote exists but no email went out (no address on file, or the tenant's
                sending domain isn't live). Silence here reads as "the customer got it". */
-            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
               Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
             </div>
           )}
@@ -20946,7 +21041,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           {embedded && savedDesign && savedDesign.ssQuote && !(savedDesign.changeOrder && savedDesign.changeOrder.draft)
             && (savedDesign.quoteTexted === true || (savedDesign.quoteTextReason && savedDesign.quoteTextReason !== "not_first_issue")) && (
             <div data-quote-texted={savedDesign.quoteTexted === true ? "yes" : "no"}
-              style={{ maxWidth: 520, margin: "10px auto 0", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left",
+              style={{ maxWidth: 520, margin: "10px auto 0", borderRadius: 4, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left",
                 ...(savedDesign.quoteTexted === true
                   ? { background: "#ECFDF5", border: "1px solid #A7F3D0", color: "#065F46" }
                   : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569" }) }}>
@@ -20956,12 +21051,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
           {savedDesign && savedDesign.deliveryUnpriced && (
-            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: 12, fontSize: 12.5 }}>
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 4, padding: 12, fontSize: 12.5 }}>
               Delivery isn&rsquo;t on this quote yet{savedDesign.deliveryUnpriced.miles != null ? ` (${savedDesign.deliveryUnpriced.miles} miles${savedDesign.deliveryUnpriced.originName ? " from " + savedDesign.deliveryUnpriced.originName : ""})` : ""} &mdash; it will be confirmed separately.
             </div>
           )}
           {savedDesign && (
-            <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+            <div style={{ maxWidth: 520, margin: "20px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 4, padding: 14, textAlign: "left" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" }}>Design ID</span>
                 <span style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", letterSpacing: "0.05em", fontFamily: "monospace" }}>{savedDesign.code}</span>
@@ -20977,7 +21072,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
                   {savedDesign.quotePdfUrl && (
                     <a href={savedDesign.quotePdfUrl} target="_blank" rel="noopener"
-                      style={{ ...S.btn(accent, pal.onAccent), padding: "9px 16px", fontSize: 13, textDecoration: "none" }}>
+                      style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "17px", textDecoration: "none" }}>
                       Print quote (PDF)
                     </a>
                   )}
@@ -20994,7 +21089,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, done);
                       else { window.prompt("Copy the customer link:", link); }
                     }}
-                    style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "9px 16px", fontSize: 13 }}>
+                    style={{ ...S.btn("#FFF", pal.accentText), border: `2px solid ${accent}`, borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px" }}>
                     Copy customer link
                   </button>
                   )}
@@ -21056,7 +21151,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           setPushBusy(false);
                         }
                       }}
-                      style={{ ...S.btn("#0F766E", "#FFF"), padding: "9px 16px", fontSize: 13, opacity: pushBusy ? 0.6 : 1, cursor: pushBusy ? "default" : "pointer" }}>
+                      style={{ ...S.btn("#0F766E", "#FFF"), borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px", opacity: pushBusy ? 0.6 : 1, cursor: pushBusy ? "default" : "pointer" }}>
                       {pushBusy ? "Creating invoice..." : "Push to Invoice"}
                     </button>
                   )}
@@ -21066,7 +21161,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   NOT a failure — the invoice is real and printable, the email just did not go
                   (paper-first, portal-settings). So it reads as a warning beside the links. */}
               {savedDesign.ssQuote && pushed && (
-                <div style={{ marginTop: 10, padding: "10px 12px", background: "#F0FDFA", border: "1px solid #99F6E4", borderRadius: 8 }}>
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#F0FDFA", border: "1px solid #99F6E4", borderRadius: 4 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "#0F766E" }}>
                     Invoice {pushed.invoiceNumber} created{pushed.sent ? " and emailed" : ""}
                   </div>
@@ -21090,7 +21185,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
               )}
               {savedDesign.ssQuote && pushErr && (
-                <div style={{ marginTop: 10, padding: "10px 12px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, fontSize: 12.5, color: "#991B1B" }}>
+                <div style={{ marginTop: 10, padding: "10px 12px", background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 4, fontSize: 12.5, color: "#991B1B" }}>
                   {pushErr}
                 </div>
               )}
@@ -21109,10 +21204,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 custName={contact.name || (custIdentity && custIdentity.name) || ""}
                 onExpired={expireCustSession} />
             ) : (
-              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
+              <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 4, padding: 14, textAlign: "left" }}>
                 <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this quote right here.</div>
                 <button type="button" onClick={() => openLoginSheet()}
-                  style={{ ...S.btn(accent, pal.onAccent), padding: "9px 16px", fontSize: 13 }}>
+                  style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "9px 16px", fontFamily: "inherit", fontSize: 13, lineHeight: "15px" }}>
                   Verify your phone to accept this quote
                 </button>
               </div>
@@ -21122,14 +21217,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // The success screen always shows the version just submitted ([0]) as Viewing.
             // Open leaves the success screen FIRST, so the plan is mounted by the time
             // openVersion scrolls to it.
-            <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
-              <SSVersionList versions={estimateVersions} viewing={estimateVersions[0].version} accent={accent} onOpen={(n) => { setSubmitted(false); openVersion(n); }} />
+            <div style={{ maxWidth: 520, margin: "16px auto 0", textAlign: "left" }}>
+              <SSVersionList versions={estimateVersions} viewing={estimateVersions[0].version} onOpen={(n) => { setSubmitted(false); openVersion(n); }} />
             </div>
           )}
           <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginTop: 20 }}>
             <button
               onClick={() => { setSubmitted(false); }}
-              style={{ ...S.btn("#FFF", accent), border: `2px solid ${accent}`, padding: "10px 24px", fontSize: 14 }}
+              style={{ ...S.btn("#FFF", pal.accentText), border: `2px solid ${accent}`, borderRadius: 4, padding: "10px 24px", fontFamily: "inherit", fontSize: 14, lineHeight: "16px" }}
             >
               Review to make additional changes
             </button>
@@ -21177,7 +21272,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setViewingVersion(null);
                 if (!embedded) window.history.replaceState({}, "", window.location.pathname);
               }}
-              style={{ ...S.btn(accent, pal.onAccent), padding: "10px 24px", fontSize: 14 }}
+              style={{ ...S.btn(accent, pal.onAccent), borderRadius: 4, padding: "10px 24px", fontFamily: "inherit", fontSize: 14, lineHeight: "16px" }}
             >
               Start New Quote
             </button>
@@ -21194,8 +21289,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return (
         <div data-ss-toast={info ? "info" : "warn"} style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 1100, maxWidth: 460, width: "90%" }}>
           <div style={{
-            background: info ? "#F0FDF4" : "#FFFBEB", border: `2px solid ${info ? "#22C55E" : "#F59E0B"}`, borderRadius: 12, padding: "14px 20px",
-            boxShadow: "0 8px 30px rgba(0,0,0,0.15)", display: "flex", gap: 12, alignItems: "flex-start",
+            background: info ? "#F0FDF4" : "#FFFBEB", border: `2px solid ${info ? "#22C55E" : "#F59E0B"}`, borderRadius: 4, padding: "14px 20px",
+            boxShadow: "0 8px 24px var(--ssd-primary-a14, rgba(61, 54, 114, 0.14))", display: "flex", gap: 12, alignItems: "flex-start",
           }}>
             <span style={{ fontSize: 24, lineHeight: 1, flexShrink: 0 }}>{info ? "✅" : "⚠️"}</span>
             <div style={{ flex: 1 }}>
