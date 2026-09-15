@@ -1193,6 +1193,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .eq("client_id", clientId)
         .maybeSingle() as any);
     }
+    // The builder's default login-code channel (migration 231). ITS OWN READ, AND TOLERANT, ON
+    // PURPOSE: `status` is the portal shell's bootstrap, so naming customer_login_default in the
+    // select above would fail this action — and black out every tenant's portal — if this deploys
+    // before 231 is applied. A failed read shows "text", which is what the default means anyway.
+    const { data: loginPref, error: loginPrefErr } = canRead("settings_crm")
+      ? await admin.from("client_settings").select("customer_login_default").eq("client_id", clientId).maybeSingle()
+      : { data: null, error: null };
     // STATUS FIELD FILTER. This action is "open" in GATES because it is the shell's
     // bootstrap: every role needs clientId/role/branding/business identity to render the
     // portal at all, so denying it would black out the app rather than close one card. The
@@ -1245,6 +1252,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         coFeeLabel: data?.co_fee_label ?? "Change order fee",
         coUnlockHours: Number(data?.co_unlock_hours ?? 72),
         ssTaxDelivery: data?.ss_tax_delivery === true,
+        // "Customer login code: Text / Email" (migration 231). 'sms' | 'email'; null and a failed
+        // read both mean text.
+        customerLoginDefault: !loginPrefErr && loginPref?.customer_login_default === "email" ? "email" : "sms",
         // For the Settings card's email warning (decision 5, 2026-08-23: warn-but-allow):
         // in SS mode there is no GHL fallback, so a tenant without live sending can't
         // email quotes/invoices at all — the card says so, loudly, without blocking.
