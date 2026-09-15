@@ -15,7 +15,11 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // never throws, never blocks the app. Auto-captures uncaught errors + unhandled promise
 // rejections; the component also reports submit/render failures via window.ssLogError. ──
 const SS_ERR_SOURCE = "designer";
-function ssLogError(source, message, code, context) {
+// `severity` is optional and defaults to "error", so every existing call site keeps its meaning
+// (the same signature as portal/01-core.jsx and admin.app.jsx). The designer passes "info" for a
+// REFUSAL, e.g. submit-estimate's 4xx (2026-09-15). Before this the public page dropped the 5th
+// argument, and every refused Get Quote landed in the fault queue as an error.
+function ssLogError(source, message, code, context, severity) {
   try {
     const params = new URLSearchParams(location.search);
     fetch(SUPABASE_URL + "/rest/v1/rpc/log_error", {
@@ -40,6 +44,7 @@ function ssLogError(source, message, code, context) {
         // fragment achieves the identical goal and is the strictly smaller change.
         p_url: location.href.split("#")[0].slice(0, 600),
         p_context: context || null,
+        p_severity: severity || "error",
       }),
     }).catch(() => {});
   } catch (_) { /* logging must never break the app */ }
