@@ -10465,6 +10465,79 @@ const SSD_CSS = [
   '.ssd-chip{border-color:var(--ss-line);background:var(--ss-surface);color:var(--ss-ink);font-weight:500;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
   '.ssd-chip:hover{border-color:var(--ss-primary-line);background:var(--ss-panel)}',
   '.ssd-chip.is-on{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent);font-weight:700}',
+  // ── Section 03: option-group cards, option chips, segmented controls, coverage chips, Included callout ──
+  // One height token for every chip in the options grid. 28px is the text-only chips' height before the
+  // redesign (Batt, Floor, Electrical Package); the emoji chips were 33 and come down to it, so a card
+  // row of mixed chips lines up and nothing grows. min-height, so a catalogue name too long for a narrow
+  // card wraps inside its chip instead of pushing the page sideways.
+  '.ssd-frame{--ssd-chip-h:28px}',
+  // The palette row is a wrapping flex row; the sub-head, the grid and the callout each take a full line.
+  '.ssd-sechead.ssd-pal-sub{flex:0 0 100%;margin:0 0 4px}',
+  '.ssd-og{flex:0 0 100%;min-width:0;display:grid;gap:11px;grid-template-columns:repeat(4,minmax(0,1fr));align-items:stretch}',
+  // lg (a 1000–1179 designer): four cards only when each is at least 250px wide, else three, so a label like
+  // "Rough Opening (Window)" with its WALL tag stays on one line on a 1024 laptop.
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-og{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-og,.ssd-frame[data-ssd-bp="sm"] .ssd-og{grid-template-columns:repeat(2,minmax(0,1fr))}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-og{grid-template-columns:minmax(0,1fr)}',
+  '.ssd-og > .is-solo{grid-column:1/-1}',
+  '.ssd-ogc{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
+  '.ssd-ogc-t{display:block;margin:0 0 10px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ssd-ogc-b{display:flex;flex-wrap:wrap;align-items:center;gap:7px;min-width:0}',
+  '.ssd-ogc-line{flex:0 0 100%;display:flex;min-width:0}',
+  // Option chip: the tool buttons (ssToolBtn), the electrical package and the foundation toggles.
+  '.ssd-tool{font-family:inherit;display:inline-flex;align-items:center;gap:6px;max-width:100%;min-width:0;min-height:var(--ssd-chip-h);box-sizing:border-box;margin:0;padding:0 10px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);font-size:12.5px;font-weight:500;line-height:1.2;text-align:left;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,color .15s ease,box-shadow .15s ease}',
+  '.ssd-tool:hover{border-color:var(--ss-primary-line);background:var(--ss-panel)}',
+  '.ssd-tool.is-armed{background:var(--ss-accent-wash);border-color:var(--ss-accent-fill);box-shadow:inset 0 0 0 1px var(--ss-accent-fill);color:var(--ss-accent-deep);font-weight:700}',
+  '.ssd-tool.is-on{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent);font-weight:700}',
+  '.ssd-tool:disabled{opacity:.5;cursor:not-allowed}',
+  '.ssd-tool:disabled:hover{border-color:var(--ss-line);background:var(--ss-surface)}',
+  '.ssd-tool-ic{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-size:14px;line-height:1}',
+  // The Electrical Items bolt in the fixed `bolt` colour. Where the browser cannot draw the emoji as text
+  // it stays the colour emoji; the DOM text is the same either way.
+  '.ssd-tool-ic.is-bolt{font-size:13px;color:var(--ss-bolt);font-variant-emoji:text}',
+  '.ssd-tool-sq{display:block;width:12px;height:12px;box-sizing:border-box;border-radius:2px;border:1px solid rgba(0,0,0,.12)}',
+  // The WALL tag: DOM text "wall", uppercased here (textContent and accessible names keep "wall").
+  '.ssd-wall{flex:0 0 auto;padding:2px 5px;border-radius:3px;background:var(--ss-line-faint);color:var(--ss-muted);font-size:9px;font-weight:700;line-height:1.1;letter-spacing:.08em;text-transform:uppercase}',
+  // Segmented control (insulation type now; S4's wall height and vent placement reuse it).
+  '.ssd-seg{display:inline-flex;max-width:100%;box-sizing:border-box;border:1px solid var(--ss-line);border-radius:4px;overflow:hidden;background:var(--ss-surface)}',
+  '.ssd-seg-b{font-family:inherit;display:inline-flex;align-items:center;justify-content:center;height:calc(var(--ssd-chip-h) - 2px);box-sizing:border-box;margin:0;padding:0 12px;border:0;border-left:1px solid var(--ss-line);border-radius:0;background:var(--ss-surface);color:var(--ss-ink);font-size:12.5px;font-weight:500;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,color .15s ease}',
+  '.ssd-seg-b:first-child{border-left:0}',
+  '.ssd-seg-b:hover{background:var(--ss-panel)}',
+  '.ssd-seg-b.is-on{background:var(--ss-accent-fill);color:var(--ss-on-accent);font-weight:700}',
+  '.ssd-frame .ssd-seg-b:focus-visible{outline-offset:-3px}',
+  // Coverage chip (insulation areas; "Entire building" is the dashed one).
+  '.ssd-cov{font-family:inherit;display:inline-flex;align-items:center;min-height:var(--ssd-chip-h);box-sizing:border-box;margin:0;padding:0 11px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);font-size:12.5px;font-weight:500;line-height:1.2;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
+  '.ssd-cov:hover{border-color:var(--ss-primary-line);background:var(--ss-panel)}',
+  '.ssd-cov.is-on{background:var(--ss-primary-soft);border-color:var(--ss-primary);color:var(--ss-primary);font-weight:700}',
+  '.ssd-cov.is-all{border-style:dashed;border-color:var(--ss-primary-dash);background:var(--ss-primary-soft);color:var(--ss-primary);font-weight:700}',
+  '.ssd-cov.is-all.is-on{border-style:solid;border-color:var(--ss-primary)}',
+  // Foundation: a toggle, and beside it the Qty / Feet / Sq ft box when the method needs a number.
+  '.ssd-fd{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;max-width:100%;min-width:0}',
+  '.ssd-fd-q{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-fd-q .ssd-input{display:inline-block;width:58px;height:var(--ssd-select-h);padding:0 7px;font-size:12.5px}',
+  // Included callout (after the option cards, above the toolbar: Carolyn 2026-09-14).
+  '.ssd-incl{flex:0 0 100%;min-width:0;box-sizing:border-box;margin-top:5px;padding:13px 14px;border:1px solid var(--ss-accent-line);border-left:3px solid var(--ss-accent-fill);border-radius:4px;background:var(--ss-accent-wash)}',
+  '.ssd-incl-head{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:9px;row-gap:2px;margin:0 0 10px;min-width:0}',
+  '.ssd-incl-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-accent-deep)}',
+  '.ssd-incl-sub{font-size:11.5px;font-weight:400;line-height:1.3;color:var(--ss-accent-muted)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-incl-sub,.ssd-frame[data-ssd-bp="sm"] .ssd-incl-sub,.ssd-frame[data-ssd-bp="xs"] .ssd-incl-sub{flex-basis:100%}',
+  '.ssd-incl-chips{display:flex;flex-wrap:wrap;align-items:center;gap:9px;min-width:0}',
+  // The chip is a SPAN holding the unchanged tool button and the decline button (a button cannot hold one).
+  '.ssd-incl-chip{display:inline-flex;align-items:center;max-width:100%;min-width:0;min-height:30px;box-sizing:border-box;padding:0 3px 0 0;border:1px solid var(--ss-accent-chip-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);transition:background-color .15s ease,border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-incl-chip:hover{border-color:var(--ss-accent-fill)}',
+  '.ssd-incl-chip.is-placed{background:var(--ss-accent-wash)}',
+  '.ssd-incl-chip.is-armed{background:var(--ss-accent-wash);border-color:var(--ss-accent-fill);box-shadow:inset 0 0 0 1px var(--ss-accent-fill)}',
+  '.ssd-incl-check{flex:0 0 auto;padding-left:10px;color:var(--ss-accent-deep);font-size:13px;font-weight:700;line-height:1}',
+  '.ssd-tool.is-incl{min-height:28px;padding:0 6px 0 11px;border:0;border-radius:3px;background:transparent;box-shadow:none;font-size:13px}',
+  '.ssd-tool.is-incl:hover{background:transparent;color:var(--ss-accent-deep)}',
+  '.ssd-tool.is-incl.is-armed{background:transparent;box-shadow:none;color:var(--ss-accent-deep);font-weight:700}',
+  '.ssd-incl-chip.is-placed .ssd-tool.is-incl{padding-left:6px}',
+  '.ssd-incl-x{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;box-sizing:border-box;margin:0;padding:0;border:0;border-radius:3px;background:transparent;color:var(--ss-subtle);font-size:14px;font-weight:400;line-height:1;cursor:pointer;transition:color .15s ease,background-color .15s ease}',
+  '.ssd-incl-x:hover{color:var(--ss-danger);background:var(--ss-danger-wash)}',
+  '.ssd-incl-chip.is-declined{gap:6px;padding:0 4px 0 11px}',
+  '.ssd-incl-name{font-size:13px;font-weight:500;line-height:1.2;color:var(--ss-subtle);text-decoration:line-through}',
+  '.ssd-incl-undo{font-family:inherit;margin:0;padding:5px 6px;border:0;border-radius:3px;background:transparent;color:var(--ss-accent-text);font-size:12px;font-weight:700;line-height:1;cursor:pointer}',
+  '.ssd-incl-undo:hover{background:var(--ss-accent-wash)}',
 ].join("\n");
 
 // The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
@@ -10523,10 +10596,11 @@ function SSDesignerFrame({ pal, children }) {
 
 // Section eyebrow. `text` arrives as ONE string ("01 · Select your building style"), so a screen
 // reader reads it as one phrase; the uppercase is CSS only (innerText shows it, textContent does not).
-function SSSecHead({ text, sub, right }) {
+// `className` adds a class to the row; `tProps` lands on the text span (a data-* test hook, for one).
+function SSSecHead({ text, sub, right, className, tProps }) {
   return (
-    <div className={sub ? "ssd-sechead is-sub" : "ssd-sechead"}>
-      <span className="ssd-sechead-t">{text}</span>
+    <div className={(sub ? "ssd-sechead is-sub" : "ssd-sechead") + (className ? " " + className : "")}>
+      <span className="ssd-sechead-t" {...(tProps || {})}>{text}</span>
       <span className="ssd-sechead-rule" aria-hidden="true" />
       {right || null}
     </div>
@@ -18415,7 +18489,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // back to looking untouched. Same for the electrical-item picker.
   const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
   const armedElecItem = (cfg) => (cfg.isElecItemPicker && ITEMS[activeTool] && ITEMS[activeTool].electricalItemId) ? activeTool : null;
-  const ssToolBtn = ([key, cfg]) => (
+  const ssToolArmed = (key, cfg) => !!(activeTool === key || armedShelf(cfg) || armedElecItem(cfg));
+  // Redesign S3: the look is the option chip in SSD_CSS (.ssd-tool), so hover and the armed state are
+  // classes, not inline colours. `variant` "incl" is the borderless button inside an Included chip;
+  // `list.map(btn)` passes an index in that slot, which is never "incl". The accessible name is
+  // unchanged: the icon, the label as a bare text node, then "wall" (uppercased by CSS only).
+  const ssToolBtn = ([key, cfg], variant) => (
     <button key={key} onClick={() => {
         if (gateRequired) { setGateOpen(true); return; }
         // Shelving opens its popup instead of arming; choosing there arms the real tool.
@@ -18427,15 +18506,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         }
         setActiveTool(activeTool === key ? null : key); setSelectedId(null);
       }}
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer", transition: "all 0.15s", position: "relative",
-        background: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#F8FAFC",
-        color: (activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? "#FFF" : "#334155",
-        border: `2px solid ${(activeTool === key || armedShelf(cfg) || armedElecItem(cfg)) ? cfg.color : "#E2E8F0"}`,
-      }}>
-      <span style={{ fontSize: 14, display: "inline-flex", alignItems: "center" }}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : cfg.icon}</span>
+      className={"ssd-tool" + (variant === "incl" ? " is-incl" : "") + (ssToolArmed(key, cfg) ? " is-armed" : "")}>
+      <span className={cfg.isElecItemPicker ? "ssd-tool-ic is-bolt" : "ssd-tool-ic"}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : (cfg.icon || <span className="ssd-tool-sq" style={{ background: cfg.color }} />)}</span>
       {(armedShelf(cfg) || armedElecItem(cfg)) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
-      {(cfg.wallOnly || cfg.wallSnap) && <span style={{ fontSize: 9, opacity: 0.7, background: (activeTool === key || armedShelf(cfg)) ? "rgba(255,255,255,0.25)" : "#F1F5F9", borderRadius: 3, padding: "1px 4px" }}>wall</span>}
+      {(cfg.wallOnly || cfg.wallSnap) && <span className="ssd-wall">wall</span>}
     </button>
   );
   // Note and Line moved OUT of the options grid onto the bottom row (Carolyn 2026-09-02). They
@@ -18991,19 +19065,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const u = inclUnit(key);
             return { ...cfg, label: u ? `${cfg.label} (${q} ${u})` : `${cfg.label} ×${q}` };
           };
+          // Placed = the submit gate's own test (an instance of the item, or of a fixture that is it, is on
+          // the plan). Presentation only: the chip shows "✓" and a wash; the gate itself is untouched.
+          const inclPlaced = (key) => items.some((it) => it.type === key || it.fixtureItemId === key);
           const inclBtn = ([key, rawCfg]) => { const cfg = withQty(key, rawCfg); return declined.includes(key)
             ? (
-              <span key={key} title="You declined this included item — it'll show as a deduction on your estimate unless you place it again"
-                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, background: "#F1F5F9", color: "#94A3B8", border: "2px dashed #CBD5E1" }}>
-                <span style={{ textDecoration: "line-through" }}>{cfg.label}</span>
-                <button onClick={() => toggleDecline(key)} title="Add it back" style={{ background: "transparent", border: "none", cursor: "pointer", color: "#334155", fontWeight: 700, fontSize: 11 }}>Undo</button>
+              <span key={key} className="ssd-incl-chip is-declined" title="You declined this included item — it'll show as a deduction on your estimate unless you place it again">
+                <span className="ssd-incl-name">{cfg.label}</span>
+                <button onClick={() => toggleDecline(key)} title="Add it back" className="ssd-incl-undo">Undo</button>
               </span>
             )
             : (
-              <span key={key} style={{ display: "inline-flex", alignItems: "center" }}>
-                {btn([key, cfg])}
-                <button onClick={() => toggleDecline(key)} title={`Decline ${cfg.label} (deduction)`}
-                  style={{ marginLeft: 2, background: "transparent", border: "none", cursor: "pointer", color: "#94A3B8", fontWeight: 800, fontSize: 13, lineHeight: 1 }}>✕</button>
+              <span key={key} className={"ssd-incl-chip" + (ssToolArmed(key, cfg) ? " is-armed" : "") + (inclPlaced(key) ? " is-placed" : "")}>
+                {inclPlaced(key) && <span className="ssd-incl-check" aria-hidden="true">✓</span>}
+                {btn([key, cfg], "incl")}
+                <button onClick={() => toggleDecline(key)} title={`Decline ${cfg.label} (deduction)`} aria-label={`Decline ${cfg.label}`}
+                  className="ssd-incl-x">✕</button>
               </span>
             ); };
           // Sections (Doors · Windows · Interior · …). An item carrying no `group` — which is
@@ -19028,12 +19105,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (by[""] && by[""].length) out.push(["Annotate", by[""]]);
             return out;
           };
-          // Groups pair up either side of a rule down the centre — Carolyn's shape, 2026-09-02:
-          // doors left, windows right, and so on. Four groups become two rows instead of four,
-          // and a fifth (Electrical) costs half a row rather than a whole one.
-          //
-          // A GRID, not a flex row, because the rule has to span every row: it is one element at
-          // column 2 with gridRow "1 / -1". Cells name their own column and let rows auto-flow.
+          // Groups are cards in one grid (redesign S3): 4 columns on a wide designer, 2 at tablet widths,
+          // 1 on a phone — the old two-column split with a rule down the centre never collapsed, so a
+          // phone got two cramped columns. Order: the groups, the electrical-only card, Insulation,
+          // Foundation. The breakpoint is the frame's data-ssd-bp, so the columns are classes.
           // One type for the whole building, then the areas — which is how it is sold. The data
           // model keeps a type PER AREA so a mixed job stays expressible, but offering that in
           // the UI would mean three type pickers in one grid cell.
@@ -19058,26 +19133,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           });
           const insAll = insAreas.length > 1 && insAreas.every(insHas);
           const insCell = insAreas.length ? (
-            <div>
-              <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>Insulation</span>
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-                {insTypes.length > 1 && insTypes.map((t) => (
-                  <button key={t} onClick={() => insSetType(t)}
-                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                      background: insType === t ? "#0F766E" : "#F8FAFC", color: insType === t ? "#FFF" : "#334155",
-                      border: `2px solid ${insType === t ? "#0F766E" : "#E2E8F0"}` }}>{INSULATION_TYPE_LABEL[t] || t}</button>
-                ))}
-                {insTypes.length > 1 && <span style={{ width: 1, height: 18, background: "#CBD5E1", margin: "0 2px" }} />}
+            <div key="ss-insulation" className="ssd-ogc">
+              <span className="ssd-ogc-t">Insulation</span>
+              <div className="ssd-ogc-b">
+                {insTypes.length > 1 && (
+                  <div className="ssd-ogc-line">
+                    <div className="ssd-seg">
+                      {insTypes.map((t) => (
+                        <button key={t} onClick={() => insSetType(t)} aria-pressed={insType === t}
+                          className={insType === t ? "ssd-seg-b is-on" : "ssd-seg-b"}>{INSULATION_TYPE_LABEL[t] || t}</button>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {insAreas.map((a) => (
-                  <button key={a} onClick={() => insToggle(a)}
-                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                      background: insHas(a) ? "#14B8A6" : "#F8FAFC", color: insHas(a) ? "#FFF" : "#334155",
-                      border: `2px solid ${insHas(a) ? "#14B8A6" : "#E2E8F0"}` }}>{INSULATION_AREA_LABEL[a]}</button>
+                  <button key={a} onClick={() => insToggle(a)} aria-pressed={insHas(a)}
+                    className={insHas(a) ? "ssd-cov is-on" : "ssd-cov"}>{INSULATION_AREA_LABEL[a]}</button>
                 ))}
                 {insAreas.length > 1 && (
                   <button onClick={() => setSel((p) => ({ ...p, insulation: insAll ? [] : insAreas.map((a) => ({ type: insType, area: a })) }))}
-                    style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                      background: "#F8FAFC", color: "#334155", border: "2px dashed #CBD5E1" }}>
+                    className={insAll ? "ssd-cov is-all is-on" : "ssd-cov is-all"}>
                     {insAll ? "Clear" : "Entire building"}
                   </button>
                 )}
@@ -19097,9 +19172,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           });
           const fdSetQty = (id, v) => setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).map((f) => (f.id === id ? { ...f, qty: v === "" ? null : v } : f)) }));
           const fdCell = fdOffered.length ? (
-            <div>
-              <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>Foundation</span>
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            <div key="ss-foundation" className="ssd-ogc">
+              <span className="ssd-ogc-t">Foundation</span>
+              <div className="ssd-ogc-b">
                 {fdOffered.map((o) => {
                   const en = fdEntry(o.id);
                   const on = !!en;
@@ -19107,17 +19182,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   const word = basis === "each" ? "Qty" : basis === "lineal_ft" ? "Feet" : basis === "sqft_option" ? "Sq ft" : null;
                   const dflt = basis === "each" ? "1" : basis === "sqft_option" ? String(Math.round((Number(bldgW) || 0) * (Number(bldgH) || 0))) : "";
                   return (
-                    <span key={o.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                      <button onClick={() => fdToggle(o.id)}
-                        style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
-                          background: on ? "#14B8A6" : "#F8FAFC", color: on ? "#FFF" : "#334155",
-                          border: `2px solid ${on ? "#14B8A6" : "#E2E8F0"}` }}>{foundationLabelOf(o)}</button>
+                    <span key={o.id} className="ssd-fd">
+                      <button onClick={() => fdToggle(o.id)} aria-pressed={on}
+                        className={on ? "ssd-tool is-on" : "ssd-tool"}>{foundationLabelOf(o)}</button>
                       {on && word && (
-                        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748B" }}>{word}
+                        <label className="ssd-fd-q">{word}
                           <input type="number" min="0" step="1" value={en.qty != null ? en.qty : dflt} placeholder={dflt || "0"}
                             readOnly={planLocked || undefined}
                             onChange={(ev) => fdSetQty(o.id, ev.target.value.replace(/[^0-9.]/g, ""))}
-                            style={{ width: 58, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 6px", fontSize: 12, outline: "none", background: "#FFF" }} />
+                            className="ssd-input ssd-field" />
                         </label>
                       )}
                     </span>
@@ -19156,11 +19229,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const elecBtn = elecCfg ? (
             <button key="ss-elec-pkg" onClick={toggleElectrical}
               title={elecAutoN ? `Lays out ${elecAutoN.outlet} outlets every ${elecCfg.outletSpacingFt} ft, ${elecAutoN.lightFixture} light(s) every ${elecCfg.lightSpacingFt} ft, and a switch by the door` : "Choose a size first"}
-              disabled={!elecAutoN}
-              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 7,
-                fontSize: 12, fontWeight: 700, cursor: elecAutoN ? "pointer" : "not-allowed",
-                background: elecOn ? "#7C3AED" : "#F8FAFC", color: elecOn ? "#FFF" : "#334155",
-                border: `2px solid ${elecOn ? "#7C3AED" : "#E2E8F0"}`, opacity: elecAutoN ? 1 : 0.5 }}>
+              disabled={!elecAutoN} aria-pressed={elecOn}
+              className={elecOn ? "ssd-tool is-on" : "ssd-tool"}>
               {elecOn ? "✓ " : ""}{elecCfg.label || "Electrical Package"}
             </button>
           ) : null;
@@ -19169,9 +19239,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // No groups at all — every tenant whose config predates palette groups. Unchanged.
             if (!secs) return addl.map(btn);
             const cellOf = ([label, list, gkey], i) => (
-              <div key={label || ("ss-ungrouped-" + i)} style={{ gridColumn: i % 2 === 0 ? 1 : 3, minWidth: 0 }}>
-                {label && <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>{label}</span>}
-                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+              <div key={label || ("ss-ungrouped-" + i)} className="ssd-ogc">
+                {label && <span className="ssd-ogc-t">{label}</span>}
+                <div className="ssd-ogc-b">
                   {/* The package sits with the devices it lays out, under one heading, rather
                       than as a second cell also called Electrical. */}
                   {gkey === "electrical" && elecBtn}
@@ -19179,13 +19249,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
               </div>
             );
-            // One group has nothing to pair with; a lone cell beside an empty column and half a
-            // rule reads as broken layout, so it renders flat.
+            // One group renders as one full-width card, with the same buttons as before (its own only).
             if (secs.length === 1) {
               return (
-                <div key="ss-one-group" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%" }}>
-                  {secs[0][0] && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>{secs[0][0]}</span>}
-                  {secs[0][1].map(btn)}
+                <div key="ss-one-group" className="ssd-og">
+                  <div className="ssd-ogc is-solo">
+                    {secs[0][0] && <span className="ssd-ogc-t">{secs[0][0]}</span>}
+                    <div className="ssd-ogc-b">{secs[0][1].map(btn)}</div>
+                  </div>
                 </div>
               );
             }
@@ -19199,26 +19270,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // group for the button to live in, so it gets its own cell.
             if (elecBtn && !secs.some((s) => s[2] === "electrical")) {
               cells.push(
-                <div key="ss-electrical" style={{ gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 }}>
-                  <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>{PALETTE_GROUP_LABEL.electrical}</span>
-                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>{elecBtn}</div>
+                <div key="ss-electrical" className="ssd-ogc">
+                  <span className="ssd-ogc-t">{PALETTE_GROUP_LABEL.electrical}</span>
+                  <div className="ssd-ogc-b">{elecBtn}</div>
                 </div>
               );
             }
-            if (insCell) cells.push(React.cloneElement(insCell, { key: "ss-insulation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
-            if (fdCell) cells.push(React.cloneElement(fdCell, { key: "ss-foundation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
+            if (insCell) cells.push(insCell);
+            if (fdCell) cells.push(fdCell);
             return (
-              <div key="ss-split" style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", columnGap: 18, rowGap: 12, alignItems: "start", width: "100%" }}>
-                <div style={{ gridColumn: 2, gridRow: "1 / -1", background: "#CBD5E1", width: 1 }} />
+              <div key="ss-split" className="ssd-og">
                 {cells}
               </div>
             );
           };
           if (incl.length === 0) {
-            // With sections each carries its own heading, so the single "Place:" label would
+            // With sections each carries its own heading, so the single "Place" sub-head would
             // just be a fifth heading with nothing under it.
             return (<>
-              {!sectionsOf(addl) && <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Place:</span>}
+              {!sectionsOf(addl) && <SSSecHead sub text="Place" className="ssd-pal-sub" />}
               {renderAddl()}
             </>);
           }
@@ -19230,12 +19300,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // tool buttons, ✕ and Undo are the same elements at the same size — and the submit gate
           // (every included item placed or declined, in submitQuote) is untouched. width:100%
           // children force line breaks inside the wrapping flex row.
+          // Redesign S3: the same order and the same elements, restyled — a sub-head carrying the
+          // data-ss-additional-options hook (designer.spec finds it by that), the group cards, then the
+          // callout with its title and a plain-language subtitle, and each chip a span around the tool
+          // button and its decline button.
           return (<>
-            <span style={{ ...S.lbl, marginRight: 4, fontSize: 10 }}>Additional options:</span>
+            <SSSecHead sub text="Additional options" className="ssd-pal-sub" tProps={{ "data-ss-additional-options": "1" }} />
             {renderAddl()}
-            <div data-ss-included="1" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, width: "100%", marginTop: 6, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 8, padding: "6px 10px" }}>
-              <span style={{ ...S.lbl, marginRight: 4, fontSize: 10, color: "#15803D" }}>✓ Included — place or decline:</span>
-              {incl.map(inclBtn)}
+            <div data-ss-included="1" className="ssd-incl">
+              <div className="ssd-incl-head">
+                <span className="ssd-incl-t">Included with this building — place or decline</span>
+                <span className="ssd-incl-sub">These are already in the price</span>
+              </div>
+              <div className="ssd-incl-chips">{incl.map(inclBtn)}</div>
             </div>
           </>);
         })()}

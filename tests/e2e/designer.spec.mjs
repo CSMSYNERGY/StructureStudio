@@ -372,7 +372,8 @@ test("the Included callout sits after Additional options and before Clear floorp
   await expect(callout).toContainText(/Included/i);
   const order = await page.evaluate(() => {
     const inc = document.querySelector("[data-ss-included]");
-    const lbl = [...document.querySelectorAll("span")].find((s) => s.textContent.trim() === "Additional options:");
+    // Redesign S3: the sub-head reads "Additional options" (no colon) and carries a hook attribute.
+    const lbl = document.querySelector("[data-ss-additional-options]");
     const clear = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Clear floorplan");
     const after = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
     return { label: !!lbl, clear: !!clear, afterLabel: after(lbl, inc), beforeClear: after(inc, clear) };
