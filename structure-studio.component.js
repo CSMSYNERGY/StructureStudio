@@ -15926,6 +15926,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
     setSubmitting(true);
     setSubmitError(null);
+    // The canvas stops being "this draft": no draft save may touch the row again, and the refresh
+    // pointer goes (the URL's ?id= reopens it, and load_design re-reads draft or sent from the row).
+    // The generation bump stops a draft save started during the submit from re-adopting the code.
+    // It runs on success, and on any failure after submit-estimate was called that is not a
+    // definite refusal (see the catch).
+    const releaseDraft = () => {
+      isDraftRef.current = false;
+      draftStateRef.current = null;
+      draftGenRef.current += 1;
+      if (!embedded) { try { localStorage.removeItem(draftKey); } catch (_e) {} }
+    };
+    let invoked = false;   // true once the submit-estimate request has been sent
 
     try {
       // 1. Render the export canvas — page 1 of the quote PDF. If the customer
@@ -16062,9 +16074,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // server promotes a draft to 'sent' in submit-estimate, at the moment the estimate or quote
       // becomes real. save_design no longer does it on this save. So a submit that is refused
       // leaves the design a draft, and the local draft state has to survive with it: isDraftRef,
-      // draftStateRef and the refresh pointer are dropped only after submit-estimate answers ok
-      // (below). Dropping them here, before the answer, is how SS-TRJNVZJW5Z read as submitted
-      // after a refusal, with no draft left to autosave or restore.
+      // draftStateRef and the refresh pointer are dropped (releaseDraft) only once submit-estimate
+      // answers ok, or fails in a way that may have come after it issued (the catch below). Dropping
+      // them here, before the answer, is how SS-TRJNVZJW5Z read as submitted after a refusal, with
+      // no draft left to autosave or restore.
       // The generation bump stays HERE: a draft save already in flight (a first one mints its own
       // code) must not adopt its code over this one while submit-estimate is still running.
       draftGenRef.current += 1;
@@ -16387,6 +16400,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // address so beta estimates silently failed to send; the per-tenant address plus the
       // refuse-if-unset rule are what make this version safe to have back.
       const betaMode = typeof window !== "undefined" && /(^|\.)beta(\.|--)/.test(window.location.hostname);
+      invoked = true;   // from here a lost or failed answer may hide a quote the server issued (see the catch)
       const { data: result, error: fnErr } = await supabase.functions.invoke("submit-estimate", {
         body: { ...payload, betaMode },
       });
@@ -16408,6 +16422,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         const fnFail = new Error(detail);
         fnFail.ssFn = "submit-estimate";
         if (fnErr.context && typeof fnErr.context.status === "number") fnFail.ssStatus = fnErr.context.status;
+        // A relay error is the gateway failing around the function, whatever status it carries.
+        // The function may still have run, so for the draft it never counts as a definite refusal.
+        if (fnErr.name === "FunctionsRelayError") fnFail.ssRelay = true;
         throw fnFail;
       }
       if (!result?.ok) {
@@ -16418,12 +16435,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       // Issued. Only now is this a submitted design that draft saves must leave alone (see the
       // comment after save_design above), and the refresh pointer goes: the URL's ?id= reopens a
-      // sent quote now. The second generation bump stops a draft save started during the submit
-      // from re-adopting the code.
-      isDraftRef.current = false;
-      draftStateRef.current = null;
-      draftGenRef.current += 1;
-      if (!embedded) { try { localStorage.removeItem(draftKey); } catch (_e) {} }
+      // sent quote now.
+      releaseDraft();
 
       // Persist the returned GHL IDs so subsequent edits update the same estimate.
       if (result.contactId) ghlContactIdRef.current = result.contactId;
@@ -16475,6 +16488,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // network error, a 5xx and a 200 with ok:false all stay error.
       const failStatus = err && typeof err.ssStatus === "number" ? err.ssStatus : null;
       const refusal = Boolean(err && err.ssRefusal) || (failStatus >= 400 && failStatus < 500);
+      // ONLY A DEFINITE REFUSAL KEEPS THE DRAFT (review 2026-09-15). A failure before
+      // submit-estimate was called (the PDF upload, save_design and its lock, the payload) issued
+      // nothing, and neither did a 4xx from submit-estimate: the server declines before it issues,
+      // and it marks a design sent only after its last refusal. Anything else once the request is
+      // out can come AFTER the quote was issued and the row marked sent. That covers a dropped
+      // connection, a relay error, a 5xx (a worker limit after the promote), a 200 with ok:false,
+      // and a throw after the answer. Keeping the draft then lets autosave rewrite a sent quote's
+      // design and items, because save_design protects only its status. So the draft goes the way
+      // it does on success. A reload still finds the truth: ?id= is already in the URL.
+      if (invoked && !(refusal && !(err && err.ssRelay))) releaseDraft();
       if (window.ssLogError) window.ssLogError("designer", (err && err.message) || "submit failed", failStatus ? ("http_" + failStatus) : null, {
         phase: "submitQuote", status: failStatus, fn: (err && err.ssFn) || null, embedded: Boolean(embedded),
         designCode: currentDesignIdRef.current || null, stack: err && err.stack ? String(err.stack).slice(0, 2000) : null,
