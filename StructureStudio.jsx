@@ -10701,7 +10701,13 @@ const SSD_CSS = [
   // Height tokens. The Details editors and the row × are 28 (the × measured 30, the + Add buttons 28, the
   // editors' inputs 28); the footer buttons are 43 (Floorplan PDF and Get Quote measured 47, Request this build 43).
   '.ssd-frame{--ssd-dt-ctl-h:28px;--ssd-cta-h:43px}',
-  '.ssd-dt-head.is-toggle{cursor:pointer;-webkit-user-select:none;user-select:none}',
+  '.ssd-dt-head.is-toggle{position:relative;z-index:0;cursor:pointer;-webkit-user-select:none;user-select:none}',
+  // The header text is a 19px line, so its tap area reaches 13px up into the row's top padding and 12px down into
+  // the header's own bottom margin: 44px to tap, nothing moves (the old full-width bar was 50). The header's own
+  // children sit above that layer (inside the header's stacking context), so "Details" and the toggle button are
+  // still what a click on them hits, and the layer only catches the space around them.
+  '.ssd-dt-head.is-toggle::before{content:"";position:absolute;left:0;right:0;top:-13px;bottom:-12px}',
+  '.ssd-dt-head.is-toggle > *{position:relative;z-index:1}',
   '.ssd-dt-tog{font-family:inherit;flex:0 0 auto;margin:0;padding:2px 0;border:0;background:none;color:var(--ss-accent-text);font-size:11.5px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}',
   '.ssd-dt-tog:hover{text-decoration:underline}',
   '.ssd-dt-lock{box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
@@ -10736,6 +10742,10 @@ const SSD_CSS = [
   '.ssd-dt-f::placeholder{color:var(--ss-placeholder);opacity:1}',
   '.ssd-dt-f:hover{border-color:var(--ss-primary-line)}',
   '.ssd-dt-f.is-name{flex:1 1 0px}',
+  // A phone: a rep's custom-option / discount name takes its own line (beside Qty, $, TAX and × it kept ~90px and
+  // cut its placeholder to "Item name (r"); the controls that follow sit right-aligned on the next line.
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-dt-f.is-name{flex-basis:100%}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-dt-f.is-name + *{margin-left:auto}',
   '.ssd-dt-f.is-ro{flex:1 1 180px;min-width:120px}',
   '.ssd-dt-f.is-qty{flex:0 0 auto;width:50px;padding:0 4px;text-align:center}',
   '.ssd-dt-f.is-num{flex:0 0 auto;width:58px;padding:0 6px}',
@@ -10769,6 +10779,9 @@ const SSD_CSS = [
   '.ssd-main.ssd-foot{margin-top:20px;padding:14px 24px;border-top:1px solid var(--ss-line-card);background:var(--ss-panel)}',
   '.ssd-frame[data-ssd-bp="lg"] .ssd-main.ssd-foot{padding:14px 20px}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="sm"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="xs"] .ssd-main.ssd-foot{padding:14px 16px}',
+  // The portal's Designer tab: its fixed Feedback pill (right 20, bottom 20, 38px tall) sat over Get Quote at the
+  // end of the scroll. The bar keeps 72px under its buttons so they finish above the pill at every width.
+  '.ssd-frame.is-embedded .ssd-main.ssd-foot{padding-bottom:72px}',
   '.ssd-ft-err{margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
   '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0}',
   '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
@@ -10843,7 +10856,9 @@ function ssdBreakpoint(w) {
 // re-lays-out elements other observers already measured this frame, so the browser fires a window
 // "ResizeObserver loop completed with undelivered notifications" error on every breakpoint change,
 // and the global error hooks turn each one into an app_errors row.
-function SSDesignerFrame({ pal, children }) {
+// `embedded` (the portal's Designer tab) adds is-embedded, which keeps the footer buttons clear of the
+// portal's fixed Feedback pill in the bottom-right corner.
+function SSDesignerFrame({ pal, embedded, children }) {
   const roRef = useRef(null);
   const rafRef = useRef(0);
   const attach = useCallback((el) => {
@@ -10864,7 +10879,7 @@ function SSDesignerFrame({ pal, children }) {
     }
   }, []);
   return (
-    <div ref={attach} className="ssd-frame" style={ssdVarsFor(pal)}>
+    <div ref={attach} className={embedded ? "ssd-frame is-embedded" : "ssd-frame"} style={ssdVarsFor(pal)}>
       <style>{SSD_CSS}</style>
       {children}
     </div>
@@ -18867,7 +18882,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
-      <SSDesignerFrame pal={pal}>
+      <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
@@ -20614,7 +20629,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       {onPlan && !planLocked
                         ? <button type="button" className="ssd-dt-x" title={r.method === "each" ? "Remove one from the plan" : "Remove from the plan"}
                             aria-label={`Remove ${r.label}`} onClick={() => removePlaced(r)}>&times;</button>
-                        : <div className="ssd-dt-sp" />}
+                        // The unheaded building group has no × to line up with, so (as in the mockup) its amounts sit
+                        // flush right, level with the Subtotal; headed groups keep the spacer under their × column.
+                        : inBuilding ? null : <div className="ssd-dt-sp" />}
                     </div>
                   </div>
                 );
