@@ -3235,6 +3235,282 @@ function textOnAccent(hex) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.4 ? "#1E293B" : "#FFFFFF";
 }
 
+// ss-brand-palette:start
+// ss-brand-palette.mjs: builder brand -> designer role colours.
+// Pure, no dependencies. The only DOM use is optional: resolving CSS colour names through a canvas.
+
+const WHITE = { r: 255, g: 255, b: 255 }
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x))
+
+// The mockup's own palette. It is the fallback, and the reference that tints are measured against.
+const MOCKUP = {
+  // neutrals (the primary hue family)
+  ink: '#2b2745', muted: '#6f6a8f', subtle: '#8f8aa8', placeholder: '#a8a3bd',
+  line: '#d9d5e8', lineCard: '#e6e3f0', lineSoft: '#eceaf4', lineFaint: '#f2f0f8',
+  panel: '#fbfaff', surface: '#ffffff', tileArtTop: '#f4f6fa', tileArtBottom: '#e8edf6',
+  // primary (indigo)
+  primary: '#3d3672', onPrimary: '#ffffff', primaryFaint: '#f7f5ff', primarySoft: '#f4f1fd',
+  primaryWash: '#f0edfb', primaryRail: '#dcd7ee', primaryLine: '#cdc7e4', primaryDash: '#9c94c4', planGrid: '#edeaf6',
+  // accent (teal) and its washes (mint)
+  accentFill: '#1b7895', onAccent: '#ffffff', accentText: '#1b7895', accentDeep: '#136075', accentMuted: '#4a8595',
+  accentWash: '#f2fcfb', accentLine: '#9fe0d6', accentChipLine: '#7fcfc4', accentRail: '#d6e6ec',
+  tileSelTop: '#eef3fb', tileSelBottom: '#dbeaff', accentShadow: 'rgba(27, 120, 149, 0.22)',
+  cta: '#75e6da', onCta: '#10303a',
+  // fixed, never branded
+  danger: '#a8342f', dangerWash: '#fdf4f4', dangerLine: '#efc9c9', bolt: '#e0a11b',
+  // header
+  headerBg: 'linear-gradient(97deg, #3d3672 0%, #2f4a7f 52%, #1b7895 100%)',
+  onHeader: '#ffffff', onHeaderMuted: 'rgba(255, 255, 255, 0.72)',
+  headerChipBg: 'rgba(255, 255, 255, 0.16)', headerChipLine: 'rgba(255, 255, 255, 0.28)', headerLine: 'transparent',
+}
+
+const NEUTRAL_KEYS = ['ink', 'muted', 'subtle', 'placeholder', 'line', 'lineCard', 'lineSoft', 'lineFaint', 'panel', 'tileArtTop', 'tileArtBottom']
+const PRIMARY_KEYS = ['primaryFaint', 'primarySoft', 'primaryWash', 'primaryRail', 'primaryLine', 'primaryDash', 'planGrid']
+const ACCENT_KEYS = ['accentDeep', 'accentMuted', 'accentWash', 'accentLine', 'accentChipLine', 'accentRail', 'tileSelTop', 'tileSelBottom']
+
+// ---------- colour maths ----------
+const hexToRgb = (h) => ({ r: parseInt(h.slice(1, 3), 16), g: parseInt(h.slice(3, 5), 16), b: parseInt(h.slice(5, 7), 16) })
+const hex = (c) => '#' + [c.r, c.g, c.b].map((v) => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('')
+const rgba = (c, a) => `rgba(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)}, ${a})`
+
+function rgbToHsl({ r, g, b }) {
+  r /= 255; g /= 255; b /= 255
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2
+  if (max === min) return [0, 0, l]
+  const d = max - min, s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4
+  return [h * 60, s, l]
+}
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360 / 360
+  if (s === 0) return { r: l * 255, g: l * 255, b: l * 255 }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q
+  const f = (t) => { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p }
+  return { r: f(h + 1 / 3) * 255, g: f(h) * 255, b: f(h - 1 / 3) * 255 }
+}
+const lin = (v) => { v = clamp(Math.round(v), 0, 255) / 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }
+const lum = (c) => 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+const contrast = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) }
+const mix = (a, b, t) => ({ r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t })
+const over = (fg, alpha, bg) => mix(bg, fg, alpha)
+
+// ---------- parsing (hex, rgb(), hsl(), names; gradients yield their stops) ----------
+const KEYWORDS = new Set(('linear radial conic repeating gradient to left right top bottom at center circle ellipse closest ' +
+  'farthest side corner in srgb oklab oklch hsl hwb lab lch longer shorter increasing decreasing hue none inherit initial unset currentcolor').split(' '))
+
+function parseColor(tok) {
+  if (tok == null) return null
+  const s = String(tok).trim().toLowerCase()
+  let m
+  if ((m = /^#([0-9a-f]{3,8})$/.exec(s))) {
+    let h = m[1]
+    if (h.length === 3 || h.length === 4) h = h.split('').map((c) => c + c).join('')
+    if (h.length !== 6 && h.length !== 8) return null
+    if (h.length === 8 && parseInt(h.slice(6, 8), 16) === 0) return null        // fully transparent
+    return hexToRgb('#' + h.slice(0, 6))
+  }
+  if ((m = /^(rgba?|hsla?)\(([^)]*)\)$/.exec(s))) {
+    const p = m[2].split(/[\s,/]+/).filter(Boolean)
+    if (p.length < 3 || (p[3] !== undefined && parseFloat(p[3]) === 0)) return null
+    const n = p.slice(0, 3).map(parseFloat)
+    if (n.some(isNaN)) return null
+    if (m[1].startsWith('rgb')) {
+      const ch = (v, i) => clamp(p[i].endsWith('%') ? v * 2.55 : v, 0, 255)
+      return { r: ch(n[0], 0), g: ch(n[1], 1), b: ch(n[2], 2) }
+    }
+    return hslToRgb(n[0], clamp(n[1] / 100, 0, 1), clamp(n[2] / 100, 0, 1))
+  }
+  if (/^[a-z]{3,20}$/.test(s) && !KEYWORDS.has(s) && typeof document !== 'undefined') {
+    const ctx = (parseColor.ctx = parseColor.ctx || document.createElement('canvas').getContext('2d'))
+    if (!ctx) return null
+    ctx.fillStyle = '#010203'; ctx.fillStyle = s                                  // an invalid name leaves the sentinel
+    return ctx.fillStyle === '#010203' ? null : parseColor(ctx.fillStyle)
+  }
+  return null
+}
+function colorStops(css) {
+  if (!css) return []
+  const toks = String(css).match(/#[0-9a-f]{3,8}\b|(?:rgba?|hsla?)\([^)]*\)|\b[a-z]{3,20}\b/gi) || []
+  return toks.map(parseColor).filter(Boolean)
+}
+
+// ---------- contrast tools ----------
+// Move fg's HSL lightness away from bg (darker on a light bg, lighter on a dark one) by the smallest step that reaches min.
+function ensureContrast(fg, bg, min) {
+  if (contrast(fg, bg) >= min) return fg
+  const [h, s, l] = rgbToHsl(fg)
+  const darken = lum(bg) > 0.18
+  if (contrast(hslToRgb(h, s, darken ? 0 : 1), bg) < min) return darken ? { r: 0, g: 0, b: 0 } : WHITE
+  let ok = darken ? 0 : 1, bad = l
+  for (let i = 0; i < 24; i++) { const mid = (ok + bad) / 2; contrast(hslToRgb(h, s, mid), bg) >= min ? (ok = mid) : (bad = mid) }
+  let out = hslToRgb(h, s, ok)
+  for (let i = 0; i < 20 && contrast(hexToRgb(hex(out)), bg) < min; i++) out = hslToRgb(h, s, (ok += darken ? -0.004 : 0.004))
+  return hexToRgb(hex(out))                                                         // 8-bit rounding re-checked
+}
+// Best text colour for a fill: white, or a deep shade of the fill's own hue. If neither reaches min, the FILL moves.
+function pickOn(bg, min = 4.5) {
+  const [h, s] = rgbToHsl(bg)
+  const [dark, darker] = [0.14, 0.07].map((L) => hexToRgb(hex(hslToRgb(h, Math.min(s, 0.57), L))))
+  const cw = contrast(WHITE, bg)
+  if (cw >= min && cw >= contrast(dark, bg)) return { bg, fg: WHITE }
+  for (const d of [dark, darker]) if (contrast(d, bg) >= min) return { bg, fg: d }
+  if (cw >= min) return { bg, fg: WHITE }
+  return cw >= contrast(darker, bg) ? { bg: ensureContrast(bg, WHITE, min), fg: WHITE } : { bg: ensureContrast(bg, darker, min), fg: darker }
+}
+function tintFamily(t, keys, refHex, brand) {
+  const [rh, rs] = rgbToHsl(hexToRgb(refHex)), [bh, bs] = rgbToHsl(brand)
+  const k = rs > 0 ? Math.min(1, bs / rs) : 0                                       // a grey brand gives grey tints
+  for (const key of keys) {
+    const [h, s, l] = rgbToHsl(hexToRgb(MOCKUP[key]))
+    let dh = ((h - rh + 540) % 360) - 180
+    if (Math.abs(dh) > 12) dh = 0                                                   // keep small hue offsets only
+    t[key] = hex(hslToRgb(bh + dh, s * k, l))
+  }
+}
+// Integer steps (i / 50 = 0.72, 0.74 …) so the alpha that was tested is the alpha that is printed,
+// plus 0.05 of headroom for the browser's own compositing rounding.
+const alphaFor = (fg, bgs, min) => {
+  for (let i = 36; i < 50; i++) { const a = i / 50; if (bgs.every((b) => contrast(over(fg, a, b), b) >= min + 0.05)) return a }
+  return 1
+}
+
+// ---------- the derivation ----------
+function ssBrandPalette(branding) {
+  const b = branding || {}
+  const accentIn = colorStops(b.accentColor)[0] || null
+  const hdrStops = colorStops(b.headerBg)
+  // No parseable stop = the header value is ignored (never echo a gradient we could not read under white text).
+  const hdrGradient = hdrStops.length > 0 && (hdrStops.length > 1 || /gradient\s*\(/i.test(String(b.headerBg || '')))
+  const t = { ...MOCKUP }
+  const R = (k) => hexToRgb(t[k])
+
+  // 1. Primary + neutrals follow the header colour (its darkest stop), forced to 4.5:1 against white.
+  if (hdrStops.length) {
+    const base = hdrStops.reduce((d, c) => (lum(c) < lum(d) ? c : d))
+    const P = ensureContrast(base, WHITE, 4.5)
+    tintFamily(t, NEUTRAL_KEYS.concat(PRIMARY_KEYS), MOCKUP.primary, P)
+    t.primary = hex(P)
+  }
+  // 2. Accent + CTA follow accentColor.
+  if (accentIn) {
+    const [ah, as] = rgbToHsl(accentIn)
+    const redLike = as > 0.4 && (ah >= 343 || ah <= 23)                             // never let "included" look like "delete"
+    tintFamily(t, ACCENT_KEYS, MOCKUP.accentFill, redLike ? R('primary') : accentIn)
+    // State fills need 3:1 against white AND 4.5:1 text. If the text search pushed the fill back under 3:1,
+    // darken the fill until WHITE text passes instead (that always clears 3:1 too).
+    // Measured against the PANEL (#fbfaff-ish), the darker of the two grounds a fill sits on.
+    const ground = R('panel')
+    let fill = pickOn(ensureContrast(accentIn, ground, 3), 4.5)
+    if (contrast(fill.bg, ground) < 3) fill = { bg: ensureContrast(accentIn, WHITE, 4.5), fg: WHITE }
+    t.accentFill = hex(fill.bg); t.onAccent = hex(fill.fg)
+    t.accentText = hex(accentIn)
+    t.accentShadow = rgba(fill.bg, 0.22)
+    const cta = pickOn(accentIn, 4.5)                                               // the CTA keeps the raw brand colour when it can
+    t.cta = hex(cta.bg); t.onCta = hex(cta.fg)
+  }
+  // 3. Text contrast, enforced on every palette (the fallback too).
+  const worse = (...ks) => ks.map(R).reduce((d, c) => (lum(c) < lum(d) ? c : d))
+  const RULES = [
+    ['ink', ['panel'], 7], ['muted', ['panel', 'lineFaint'], 4.5], ['subtle', ['panel'], 4.5], ['placeholder', ['surface'], 3],
+    ['primary', ['primaryWash'], 4.5], ['accentText', ['panel', 'accentWash'], 4.5],
+    ['accentDeep', ['accentWash'], 4.5], ['accentMuted', ['accentWash'], 4.5], ['danger', ['dangerWash'], 4.5],
+  ]
+  for (const [fg, bgs, min] of RULES) t[fg] = hex(ensureContrast(R(fg), worse(...bgs), min))
+  t.onPrimary = hex(pickOn(R('primary')).fg)
+
+  // 4. Header.
+  if (hdrStops.length || accentIn) {
+    const E = ensureContrast(accentIn || hexToRgb(MOCKUP.accentFill), WHITE, 4.5)
+    const solidH = !hdrGradient && hdrStops[0]
+    if (hdrGradient) {                                                              // builder's own gradient: keep it verbatim
+      const worstW = Math.min(...hdrStops.map((c) => contrast(WHITE, c)))
+      const ink = R('ink'), worstI = Math.min(...hdrStops.map((c) => contrast(ink, c)))
+      let bgCss = String(b.headerBg), fg = WHITE, stops = hdrStops
+      if (worstW < 4.5 && worstI >= 4.5) fg = ink
+      else if (worstW < 4.5) {                                                      // mixed light/dark stops: add a scrim
+        let a = 0.1
+        const black = { r: 0, g: 0, b: 0 }
+        while (a < 0.7 && Math.min(...hdrStops.map((c) => contrast(WHITE, over(black, a, c)))) < 4.5) a += 0.05
+        a = +a.toFixed(2)
+        bgCss = `linear-gradient(rgba(0, 0, 0, ${a}), rgba(0, 0, 0, ${a})), ${bgCss}`
+        stops = hdrStops.map((c) => over(black, a, c))
+      }
+      setHeaderText(t, bgCss, fg, stops)
+    } else if (solidH && contrast(solidH, WHITE) < 3) {                            // a light header stays light, with dark text
+      setHeaderText(t, hex(solidH), pickOn(solidH).fg, [solidH])
+    } else {
+      const P = R('primary'), [ph, ps] = rgbToHsl(P), [eh, es] = rgbToHsl(E)
+      const dist = Math.abs(((eh - ph + 540) % 360) - 180)
+      if (ps < 0.12 || es < 0.12 || dist <= 60) {                                  // analogous hues: sweep primary -> accent, as the mockup does
+        const M = mix(P, E, 0.45)
+        setHeaderText(t, `linear-gradient(97deg, ${t.primary} 0%, ${hex(M)} 52%, ${hex(E)} 100%)`, WHITE, [P, M, E])
+      } else {                                                                      // clashing hues mix to mud: stay inside the primary hue
+        const P2 = ensureContrast(hslToRgb(ph, Math.min(ps + 0.1, 0.6), 0.9), WHITE, 5.5)
+        setHeaderText(t, `linear-gradient(97deg, ${t.primary} 0%, ${hex(P2)} 100%)`, WHITE, [P, P2])
+      }
+    }
+  }
+  // The mockup's own header too: 0.72 white fails 4.5:1 over its teal end, where "Powered by" sits.
+  if (!hdrStops.length && !accentIn) t.onHeaderMuted = rgba(WHITE, alphaFor(WHITE, colorStops(MOCKUP.headerBg), 4.5))
+  return t
+}
+function setHeaderText(t, bgCss, fg, stops) {
+  const light = lum(fg) > 0.5
+  t.headerBg = bgCss
+  t.onHeader = hex(fg)
+  t.onHeaderMuted = rgba(fg, alphaFor(fg, stops, 4.5))
+  t.headerChipBg = light ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.06)'
+  t.headerChipLine = light ? 'rgba(255, 255, 255, 0.28)' : 'rgba(0, 0, 0, 0.16)'
+  t.headerLine = light ? 'transparent' : t.lineCard                                // a light header needs an edge against the page
+}
+
+// Every text/UI pair the components use, for tests.
+const PAIRS = [
+  ['ink', 'panel', 4.5], ['ink', 'surface', 4.5], ['muted', 'panel', 4.5], ['muted', 'lineFaint', 4.5], ['subtle', 'panel', 4.5],
+  ['primary', 'surface', 4.5], ['primary', 'primaryWash', 4.5], ['primary', 'primaryFaint', 4.5], ['primary', 'primarySoft', 4.5],
+  ['onPrimary', 'primary', 4.5], ['accentText', 'surface', 4.5], ['accentText', 'panel', 4.5], ['accentText', 'accentWash', 4.5],
+  ['onAccent', 'accentFill', 4.5], ['accentFill', 'surface', 3], ['accentFill', 'panel', 3], ['accentDeep', 'accentWash', 4.5],
+  ['accentMuted', 'accentWash', 4.5], ['onCta', 'cta', 4.5], ['danger', 'dangerWash', 4.5], ['danger', 'surface', 4.5],
+  ['primary', 'panel', 3], ['subtle', 'surface', 3], ['placeholder', 'surface', 3],
+]
+function checkPalette(t) {
+  const fails = []
+  for (const [fg, bg, min] of PAIRS) { const c = contrast(hexToRgb(t[fg]), hexToRgb(t[bg])); if (c < min) fails.push(`${fg}/${bg} ${c.toFixed(2)} < ${min}`) }
+  return fails
+}
+const toCssVars = (t) => Object.fromEntries(Object.entries(t).map(([k, v]) => ['--ss-' + k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()), v]))
+
+// The designer reads the palette through these three. No hook (the Inner has a documented React
+// #310 hazard): the derivation is pure, so it is cached here by its two inputs.
+const SS_PAL_CACHE = new Map();
+function ssPal(branding) {
+  const b = branding || {};
+  const key = String(b.accentColor || "") + "|" + String(b.headerBg || "");
+  if (!SS_PAL_CACHE.has(key)) SS_PAL_CACHE.set(key, ssBrandPalette(b));
+  return SS_PAL_CACHE.get(key);
+}
+// Ahsan's decision 1: the mockup's indigo/teal/mint is for a tenant with NO branding. A tenant who
+// set only one of the two colours keeps today's fallback for the other half (the designer's
+// long-standing "#D97706" accent, or the slate header gradient), so their page does not suddenly
+// pick up half of someone else's palette.
+function ssPalInput(b) {
+  const src = b || {};
+  const hasAccent = Boolean(String(src.accentColor || "").trim());
+  const hasHeader = Boolean(String(src.headerBg || "").trim());
+  if (hasAccent === hasHeader) return src;
+  return {
+    ...src,
+    accentColor: hasAccent ? src.accentColor : "#D97706",
+    headerBg: hasHeader ? src.headerBg : "linear-gradient(135deg, #1E293B 0%, #334155 100%)",
+  };
+}
+// Readable text for any fill colour (hex, rgb(), a name, or a gradient's first stop). For the
+// module-level components that only receive `accent` (LoginSheet, CustomerAccount, …).
+function ssOnFill(css) {
+  return hex(pickOn(parseColor(css) || colorStops(css)[0] || hexToRgb("#1b7895")).fg);
+}
+// ss-brand-palette:end
+
 // Progressive US phone formatter: "8163003600" -> "(816) 300-3600".
 // Caps at 10 digits; partial inputs format as "(816", "(816) 30", etc.
 // Display only — strip back to digits before sending to GHL.
@@ -9295,7 +9571,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                 else if ((kc.wallOnly || kc.doorSnap) && interior) setInterior(false);
               }
             }} disabled={phase !== "ready"}
-              style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? "#FFF" : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              style={{ background: tool3 === k ? accent : "#1E293B", color: tool3 === k ? ssOnFill(accent) : "#CBD5E1", border: "1px solid #334155", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               {itemTypes[k].icon} {itemTypes[k].shortLabel || itemTypes[k].label}
             </button>
           ))}
@@ -9341,9 +9617,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             setShotTaken(false);
           };
           const cell = (on) => ({
-            background: on ? accent : "#1E293B", color: on ? "#FFF" : "#CBD5E1",
+            background: on ? accent : "#1E293B", color: on ? ssOnFill(accent) : "#CBD5E1",
             border: "1px solid #334155", borderRadius: 7, padding: "6px 10px",
-            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: SS_LEGACY_UI_FONT,
             opacity: phase === "ready" ? 1 : 0.5,
           });
           return (
@@ -9414,9 +9690,9 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             setShotTaken(false);
           };
           const cell = (on) => ({
-            background: on ? accent : "#1E293B", color: on ? "#FFF" : "#CBD5E1",
+            background: on ? accent : "#1E293B", color: on ? ssOnFill(accent) : "#CBD5E1",
             border: "1px solid #334155", borderRadius: 7, padding: "6px 10px",
-            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: SS_LEGACY_UI_FONT,
             display: "flex", alignItems: "center", gap: 5,
             opacity: phase === "ready" ? 1 : 0.5,
           });
@@ -9517,7 +9793,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                 ))}
               </div>
             )}
-            <button onClick={() => setViewsOpen((v) => !v)} disabled={phase !== "ready"} style={{ background: viewsOpen ? accent : "#1E293B", color: viewsOpen ? "#FFF" : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+            <button onClick={() => setViewsOpen((v) => !v)} disabled={phase !== "ready"} style={{ background: viewsOpen ? accent : "#1E293B", color: viewsOpen ? ssOnFill(accent) : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               🎥 Views {viewsOpen ? "▾" : "▴"}
             </button>
           </div>
@@ -9544,14 +9820,14 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
             )}
             <button onClick={() => setItemsOpen((v) => !v)} disabled={phase !== "ready"}
               title="Put a mower, bike or shelving inside to see how it fits"
-              style={{ background: itemsOpen ? accent : "#1E293B", color: itemsOpen ? "#FFF" : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+              style={{ background: itemsOpen ? accent : "#1E293B", color: itemsOpen ? ssOnFill(accent) : "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
               📦 Items {itemsOpen ? "▾" : "▴"}
             </button>
           </div>
           <button onClick={() => setInterior((v) => !v)} disabled={phase !== "ready"} style={{ background: "#1E293B", color: "#E2E8F0", border: "1px solid #334155", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {interior ? "🏠 Show exterior" : "👁 Look inside"}
         </button>
-        <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
+        <button onClick={takeSnapshot} disabled={phase !== "ready"} style={{ background: accent, color: ssOnFill(accent), border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer", opacity: phase === "ready" ? 1 : 0.5 }}>
           {shotTaken ? "✓ Added to quote — retake?" : "📸 Use this view in my quote"}
         </button>
         </div>
@@ -10021,6 +10297,351 @@ function SSVersionList({ versions, viewing, accent, onOpen }) {
       </div>
     </div>
   );
+}
+
+// ─── DESIGNER FRAME, STEPPER RAIL AND SECTION HEADS (redesign 2026-09-15) ───
+// One stylesheet for what inline styles cannot do: :focus-visible, hover, breakpoints, the stepper
+// rail and the sticky progress bar. Colours come from the --ss-* custom properties SSDesignerFrame
+// sets from the builder's palette (toCssVars), so the stylesheet is one string for every tenant.
+//
+// ⚠️ Breakpoints follow the DESIGNER's width, not the viewport: the portal pane is narrower than the
+// window and tenant iframes are any size. They are a data-ssd-bp attribute written by a
+// ResizeObserver, NOT container queries — toasts, the pick scrim and the full-screen 3D viewer are
+// position:fixed inside this frame, and older iOS Safari applied layout containment to a query
+// container, which pins fixed children to it. Customers design on phones.
+//
+// ⚠️ Nothing here may create a stacking context on an ANCESTOR of the plan <svg> (transform, filter,
+// opacity, contain, will-change, or z-index on a positioned wrapper): the svg rises to z-index 901
+// over the pick-one-to-remove scrim (900), and a stacking context above it would trap it underneath.
+// The face the designer's root used before the redesign. Controls that said fontFamily:"inherit" now
+// name it outright: inheriting the frame's DM Sans would make each one 1–2px taller (a taller line
+// box), and buttons must not grow. A later slice switches a control to DM Sans with a fixed height.
+const SS_LEGACY_UI_FONT = "'Segoe UI', system-ui, -apple-system, sans-serif";
+const SSD_FONT = '"DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+const SSD_DISPLAY_FONT = 'Play, "DM Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const SSD_CSS = [
+  '.ssd-frame{font-family:' + SSD_FONT + ';--ssd-sticky-top:44px}',
+  '.ssd-frame[data-ssd-bp="xl"]{--ssd-sticky-top:0px}',
+  // Controls keep the browser's own control face on purpose. DM Sans' line box is taller than the
+  // system face's, so inheriting it grows every button, select and input by 1–2px, and buttons must
+  // not grow. A control switches to the page face in the slice that gives it a fixed height; the
+  // header, rail and progress-bar buttons below already have one and say font-family:inherit.
+  '.ssd-sr{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}',
+  '.ssd-frame button:focus-visible,.ssd-frame a:focus-visible,.ssd-frame [role="button"]:focus-visible{outline:2px solid var(--ss-accent-fill);outline-offset:2px}',
+  '.ssd-frame input:focus-visible,.ssd-frame select:focus-visible,.ssd-frame textarea:focus-visible{outline:2px solid transparent;border-color:var(--ss-accent-fill);box-shadow:0 0 0 3px var(--ss-accent-shadow)}',
+  // iOS zooms the page on focus under 16px. Only for fields that hold their own fixed height (S5).
+  '@media (pointer: coarse){.ssd-frame .ssd-field{font-size:16px}}',
+  // Header
+  '.ssd-header{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:4px;min-height:56px;box-sizing:border-box;padding:8px 20px 6px;background:var(--ss-header-bg);border-bottom:1px solid var(--ss-header-line);color:var(--ss-on-header)}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-header,.ssd-frame[data-ssd-bp="xs"] .ssd-header{padding-left:16px;padding-right:16px}',
+  '.ssd-hd-brand{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}',
+  '.ssd-hd-logo{display:block;width:32px;height:32px;flex:0 0 auto;box-sizing:border-box;object-fit:contain;border-radius:4px;background:var(--ss-header-chip-bg);border:1px solid var(--ss-header-chip-line)}',
+  '.ssd-hd-initials{width:26px;height:26px;flex:0 0 auto;box-sizing:border-box;display:flex;align-items:center;justify-content:center;border-radius:4px;background:var(--ss-header-chip-bg);border:1px solid var(--ss-header-chip-line);color:var(--ss-on-header);font-size:10px;font-weight:700;line-height:1}',
+  '.ssd-hd-titles{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:12px;min-width:0}',
+  '.ssd-hd-name{font-family:' + SSD_DISPLAY_FONT + ';font-size:19px;font-weight:700;line-height:1.25;color:var(--ss-on-header);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:100%}',
+  '.ssd-hd-tag{font-size:12.5px;font-weight:400;line-height:1.3;color:var(--ss-on-header-muted);min-width:0}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-hd-tag{display:none}',
+  '.ssd-hd-account{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-left:auto;min-width:0}',
+  '.ssd-hd-status{font-size:12px;font-weight:500;color:var(--ss-on-header-muted);white-space:nowrap}',
+  '.ssd-hd-btn{font-family:inherit;display:inline-flex;align-items:center;justify-content:center;height:26px;box-sizing:border-box;margin:0;padding:0 10px;border-radius:4px;border:1px solid var(--ss-header-chip-line);background:var(--ss-header-chip-bg);color:var(--ss-on-header);font-size:11.5px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
+  '.ssd-hd-btn:hover{border-color:var(--ss-on-header-muted)}',
+  '.ssd-hd-btn.is-solid,.ssd-hd-btn[aria-pressed="true"]{background:var(--ss-on-header);border-color:var(--ss-on-header);color:var(--ssd-hd-solid-fg)}',
+  '.ssd-hd-btn.is-code{background:#FBBF24;border-color:#F59E0B;color:#422006}',
+  '.ssd-hd-btn.is-small{height:22px;padding:0 8px;font-size:11px}',
+  '.ssd-hd-signout{font-family:inherit;margin:0;padding:4px 2px;border:0;background:transparent;color:var(--ss-on-header-muted);font-size:11px;font-weight:700;text-decoration:underline;white-space:nowrap;cursor:pointer}',
+  '.ssd-hd-powered{flex:0 0 100%;text-align:right;font-size:10.5px;font-weight:500;line-height:1.2;color:var(--ss-on-header-muted);white-space:nowrap}',
+  // Sticky progress bar (below xl)
+  '.ssd-progress{position:sticky;top:0;z-index:20;background:var(--ss-surface);border-bottom:1px solid var(--ss-line-card)}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-progress{display:none}',
+  '.ssd-pb-full{height:43px;box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:0 20px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}',
+  '.ssd-pb-full::-webkit-scrollbar{display:none}',
+  '.ssd-pb-step{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;margin:0;padding:6px 4px;border:0;background:none;color:inherit;white-space:nowrap;cursor:pointer}',
+  '.ssd-pb-dot{width:22px;height:22px;box-sizing:border-box;border-radius:11px;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;line-height:1;background:var(--ss-surface);border:1px solid var(--ss-line);color:var(--ss-subtle)}',
+  '.ssd-pb-label{font-size:12px;font-weight:500;color:var(--ss-muted)}',
+  '.ssd-pb-step.is-done .ssd-pb-dot{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent)}',
+  '.ssd-pb-step.is-done .ssd-pb-label{font-weight:700;color:var(--ss-accent-text)}',
+  '.ssd-pb-step.is-current .ssd-pb-dot{background:var(--ss-primary);border-color:var(--ss-primary);color:var(--ss-on-primary)}',
+  '.ssd-pb-step.is-current .ssd-pb-label{font-weight:700;color:var(--ss-primary)}',
+  '.ssd-pb-conn{flex:1 1 16px;min-width:16px;height:1px;background:var(--ss-line-card)}',
+  '.ssd-pb-conn.is-done{background:var(--ss-accent-rail)}',
+  '.ssd-pb-compact{display:none;height:40px;box-sizing:border-box;align-items:center;justify-content:space-between;gap:10px;padding:0 16px}',
+  '.ssd-pb-text{display:flex;align-items:baseline;gap:8px;min-width:0;overflow:hidden}',
+  '.ssd-pb-count{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-pb-cur{font-size:13px;font-weight:700;color:var(--ss-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}',
+  '.ssd-pb-dots{display:flex;gap:6px;flex:0 0 auto}',
+  '.ssd-pb-hit{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;margin:0;padding:0;border:0;background:none;cursor:pointer}',
+  '.ssd-pb-mini{display:block;width:8px;height:8px;border-radius:50%;background:var(--ss-line)}',
+  '.ssd-pb-hit.is-done .ssd-pb-mini{background:var(--ss-accent-fill)}',
+  '.ssd-pb-hit.is-current .ssd-pb-mini{width:10px;height:10px;background:var(--ss-primary)}',
+  '.ssd-pb-track{display:none;height:3px;background:var(--ss-line-faint)}',
+  '.ssd-pb-track > span{display:block;height:100%;background:var(--ss-accent-fill)}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-full,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-full{display:none}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-compact,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-compact{display:flex}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-pb-track,.ssd-frame[data-ssd-bp="xs"] .ssd-pb-track{display:block}',
+  // Section rows: a 62px rail cell at xl, one column below it
+  '.ssd-row{display:grid;grid-template-columns:minmax(0,1fr);scroll-margin-top:var(--ssd-sticky-top)}',
+  '.ssd-row svg{scroll-margin-top:var(--ssd-sticky-top)}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-row{grid-template-columns:62px minmax(0,1fr)}',
+  '.ssd-rail{display:none}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-rail{display:block;position:relative;min-height:1px;background:var(--ss-panel);border-right:1px solid var(--ss-line-card)}',
+  '.ssd-main{min-width:0;padding:22px 24px 0}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-main{padding:20px 20px 0}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-main{padding:18px 16px 0}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-main,.ssd-frame[data-ssd-bp="xs"] .ssd-main{padding:16px 16px 0}',
+  '.ssd-frame .ssd-row.is-note > .ssd-main{padding-top:12px}',
+  // Rail cell. Absolutely placed so the vertical label never makes a row taller than its section.
+  '.ssd-step{font-family:inherit;position:absolute;top:0;right:0;bottom:0;left:0;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:9px;margin:0;padding:14px 4px 0;border:0;background:transparent;color:inherit;overflow:hidden;cursor:pointer;transition:background-color .15s ease}',
+  '.ssd-step.is-first{padding-top:18px}',
+  '.ssd-step:hover{background:var(--ss-primary-faint)}',
+  '.ssd-step.is-current{padding-top:14px;background:var(--ss-primary-wash);box-shadow:inset 3px 0 0 var(--ss-primary)}',
+  '.ssd-step-dot{flex:0 0 auto;width:26px;height:26px;box-sizing:border-box;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;line-height:1;background:var(--ss-surface);border:1px solid var(--ss-line);color:var(--ss-subtle)}',
+  '.ssd-step-label{flex:0 1 auto;min-height:0;overflow:hidden;text-overflow:ellipsis;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;letter-spacing:.02em;font-size:11.5px;font-weight:500;line-height:1.2;color:var(--ss-muted)}',
+  '.ssd-step-conn{flex:1 1 0;width:2px;min-height:10px;background:var(--ss-line-card)}',
+  '.ssd-step.is-done .ssd-step-dot{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent)}',
+  '.ssd-step.is-done .ssd-step-label{font-weight:700;color:var(--ss-accent-text)}',
+  '.ssd-step.is-done .ssd-step-conn{background:var(--ss-accent-rail)}',
+  '.ssd-step.is-current .ssd-step-dot{background:var(--ss-primary);border-color:var(--ss-primary);color:var(--ss-on-primary)}',
+  '.ssd-step.is-current .ssd-step-label{font-size:12.5px;font-weight:700;color:var(--ss-primary)}',
+  '.ssd-step.is-current .ssd-step-conn{background:var(--ss-primary-rail)}',
+  // Section eyebrow ("01 · Select your building style") and the sub-head inside a section
+  '.ssd-sechead{display:flex;align-items:center;gap:10px;margin:0 0 12px;min-width:0}',
+  '.ssd-sechead-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.16em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-sechead-rule{flex:1 1 0;min-width:16px;height:1px;background:var(--ss-line-soft)}',
+  '.ssd-sechead.is-sub{margin:18px 0 10px}',
+  '.ssd-sechead.is-sub .ssd-sechead-t{letter-spacing:.14em}',
+  '.ssd-sechead.is-sub .ssd-sechead-rule{background:var(--ss-line-faint)}',
+].join("\n");
+
+// The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
+// buttons need. Cached per palette object (ssPal already hands back one object per brand).
+const SSD_VARS_CACHE = new WeakMap();
+function ssdVarsFor(pal) {
+  let v = SSD_VARS_CACHE.get(pal);
+  if (!v) {
+    v = toCssVars(pal);
+    // "Log in" and a pressed Quotes/Invoices fill with the header's text colour, so their own text is
+    // the page primary on a white fill, or white on the dark fill a light builder header gets.
+    v["--ssd-hd-solid-fg"] = String(pal.onHeader).toLowerCase() === "#ffffff" ? pal.primary : "#ffffff";
+    SSD_VARS_CACHE.set(pal, v);
+  }
+  return v;
+}
+
+// Designer width -> breakpoint. xl (≥1180) shows the stepper rail; below it the sticky progress bar.
+function ssdBreakpoint(w) {
+  return w >= 1180 ? "xl" : w >= 1000 ? "lg" : w >= 740 ? "md" : w >= 560 ? "sm" : "xs";
+}
+
+// Wraps the whole designer. A callback ref, the canvasRowRef pattern: it runs during commit, so the
+// first breakpoint is on the element before the browser paints, and it is an attribute, not React
+// state — a resize never re-renders the designer. Width 0 is a hidden portal tab: keep the last one.
+function SSDesignerFrame({ pal, children }) {
+  const roRef = useRef(null);
+  const attach = useCallback((el) => {
+    if (roRef.current) { roRef.current.disconnect(); roRef.current = null; }
+    if (!el) return;
+    const apply = () => {
+      const w = el.clientWidth;
+      if (!w) return;
+      const bp = ssdBreakpoint(w);
+      if (el.getAttribute("data-ssd-bp") !== bp) el.setAttribute("data-ssd-bp", bp);
+    };
+    apply();
+    if (typeof ResizeObserver !== "undefined") {
+      roRef.current = new ResizeObserver(apply);
+      roRef.current.observe(el);
+    }
+  }, []);
+  return (
+    <div ref={attach} className="ssd-frame" style={ssdVarsFor(pal)}>
+      <style>{SSD_CSS}</style>
+      {children}
+    </div>
+  );
+}
+
+// Section eyebrow. `text` arrives as ONE string ("01 · Select your building style"), so a screen
+// reader reads it as one phrase; the uppercase is CSS only (innerText shows it, textContent does not).
+function SSSecHead({ text, sub, right }) {
+  return (
+    <div className={sub ? "ssd-sechead is-sub" : "ssd-sechead"}>
+      <span className="ssd-sechead-t">{text}</span>
+      <span className="ssd-sechead-rule" aria-hidden="true" />
+      {right || null}
+    </div>
+  );
+}
+
+// One cell of the stepper rail. Presentation only: done/current come from the designer's existing
+// state, and a click only scrolls to the section. No href — a "#…" link would rewrite the URL, and
+// the designer reads ?v= and friends from it.
+function SSStepRailCell({ step, total, label, done, current, first, last, onGo }) {
+  const cls = "ssd-step" + (first ? " is-first" : "") + (done ? " is-done" : "") + (current ? " is-current" : "");
+  return (
+    <button type="button" className={cls} onClick={onGo}
+      aria-label={`Step ${step} of ${total}: ${label}${current ? " (current)" : done ? " (done)" : ""}`}
+      aria-current={current ? "step" : undefined}>
+      <span className="ssd-step-dot" aria-hidden="true">{done ? "✓" : step}</span>
+      <span className="ssd-step-label" aria-hidden="true">{label}</span>
+      {!last && <span className="ssd-step-conn" aria-hidden="true" />}
+    </button>
+  );
+}
+
+// A section row: rail cell + main cell. With no stepKey it is an empty-rail row (banners, warnings).
+// id="ss-step-<key>" and data-ss-step="<shown number>" are new hooks; the number closes up when a
+// section does not render.
+function SSRow({ stepKey, step, total, label, done, current, first, last, onGo, children }) {
+  if (!stepKey) {
+    return (
+      <div className="ssd-row is-note">
+        <div className="ssd-rail" />
+        <div className="ssd-main">{children}</div>
+      </div>
+    );
+  }
+  return (
+    <div className="ssd-row" id={"ss-step-" + stepKey} data-ss-step={String(step)}>
+      <div className="ssd-rail">
+        <SSStepRailCell step={step} total={total} label={label} done={done} current={current} first={first} last={last} onGo={onGo} />
+      </div>
+      <div className="ssd-main">{children}</div>
+    </div>
+  );
+}
+
+// The rail's stand-in below xl: a sticky bar of steps (md/lg) or "Step N of M" + dots (sm/xs). CSS
+// picks the form from data-ssd-bp, so both render and one is display:none.
+function SSProgressBar({ steps, current, onGo }) {
+  const fullRef = useRef(null);
+  // Keep the current step visible inside the bar. scrollLeft, never scrollIntoView (that would also
+  // scroll the page to the bar) — the same rule as SSStyleStrip.
+  useEffect(() => {
+    const bar = fullRef.current;
+    if (!bar || !current || !bar.clientWidth) return;
+    const btn = bar.querySelector('[data-ssd-pb="' + current + '"]');
+    if (!btn) return;
+    const br = bar.getBoundingClientRect(), r = btn.getBoundingClientRect();
+    if (r.left < br.left) bar.scrollLeft += r.left - br.left - 20;
+    else if (r.right > br.right) bar.scrollLeft += r.right - br.right + 20;
+  }, [current]);
+  if (!steps.length) return null;
+  const total = steps.length;
+  const cur = steps.find((s) => s.key === current) || steps[0];
+  const doneCount = steps.filter((s) => s.done).length;
+  const nameOf = (s) => `Step ${s.n} of ${total}: ${s.label}${s.key === current ? " (current)" : s.done ? " (done)" : ""}`;
+  const cls = (base, s) => base + (s.done ? " is-done" : "") + (s.key === current ? " is-current" : "");
+  return (
+    <div className="ssd-progress">
+      <div className="ssd-pb-full" ref={fullRef}>
+        {steps.flatMap((s, i) => [
+          i > 0 ? <span key={"c-" + s.key} className={"ssd-pb-conn" + (steps[i - 1].done ? " is-done" : "")} aria-hidden="true" /> : null,
+          <button key={s.key} type="button" data-ssd-pb={s.key} className={cls("ssd-pb-step", s)} aria-label={nameOf(s)}
+            aria-current={s.key === current ? "step" : undefined} onClick={() => onGo(s.key)}>
+            <span className="ssd-pb-dot" aria-hidden="true">{s.done ? "✓" : s.n}</span>
+            <span className="ssd-pb-label" aria-hidden="true">{s.label}</span>
+          </button>,
+        ])}
+      </div>
+      <div className="ssd-pb-compact">
+        <div className="ssd-pb-text">
+          <span className="ssd-pb-count">{`Step ${cur.n} of ${total}`}</span>
+          <span className="ssd-pb-cur">{cur.label}</span>
+        </div>
+        <div className="ssd-pb-dots">
+          {steps.map((s) => (
+            <button key={s.key} type="button" className={cls("ssd-pb-hit", s)} aria-label={nameOf(s)}
+              aria-current={s.key === current ? "step" : undefined} onClick={() => onGo(s.key)}>
+              <span className="ssd-pb-mini" aria-hidden="true" />
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="ssd-pb-track" aria-hidden="true"><span style={{ width: `${Math.round((doneCount / total) * 100)}%` }} /></div>
+    </div>
+  );
+}
+
+// Reports which section the customer is looking at, from the scroll position of the nearest
+// scrolling ancestor (the window on the public page, .ss-designer-host in the portal). A section
+// whose top sits just under the top edge (or the sticky bar) wins; otherwise the last section whose
+// top has passed the line at 35% of the height; at the very end of the page, the last section in
+// view. Calls onChange only when the answer changes, so scrolling does not re-render the designer.
+// A clicked step stays current until the customer scrolls away from where the click took them. The
+// page cannot always bring a short section to the top (there may be less than a screen below it), and
+// the scroll position alone would then name a different step than the one just clicked. One designer
+// per page, so one module-level slot is enough.
+let SSD_STEP_HOLD = null;
+function ssdHoldStep(key) { SSD_STEP_HOLD = { key, t: Date.now(), lastPos: null, settledAt: null }; }
+
+function SSStepWatcher({ ids, onChange }) {
+  const markRef = useRef(null);
+  const lastRef = useRef(undefined);
+  const cbRef = useRef(onChange);
+  cbRef.current = onChange;
+  const idsKey = ids.join(",");
+  useEffect(() => {
+    const mark = markRef.current;
+    if (!mark) return undefined;
+    let scroller = null;
+    for (let p = mark.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+      const oy = getComputedStyle(p).overflowY;
+      if (oy === "auto" || oy === "scroll") { scroller = p; break; }
+    }
+    const keys = idsKey ? idsKey.split(",") : [];
+    const measure = () => {
+      const viewTop = scroller ? scroller.getBoundingClientRect().top : 0;
+      const h = scroller ? scroller.clientHeight : window.innerHeight;
+      if (!h) return;   // hidden portal tab
+      const frameEl = mark.closest(".ssd-frame");
+      const sticky = frameEl ? (parseFloat(getComputedStyle(frameEl).getPropertyValue("--ssd-sticky-top")) || 0) : 0;
+      const zoneTop = viewTop + sticky;
+      const line = viewTop + h * 0.35;
+      const sTop = scroller ? scroller.scrollTop : window.scrollY;
+      const sMax = scroller ? scroller.scrollHeight - scroller.clientHeight : document.documentElement.scrollHeight - window.innerHeight;
+      const atEnd = sTop > 0 && sMax - sTop < 2;
+      const hold = SSD_STEP_HOLD;
+      if (hold && keys.indexOf(hold.key) !== -1) {
+        if (hold.settledAt === null) {                 // the smooth scroll may still be running
+          if ((hold.lastPos === sTop && Date.now() - hold.t > 250) || Date.now() - hold.t > 3000) hold.settledAt = sTop;
+          hold.lastPos = sTop;
+        }
+        if (hold.settledAt === null || Math.abs(hold.settledAt - sTop) < 4) {
+          if (lastRef.current !== hold.key) { lastRef.current = hold.key; cbRef.current(hold.key); }
+          return;
+        }
+        SSD_STEP_HOLD = null;                          // scrolled away: back to the scroll position
+      }
+      let atTop = null, atLine = null, lastSeen = null;
+      for (const k of keys) {
+        const el = document.getElementById("ss-step-" + k);
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        if (!r.height) continue;
+        if (atTop === null && r.top >= zoneTop - 8 && r.top <= zoneTop + 96) atTop = k;
+        if (r.top <= line) atLine = k;
+        if (r.top < viewTop + h - 24) lastSeen = k;
+      }
+      const found = atTop || (atEnd ? lastSeen : atLine);
+      if (found !== lastRef.current) { lastRef.current = found; cbRef.current(found); }
+    };
+    let pending = 0;
+    const onScroll = () => { if (pending) return; pending = setTimeout(() => { pending = 0; measure(); }, 80); };
+    const target = scroller || window;
+    target.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll, { passive: true });
+    // A timer as well as the events: hidden browser panes starve animation frames, and a section can
+    // move without any scroll (Details opening, the 3D dock arriving, a size change).
+    const iv = setInterval(measure, 500);
+    measure();
+    return () => {
+      target.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+      clearInterval(iv);
+      if (pending) clearTimeout(pending);
+    };
+  }, [idsKey]);
+  return <span ref={markRef} hidden />;
 }
 
 // ─── STYLE STRIP ───
@@ -10493,7 +11114,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
 
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CBD5E1", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 12px" };
   const lbl = { fontSize: 12, fontWeight: 700, color: "#475569" };
-  const primaryBtn = (on) => ({ width: "100%", background: on ? acc : "#94A3B8", color: "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: on ? "pointer" : "default", fontFamily: "inherit" });
+  const primaryBtn = (on) => ({ width: "100%", background: on ? acc : "#94A3B8", color: on ? ssOnFill(acc) : "#FFF", border: "none", borderRadius: 10, padding: "12px", fontSize: 15, fontWeight: 700, cursor: on ? "pointer" : "default", fontFamily: "inherit" });
   const linkBtn = (on) => ({ background: "transparent", border: "none", padding: 0, fontSize: 13, fontWeight: 700, color: on ? acc : "#94A3B8", cursor: on ? "pointer" : "default", fontFamily: "inherit" });
   const byEmail = (sentTo ? sentTo.channel : channel) === "email";
   const offerChoice = Array.isArray(channels) && channels.includes("sms") && channels.includes("email");
@@ -10530,7 +11151,7 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
                 <span style={lbl}>Send my code by</span>
                 {["sms", "email"].map((c) => (
                   <button key={c} type="button" aria-pressed={channel === c} onClick={() => { setChannel(c); setErr(""); }}
-                    style={{ border: `1.5px solid ${channel === c ? acc : "#CBD5E1"}`, background: channel === c ? acc : "#FFF", color: channel === c ? "#FFF" : "#334155", borderRadius: 999, padding: "5px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    style={{ border: `1.5px solid ${channel === c ? acc : "#CBD5E1"}`, background: channel === c ? acc : "#FFF", color: channel === c ? ssOnFill(acc) : "#334155", borderRadius: 999, padding: "5px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
                     {c === "sms" ? "Text" : "Email"}
                   </button>
                 ))}
@@ -10735,14 +11356,14 @@ function SSAcceptPanel({ q, call, accent, defaultName, clientId, onDone }) {
       <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 4 }}>Your full name</label>
       <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
         onChange={(e) => setName(e.target.value)}
-        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: SS_LEGACY_UI_FONT }} />
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
         <span>{sentence}</span>
       </label>
       {err && <div role="alert" style={{ fontSize: 13, color: "#B91C1C", marginBottom: 8 }}>{err}</div>}
       <button type="button" disabled={busy} onClick={submit}
-        style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF", opacity: busy ? 0.6 : 1 }}>
+        style={{ ...SS_ACCT_BTN, background: accent, color: ssOnFill(accent), opacity: busy ? 0.6 : 1 }}>
         {busy ? "Accepting…" : "Accept Quote"}
       </button>
     </div>
@@ -10809,7 +11430,7 @@ function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
   };
   const tab = (id, label) => (
     <button type="button" aria-pressed={mode === id} onClick={() => setMode(id)}
-      style={{ flex: 1, fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: 8, borderRadius: 8, cursor: "pointer",
+      style={{ flex: 1, fontFamily: SS_LEGACY_UI_FONT, fontSize: 13, fontWeight: 600, padding: 8, borderRadius: 8, cursor: "pointer",
         border: `1px solid ${mode === id ? accent : "#CBD5E1"}`, background: mode === id ? "#EEF2FF" : "#FFF", color: mode === id ? "#1E293B" : "#475569" }}>
       {label}
     </button>
@@ -10846,13 +11467,13 @@ function SSSignPanel({ q, inv, call, accent, defaultName, clientId, onDone }) {
       <div hidden={mode !== "typed"}>
         <input type="text" value={typed} maxLength={120} autoComplete="name" placeholder="Type your full name" aria-label="Type your full name"
           onChange={(e) => setTyped(e.target.value)}
-          style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+          style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: SS_LEGACY_UI_FONT }} />
         <div style={{ fontStyle: "italic", fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 26, minHeight: 40, padding: "6px 2px", color: "#0F172A", borderBottom: "1px solid #CBD5E1" }}>{typed}</div>
       </div>
       <label style={{ display: "block", fontSize: 12, fontWeight: 700, color: "#475569", margin: "12px 0 4px" }}>Your full name</label>
       <input type="text" value={name} maxLength={120} autoComplete="name" aria-label="Your full name"
         onChange={(e) => setName(e.target.value)}
-        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: "inherit" }} />
+        style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", border: "1px solid #CBD5E1", borderRadius: 8, fontSize: 14, fontFamily: SS_LEGACY_UI_FONT }} />
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, lineHeight: 1.5, color: "#334155", margin: "12px 0" }}>
         <input type="checkbox" checked={agree} onChange={(e) => setAgree(e.target.checked)} style={{ marginTop: 3, flexShrink: 0 }} />
         <span>{sentence}</span>
@@ -10946,7 +11567,7 @@ function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, hig
             )}
             {feeTotal > 0 && <div style={{ fontSize: 13, color: "#B45309", marginTop: 6 }}>+ {co.feeLabel || "Change order fee"}: {ssAcctMoney(feeTotal / 100)}</div>}
             {feeTotal > 0 && ssAcctMoney(co.newTotal) && <div style={{ fontSize: 13, fontWeight: 800, marginTop: 4, color: "#92400E" }}>New order total: {ssAcctMoney(co.newTotal)}</div>}
-            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, marginTop: 10, background: accent, color: "#FFF" }}>Review &amp; sign the change ↗</a>
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, marginTop: 10, background: accent, color: ssOnFill(accent) }}>Review &amp; sign the change ↗</a>
           </div>
         );
       })}
@@ -10960,7 +11581,7 @@ function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, hig
               </a>
             )}
             {/* Paying stays on my-quotes until the tokenizer is ported (plan "Later"). */}
-            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>Pay or see payments ↗</a>
+            <a href={ssMyQuotesLink(clientId, ref)} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: ssOnFill(accent) }}>Pay or see payments ↗</a>
           </div>
         </div>
       )}
@@ -11016,11 +11637,11 @@ function SSQuoteCard({ q, clientId, accent, call, custName, panel, setPanel, hig
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
           {canAccept ? (
             <button type="button" aria-expanded={Boolean(acceptOpen)} onClick={() => toggle("accept")}
-              style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>
+              style={{ ...SS_ACCT_BTN, background: accent, color: ssOnFill(accent) }}>
               Review &amp; Accept
             </button>
           ) : acceptUrl && !q.acceptedAt ? (
-            <a href={acceptUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: "#FFF" }}>View &amp; Accept ↗</a>
+            <a href={acceptUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: accent, color: ssOnFill(accent) }}>View &amp; Accept ↗</a>
           ) : null}
           {pdfUrl && (
             <a href={pdfUrl} target="_blank" rel="noopener" style={{ ...SS_ACCT_BTN, background: "#FFF", color: "#334155", border: "1px solid #CBD5E1" }}>
@@ -11150,8 +11771,8 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
   const nInvoices = quotes.length - nQuotes;
   const tabBtn = (v, label, n) => (
     <button type="button" aria-pressed={view === v} onClick={() => onViewChange && onViewChange(v)}
-      style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 700, borderRadius: 8, padding: "7px 14px", cursor: "pointer",
-        border: `1px solid ${view === v ? accent : "#CBD5E1"}`, background: view === v ? accent : "#FFF", color: view === v ? "#FFF" : "#334155" }}>
+      style={{ fontFamily: SS_LEGACY_UI_FONT, fontSize: 13, fontWeight: 700, borderRadius: 8, padding: "7px 14px", cursor: "pointer",
+        border: `1px solid ${view === v ? accent : "#CBD5E1"}`, background: view === v ? accent : "#FFF", color: view === v ? ssOnFill(accent) : "#334155" }}>
       {label}{state.data ? ` · ${n}` : ""}
     </button>
   );
@@ -11204,7 +11825,7 @@ function CustomerAccount({ supabase, clientId, token, view, focusRef, inline, ac
                     <b>{[d.style ? capWords(d.style) : null, d.size].filter(Boolean).join(" ") || "Design"}</b>
                     {ssAcctDate(d.updatedAt) && <span style={{ color: "#94A3B8" }}> · saved {ssAcctDate(d.updatedAt)}</span>}
                   </div>
-                  <button type="button" onClick={() => onOpenDesign && onOpenDesign(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 12px", background: accent, color: "#FFF" }}>Open</button>
+                  <button type="button" onClick={() => onOpenDesign && onOpenDesign(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 12px", background: accent, color: ssOnFill(accent) }}>Open</button>
                   <button type="button" onClick={() => removeSaved(d.ref)} style={{ ...SS_ACCT_BTN, padding: "6px 10px", background: "#FFF", color: "#64748B", border: "1px solid #E2E8F0" }}>Remove</button>
                 </div>
               ))}
@@ -11912,7 +12533,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const c = ITEMS[it.type];
     return !!(c && c.archived);
   };
-  const accent = C.branding.accentColor || "#D97706";
+  // The builder's brand, turned into every colour the page paints (ssBrandPalette, contrast-checked;
+  // ssPalInput keeps today's fallback for a tenant who set only one of the two colours). `accent`
+  // keeps its name for its many uses and is now the palette's state fill — always 6-digit hex, so the
+  // `${accent}40` shadows keep working — and pal.onAccent is the text that reads on it.
+  const pal = ssPal(ssPalInput(C.branding));
+  const accent = pal.accentFill;
   // White-label initials for the logo placeholder shown when no logo is set.
   const initials = (C.branding.companyName || "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "SS";
   // Admin gate: ?admin=1 surfaces the GHL credentials panel. The credentials never
@@ -12272,6 +12898,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [viewingVersion, setViewingVersion] = useState(null);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
+  // The stepper rail / progress bar's current step, reported by SSStepWatcher from the scroll
+  // position. null = not measured yet, which shows the first step that isn't done as current.
+  const [ssStepCur, setSsStepCur] = useState(null);
   // Every enabled contact field filled, phone a real 10 digits — the same bar submitQuote
   // enforces. Drives the public Details gate: a shopper sees quote details only after
   // giving full contact info (which is what makes them a capturable lead).
@@ -16539,7 +17168,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       padding: "6px 8px", textAlign: "center", fontWeight: 700, fontSize: 11,
       background: active ? "#FFFBEB" : "#FAFBFC", color: active ? "#92400E" : "#334155",
     }),
-    check: { position: "absolute", top: 4, right: 4, width: 20, height: 20, borderRadius: 99, background: accent, display: "flex", alignItems: "center", justifyContent: "center", color: "#FFF", fontSize: 11, fontWeight: 800 },
+    check: { position: "absolute", top: 4, right: 4, width: 20, height: 20, borderRadius: 99, background: accent, display: "flex", alignItems: "center", justifyContent: "center", color: pal.onAccent, fontSize: 11, fontWeight: 800 },
     pill: (active) => ({
       padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 13, transition: "all 0.15s",
       border: `2px solid ${active ? accent : "#E2E8F0"}`,
@@ -17750,8 +18379,62 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // "Annotate" heading, which only ever existed because a split cell needs one.
   const ANNOTATE_KEYS = ["textNote", "line"];
 
+  // ─── Stepper rail + progress bar (redesign 2026-09-15) ───
+  // Presentation only. The steps, their numbers and their done flags all come from state the designer
+  // already has, and a click only scrolls. A section that does not render drops its step and the
+  // numbers close up. Plain consts, no hooks: this is below the early returns.
+  const ssSizeShown = sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || Boolean(paintOpt)
+    || visibleOptions.some((o) => o !== paintOpt);
+  const ssDeclined = Array.isArray(sel.declinedItems) ? sel.declinedItems : [];
+  // The same test submitQuote runs before "Please place all included items…".
+  const ssIncludedOpen = actionableIncludedKeys.some((k) => !ssDeclined.includes(k) && !items.some((it) => it.type === k || it.fixtureItemId === k));
+  const ssStyleDone = Boolean(sel.style);
+  const ssSizeDone = Boolean(sel.size) && (roofTypes.length === 0 || Boolean(sel.roofType));
+  const ssDoneOf = {
+    style: ssStyleDone,
+    size: ssSizeDone,
+    options: ssStyleDone && ssSizeDone && !ssIncludedOpen,
+    // contactComplete is what unlocks the public Details (detailsLocked = customerFacing && !it). Read
+    // directly, so the portal — which never locks Details — still shows an empty form as not done.
+    customer: contactComplete,
+    details: contactComplete,
+    quote: false,
+  };
+  const ssSteps = [
+    ["style", "Select your building style", "Select your building style"],
+    ssSizeShown && ["size", "Size, roof & cladding", "Size, roof & cladding"],
+    ["options", "Options, openings & layout", "Options & layout"],
+    !submitted && ["customer", "Customer information", "Customer information"],
+    !submitted && ["details", "Details & charges", "Details"],
+    ["quote", "Get quote", ""],
+  ].filter(Boolean).map(([key, label, title], i) => ({ key, label, title, n: i + 1, done: submitted || ssDoneOf[key] }));
+  const ssStepIds = ssSteps.map((s) => s.key);
+  const ssCur = ssStepIds.includes(ssStepCur) ? ssStepCur : (ssSteps.find((s) => !s.done) || ssSteps[ssSteps.length - 1]).key;
+  const ssGo = (key) => {
+    const el = document.getElementById("ss-step-" + key);
+    if (!el) return;
+    ssdHoldStep(key);
+    setSsStepCur(key);
+    try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_e) { el.scrollIntoView(); }
+  };
+  const ssRowProps = (key) => {
+    const s = ssSteps.find((x) => x.key === key) || ssSteps[0];
+    return { stepKey: key, step: s.n, total: ssSteps.length, label: s.label, done: s.done, current: ssCur === key,
+      first: s.n === 1, last: s.n === ssSteps.length, onGo: () => ssGo(key) };
+  };
+  const ssHead = (key) => {
+    const s = ssSteps.find((x) => x.key === key) || ssSteps[0];
+    return `${String(s.n).padStart(2, "0")} · ${s.title}`;
+  };
+  // Rows 01 and 02 each hold a fieldset with today's lock: `disabled` keeps every control out of the
+  // keyboard, pointerEvents covers the style tiles (divs), and the dimming stays on the fieldsets only.
+  // The rail buttons sit outside them, so they still scroll on a locked plan.
+  const ssLockStyle = { display: "block", border: "none", padding: 0, margin: 0, minWidth: 0,
+    ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) };
+
   return (
-    <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: "#F8FAFC", minHeight: embedded ? "100%" : "100vh" }}>
+    <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
+      <SSDesignerFrame pal={pal}>
       {gateEl && createPortal(gateEl, document.body)}
       {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
@@ -17787,7 +18470,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               else — then pick the size again.
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button type="button" onClick={() => setSizeBlock(null)} style={{ background: accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Got it</button>
+              <button type="button" onClick={() => setSizeBlock(null)} style={{ background: accent, color: pal.onAccent, border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Got it</button>
             </div>
           </div>
         </div>, document.body)}
@@ -17795,68 +18478,68 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           public page is customers-only: no Business Login link (Carolyn 2026-07-24);
           instead a gate identity chip shows who this browser is remembered as. */}
       {!embedded && (
-      <div style={{ background: C.branding.headerBg || "linear-gradient(135deg, #1E293B 0%, #334155 100%)", color: "#FFF", padding: "14px 20px 6px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <div className="ssd-header">
+        {/* Brand: the builder's logo (or initials on a quiet chip), company name in Play, tagline.
+            Colours are the palette's header roles, so a light builder header gets dark text. */}
+        <div className="ssd-hd-brand">
           {C.branding.logo
-            ? <img src={C.branding.logo} alt={C.branding.companyName || "logo"} style={{ width: 34, height: 34, borderRadius: 8, objectFit: "contain", flexShrink: 0, background: "rgba(255,255,255,0.12)" }} />
-            : <div style={{ width: 34, height: 34, background: accent, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 800, flexShrink: 0, letterSpacing: "-0.05em", color: "#FFF" }}>{initials}</div>}
-          <div style={{ flex: "1 1 160px", minWidth: 0 }}>
-            <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em" }}>{C.branding.companyName || "Design Studio"}</div>
-            <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 1 }}>{C.branding.tagline || "Design & Quote"}</div>
+            ? <img className="ssd-hd-logo" src={C.branding.logo} alt={C.branding.companyName || "logo"} />
+            : <div className="ssd-hd-initials">{initials}</div>}
+          <div className="ssd-hd-titles">
+            <div className="ssd-hd-name">{C.branding.companyName || "Design Studio"}</div>
+            <div className="ssd-hd-tag">{C.branding.tagline || "Design & Quote"}</div>
           </div>
-          {/* The account corner (Carolyn 2026-09-14, drawn in red across this header): signed
-              out → Log in; a code out → amber "Enter your code"; signed in → who, Quotes,
-              Invoices, Sign out. Wraps under the name on a phone rather than squeezing it. */}
-          {!isAdmin && (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap", marginLeft: "auto" }}>
-              {custToken ? (
-                <>
-                  <span style={{ fontSize: 12, color: "#E2E8F0", whiteSpace: "nowrap" }}>
-                    {custIdentity && custIdentity.phone ? `Signed in as ${formatPhoneDisplay(custIdentity.phone)}`
-                      : custIdentity && custIdentity.email ? `Signed in as ${custIdentity.email}`
-                      : "Signed in"}
-                  </span>
-                  {[["quotes", "Quotes"], ["invoices", "Invoices"]].map(([v, label]) => (
-                    <button key={v} type="button" aria-pressed={accountView === v}
-                      onClick={() => setAccountView((cur) => (cur === v ? null : v))}
-                      style={{ fontSize: 12, fontWeight: 700, color: accountView === v ? "#0F172A" : "#FFF", background: accountView === v ? "#FFF" : "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "5px 12px", cursor: "pointer" }}>
-                      {label}
-                    </button>
-                  ))}
-                  <button type="button" onClick={signOutCustomer} title="Sign out of this browser"
-                    style={{ fontSize: 11, fontWeight: 700, color: "#CBD5E1", background: "transparent", border: "none", padding: "4px 2px", cursor: "pointer", textDecoration: "underline" }}>
-                    Sign out
-                  </button>
-                </>
-              ) : (
-                <>
-                  {gatePassed && (
-                    <span style={{ fontSize: 12, color: "#E2E8F0", whiteSpace: "nowrap" }}>{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
-                  )}
-                  {codePending ? (
-                    <button type="button" onClick={openCodeSheet} title="Enter the code we sent you"
-                      style={{ fontSize: 12, fontWeight: 800, color: "#422006", background: "#FBBF24", border: "1px solid #F59E0B", borderRadius: 999, padding: "5px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                      Enter your code
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => openLoginSheet()}
-                      style={{ fontSize: 12, fontWeight: 700, color: "#0F172A", background: "#FFF", border: "1px solid #FFF", borderRadius: 8, padding: "5px 12px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                      Log in
-                    </button>
-                  )}
-                  {gatePassed && (
-                    <button type="button" onClick={resetGate} title="Clear this browser's saved visitor and start fresh"
-                      style={{ fontSize: 11, fontWeight: 700, color: "#FFF", background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8, padding: "4px 10px", cursor: "pointer", whiteSpace: "nowrap" }}>
-                      Not you? Start over
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          )}
         </div>
-        {/* Its own slim row now, so the account corner above has the room. */}
-        <div style={{ fontSize: 10, color: "#94A3B8", whiteSpace: "nowrap", textAlign: "right", marginTop: 6 }}>Powered by Structure Studio</div>
+        {/* The account corner (Carolyn 2026-09-14, drawn in red across this header): signed
+            out → Log in; a code out → amber "Enter your code"; signed in → who, Quotes,
+            Invoices, Sign out. Wraps under the name on a phone rather than squeezing it.
+            Heights stay at today's (Log in 26px, Not you 22px): buttons must not grow. */}
+        {!isAdmin && (
+          <div className="ssd-hd-account">
+            {custToken ? (
+              <>
+                <span className="ssd-hd-status">
+                  {custIdentity && custIdentity.phone ? `Signed in as ${formatPhoneDisplay(custIdentity.phone)}`
+                    : custIdentity && custIdentity.email ? `Signed in as ${custIdentity.email}`
+                    : "Signed in"}
+                </span>
+                {[["quotes", "Quotes"], ["invoices", "Invoices"]].map(([v, label]) => (
+                  <button key={v} type="button" className="ssd-hd-btn" aria-pressed={accountView === v}
+                    onClick={() => setAccountView((cur) => (cur === v ? null : v))}>
+                    {label}
+                  </button>
+                ))}
+                <button type="button" className="ssd-hd-signout" onClick={signOutCustomer} title="Sign out of this browser">
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                {gatePassed && (
+                  <span className="ssd-hd-status">{gateName ? `Designing as ${gateName}` : "Welcome back"}</span>
+                )}
+                {codePending ? (
+                  <button type="button" className="ssd-hd-btn is-code" onClick={openCodeSheet} title="Enter the code we sent you">
+                    Enter your code
+                  </button>
+                ) : (
+                  <button type="button" className="ssd-hd-btn is-solid" onClick={() => openLoginSheet()}>
+                    Log in
+                  </button>
+                )}
+                {gatePassed && (
+                  <button type="button" className="ssd-hd-btn is-small" onClick={resetGate} title="Clear this browser's saved visitor and start fresh">
+                    Not you? Start over
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {/* Its own slim right-aligned row (flex-basis 100%), so the account corner has the room. It
+            stays a DIRECT child of the header root: customer-login.spec measures every header
+            descendant through this div's parent. */}
+        <div className="ssd-hd-powered">Powered by Structure Studio</div>
       </div>
       )}
       {!embedded && custToken && accountView && (
@@ -17881,10 +18564,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         </div>
       )}
 
+      {/* The stepper's stand-in below xl (a sticky bar; the rail cells take over at xl), and the watcher
+          that tells both which section is on screen. */}
+      <SSProgressBar steps={ssSteps} current={ssCur} onGo={ssGo} />
+      <SSStepWatcher ids={ssStepIds} onChange={setSsStepCur} />
+
       {/* Admin Panel — only visible with ?admin=1. Lets the operator save GHL Location ID + API Key for this client.
           The API key is stored in Supabase (RLS-locked) and only ever read by the submit-estimate Edge Function. */}
       {isAdmin && (
-        <div style={{ background: "#FEF3C7", borderBottom: "2px solid #F59E0B", padding: "14px 20px" }}>
+        <SSRow>
+        <div style={{ background: "#FEF3C7", border: "1px solid #F59E0B", borderRadius: 4, padding: "14px 20px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
             <span style={{ fontWeight: 700, fontSize: 14, color: "#92400E" }}>🔒 GHL Integration — Admin</span>
             <span style={{ fontSize: 11, color: "#92400E" }}>Client: <code>{C.clientId}</code></span>
@@ -17919,15 +18608,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
         </div>
+        </SSRow>
       )}
 
-      {cal3dPanel}
+      {cal3dPanel && <SSRow>{cal3dPanel}</SSRow>}
 
       {/* Inventory estimate: the building already exists, so the plan is read-only. The
           money lines below (custom options, discount, delivery) stay fully editable —
           that is the whole point of quoting one lot building to several customers. */}
       {planLocked && (
-        <div style={{ background: "#EFF6FF", borderBottom: "1px solid #BFDBFE", padding: "11px 20px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <SSRow>
+        <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 4, padding: "11px 20px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "#1E3A8A" }}>
             🔒 Inventory building{designUnit && designUnit.serial != null ? ` #${designUnit.serial}` : ""} — already built, so the plan can't be changed.
           </span>
@@ -17944,11 +18635,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </button>
           )}
         </div>
+        </SSRow>
       )}
       {/* CHANGING A SIGNED ORDER. Persistent, at the top, and it names the money — a rep
           must not be able to work for twenty minutes without seeing what this costs. */}
       {embedded && amendment && (
-        <div style={{ background: "#FFFBEB", borderBottom: "2px solid #FDE68A", padding: "10px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <SSRow>
+        <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 4, padding: "10px 20px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#92400E", flex: "1 1 260px", lineHeight: 1.5 }}>
             ✎ Changing a signed order{amendment.coNo != null ? ` — change order CO-${amendment.coNo}` : ""}.
             {" "}Change anything you need to; the customer signs the revised order when you save it.
@@ -17969,12 +18662,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </button>
           )}
         </div>
+        </SSRow>
       )}
       {/* Started on an inventory building, then staff chose to design fresh. */}
       {embedded && newBuildMode && designUnit && (
-        <div style={{ background: "#F0FDF4", borderBottom: "1px solid #BBF7D0", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>
+        <SSRow>
+        <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 4, padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#15803D" }}>
           ✎ Designing a new build for this customer — submitting saves it as another version, no longer tied to building{designUnit.serial != null ? ` #${designUnit.serial}` : ""}.
         </div>
+        </SSRow>
       )}
       {/* Quoting a spec build that has NOT been built yet (migration 102 made this reachable:
           a customer can buy a building that is still in the queue). The plan is deliberately
@@ -17982,29 +18678,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           will make, which is a very different thing from adjusting a quote. */}
       {embedded && !planLocked && !newBuildMode && designUnit && designUnit.lifecycle
         && (INV_RANKS[designUnit.lifecycle] ?? INV_BUILT_RANK) < INV_BUILT_RANK && (
-        <div style={{ background: "#FFFBEB", borderBottom: "1px solid #FDE68A", padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#92400E" }}>
+        <SSRow>
+        <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 4, padding: "10px 20px", fontSize: 12.5, fontWeight: 700, color: "#92400E" }}>
           ⚠ Building{designUnit.serial != null ? ` #${designUnit.serial}` : ""} isn’t built yet — what you change here is what gets built.
         </div>
+        </SSRow>
       )}
       {/* Configuration Panel — style, size, roof, paint and options all describe the
           BUILDING, so the whole panel goes inert together when the plan is locked. One
-          gate here beats fifteen `disabled` props that a new control would silently miss. */}
-      {(
-        // A real <fieldset disabled> — pointerEvents alone leaves every <select>/<input>
-        // in the tab order, so a keyboard user could still change Building Size, and the
-        // size effect wipes every item off a plan that describes a building already built.
-        // fieldset disables form controls including via keyboard; pointerEvents covers the
-        // style cards, which are clickable divs rather than controls. Both, deliberately.
-        <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined}
-          style={{ border: "none", margin: 0, minWidth: 0, background: "#FFF", borderBottom: "2px solid #E2E8F0", padding: "14px 20px",
-            ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) }}>
+          gate here beats fifteen `disabled` props that a new control would silently miss.
+          It is two fieldsets now, one in row 01 and one in row 02, with the same lock (ssLockStyle).
+          A real <fieldset disabled> — pointerEvents alone leaves every <select>/<input>
+          in the tab order, so a keyboard user could still change Building Size, and the
+          size effect wipes every item off a plan that describes a building already built.
+          fieldset disables form controls including via keyboard; pointerEvents covers the
+          style cards, which are clickable divs rather than controls. Both, deliberately. */}
+      <SSRow {...ssRowProps("style")}>
+        <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined} style={ssLockStyle}>
           {/* Building Styles — one row of N tiles that scrolls (Carolyn 2026-09-14); see
               SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
-          <div style={{ marginBottom: 14 }}>
-            <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Select Your Building Style</span>
+          <div>
+            <SSSecHead text={ssHead("style")} />
             <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S}
               onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
           </div>
+        </fieldset>
+      </SSRow>
+      {ssSizeShown && (
+      <SSRow {...ssRowProps("size")}>
+        <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined} style={ssLockStyle}>
+          <SSSecHead text={ssHead("size")} />
 
           {/* Building Size · Roof Type · Roof Color · Cladding · Body Color · Trim Color — six
               compact cells on ONE grid row (Carolyn 2026-09-14: all six selects on one line, and
@@ -18087,8 +18790,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               Paint is excluded — it renders inline beside the roof colors above. */}
           {visibleOptions.filter((o) => o !== paintOpt).map((opt) => renderOption(opt))}
         </fieldset>
+      </SSRow>
       )}
 
+      {/* What the plan just did (loft support, a size change's reflow): an empty-rail row between
+          sections 02 and 03, in the same DOM position as before. */}
+      {(unattachedLofts.length > 0 || (reflowNote && reflowNote.length > 0)) && (
+      <SSRow>
       {unattachedLofts.length > 0 && (
         <div style={{ background: "#FEF3C7", borderBottom: "1px solid #FCD34D", padding: "10px 16px", fontSize: 12, color: "#92400E" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Loft support warning — {unattachedLofts.length} loft{unattachedLofts.length > 1 ? "s" : ""} not properly supported</div>
@@ -18123,11 +18831,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             style={{ background: "none", border: "none", color: "#1E3A8A", cursor: "pointer", fontSize: 15, fontWeight: 800, lineHeight: 1, flexShrink: 0 }}>✕</button>
         </div>
       )}
+      </SSRow>
+      )}
 
+      {/* Section 03: options, the selection toolbar, and the plan with its docked 3D. */}
+      <SSRow {...ssRowProps("options")}>
+      <SSSecHead text={ssHead("options")} />
       {/* Tool Palette. The ROW stays — Export and the 3D teaser live in it and neither
           touches the building. Only the plan-editing controls inside it go away when the
           plan is locked (hiding the whole row took Export with it). */}
-      <div style={{ background: "#FFF", borderBottom: "1px solid #E2E8F0", padding: "10px 20px", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ background: "#FFF", padding: "10px 0", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         {!planLocked && (() => {
           const btn = ssToolBtn;
           // `entries` is the PALETTE (its own tool button); `incl` is the included row, which is
@@ -18443,7 +19156,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             2026-09-02). width:100% forces it onto a line of its own, so the two ends stay
             opposite each other no matter how the tool buttons above happen to wrap — which is
             what "same line as the 3D button" actually requires. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", marginTop: 4 }}>
+        {/* flexWrap (redesign S1): at a phone width the right-hand group used to push the page
+            sideways (measured 600px wide at 414 on beta). Wrapping moves it onto its own line
+            instead; on desktop everything fits one line, so nothing moves there. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, rowGap: 6, flexWrap: "wrap", width: "100%", marginTop: 4 }}>
           {/* Wall height USED to sit in the top selection row, inside <fieldset disabled=
               {planLocked}>, so the lock greyed it out for free. Out here it must gate itself —
               and it follows its new neighbours (the tools, which vanish) rather than its old
@@ -18463,8 +19179,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               // NO lineHeight — S.btn does not set one, and 1.5 made this 2px taller than the
               // 3D button beside it. Matching means matching what it omits as well.
               padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
-              fontFamily: "inherit", border: "none", borderRight: "1px solid #CBD5E1",
-              background: on ? accent : "#F1F5F9", color: on ? "#FFF" : "#334155",
+              border: "none", borderRight: "1px solid #CBD5E1",
+              background: on ? accent : "#F1F5F9", color: on ? pal.onAccent : "#334155",
             });
             return (<>
               <span style={{ ...S.lbl, fontSize: 10 }}>Wall Height</span>
@@ -18480,7 +19196,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </>);
           })()}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
             // in place. Deliberate click only — dragging/nudging never opens it. Essential for
@@ -18518,7 +19234,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!si || !isVentItem(si) || !si.wall) return null;
             const vr = ventRoof2D();
             const w = ssVentWhere(vr.roof, bldgW, bldgH, vr.H, si, scale, mgX, mgY);
-            const chip = (on) => ({ ...S.btn(on ? accent : "#F1F5F9", on ? "#FFF" : "#334155"), border: `1px solid ${on ? accent : "#CBD5E1"}` });
+            const chip = (on) => ({ ...S.btn(on ? accent : "#F1F5F9", on ? pal.onAccent : "#334155"), border: `1px solid ${on ? accent : "#CBD5E1"}` });
             const arrow = { ...S.btn("#F8FAFC", "#334155"), border: "1px solid #CBD5E1", padding: "5px 9px" };
             return <>
               <button onClick={() => ventZoneSel("gable")} aria-pressed={w.zone === "gable"} title="Put the vent up in the gable, above the wall" style={chip(w.zone === "gable")}>In the gable</button>
@@ -18627,7 +19343,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
           and the PDF export draws from state, not this DOM. */}
       {!(show3D || adminCalPreview) && (
-      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 20px", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 0", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
@@ -19067,7 +19783,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              which recompute on every render and would realloc the drawing buffer at
              mousemove rate. sticky (not fixed) because the designer host is the
              scroller; fixed would escape it and float over the whole portal. */
-          <div style={{ flex: "0 0 clamp(320px, 36%, 520px)", height: "min(620px, 68vh)", position: "sticky", top: 12 }}>
+          <div style={{ flex: "0 0 clamp(320px, 36%, 520px)", height: "min(620px, 68vh)", position: "sticky", top: "calc(var(--ssd-sticky-top, 0px) + 12px)" }}>
             <Structure3DPanel
               /* Remount on building size and NOTHING else: every camera, shadow and
                  orbit constant in the panel bakes from bldgW/bldgH at mount. Size
@@ -19110,11 +19826,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         )}
       </div>
       )}
+      </SSRow>
 
       {/* Customer Information (above Submit Bar) */}
       {!submitted && (
-        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
-          <span style={{ ...S.lbl, display: "block", marginBottom: 10, fontSize: 12 }}>Customer Information</span>
+        <SSRow {...ssRowProps("customer")}>
+        <div style={{ background: "#FFF" }}>
+          <SSSecHead text={ssHead("customer")} />
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
             {C.contactFields.includes("name") && (
               <div style={{ flex: "1 1 180px" }}>
@@ -19195,12 +19913,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           )}
         </div>
+        </SSRow>
       )}
 
       {/* Additional options (layout pricing, rough openings, custom options, delivery
           fee) — collapsible; relocated below the address, just above the submit bar. */}
       {!submitted && (
-        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "14px 20px" }}>
+        <SSRow {...ssRowProps("details")}>
+        <div style={{ background: "#FFF" }}>
+          {/* ONE text node ("05 · Details") until the Details slice splits it: snap.mjs openDetails
+              falls back to an element whose text is exactly "Details", which must stay the bar's title. */}
+          <SSSecHead text={ssHead("details")} />
           {/* Public gate: Details opens only once the contact form is complete — the moment
               a shopper asks to see prices with full contact info, they are silently saved
               as a lead (and their design as a draft). Customer-facing this is a REAL bar
@@ -19633,6 +20356,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })()}
         </div>
+        </SSRow>
       )}
 
       {/* Save-to-Inventory dialog (embedded-only; opened from the Submit Bar button). */}
@@ -19691,7 +20415,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <button type="button" onClick={() => setInvDialog(null)}
                     style={{ background: "#F1F5F9", color: "#334155", border: "1px solid #E2E8F0", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
                   <button type="button" onClick={saveInventory} disabled={invDialog.busy}
-                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
+                    style={{ background: invDialog.busy ? "#9CA3AF" : accent, color: invDialog.busy ? "#FFF" : pal.onAccent, border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: invDialog.busy ? "wait" : "pointer" }}>
                     {invDialog.busy ? "Saving…" : (inventoryMaster && inventoryMaster.unitId ? "Save changes" : "Send request")}
                   </button>
                 </div>
@@ -19703,7 +20427,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
       {/* Submit Bar */}
       {!submitted && (
-        <div style={{ background: "#FFF", borderTop: "2px solid #E2E8F0", padding: "16px 20px" }}>
+        <SSRow {...ssRowProps("quote")}>
+        <div style={{ background: "#FFF", padding: "0 0 16px" }}>
           {submitError && (
             <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "10px 14px", marginBottom: 12, color: "#DC2626", fontSize: 13, fontWeight: 600 }}>
               {submitError}
@@ -19748,7 +20473,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   onClick={openInventoryDialog}
                   disabled={submitting || Boolean(invDialog && invDialog.busy)}
                   style={{
-                    background: (submitting || (invDialog && invDialog.busy)) ? "#9CA3AF" : accent, color: "#FFF",
+                    background: (submitting || (invDialog && invDialog.busy)) ? "#9CA3AF" : accent, color: (submitting || (invDialog && invDialog.busy)) ? "#FFF" : pal.onAccent,
                     border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 14, fontWeight: 800,
                     cursor: (submitting || (invDialog && invDialog.busy)) ? "wait" : "pointer",
                     letterSpacing: "-0.01em", whiteSpace: "nowrap",
@@ -19774,7 +20499,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 onClick={submitQuote}
                 disabled={submitting}
                 style={{
-                  background: submitting ? "#9CA3AF" : accent, color: "#FFF", border: "none", borderRadius: 10,
+                  background: submitting ? "#9CA3AF" : accent, color: submitting ? "#FFF" : pal.onAccent, border: "none", borderRadius: 10,
                   padding: "12px 32px", fontSize: 16, fontWeight: 800, cursor: submitting ? "wait" : "pointer",
                   letterSpacing: "-0.01em", boxShadow: submitting ? "none" : `0 4px 14px ${accent}50`,
                   transition: "all 0.2s", minWidth: 160,
@@ -19798,10 +20523,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })()}
         </div>
+        </SSRow>
       )}
 
       {/* Success Screen */}
       {submitted && (
+        <SSRow {...ssRowProps("quote")}>
         <div style={{ background: "#F0FDF4", borderTop: "2px solid #BBF7D0", padding: "32px 20px", textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>✅</div>
           <h3 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700, color: "#166534" }}>
@@ -19855,7 +20582,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
                 <button type="button" disabled={amendBusy}
                   onClick={() => finishAmendment("send")}
-                  style={{ ...S.btn(accent, "#FFF"), padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
+                  style={{ ...S.btn(accent, pal.onAccent), padding: "8px 14px", fontSize: 13, opacity: amendBusy ? 0.6 : 1 }}>
                   {amendBusy ? "Working…" : "Send it for signature"}
                 </button>
                 <button type="button" disabled={amendBusy}
@@ -19924,7 +20651,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
                   {savedDesign.quotePdfUrl && (
                     <a href={savedDesign.quotePdfUrl} target="_blank" rel="noopener"
-                      style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13, textDecoration: "none" }}>
+                      style={{ ...S.btn(accent, pal.onAccent), padding: "9px 16px", fontSize: 13, textDecoration: "none" }}>
                       Print quote (PDF)
                     </a>
                   )}
@@ -20059,7 +20786,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <div style={{ maxWidth: 520, margin: "16px auto 0", background: "#FFF", border: "1px solid #BBF7D0", borderRadius: 10, padding: 14, textAlign: "left" }}>
                 <div style={{ fontSize: 13, color: "#334155", marginBottom: 10 }}>Ready to go ahead? Verify it's you and you can accept this quote right here.</div>
                 <button type="button" onClick={() => openLoginSheet()}
-                  style={{ ...S.btn(accent, "#FFF"), padding: "9px 16px", fontSize: 13 }}>
+                  style={{ ...S.btn(accent, pal.onAccent), padding: "9px 16px", fontSize: 13 }}>
                   Verify your phone to accept this quote
                 </button>
               </div>
@@ -20124,12 +20851,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 setViewingVersion(null);
                 if (!embedded) window.history.replaceState({}, "", window.location.pathname);
               }}
-              style={{ ...S.btn(accent, "#FFF"), padding: "10px 24px", fontSize: 14 }}
+              style={{ ...S.btn(accent, pal.onAccent), padding: "10px 24px", fontSize: 14 }}
             >
               Start New Quote
             </button>
           </div>
         </div>
+        </SSRow>
       )}
       {toast && (() => {
         // A plain string is a placement refusal (every caller before 2026-09-15) and keeps
@@ -20227,6 +20955,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           </div>
         </div>
       )}
+      </SSDesignerFrame>
     </div>
   );
 }
