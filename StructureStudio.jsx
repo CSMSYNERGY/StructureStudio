@@ -10466,6 +10466,21 @@ const SSD_CSS = [
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
   '.ssd-frame{--ssd-select-h:26px}',
   '.ssd-s2{display:grid;gap:12px;grid-template-columns:var(--ssd-s2-cols)}',
+  // xl and lg: every field of the row is at least --ssd-fld-min wide, so a colour name is not cut to
+  // "Coffee Bro…" (155px leaves a colour select 96px of name, "Burnished Slate"). Each card's floor comes
+  // from ssS2Floor in the component: the minmax() tracks of --ssd-s2-cols-xl, and --ssd-min on each card.
+  // xl keeps the grid. All six fit at the narrowest xl (1065px of floors in 1070px of content), and
+  // wherever no floor binds the fr tracks give exactly the widths they gave before. lg is a wrapping flex
+  // row instead, because a 1000–1100px designer (a 1024 laptop, the portal at 1280) cannot hold six fields
+  // that wide: there Cladding drops to a row of its own, as at md, and from about 1110px the six share
+  // one line again. The grow is the card's fr; each card's 28px of padding and border sits outside what
+  // grow shares out, so at lg the split is a few px off the grid's.
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2,.ssd-frame[data-ssd-bp="lg"] .ssd-s2{--ssd-fld-min:155px}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2{grid-template-columns:var(--ssd-s2-cols-xl)}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2{display:flex;flex-wrap:wrap}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card{flex:var(--ssd-grow,1) 1 0px;min-width:var(--ssd-min,0px)}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card:only-child{max-width:520px}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2 .ssd-fld,.ssd-frame[data-ssd-bp="lg"] .ssd-s2 .ssd-fld{min-width:var(--ssd-fld-min)}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-s2{grid-template-columns:var(--ssd-s2-cols-md)}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .is-wide{grid-column:1/-1}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-s2,.ssd-frame[data-ssd-bp="xs"] .ssd-s2{grid-template-columns:minmax(0,1fr)}',
@@ -11212,7 +11227,8 @@ function ColorSelect({ value, colors, onPick }) {
   const chip = (hex) => <span className="ssd-cs-swatch" style={{ background: hex || "transparent" }} />;
   return (
     <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
-      <button type="button" onClick={() => setOpen((o) => !o)} className={sel ? "ssd-select ssd-cs" : "ssd-select ssd-cs is-empty"}>
+      {/* title: a builder's colour name longer than the box still reads in full on hover (button and rows). */}
+      <button type="button" onClick={() => setOpen((o) => !o)} title={sel ? sel.label : undefined} className={sel ? "ssd-select ssd-cs" : "ssd-select ssd-cs is-empty"}>
         {sel && chip(sel.hex)}
         <span className="ssd-cs-name">{sel ? sel.label : "Select…"}</span>
         <span className="ssd-cs-chev">▾</span>
@@ -11220,7 +11236,7 @@ function ColorSelect({ value, colors, onPick }) {
       {open && (
         <div className="ssd-cs-list">
           {colors.map((c) => (
-            <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }}
+            <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }} title={c.label}
               className={c.label === value ? "ssd-cs-row is-on" : "ssd-cs-row"}>
               {chip(c.hex)}<span className="ssd-cs-name">{c.label}</span>
             </div>
@@ -18874,11 +18890,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Section 02's card columns, from the cards that render: size 0.8fr, roof 1.3fr, cladding 2.1fr
   // (DESIGN-SPEC 4.4); one card alone is at most 520px. The -md template leaves Cladding out, because
   // at a 740–999px designer it takes a row of its own. The breakpoint CSS picks which one applies.
+  // At xl and lg every field is at least --ssd-fld-min wide (.ssd-s2 in SSD_CSS). ssS2Floor(n) is the floor
+  // of a card holding n fields: n fields, the 9px gaps between them, 13px padding and 1px border each side.
+  // It sets the xl grid's minmax() tracks (ssS2ColsXl) and each card's --ssd-min for the lg flex row.
+  // ssS2CladN counts the Cladding card's fields: Siding, then Body and Trim as a pair.
   const ssS2Fr = [sizeOpts.length > 0 && 0.8, roofTypes.length > 0 && 1.3, (claddingChoices.length > 0 || Boolean(paintOpt)) && 2.1].filter(Boolean);
   const ssS2Cols = ssS2Fr.length === 1 ? "minmax(0, 520px)" : ssS2Fr.map((f) => `minmax(0, ${f}fr)`).join(" ");
   const ssS2Short = ssS2Fr.filter((f) => f !== 2.1);
   const ssS2ColsMd = ssS2Fr.length === 1 ? ssS2Cols
     : ssS2Short.length > 1 ? ssS2Short.map((f) => `minmax(0, ${f}fr)`).join(" ") : "minmax(0, 1fr)";
+  const ssS2CladN = (claddingChoices.length > 0 ? 1 : 0) + (paintOpt ? 2 : 0);
+  const ssS2Floor = (n) => `calc(${n} * var(--ssd-fld-min) + ${(n - 1) * 9 + 28}px)`;
+  const ssS2ColsXl = ssS2Fr.length === 1 ? ssS2Cols
+    : [sizeOpts.length > 0 && `minmax(${ssS2Floor(1)}, 0.8fr)`, roofTypes.length > 0 && `minmax(${ssS2Floor(2)}, 1.3fr)`,
+      (claddingChoices.length > 0 || Boolean(paintOpt)) && `minmax(${ssS2Floor(ssS2CladN)}, 2.1fr)`].filter(Boolean).join(" ");
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
@@ -19158,11 +19183,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <SSSecHead text={ssHead("size")} />
 
           {/* Size, roof and cladding as three cards (redesign 2026-09-15, DESIGN-SPEC 4.4): Building size ·
-              Roof options (Type, Color) · Cladding (Siding, Body color, Trim color). The six selects stay
-              on ONE line down to a 1000px designer (Carolyn 2026-09-14: all six on one line, and they
-              "don't need to be as wide"); at 740–999px Cladding takes its own row, and a phone gets one
-              card a row with its fields two-up. The columns come from the cards present (ssS2Cols) and
-              the breakpoint CSS picks the template. Every card is still conditional, so any subset lays
+              Roof options (Type, Color) · Cladding (Siding, Body color, Trim color). The six selects share
+              ONE line whenever each gets 155px, which is every xl designer and lg from about 1110px
+              (Carolyn 2026-09-14: all six on one line, and they "don't need to be as wide"). Narrower
+              than that the colour names were cut ("Coffee Bro…"), so Cladding takes its own row there,
+              as it does at 740–999px, and a phone gets one card a row with its fields two-up. The
+              columns come from the cards present (ssS2Cols, ssS2ColsXl with the floors, and --ssd-grow /
+              --ssd-min on each card for the lg flex row) and the breakpoint CSS picks the layout. Every card is still conditional, so any subset lays
               out, and Cladding still sits between the roof and the paint, where Carolyn drew it
               (2026-08-18). minWidth:0 on each card and field is load-bearing: a long colour name would
               otherwise widen its track past the page on a phone.
@@ -19170,9 +19197,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               finds the select by that xpath). The "Roof " before Type and Color is visually hidden only,
               so a screen reader and the harness still read "Roof Type" / "Roof Color". */}
           {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
-            <div className="ssd-s2" style={{ "--ssd-s2-cols": ssS2Cols, "--ssd-s2-cols-md": ssS2ColsMd }}>
+            <div className="ssd-s2" style={{ "--ssd-s2-cols": ssS2Cols, "--ssd-s2-cols-md": ssS2ColsMd, "--ssd-s2-cols-xl": ssS2ColsXl }}>
               {sizeOpts.length > 0 && (
-                <div className="ssd-card">
+                <div className="ssd-card" style={{ "--ssd-grow": "0.8", "--ssd-min": ssS2Floor(1) }}>
                   <span className="ssd-card-t">Building Size</span>
                   <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
                     className={"ssd-select ssd-field is-size" + (sel.size ? "" : " is-empty")}>
@@ -19201,7 +19228,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // One card, Type then Color. Before a type is picked the Color field shows a greyed
                 // box the height of a select, so the row's controls still line up.
                 return (
-                  <div className="ssd-card">
+                  <div className="ssd-card" style={{ "--ssd-grow": "1.3", "--ssd-min": ssS2Floor(2) }}>
                     <span className="ssd-card-t">Roof options</span>
                     <div className="ssd-flds">
                       <div className="ssd-fld">
@@ -19227,7 +19254,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 );
               })()}
               {(claddingChoices.length > 0 || paintOpt) && (
-                <div className="ssd-card is-wide">
+                <div className="ssd-card is-wide" style={{ "--ssd-grow": "2.1", "--ssd-min": ssS2Floor(ssS2CladN) }}>
                   <span className="ssd-card-t">Cladding</span>
                   <div className="ssd-flds">
                     {claddingChoices.length > 0 && (
