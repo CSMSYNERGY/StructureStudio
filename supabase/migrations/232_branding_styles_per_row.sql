@@ -24,7 +24,9 @@
 -- post-check below still re-asserts anon EXECUTE, because a designer that cannot read its config
 -- is every tenant's public page down.
 --
--- NUMBERING. 228 was claimed up front for this workstream (229-231 belong to the login session).
+-- NUMBERING. Written as 232 and applied live under that file name on 2026-09-15, but another session had
+-- applied and recorded 228_bos_fee_all_bases a few minutes earlier, so the ledger insert no-op'd. Renamed
+-- to 232 the same day and recorded as version 232 (229-231 belong to the login workstream).
 -- The live ledger mixes plain versions ('224') with timestamps ('20260908031748'), and on
 -- 2026-09-15 it had NO rows for 225, 226 or 227 even though 227's column is live — so "the
 -- highest prefix" answers nothing. Check the ledger by NAME before applying.
@@ -55,13 +57,13 @@
 --        begin if position(a in s) = 0 then raise exception 'splice not found'; end if;
 --              execute replace(s, a, ''); end $$;
 --   2. Then: alter table public.client_configs drop column styles_per_row;
---   3. Then delete the ledger row. Deploy the pre-228 portal-settings first if it is already live
+--   3. Then delete the ledger row. Deploy the pre-232 portal-settings first if it is already live
 --      (its fallback select keeps the card loading, but a Save Branding that carries stylesPerRow
 --      would fail on the missing column).
 --
 -- HAND-APPLY: pipe this file to `supabase db query --linked` (NOT `--file`, which auth-fails,
 -- retries and still exits 0), then record it:
---   insert into supabase_migrations.schema_migrations (version, name) values ('228', '228_branding_styles_per_row');
+--   insert into supabase_migrations.schema_migrations (version, name) values ('232', '228_branding_styles_per_row');
 -- The rehearsal (begin … rollback) and the md5 before/after checks are written out for the
 -- integrator separately; run them first.
 
@@ -96,7 +98,7 @@ $con$;
 
 comment on column public.client_configs.styles_per_row is
   'Building styles per row on the public designer''s style bar, 5..8. NULL = never chosen = 8. '
-  'Emitted by get_config as branding.stylesPerRow ONLY when set (228). Written by portal-settings save_branding.';
+  'Emitted by get_config as branding.stylesPerRow ONLY when set (232). Written by portal-settings save_branding.';
 
 -- ── 2. get_config: branding.stylesPerRow, sparse ─────────────────────────────────────────────
 do $splice$
@@ -109,7 +111,7 @@ declare
 begin
   -- GUARD 1 — idempotent.
   if position('stylesPerRow' in v_src) > 0 then
-    raise notice '228: get_config already emits stylesPerRow — nothing to splice';
+    raise notice '232: get_config already emits stylesPerRow — nothing to splice';
     return;
   end if;
 
@@ -117,18 +119,18 @@ begin
   -- migration added a second object ending in accentColor, a blind replace would splice both.
   v_hits := (length(v_src) - length(replace(v_src, v_anchor, ''))) / length(v_anchor);
   if v_hits <> 1 then
-    raise exception '228: anchor % found % time(s), expected exactly 1 — get_config has changed shape; re-derive the anchor from a fresh pg_get_functiondef before retrying', v_anchor, v_hits;
+    raise exception '232: anchor % found % time(s), expected exactly 1 — get_config has changed shape; re-derive the anchor from a fresh pg_get_functiondef before retrying', v_anchor, v_hits;
   end if;
 
   v_new := replace(v_src, v_anchor, v_anchor || v_add);
 
   -- GUARD 3 — one insertion, no deletion.
   if length(v_new) <> length(v_src) + length(v_add) then
-    raise exception '228: spliced body is % chars, expected % — refusing to execute', length(v_new), length(v_src) + length(v_add);
+    raise exception '232: spliced body is % chars, expected % — refusing to execute', length(v_new), length(v_src) + length(v_add);
   end if;
 
   execute v_new;
-  raise notice '228: spliced stylesPerRow into get_config branding (% -> % chars)', length(v_src), length(v_new);
+  raise notice '232: spliced stylesPerRow into get_config branding (% -> % chars)', length(v_src), length(v_new);
 end
 $splice$;
 
@@ -139,19 +141,19 @@ begin
     select 1 from information_schema.columns
      where table_schema = 'public' and table_name = 'client_configs' and column_name = 'styles_per_row'
   ) then
-    raise exception '228: client_configs.styles_per_row is missing after the ALTER';
+    raise exception '232: client_configs.styles_per_row is missing after the ALTER';
   end if;
   if not exists (
     select 1 from pg_constraint
      where conrelid = 'public.client_configs'::regclass and conname = 'client_configs_styles_per_row_range'
   ) then
-    raise exception '228: the 5..8 CHECK is missing';
+    raise exception '232: the 5..8 CHECK is missing';
   end if;
   if position('stylesPerRow' in pg_get_functiondef('public.get_config(text)'::regprocedure)) = 0 then
-    raise exception '228: get_config does not mention stylesPerRow after the splice';
+    raise exception '232: get_config does not mention stylesPerRow after the splice';
   end if;
   if not has_function_privilege('anon', 'public.get_config(text)', 'execute') then
-    raise exception '228: anon lost EXECUTE on get_config — every public designer would fail to load';
+    raise exception '232: anon lost EXECUTE on get_config — every public designer would fail to load';
   end if;
 end
 $check$;

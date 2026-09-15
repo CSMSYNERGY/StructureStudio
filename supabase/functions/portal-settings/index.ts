@@ -1182,15 +1182,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (error) return dbFail(req, clientId, "load your settings", error);
     // Designer branding lives in client_configs (drives the public ?client= link).
     //
-    // ⚠️ THE FALLBACK SELECT IS LOAD-BEARING (styles_per_row, migration 228, 2026-09-15). This
+    // ⚠️ THE FALLBACK SELECT IS LOAD-BEARING (styles_per_row, migration 232, 2026-09-15). This
     // read swallows its error by design — status is the bootstrap every role needs — so a select
     // naming a column the database does not have yet returns cfg = null, not a failure. The
     // Branding card then loads BLANK, and the owner's next Save Branding sends those blanks and
     // wipes company name, tagline and colours on beta AND production. Deploying this function a
-    // minute ahead of 228 would do exactly that to every tenant. Retrying with the pre-228 column
+    // minute ahead of 232 would do exactly that to every tenant. Retrying with the pre-232 column
     // list turns that into "stylesPerRow reads as default" instead; a save that carries
     // stylesPerRow then fails loudly on the missing column and writes nothing (one UPDATE).
-    // Apply 228 first anyway — this is the seatbelt, not the plan.
+    // Apply 232 first anyway — this is the seatbelt, not the plan.
     let { data: cfg, error: cfgErr } = await admin
       .from("client_configs")
       .select("company_name, tagline, logo_url, accent_color, header_bg, styles_per_row")
@@ -1310,7 +1310,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         logoUrl: cfg?.logo_url ?? null,
         accentColor: cfg?.accent_color ?? null,
         headerBg: cfg?.header_bg ?? null,
-        // Building styles per row on the designer (228). null = never chosen, which the card
+        // Building styles per row on the designer (232). null = never chosen, which the card
         // shows as 8 and the designer treats as 8 — the same default, stated in two places.
         stylesPerRow: (cfg as { styles_per_row?: number | null } | null)?.styles_per_row ?? null,
       },
@@ -1773,7 +1773,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (val === false) return json({ error: `${key === "accentColor" ? "Accent color" : "Header background"} must be a color like #D97706 or a gradient — it can't contain punctuation such as ; { } < >.` }, 400);
       updates[col] = val;
     }
-    // BUILDING STYLES PER ROW (migration 228). Carolyn 2026-09-14 @7:10: a ninth style wrapped to a
+    // BUILDING STYLES PER ROW (migration 232). Carolyn 2026-09-14 @7:10: a ninth style wrapped to a
     // second row of the designer's style bar; the bar now scrolls, and each builder picks how many
     // photos sit side by side. 5..8 because below 5 a tile is wider than the photo is worth and
     // above 8 the photos stop reading as buildings on a laptop — the column CHECK says the same, so

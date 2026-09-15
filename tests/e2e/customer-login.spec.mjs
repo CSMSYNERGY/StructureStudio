@@ -124,8 +124,11 @@ async function armATool(page) {
 // from several styles (Utility, sizes from 8x10) to one "Lofted Barn" (10x12–12x24), and every
 // driver that clicked "Utility" or picked "8x10" timed out with the product working fine. So pick
 // the FIRST style card under the heading and a size the select actually offers, never a name.
+// The style bar is SSStyleStrip since the layout workstream (a scroller with arrow buttons around
+// the tiles), so "the first child under the heading" is no longer a tile. Its tiles carry
+// data-ss-style, the same hook designer.spec.mjs uses.
 async function pickFirstStyle(page) {
-  await page.getByText("Select Your Building Style", { exact: true }).locator("xpath=following-sibling::*[1]/*[1]").click();
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
 }
 const sizeSelectOf = (page) => page.locator("select").filter({ has: page.locator("option", { hasText: "Select a size…" }) });
 const sizeValues = (page) => sizeSelectOf(page).evaluate((s) => [...s.options].map((o) => o.value).filter(Boolean));

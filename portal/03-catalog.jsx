@@ -42,7 +42,7 @@ function SettingsView({ section }) {
     coFeeLabel: "Change order fee", coUnlockHours: "72",
     // designer branding (client_configs — drives the public ?client= link)
     brandName: "", brandTagline: "", brandAccent: "#D97706", brandHeaderBg: "#1E293B",
-    // Building styles per row on the designer (migration 228). A STRING like every other form
+    // Building styles per row on the designer (migration 232). A STRING like every other form
     // field here; "8" is the designer's own default, so a tenant who never chose reads as 8.
     brandStylesPerRow: "8",
   });
@@ -73,7 +73,7 @@ function SettingsView({ section }) {
   // Styles per row AS STORED: "5".."8", or null = never chosen (the card shows that as 8).
   // Review 2026-09-15: Save Branding used to send stylesPerRow on EVERY save, so a tenant who
   // only swapped their logo got styles_per_row = 8 written — erasing "never chosen", changing
-  // their get_config payload (228 emits the key only when the column is set) and pinning them
+  // their get_config payload (232 emits the key only when the column is set) and pinning them
   // at 8 if the default ever moves. Same idea as the logo: the key is sent only when the owner
   // actually picked a different number, and save_branding leaves the column alone otherwise.
   const [brandSprStored, setBrandSprStored] = useState(null);
@@ -752,7 +752,7 @@ function SettingsView({ section }) {
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="color" value={form.brandHeaderBg} onChange={set("brandHeaderBg")} style={{ width: 44, height: 34, border: "1px solid #CBD5E1", borderRadius: 6, background: "#FFF", cursor: "pointer" }} />
               <input style={{ ...S.input, flex: 1 }} value={form.brandHeaderBg} onChange={set("brandHeaderBg")} onKeyDown={brandKeyDown} /></div></div>
-          {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 228). A ninth style
+          {/* BUILDING STYLES PER ROW (Carolyn 2026-09-14 @7:10, migration 232). A ninth style
               wrapped to a second row of her style bar; the bar now scrolls instead, and this is
               how many photos sit side by side before it does. Four buttons, not a number box:
               only 5-8 are valid, and a picker that cannot hold a wrong value needs no error.
