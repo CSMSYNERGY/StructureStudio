@@ -9901,7 +9901,7 @@ function d3ScopeForItemsChange(prev, next, itemTypes) {
  *   forceContextLoss() on teardown — the modal omits it; the repo's throwaway
  *     GLB-scan renderer does call it, and this surface mounts far more often.
  */
-function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt = 0, activeWall = null, suspended, canEdit, onEdit, onClose }) {
+function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, style3d, roofType, roofColorHex, fixtures, bodyColors, trimColors, dormerWindowId, dormerWindowOffset, fitHeightFt = 0, activeWall = null, suspended, canEdit, onEdit, onClose, pal = ssPal({}) }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -10235,28 +10235,30 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
     if (e && activeWall) e.aimAtWall(activeWall);
   }, [activeWall]);
 
+  // Redesign S4: the 3D card in the builder's palette (`pal`, defaulting to the unbranded one). Every
+  // colour is inline, not a stylesheet class: the calibration surface renders this panel outside the
+  // designer frame, where SSD_CSS does not exist. Heights stay at or under today's: ✕ 20, Edit in 3D 30.
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.08)", overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 8px 12px", borderBottom: "1px solid #E2E8F0", background: "#F8FAFC", flexShrink: 0 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>3D view</span>
-        <span style={{ fontSize: 11, color: "#94A3B8" }}>{bldgW}×{bldgH} ft · drag to rotate · scroll to zoom</span>
-        <button onClick={onClose} title="Hide the 3D view" aria-label="Hide the 3D view"
-          style={{ marginLeft: "auto", background: "transparent", border: "none", color: "#64748B", fontSize: 16, lineHeight: 1, cursor: "pointer", padding: "2px 4px" }}>✕</button>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", boxSizing: "border-box", background: pal.surface, border: `1px solid ${pal.lineCard}`, borderRadius: 4, overflow: "hidden", fontFamily: SSD_FONT }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: "9px 10px 9px 13px", borderBottom: `1px solid ${pal.lineSoft}`, background: pal.surface, flexShrink: 0 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: pal.ink, whiteSpace: "nowrap" }}>3D view</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, fontWeight: 400, color: pal.subtle }}>{bldgW}×{bldgH} ft · drag to rotate · scroll to zoom</span>
+        <button onClick={onClose} title="Hide the 3D view" aria-label="Hide the 3D view" className="ssd-3d-x"
+          style={{ marginLeft: "auto", flex: "0 0 auto", width: 20, height: 20, boxSizing: "border-box", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, borderRadius: 4, background: "transparent", border: "none", color: pal.subtle, fontFamily: "inherit", fontSize: 14, lineHeight: 1, cursor: "pointer" }}>✕</button>
       </div>
       <div ref={wrapRef} style={{ flex: 1, position: "relative", minHeight: 0, background: "#E7EEF5" }}>
         <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block", touchAction: "none" }} />
         {phase !== "ready" && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#64748B", fontSize: 12, textAlign: "center", padding: 16, pointerEvents: "none" }}>
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: pal.muted, fontSize: 12, textAlign: "center", padding: 16, pointerEvents: "none" }}>
             {phase === "error" ? "The 3D view couldn't load. Close and open it again." : "Building the 3D view…"}
           </div>
         )}
       </div>
       {canEdit && (
-        <div style={{ padding: 8, borderTop: "1px solid #E2E8F0", background: "#F8FAFC", flexShrink: 0 }}>
-          {/* S lives inside the main component, out of reach from module scope, so
-              the panel spells its one button out. Values copied verbatim from S.btn
-              so the dock button and the toolbar button stay visually identical. */}
-          <button onClick={onEdit} style={{ background: "#7C3AED", color: "#FFF", border: "none", borderRadius: 6, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", width: "100%" }}>⛶ Edit in 3D</button>
+        <div style={{ padding: "8px 10px", borderTop: `1px solid ${pal.lineSoft}`, background: pal.surface, flexShrink: 0 }}>
+          {/* S lives inside the main component, out of reach from module scope, so the panel spells
+              its one button out: the toolbar's primary fill, at the 30px it has always been. */}
+          <button onClick={onEdit} className="ssd-3d-edit" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", height: 30, boxSizing: "border-box", margin: 0, padding: "0 12px", background: pal.primary, color: pal.onPrimary, border: "none", borderRadius: 4, fontFamily: "inherit", fontSize: 13, fontWeight: 700, lineHeight: 1, cursor: "pointer" }}>⛶ Edit in 3D</button>
         </div>
       )}
     </div>
@@ -10538,6 +10540,78 @@ const SSD_CSS = [
   '.ssd-incl-name{font-size:13px;font-weight:500;line-height:1.2;color:var(--ss-subtle);text-decoration:line-through}',
   '.ssd-incl-undo{font-family:inherit;margin:0;padding:5px 6px;border:0;border-radius:3px;background:transparent;color:var(--ss-accent-text);font-size:12px;font-weight:700;line-height:1;cursor:pointer}',
   '.ssd-incl-undo:hover{background:var(--ss-accent-wash)}',
+  // ── Section 03, part 2: the toolbar, the pick-one-to-remove pill, the plan card and the docked 3D ──
+  // One height token for the toolbar. 26px is what Clear floorplan and the 3D toggle measured before
+  // the redesign (Center and Rotate were 27, Remove 28, Note and Line 33), so the whole bar lines up at
+  // the smallest of them and nothing grows. A segmented control in the bar is 26 overall, borders in.
+  '.ssd-frame{--ssd-tb-h:26px}',
+  // Wall height hard left, the actions hard right and ending with 3D (Carolyn 2026-09-02: "same line as
+  // the 3D button"). Both halves wrap, so a phone stacks them instead of pushing the page sideways.
+  '.ssd-tb{flex:0 0 100%;min-width:0;box-sizing:border-box;display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:10px;padding:11px 13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
+  '.ssd-tb.is-empty{display:none}',
+  '.ssd-tb-l{display:inline-flex;flex-wrap:wrap;align-items:center;gap:10px;min-width:0;max-width:100%}',
+  '.ssd-tb-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap}',
+  // The action group takes the rest of the line (flex-basis 0) and wraps inside itself. Its minimum is its
+  // widest control, so the bar only drops it under the wall height when not even that fits (a phone).
+  '.ssd-tb-r{flex:1 1 0px;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:9px;max-width:100%}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-tb,.ssd-frame[data-ssd-bp="lg"] .ssd-tb-r{column-gap:7px}',
+  '.ssd-seg.is-tb .ssd-seg-b{height:calc(var(--ssd-tb-h) - 2px)}',
+  '.ssd-tb-btn{font-family:inherit;display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:0 0 auto;height:var(--ssd-tb-h);box-sizing:border-box;margin:0;padding:0 12px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);font-size:12.5px;font-weight:500;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,filter .15s ease}',
+  '.ssd-tb-btn:hover{background:var(--ss-panel);border-color:var(--ss-primary-line)}',
+  '.ssd-tb-btn.is-arrow{padding:0 9px;font-size:11px}',
+  '.ssd-tb-btn.is-soft,.ssd-tb-btn.is-accent,.ssd-tb-btn.is-danger,.ssd-tb-btn.is-warn,.ssd-tb-btn.is-primary{font-weight:700}',
+  '.ssd-tb-btn.is-soft{background:var(--ss-primary-faint);border-color:var(--ss-primary-line);color:var(--ss-primary)}',
+  '.ssd-tb-btn.is-accent{background:var(--ss-accent-wash);border-color:var(--ss-accent-line);color:var(--ss-accent-deep)}',
+  '.ssd-tb-btn.is-danger{background:var(--ss-danger-wash);border-color:var(--ss-danger-line);color:var(--ss-danger)}',
+  '.ssd-tb-btn.is-warn{background:#FEF3C7;border-color:#FCD34D;color:#B45309}',
+  '.ssd-tb-btn.is-primary{background:var(--ss-primary);border-color:var(--ss-primary);color:var(--ss-on-primary)}',
+  '.ssd-tb-btn.is-soft:hover,.ssd-tb-btn.is-accent:hover,.ssd-tb-btn.is-danger:hover,.ssd-tb-btn.is-warn:hover{filter:brightness(.97)}',
+  '.ssd-tb-btn.is-primary:hover{filter:brightness(1.08)}',
+  '.ssd-tb-btn.is-static,.ssd-tb-btn.is-static:hover{cursor:default;filter:none}',
+  // Note and Line are ssToolBtn option chips, dressed as the bar's neutral button (armed stays .is-armed).
+  '.ssd-tool.is-tb{min-height:0;height:var(--ssd-tb-h);padding:0 12px;white-space:nowrap}',
+  // "Selected: …" is information, so it never costs the bar a line. It sits in a one-line box that takes only
+  // the space the buttons leave; behind a zero-width first item it wraps onto a hidden second line when it
+  // does not fit whole. That keeps the toolbar's height, and the plan under it, still when you select.
+  '.ssd-tb-selw{flex:1 1 0px;width:0;min-width:0;height:13px;overflow:hidden;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:flex-start}',
+  '.ssd-tb-selw::before{content:"";flex:0 0 0px;height:13px}',
+  '.ssd-tb-sel{flex:0 0 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:10px;font-weight:700;line-height:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
+  // A phone gives the label a line of its own instead (the bar wraps there anyway).
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-tb-selw,.ssd-frame[data-ssd-bp="xs"] .ssd-tb-selw{flex-basis:100%;width:auto;height:auto}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-tb-selw::before,.ssd-frame[data-ssd-bp="xs"] .ssd-tb-selw::before{display:none}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-tb-sel,.ssd-frame[data-ssd-bp="xs"] .ssd-tb-sel{flex:0 1 auto;max-width:100%}',
+  // lg (a 1000–1179 designer): a little less air, so a selected item's actions still share one line.
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-tb-btn,.ssd-frame[data-ssd-bp="lg"] .ssd-tool.is-tb{padding:0 10px}',
+  '.ssd-frame[data-ssd-bp="lg"] .ssd-tb-btn.is-arrow{padding:0 8px}',
+  // A selected vent adds six controls (the zone pair, ▲ ▼ and the readout). Tighter air while they show, at
+  // the same heights and type, keeps that on one line on a 1250px designer as it was before the redesign.
+  '.ssd-tb.is-dense,.ssd-tb.is-dense .ssd-tb-r{column-gap:5px}',
+  '.ssd-tb.is-dense .ssd-tb-l{gap:7px}',
+  '.ssd-tb.is-dense .ssd-tb-btn,.ssd-tb.is-dense .ssd-tool.is-tb,.ssd-tb.is-dense .ssd-seg-b{padding:0 8px}',
+  '.ssd-tb.is-dense .ssd-tb-btn.is-arrow{padding:0 7px}',
+  '.ssd-tb.is-dense .ssd-tb-div{margin:0}',
+  '.ssd-tb-hint{font-size:11.5px;font-weight:600;line-height:1.3;color:var(--ss-accent-text);white-space:nowrap}',
+  '.ssd-tb-warn{font-size:11px;font-weight:700;line-height:1.3;color:#B45309;white-space:nowrap}',
+  // The vent readout: tests read it through innerText, so it must never be text-transformed.
+  '.ssd-tb-read{font-size:11.5px;font-weight:700;line-height:1.3;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-tb-div{flex:0 0 auto;width:1px;height:22px;margin:0 2px;background:var(--ss-line-card)}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-tb-div,.ssd-frame[data-ssd-bp="xs"] .ssd-tb-div{display:none}',
+  // Pick-one-to-remove pill. Position, stacking and the scrim stay inline where they always were.
+  '.ssd-pick{display:flex;align-items:center;gap:12px;padding:8px 10px 8px 14px;border:1px solid var(--ss-danger-line);border-left:3px solid var(--ss-danger);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);box-shadow:0 8px 24px rgba(15,23,42,.28)}',
+  '.ssd-pick-t{font-size:13px;font-weight:600;line-height:1.35}',
+  '.ssd-pick-x{font-family:inherit;flex-shrink:0;height:24px;box-sizing:border-box;margin:0;padding:0 12px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:12px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer}',
+  '.ssd-pick-x:hover{border-color:var(--ss-danger)}',
+  // Plan card. ⚠️ No transform, filter, opacity, contain or positioned z-index here: the plan svg must
+  // rise over the pick scrim. The plan column's flex-basis is dispMaxW + 34 (16px padding and a 1px
+  // border each side), so plan and dock stay a centred pair.
+  '.ssd-plan{width:100%;min-width:0;box-sizing:border-box;padding:14px 16px 16px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-plan{padding:10px 10px 12px}',
+  '.ssd-plan-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;margin:0 0 8px}',
+  '.ssd-plan-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-plan-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11.5px;font-weight:500;line-height:1.3;color:var(--ss-subtle);white-space:nowrap}',
+  // Docked 3D card: its look is inline (the calibration surface renders it outside this stylesheet); only hover lives here.
+  '.ssd-3d-x:hover{background:var(--ss-panel)!important;color:var(--ss-ink)!important}',
+  '.ssd-3d-edit:hover{filter:brightness(1.08)}',
 ].join("\n");
 
 // The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
@@ -18468,6 +18542,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     /* Nothing drags on this surface, and no canEdit: there is no plan to edit
                        here, so the panel's "⛶ Edit in 3D" footer never renders. */
                     suspended={false}
+                    pal={pal}
                     onClose={() => setCalDock3D(false)}
                   />
                 </div>
@@ -18506,7 +18581,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         }
         setActiveTool(activeTool === key ? null : key); setSelectedId(null);
       }}
-      className={"ssd-tool" + (variant === "incl" ? " is-incl" : "") + (ssToolArmed(key, cfg) ? " is-armed" : "")}>
+      className={"ssd-tool" + (variant === "incl" ? " is-incl" : variant === "tb" ? " is-tb" : "") + (ssToolArmed(key, cfg) ? " is-armed" : "")}>
       <span className={cfg.isElecItemPicker ? "ssd-tool-ic is-bolt" : "ssd-tool-ic"}>{key === "singleDoor" || key === "doorPicker" ? <DoorIcon /> : key === "doubleDoor" ? <DoorIcon double /> : (cfg.icon || <span className="ssd-tool-sq" style={{ background: cfg.color }} />)}</span>
       {(armedShelf(cfg) || armedElecItem(cfg)) ? ((ITEMS[activeTool] && ITEMS[activeTool].label) || cfg.label) : cfg.label}
       {(cfg.wallOnly || cfg.wallSnap) && <span className="ssd-wall">wall</span>}
@@ -18517,6 +18592,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // doors and windows. Moving them also takes a whole cell out of the grid and retires the
   // "Annotate" heading, which only ever existed because a split cell needs one.
   const ANNOTATE_KEYS = ["textNote", "line"];
+  // Redesign S4: the plan's selection chrome (dashed outline, handles, stretch grips, loft bars) in the
+  // palette's primary instead of a fixed blue. The hex-alpha fills below append two digits, so this is
+  // always a 6-digit hex. The building outline keeps its stroke ATTRIBUTE (tests find the plan by it).
+  const planSel = /^#[0-9a-f]{6}$/i.test(String(pal.primary)) ? pal.primary : "#3d3672";
 
   // ─── Stepper rail + progress bar (redesign 2026-09-15) ───
   // Presentation only. The steps, their numbers and their done flags all come from state the designer
@@ -19316,15 +19395,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           </>);
         })()}
-        {activeTool && <span style={{ fontSize: 11, color: accent, fontWeight: 600, marginLeft: 6 }}>← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>}
         {/* The bottom line: wall height hard left, the action buttons hard right (Carolyn
-            2026-09-02). width:100% forces it onto a line of its own, so the two ends stay
+            2026-09-02). flex-basis 100% forces it onto a line of its own, so the two ends stay
             opposite each other no matter how the tool buttons above happen to wrap — which is
             what "same line as the 3D button" actually requires. */}
-        {/* flexWrap (redesign S1): at a phone width the right-hand group used to push the page
-            sideways (measured 600px wide at 414 on beta). Wrapping moves it onto its own line
-            instead; on desktop everything fits one line, so nothing moves there. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, rowGap: 6, flexWrap: "wrap", width: "100%", marginTop: 4 }}>
+        {/* Redesign S4: the bar is the toolbar card (.ssd-tb in SSD_CSS). Both halves wrap: at a phone
+            width the right-hand group used to push the page sideways (600px wide at 414 on beta).
+            The active-tool hint moved INTO the bar, in the slot "Selected: …" uses while nothing is
+            armed; outside it, arming a tool added a line above the bar and pushed the plan down. A
+            locked plan with no dock has nothing to show here, so that empty bar is hidden. */}
+        <div className={(planLocked && !(dockOn && view3dOn) ? "ssd-tb is-empty" : "ssd-tb")
+          + (selectedId && !planLocked && items.some((i) => i.id === selectedId && isVentItem(i) && i.wall) ? " is-dense" : "")}>
           {/* Wall height USED to sit in the top selection row, inside <fieldset disabled=
               {planLocked}>, so the lock greyed it out for free. Out here it must gate itself —
               and it follows its new neighbours (the tools, which vanish) rather than its old
@@ -19336,32 +19417,36 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!whList.length) return null;
             const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
             const cur = Number(sel.wallHeightDeltaIn) || 0;
-            // Metrics are S.btn's, EXACTLY — that is what makes this the same height as the 3D
-            // button beside it. Two things would break the match and both are deliberate here:
-            // the container carries no border (a 1px one makes it 2px taller), and the price is
-            // INLINE rather than a second line, which alone would double the height.
-            const cell = (on) => ({
-              // NO lineHeight — S.btn does not set one, and 1.5 made this 2px taller than the
-              // 3D button beside it. Matching means matching what it omits as well.
-              padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer",
-              border: "none", borderRight: "1px solid #CBD5E1",
-              background: on ? accent : "#F1F5F9", color: on ? pal.onAccent : "#334155",
-            });
-            return (<>
-              <span style={{ ...S.lbl, fontSize: 10 }}>Wall Height</span>
-              <div style={{ display: "inline-flex", borderRadius: 6, overflow: "hidden" }}>
-                <button onClick={() => pick(0)} style={{ ...cell(cur === 0) }}>Standard</button>
-                {whList.map((o, i) => (
-                  <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
-                    style={{ ...cell(cur === Number(o.deltaIn)), borderRight: i === whList.length - 1 ? "none" : "1px solid #CBD5E1" }}
-                    title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
-                    +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
-                  </button>
-                ))}
+            // The segmented control at the bar's 26px, the same height as the 3D button beside it: the
+            // price is INLINE rather than a second line, which alone would double the height.
+            return (
+              <div className="ssd-tb-l">
+                <span className="ssd-tb-t">Wall Height</span>
+                <div className="ssd-seg is-tb">
+                  <button onClick={() => pick(0)} aria-pressed={cur === 0} className={cur === 0 ? "ssd-seg-b is-on" : "ssd-seg-b"}>Standard</button>
+                  {whList.map((o) => (
+                    <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
+                      aria-pressed={cur === Number(o.deltaIn)} className={cur === Number(o.deltaIn) ? "ssd-seg-b is-on" : "ssd-seg-b"}
+                      title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
+                      +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
+                    </button>
+                  ))}
+                </div>
               </div>
-            </>);
+            );
           })()}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+        <div className="ssd-tb-r">
+          {/* Slot 1: the armed tool's hint, else the selected item's name, the one the 3D footer's
+              "Remove …" uses. One text node, so a getByText(name, exact) never lands on this label. */}
+          {activeTool
+            ? <span className="ssd-tb-hint">← {ITEMS[activeTool] && ITEMS[activeTool].doorSnap ? "Click near a door" : `Click ${ITEMS[activeTool] && (ITEMS[activeTool].wallOnly || ITEMS[activeTool].wallSnap) ? "a wall" : "the layout"}`}</span>
+            : selectedId && !planLocked && (() => {
+              const si = items.find((i) => i.id === selectedId);
+              if (!si) return null;
+              const sc = ITEMS[si.type];
+              const nm = String(si.windowName || si.doorName || si.rampName || (sc && (sc.label || sc.shortLabel)) || si.planLabel || si.type);
+              return <span className="ssd-tb-selw"><span className="ssd-tb-sel" title={nm}>{"Selected: " + nm}</span></span>;
+            })()}
           {selectedId && (() => {
             // Swap: change a placed door/window/ramp (built-in OR catalog) to a current catalog one,
             // in place. Deliberate click only — dragging/nudging never opens it. Essential for
@@ -19386,8 +19471,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (isDoor) setDoorPick({ swap: true }); else if (isWin) setWindowPick({ swap: true }); else setRampPick({ swap: true });
             };
             return <>
-              {archived && <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309" }}>⚠ Archived — swap it →</span>}
-              <button onClick={openSwap} style={{ ...S.btn(archived ? "#FEF3C7" : "#ECFEFF", archived ? "#B45309" : "#0891B2"), border: `1px solid ${archived ? "#FCD34D" : "#A5F0FC"}` }}>⇄ Swap</button>
+              {archived && <span className="ssd-tb-warn">⚠ Archived — swap it →</span>}
+              <button onClick={openSwap} className={archived ? "ssd-tb-btn is-warn" : "ssd-tb-btn is-soft"}>⇄ Swap</button>
             </>;
           })()}
           {/* A selected VENT's height (2026-09-15): where it is, and the controls to move it up
@@ -19399,14 +19484,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!si || !isVentItem(si) || !si.wall) return null;
             const vr = ventRoof2D();
             const w = ssVentWhere(vr.roof, bldgW, bldgH, vr.H, si, scale, mgX, mgY);
-            const chip = (on) => ({ ...S.btn(on ? accent : "#F1F5F9", on ? pal.onAccent : "#334155"), border: `1px solid ${on ? accent : "#CBD5E1"}` });
-            const arrow = { ...S.btn("#F8FAFC", "#334155"), border: "1px solid #CBD5E1", padding: "5px 9px" };
+            // A segmented control (the two zones) + the neutral ▲ ▼, at the bar's height. The labels stay
+            // the buttons' last child: ventGable_test greps the markup for ">In the gable</button>".
+            const chip = (on) => (on ? "ssd-seg-b is-on" : "ssd-seg-b");
             return <>
-              <button onClick={() => ventZoneSel("gable")} aria-pressed={w.zone === "gable"} title="Put the vent up in the gable, above the wall" style={chip(w.zone === "gable")}>In the gable</button>
-              <button onClick={() => ventZoneSel("wall")} aria-pressed={w.zone === "wall"} title="Put the vent on the wall, below the roof line" style={chip(w.zone === "wall")}>On the wall</button>
-              <button onClick={() => ventNudgeSel(1)} aria-label="Raise the vent 3 inches" title="Up 3 in" style={arrow}>▲</button>
-              <button onClick={() => ventNudgeSel(-1)} aria-label="Lower the vent 3 inches" title="Down 3 in" style={arrow}>▼</button>
-              <span data-vent-readout="1" style={{ fontSize: 11, fontWeight: 700, color: "#475569", whiteSpace: "nowrap" }}>
+              <div className="ssd-seg is-tb">
+                <button onClick={() => ventZoneSel("gable")} aria-pressed={w.zone === "gable"} title="Put the vent up in the gable, above the wall" className={chip(w.zone === "gable")}>In the gable</button>
+                <button onClick={() => ventZoneSel("wall")} aria-pressed={w.zone === "wall"} title="Put the vent on the wall, below the roof line" className={chip(w.zone === "wall")}>On the wall</button>
+              </div>
+              <button onClick={() => ventNudgeSel(1)} aria-label="Raise the vent 3 inches" title="Up 3 in" className="ssd-tb-btn is-arrow">▲</button>
+              <button onClick={() => ventNudgeSel(-1)} aria-label="Lower the vent 3 inches" title="Down 3 in" className="ssd-tb-btn is-arrow">▼</button>
+              <span data-vent-readout="1" className="ssd-tb-read">
                 {w.zone === "gable" ? `${fmtDimFtIn(w.riseFt)} above the plate` : `${fmtDimFtIn(w.bottomFt)} off the floor`}
               </span>
             </>;
@@ -19422,23 +19510,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const d = ssWallDims(si, sc, bldgW, bldgH, mgX, mgY, scale);
             if (!d) return null;
             return d.centered
-              ? <span style={{ ...S.btn("#ECFDF5", "#059669"), border: "1px solid #A7F3D0", cursor: "default" }}>✓ Centered</span>
-              : <button onClick={centerSel} style={{ ...S.btn("#ECFEFF", "#0891B2"), border: "1px solid #A5F0FC" }}>⇔ Center</button>;
+              ? <span className="ssd-tb-btn is-accent is-static">✓ Centered</span>
+              : <button onClick={centerSel} className="ssd-tb-btn is-accent">⇔ Center</button>;
           })()}
           {selectedId && !planLocked && (
             <>
-              <button onClick={rotSel} style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE" }}>↻ Rotate</button>
+              <button onClick={rotSel} className="ssd-tb-btn is-soft">↻ Rotate</button>
               {/* "Remove", the word the 3D footer and every quote row already use (Carolyn,
                   2026-09-14): one action should not have two names on one page. */}
-              <button onClick={delSel} style={{ ...S.btn("#FEF2F2", "#DC2626"), border: "1px solid #FECACA" }}>🗑 Remove</button>
+              <button onClick={delSel} className="ssd-tb-btn is-danger">🗑 Remove</button>
+              {/* Divider between the selection's actions and the drawing tools after them. */}
+              <span className="ssd-tb-div" aria-hidden="true" />
             </>
           )}
           {/* Note and Line sit right beside Clear floorplan, in the right-hand group (Carolyn
               2026-09-12) — they used to open the row on the left. Still a sibling of the
               wall-height block, never inside it: that one returns null for a style with no
               height increases, and Note/Line must not vanish with it. */}
-          {!planLocked && ANNOTATE_KEYS.filter((k) => ITEMS[k]).map((k) => ssToolBtn([k, ITEMS[k]]))}
-          {!planLocked && <button onClick={clearAll} style={{ ...S.btn("#F1F5F9", "#64748B"), border: "1px solid #E2E8F0" }}>Clear floorplan</button>}
+          {!planLocked && ANNOTATE_KEYS.filter((k) => ITEMS[k]).map((k) => ssToolBtn([k, ITEMS[k]], "tb"))}
+          {!planLocked && <button onClick={clearAll} className="ssd-tb-btn">Clear floorplan</button>}
           {/* 3D is gated by the lock too: the 3D modal edits items through its own handlers,
               so opening it on an inventory unit would bypass planLocked. A view-only 3D for
               locked plans is a planned follow-up. (Beta's "coming soon" 3D teaser is
@@ -19458,7 +19548,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               if (gateRequired) { setGateOpen(true); return; }
               if (dockOn) setDock3D((v) => !v);
               else setShow3D(true);   // narrow or touch: byte-identical to before
-            }} style={S.btn(dock3D ? "#5B21B6" : "#7C3AED", "#FFF")}>
+            }} className="ssd-tb-btn is-primary">
               {/* No ✓ badge in docked mode: the snapshot is cleared on every
                   items/sel/paint/size change, so a tick beside a live panel would
                   flicker off on every keystroke and read as a bug. */}
@@ -19493,10 +19583,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         return (
           <>
             <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 900 }} />
-            <div style={{ position: "fixed", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 902, background: "#1E293B", color: "#FFF", borderRadius: 10, padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 8px 30px rgba(0,0,0,0.35)", maxWidth: "92vw", boxSizing: "border-box" }}>
-              <span style={{ fontSize: 13, fontWeight: 600 }}>Removing one {prLbl} — click a highlighted item on the plan.</span>
-              <button onClick={() => setPendingRemoval(null)}
-                style={{ background: "rgba(255,255,255,0.12)", color: "#FFF", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Cancel</button>
+            <div className="ssd-pick" style={{ position: "fixed", top: 14, left: "50%", transform: "translateX(-50%)", zIndex: 902, maxWidth: "92vw", boxSizing: "border-box" }}>
+              <span className="ssd-pick-t">Removing one {prLbl} — click a highlighted item on the plan.</span>
+              <button onClick={() => setPendingRemoval(null)} className="ssd-pick-x">Cancel</button>
             </div>
           </>
         );
@@ -19508,7 +19597,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
           and the PDF export draws from state, not this DOM. */}
       {!(show3D || adminCalPreview) && (
-      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 12 : 0, padding: "16px 0", background: "#F1F5F9", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 16 : 0, padding: "4px 0 0", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
@@ -19529,17 +19618,28 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             why justifyContent is "center" in both states now. It still SHRINKS (0 1), so a narrow
             row gives the plan less, never the page more. dispMaxW follows the frame only, never
             the selection, so "the plan must not move when an item is selected" still holds. */}
-        <div style={{ flex: `0 1 ${dispMaxW}px`, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
+        {/* Redesign S4: the column holds the plan CARD ("Floorplan" + the size), so the basis is
+            dispMaxW + 34, the card's 16px padding and 1px border each side, and the drawing inside
+            it is still dispMaxW. Still 0 1 and a column, for every reason above. */}
+        <div style={{ flex: `0 1 ${dispMaxW + 34}px`, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
+        <div className="ssd-plan">
+        <div className="ssd-plan-head">
+          <span className="ssd-plan-t">Floorplan</span>
+          {sel.size && <span className="ssd-plan-meta">{bldgW} × {bldgH} ft · {bldgW * bldgH} sq ft</span>}
+        </div>
+        {/* The svg's colours are the palette's, but the building outline keeps stroke="#1E293B" as its
+            ATTRIBUTE (helpers, the harness and snap.mjs find the plan by it) and is painted by the
+            inline style, which beats a presentation attribute. The PDF draws its own canvas. */}
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
-          style={{ width: "100%", maxWidth: dispMaxW, height: "auto", background: "#FFF", borderRadius: 12, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "0 4px 24px rgba(0,0,0,0.08)", border: "1px solid #E2E8F0", userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
+          style={{ display: "block", width: "100%", maxWidth: dispMaxW, height: "auto", boxSizing: "border-box", background: pal.panel, borderRadius: 4, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "none", border: `1px solid ${pal.lineCard}`, userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
           {/* Visible page background — only the area above the auto info band */}
-          <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill="#FFF" />
+          <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill={pal.panel} />
           {/* Plan rectangle and grid */}
-          <rect x={mgX} y={mgY} width={pW} height={pH} fill="#FAFBFD" />
-          {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mgX + i * scale} y1={mgY} x2={mgX + i * scale} y2={mgY + pH} stroke="#E8ECF1" strokeWidth={0.5} />)}
-          {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mgX} y1={mgY + i * scale} x2={mgX + pW} y2={mgY + i * scale} stroke="#E8ECF1" strokeWidth={0.5} />)}
-          <rect x={mgX} y={mgY} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} />
+          <rect x={mgX} y={mgY} width={pW} height={pH} fill={pal.surface} />
+          {Array.from({ length: Math.floor(bldgW) + 1 }, (_, i) => <line key={`gx${i}`} x1={mgX + i * scale} y1={mgY} x2={mgX + i * scale} y2={mgY + pH} stroke={pal.planGrid} strokeWidth={0.5} />)}
+          {Array.from({ length: Math.floor(bldgH) + 1 }, (_, i) => <line key={`gy${i}`} x1={mgX} y1={mgY + i * scale} x2={mgX + pW} y2={mgY + i * scale} stroke={pal.planGrid} strokeWidth={0.5} />)}
+          <rect x={mgX} y={mgY} width={pW} height={pH} fill="none" stroke="#1E293B" strokeWidth={WALL_THICKNESS} style={{ stroke: pal.primary }} />
 
           {[...items].sort((a, b) => (a.type === "ramp" ? 0 : 1) - (b.type === "ramp" ? 0 : 1)).map((item) => {
             const cfg = ITEMS[item.type]; if (!cfg) return null;
@@ -19560,13 +19660,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   {isSel && (
                     <>
                       <line x1={item.x1} y1={item.y1} x2={item.x2} y2={item.y2}
-                        stroke="#3B82F6" strokeWidth={1} strokeDasharray="4 3" pointerEvents="none" />
+                        stroke={planSel} strokeWidth={1} strokeDasharray="4 3" pointerEvents="none" />
                       {/* Endpoint handles: drag to change length and angle freely */}
-                      <circle cx={item.x1} cy={item.y1} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                      <circle cx={item.x1} cy={item.y1} r={7} fill={pal.surface} stroke={planSel} strokeWidth={1.5}
                         style={{ cursor: "move" }}
                         onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "ep1"); }}
                         onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "ep1"); }} />
-                      <circle cx={item.x2} cy={item.y2} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                      <circle cx={item.x2} cy={item.y2} r={7} fill={pal.surface} stroke={planSel} strokeWidth={1.5}
                         style={{ cursor: "move" }}
                         onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "ep2"); }}
                         onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "ep2"); }} />
@@ -19577,7 +19677,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     const lenFt = Math.sqrt(((item.x2 - item.x1) / scale) ** 2 + ((item.y2 - item.y1) / scale) ** 2);
                     return (
                       <g transform={`translate(${midX},${midY - 14})`} pointerEvents="none">
-                        <rect x={-26} y={-11} width={52} height={20} rx={5} fill="#1E293B" />
+                        <rect x={-26} y={-11} width={52} height={20} rx={5} fill={pal.ink} />
                         <text x={0} y={3} textAnchor="middle" fill="#FFF" fontSize={11} fontWeight="700">{lenFt.toFixed(1)} ft</text>
                       </g>
                     );
@@ -19611,7 +19711,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       </g>
                     );
                   })()}
-                  {isSel && <rect x={-w / 2 - 4} y={-h / 2 - 4} width={w + 8} height={h + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={6} />}
+                  {isSel && <rect x={-w / 2 - 4} y={-h / 2 - 4} width={w + 8} height={h + 8} fill="none" stroke={planSel} strokeWidth={1.5} strokeDasharray="4 2" rx={6} />}
                   {/* Background pill */}
                   <rect x={-w / 2} y={-h / 2} width={w} height={h} fill="#FFFBEB" stroke={cfg.color} strokeWidth={1.25} rx={4} />
                   {/* HTML inside SVG — native word-wrap; contentEditable when editing.
@@ -19693,7 +19793,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "br"); }} />
                       {/* Visible handle */}
                       <rect x={w / 2 - 7} y={h / 2 - 7} width={14} height={14}
-                        fill="#3B82F6" stroke="#FFF" strokeWidth={1.5} rx={2} pointerEvents="none" />
+                        fill={planSel} stroke="#FFF" strokeWidth={1.5} rx={2} pointerEvents="none" />
                       {/* Delete ✕ at the note's top-right corner */}
                       <g transform={`translate(${w / 2 + 2},${-h / 2 - 2})`} style={{ cursor: "pointer" }}
                         onMouseDown={(e) => e.stopPropagation()}
@@ -19711,7 +19811,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         return (
                           <g>
                             {!lt && <line x1={-w / 2} y1={0} x2={hx + 7} y2={hy} stroke="#94A3B8" strokeWidth={1} strokeDasharray="2 3" pointerEvents="none" />}
-                            <circle cx={hx} cy={hy} r={7} fill="#FFF" stroke="#3B82F6" strokeWidth={2}
+                            <circle cx={hx} cy={hy} r={7} fill={pal.surface} stroke={planSel} strokeWidth={1.5}
                               style={{ cursor: "move" }}
                               onClick={(e) => e.stopPropagation()}
                               onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "leader"); }}
@@ -19736,7 +19836,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return (
               <g key={item.id} transform={`translate(${item.x},${item.y}) rotate(${item.rotation})`}
                 onMouseDown={(e) => onPtrDown(e, item)} onTouchStart={(e) => onPtrDown(e, item)} style={{ cursor: activeTool ? "crosshair" : "grab" }}>
-                {isSel && <rect x={-iw / 2 - 4} y={(cfg.wallOnly ? -8 : -ih / 2) - 4} width={iw + 8} height={(cfg.wallOnly ? 16 : ih) + 8} fill="none" stroke="#3B82F6" strokeWidth={2} strokeDasharray="4 2" rx={3} />}
+                {isSel && <rect x={-iw / 2 - 4} y={(cfg.wallOnly ? -8 : -ih / 2) - 4} width={iw + 8} height={(cfg.wallOnly ? 16 : ih) + 8} fill="none" stroke={planSel} strokeWidth={1.5} strokeDasharray="4 2" rx={3} />}
                 {/* Archived-option marker (screen only — NOT drawn on the exported/submitted plan). */}
                 {isArchivedItem(item) && (<>
                   <rect x={-iw / 2 - 3} y={(cfg.wallOnly ? -8 : -ih / 2) - 3} width={iw + 6} height={(cfg.wallOnly ? 16 : ih) + 6} fill="none" stroke="#F59E0B" strokeWidth={2} strokeDasharray="2 2" rx={3} />
@@ -19767,10 +19867,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           <rect x={iw / 2 - vz / 2} y={-hz / 2} width={vz / 2 + 1} height={hz} fill="transparent" style={{ cursor: "ew-resize" }}
                             onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "right"); }}
                             onTouchStart={(e) => { e.stopPropagation(); startResize(e, item, "right"); }} />
-                          <line x1={-vz / 3} y1={-ih / 2} x2={vz / 3} y2={-ih / 2} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
-                          <line x1={-vz / 3} y1={ih / 2} x2={vz / 3} y2={ih / 2} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
-                          <line x1={-iw / 2} y1={-hz / 3} x2={-iw / 2} y2={hz / 3} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
-                          <line x1={iw / 2} y1={-hz / 3} x2={iw / 2} y2={hz / 3} stroke="#3B82F6" strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={-vz / 3} y1={-ih / 2} x2={vz / 3} y2={-ih / 2} stroke={planSel} strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={-vz / 3} y1={ih / 2} x2={vz / 3} y2={ih / 2} stroke={planSel} strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={-iw / 2} y1={-hz / 3} x2={-iw / 2} y2={hz / 3} stroke={planSel} strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
+                          <line x1={iw / 2} y1={-hz / 3} x2={iw / 2} y2={hz / 3} stroke={planSel} strokeWidth={3} strokeLinecap="round" pointerEvents="none" />
                         </>
                       );
                     })()}
@@ -19827,9 +19927,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       return (
                         <>
                           <rect x={-iw / 2 + 1} y={-4} width={endZoneW - 2} height={8}
-                            fill="#3B82F640" stroke="#3B82F680" strokeWidth={1} pointerEvents="none" rx={1} />
+                            fill={planSel + "40"} stroke={planSel + "80"} strokeWidth={1} pointerEvents="none" rx={1} />
                           <rect x={iw / 2 - endZoneW + 1} y={-4} width={endZoneW - 2} height={8}
-                            fill="#3B82F640" stroke="#3B82F680" strokeWidth={1} pointerEvents="none" rx={1} />
+                            fill={planSel + "40"} stroke={planSel + "80"} strokeWidth={1} pointerEvents="none" rx={1} />
                           <rect x={-iw / 2 - 4} y={-9} width={endZoneW + 4} height={18}
                             fill="transparent" style={{ cursor }}
                             onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "min"); }}
@@ -19878,11 +19978,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       return (
                         <>
                           <rect x={-iw / 2 + 1} y={-ih / 2 + 1} width={endZoneW - 2} height={ih - 2}
-                            fill="#3B82F618" stroke="#3B82F680" strokeWidth={1.5} pointerEvents="none" rx={2} />
+                            fill={planSel + "18"} stroke={planSel + "80"} strokeWidth={1.5} pointerEvents="none" rx={2} />
                           <rect x={iw / 2 - endZoneW + 1} y={-ih / 2 + 1} width={endZoneW - 2} height={ih - 2}
-                            fill="#3B82F618" stroke="#3B82F680" strokeWidth={1.5} pointerEvents="none" rx={2} />
-                          <text x={handleX1} y={5} textAnchor="middle" fill="#3B82F6" fontSize={14} fontWeight="700" pointerEvents="none">◄</text>
-                          <text x={handleX2} y={5} textAnchor="middle" fill="#3B82F6" fontSize={14} fontWeight="700" pointerEvents="none">►</text>
+                            fill={planSel + "18"} stroke={planSel + "80"} strokeWidth={1.5} pointerEvents="none" rx={2} />
+                          <text x={handleX1} y={5} textAnchor="middle" fill={planSel} fontSize={14} fontWeight="700" pointerEvents="none">◄</text>
+                          <text x={handleX2} y={5} textAnchor="middle" fill={planSel} fontSize={14} fontWeight="700" pointerEvents="none">►</text>
                           <rect x={-iw / 2} y={-ih / 2} width={endZoneW} height={ih}
                             fill="transparent" style={{ cursor }}
                             onMouseDown={(e) => { e.stopPropagation(); startResize(e, item, "min"); }}
@@ -19900,16 +20000,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })}
           {/* Building dimension + FRONT/BACK/LEFT/RIGHT labels — rendered AFTER items so a centered ramp doesn't paint over the building chrome. */}
-          <text x={mgX + pW / 2} y={mgY - 16} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mgX + pW / 2} y={mgY + pH + 26} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold">{bldgW} ft</text>
-          <text x={mgX - 20} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(-90,${mgX - 20},${mgY + pH / 2})`}>{bldgH} ft</text>
-          <text x={mgX + pW + 24} y={mgY + pH / 2} textAnchor="middle" fill="#475569" fontSize={13} fontWeight="bold" transform={`rotate(90,${mgX + pW + 24},${mgY + pH / 2})`}>{bldgH} ft</text>
+          <text x={mgX + pW / 2} y={mgY - 16} textAnchor="middle" fill={pal.muted} fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX + pW / 2} y={mgY + pH + 26} textAnchor="middle" fill={pal.muted} fontSize={13} fontWeight="bold">{bldgW} ft</text>
+          <text x={mgX - 20} y={mgY + pH / 2} textAnchor="middle" fill={pal.muted} fontSize={13} fontWeight="bold" transform={`rotate(-90,${mgX - 20},${mgY + pH / 2})`}>{bldgH} ft</text>
+          <text x={mgX + pW + 24} y={mgY + pH / 2} textAnchor="middle" fill={pal.muted} fontSize={13} fontWeight="bold" transform={`rotate(90,${mgX + pW + 24},${mgY + pH / 2})`}>{bldgH} ft</text>
           {frontWall && (
             <>
-              <text x={mgX + pW / 2} y={mgY - 32} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
-              <text x={mgX + pW / 2} y={mgY + pH + 42} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
-              <text x={mgX - 38} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mgX - 38},${mgY + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
-              <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill="#94A3B8" fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
+              <text x={mgX + pW / 2} y={mgY - 32} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("north", frontWall)}</text>
+              <text x={mgX + pW / 2} y={mgY + pH + 42} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em">{getDisplayLabel("south", frontWall)}</text>
+              <text x={mgX - 38} y={mgY + pH / 2} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(-90,${mgX - 38},${mgY + pH / 2})`}>{getDisplayLabel("west", frontWall)}</text>
+              <text x={mgX + pW + 42} y={mgY + pH / 2} textAnchor="middle" fill={pal.subtle} fontSize={10} fontWeight="600" letterSpacing="0.1em" transform={`rotate(90,${mgX + pW + 42},${mgY + pH / 2})`}>{getDisplayLabel("east", frontWall)}</text>
             </>
           )}
           {resizing && (() => {
@@ -19917,7 +20017,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             if (!ri || ri.type === "line" || !Number.isFinite(ri.widthFt)) return null; // line shows its own length inline; notes have no widthFt → skip the 'ft' badge (audit #F3)
             return (
               <g transform={`translate(${ri.x},${ri.y - 28})`}>
-                <rect x={-30} y={-12} width={60} height={24} rx={6} fill="#1E293B" />
+                <rect x={-30} y={-12} width={60} height={24} rx={6} fill={pal.ink} />
                 <text x={0} y={4} textAnchor="middle" fill="#FFF" fontSize={13} fontWeight="700">{d3FtIn(ri.widthFt)}</text>
               </g>
             );
@@ -19942,6 +20042,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             );
           })}
         </svg>
+        </div>
         </div>
         {view3dOn && dock3D && (
           /* Width and height are pure CSS — never derived from `frame` or dispMaxW,
@@ -19985,6 +20086,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 if (gateRequired) { setGateOpen(true); return; }
                 setDock3D(false); setShow3D(true);
               }}
+              pal={pal}
               onClose={() => setDock3D(false)}
             />
           </div>
