@@ -31,8 +31,35 @@ export function bosBasisOf(raw: unknown): BosBasis {
  *
  * A flat fee is quantity ONE, not the building's size — that is the whole point of "each",
  * and returning area here would multiply a $500 call-out into $144,000 on a 12x24.
+ *
+ * `explicitQty` (foundation items, Carolyn 2026-09-14): the three OPTION-shaped bases — each,
+ * lineal_ft, sqft_option — name a quantity the building cannot always supply. For a
+ * build-on-site fee it can: the fee is a whole-building option, so "each" is one call-out,
+ * "lineal ft" is the perimeter and "option sq ft" is the wall area, and whole-building callers
+ * pass nothing and keep exactly that reading. A Foundation item is different — "each" is the
+ * NUMBER OF PIERS, "lineal ft" is the FENCE the crew tears out, "option sq ft" is the PAD or
+ * SLAB — quantities only the customer knows, which the Foundation card collects (gravel pad,
+ * fence removal, piers, concrete slab). A caller holding one passes it here and it wins.
+ * Anything that is not a finite number above zero falls back to the whole-building reading,
+ * so a blank or junk field can never zero a line or multiply it by NaN — validation of the
+ * customer's typing belongs to foundationQtyFor, not here. The four whole-building bases
+ * (sqft_building, perimeter_building and both percentages) IGNORE it on purpose: their
+ * quantity is a fact about the building, and honouring an override there would let one line
+ * describe a different building from the rest of the estimate.
  */
-export function bosQtyFor(basis: BosBasis, buildingArea: number, buildingPerimeter: number, wallArea = 0): number {
+export function bosQtyFor(
+  basis: BosBasis,
+  buildingArea: number,
+  buildingPerimeter: number,
+  wallArea = 0,
+  explicitQty: number | null = null,
+): number {
+  if (
+    (basis === "each" || basis === "lineal_ft" || basis === "sqft_option") &&
+    typeof explicitQty === "number" && Number.isFinite(explicitQty) && explicitQty > 0
+  ) {
+    return explicitQty;
+  }
   if (basis === "sqft_building") return Number(buildingArea) || 0;
   // A wall-height fee is a whole-building option, so it reads like cladding: "option area" is
   // the WALL area (perimeter x the wall height actually billed) and "lineal ft" is the

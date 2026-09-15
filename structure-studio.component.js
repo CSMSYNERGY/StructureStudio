@@ -1666,6 +1666,49 @@ function insulationSqft(area, widthFt, lengthFt, wallHeightFt) {
   return 0;
 }
 
+// ── Foundation (237) ─────────────────────────────────────────────────────────
+// Site work before the building arrives — gravel pad, fence removal, piers, concrete slab —
+// each priced by any of the seven methods. Three of them take a number the building cannot
+// supply (a count, feet, square feet); the customer enters it beside the toggle. NO prices in
+// the picker: the cost appears on the quote rows, the Options rule since 182.
+const FOUNDATION_ITEM_LABEL = { gravel_pad: "Gravel pad", fence_removal: "Fence removal", piers: "Piers", concrete_slab: "Concrete slab" };
+const FOUNDATION_ORDER = ["gravel_pad", "fence_removal", "piers", "concrete_slab"];
+function foundationOffered(C, includeInternal) {
+  const l = Array.isArray(C && C.foundationItems) ? C.foundationItems : [];
+  return FOUNDATION_ORDER.map((id) => l.find((o) => o && o.id === id)).filter((o) => o && (includeInternal || !o.internalOnly));
+}
+// includeInternal TRUE — this resolves a PRICE, and an item a rep selected must still cost what
+// it costs (the resolveCladding / resolveWallHeight rule).
+function resolveFoundation(C, id) { return foundationOffered(C, true).find((o) => o.id === id) || null; }
+function foundationLabelOf(opt) { return (opt && opt.label) || FOUNDATION_ITEM_LABEL[opt && opt.id] || (opt && opt.id) || ""; }
+function foundationNeedsQty(basis) { return basis === "each" || basis === "lineal_ft" || basis === "sqft_option"; }
+// MIRRORS _shared/foundation.ts foundationQtyFor exactly — the server re-derives every quantity
+// and refuses what this refuses, so the two must agree or the preview and the quote disagree.
+// A refused value reads as 0 here (no total, and the submit guard names the item).
+function foundationQtyOf(basis, rawQty, widthFt, lengthFt) {
+  const w = Number(widthFt) || 0, l = Number(lengthFt) || 0;
+  const area = Math.round(w * l), perim = Math.round(2 * (w + l));
+  const given = rawQty != null && String(rawQty).trim() !== "";
+  const n = given ? Number(rawQty) : NaN;
+  if (basis === "each") return given ? (Number.isInteger(n) && n >= 1 && n <= 1000 ? n : 0) : 1;
+  if (basis === "lineal_ft") return given && Number.isFinite(n) && n > 0 && n <= 100000 ? n : 0;
+  if (basis === "sqft_option") return given ? (Number.isFinite(n) && n > 0 && n <= 100000 ? n : 0) : area;
+  if (basis === "sqft_building") return area;
+  if (basis === "perimeter_building") return perim;
+  return 1;
+}
+// Why an automatic delivery quote could not price an address (233), in the customer's words.
+function ssDeliveryReason(r) {
+  return ({
+    beyond_last_band: "this address is beyond the delivery area priced automatically",
+    no_distance: "no driving distance could be found for this address",
+    no_route: "no driving route could be found to this address",
+    rule_incomplete: "the builder's delivery rule is incomplete",
+    no_origin: "the builder has no origin address on file",
+    distance_not_configured: "distance lookups aren't available right now",
+  })[r] || "it will be worked out when your quote is issued";
+}
+
 // ── Electrical ───────────────────────────────────────────────────────────────
 // The builder sets their wiring standards once; turning the package on lays the devices out at
 // those spacings, and only devices placed BEYOND the standard layout are charged.
@@ -1916,8 +1959,9 @@ function resolveWallHeight(C, styleKey, deltaIn, widthFt) {
 // Every row carries its section, so the ORDER lives in one list rather than in the order the
 // two row-builders happen to push. Anything unclassified falls to "options", which is the safe
 // direction: a new priced thing shows up in the quote rather than silently vanishing from it.
-const SS_QUOTE_SECTIONS = ["building", "cladding", "roof", "openings", "options"];
-const SS_SECTION_HEADING = { openings: "Doors & Windows", options: "Options on your plan" };
+// "services" (2026-09-14): delivery and the site work — what the builder DOES rather than sells.
+const SS_QUOTE_SECTIONS = ["building", "cladding", "roof", "openings", "options", "services"];
+const SS_SECTION_HEADING = { openings: "Doors & Windows", options: "Options on your plan", services: "Site services" };
 // Doors before windows inside the openings section. A rough opening is an opening in a wall,
 // so it reads with the windows rather than off in the general options.
 function ssOpeningRank(key) {
@@ -1931,6 +1975,7 @@ function ssOpeningRank(key) {
   return -1;                                                                              // not an opening
 }
 function ssRowSection(key) {
+  if (key === "delivery" || String(key || "").indexOf("foundation:") === 0) return "services";
   if (key === "building") return "building";
   // "cladding" is the priced siding line (207), "paint" is the colours that go on it. Both
   // belong under the Cladding heading, and the push order in computeSelectionRows is what puts
@@ -2180,6 +2225,42 @@ function computeSelectionRows(sel, paintColors, C, items) {
       });
     });
   }
+  // ── Foundation (237) — MIRRORS submit-estimate's block; see foundationQtyOf ──────
+  // `charged` decides whether there is a row (the cladding rule): a rate of 0 is included.
+  const fdSel = Array.isArray(sel && sel.foundation) ? sel.foundation : [];
+  fdSel.forEach((f) => {
+    const opt = f && resolveFoundation(C, f.id);
+    if (!opt || !opt.charged) return;
+    const basis = String(opt.basis || "each");
+    const rate = opt.rate != null ? Number(opt.rate) : null;
+    const qty = foundationQtyOf(basis, f.qty, bW, bL);
+    const shape =
+      basis === "sqft_option"          ? { unitWord: " / sq ft", bare: "sq ft" }
+      : basis === "sqft_building"      ? { unitWord: " / sq ft of building", bare: "sq ft" }
+      : basis === "lineal_ft"          ? { unitWord: " / ft", bare: "ft" }
+      : basis === "perimeter_building" ? { unitWord: " / ft of perimeter", bare: "ft" }
+      : basis === "pct_building_price" ? { unitWord: null, bare: "", pctOf: "building price" }
+      : basis === "pct_estimate_total" ? { unitWord: null, bare: "", pctOf: "subtotal", deferred: true }
+      : /* each */                       { unitWord: " each", bare: "" };
+    // A fence with no feet yet: the row stays (so the customer sees why it has no number) and
+    // contributes 0 to every base, which is the correct contribution.
+    const missing = foundationNeedsQty(basis) && qty <= 0;
+    const total =
+      !showP || rate == null || missing ? null
+      : shape.deferred ? null
+      : basis === "pct_building_price" ? Math.round((rate / 100) * buildingPrice * 100) / 100
+      : Math.round(rate * qty * 100) / 100;
+    rows.push({
+      key: "foundation:" + opt.id,
+      label: foundationLabelOf(opt),
+      ...(missing ? { detail: basis === "lineal_ft" ? "Enter the feet to remove" : "Enter a quantity" } : {}),
+      qty: qty,
+      unit: rate == null ? shape.bare : shape.pctOf ? rate + "% of " + shape.pctOf : fmtMoney2(rate) + shape.unitWord,
+      total: total,
+      method: basis,
+      ...(shape.deferred && showP && rate != null && !missing ? { pct: rate } : {}),
+    });
+  });
   // The electrical package: one fixed line. A SELECTION charge like taller walls, so it is not
   // in LAYOUT_PRICE_ORDER — the devices it lays out are priced there, and net to nothing.
   const elecCfg = electricalOffered(C);
@@ -10140,6 +10221,32 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [pendingRemoval, setPendingRemoval] = useState(null);
   // "+ Add Delivery Fee" clicked — shows the delivery row before a value is typed.
   const [deliveryOpen, setDeliveryOpen] = useState(false);
+  // ── Automatic delivery (233–236) ───────────────────────────────────────────────────
+  // Once the address is complete, ask delivery-quote for the miles and the fee the builder's
+  // rules give. Asked when the builder automated delivery (the customer sees the line) OR in
+  // the rep designer regardless (the rep sees it as a suggestion). Debounced, keyed on the
+  // address so a stale answer for an earlier address is thrown away, and cleared the moment the
+  // address stops being complete. The endpoint reads the same cache submit-estimate will.
+  const [deliveryQuote, setDeliveryQuote] = useState(null);
+  const deliveryQuoteKeyRef = useRef("");
+  useEffect(() => {
+    const dl = C && C.delivery;
+    const want = !!(dl && dl.configured && (embedded || dl.automate));
+    const a = { street: String(contact.street || "").trim(), city: String(contact.city || "").trim(), state: String(contact.state || "").trim(), zip: String(contact.zip || "").trim() };
+    const ready = want && !!a.city && !!a.state && /^\d{5}$/.test(a.zip);
+    const key = ready ? [a.street, a.city, a.state, a.zip].join("|").toLowerCase() : "";
+    if (!ready) { deliveryQuoteKeyRef.current = ""; if (deliveryQuote) setDeliveryQuote(null); return; }
+    if (key === deliveryQuoteKeyRef.current) return;
+    const t = setTimeout(async () => {
+      deliveryQuoteKeyRef.current = key;
+      try {
+        const { data } = await supabase.functions.invoke("delivery-quote", { body: { clientId: C.clientId, address: a } });
+        if (deliveryQuoteKeyRef.current !== key) return;   // a newer address won
+        setDeliveryQuote(data && data.ok && data.ready ? data : null);
+      } catch (_) { if (deliveryQuoteKeyRef.current === key) setDeliveryQuote(null); }
+    }, 600);
+    return () => clearTimeout(t);
+  }, [contact.street, contact.city, contact.state, contact.zip, C && C.delivery, C.clientId, embedded]);
   useEffect(() => {
     // Reopened designs restore sel.deliveryFee without deliveryOpen; latch the row
     // open so clearing the amount mid-edit doesn't unmount the input underneath the
@@ -13580,6 +13687,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSubmitError("Zip must be 5 digits.");
       return;
     }
+    // Foundation (237): an item priced per foot or per unit needs its number. The server would
+    // refuse too, but the customer should not learn that from an error toast.
+    {
+      const fdMissing = (Array.isArray(sel.foundation) ? sel.foundation : []).filter((f) => {
+        const o = f && resolveFoundation(C, f.id);
+        return o && o.charged && foundationNeedsQty(String(o.basis)) && foundationQtyOf(String(o.basis), f.qty, bldgW, bldgH) <= 0;
+      });
+      if (fdMissing.length) {
+        setSubmitError(`Enter the quantity for ${fdMissing.map((f) => foundationLabelOf(resolveFoundation(C, f.id))).join(", ")} before requesting your quote.`);
+        return;
+      }
+    }
     if (!sel.style || !sel.size) {
       setSubmitError("Please select a Building Style and Size.");
       return;
@@ -13823,6 +13942,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // prints; `claddingId` is the stable id the design row stores (p_selections holds
           // sel verbatim), so a consumer never has to reverse-map display text.
           ...(sel.cladding && D3_CLADDING[sel.cladding] ? { cladding: D3_CLADDING[sel.cladding].label, claddingId: sel.cladding } : {}),
+          // Foundation (237): ids, plus a quantity only when the customer typed one — a null qty is
+          // OMITTED so the server applies the same defaults (1 / the footprint) the preview did.
+          // Rates and methods are never sent; the server re-reads them.
+          ...(Array.isArray(sel.foundation) && sel.foundation.length
+            ? { foundation: sel.foundation.map((f) => ({ id: f.id, ...(f.qty != null && Number(f.qty) > 0 ? { qty: Number(f.qty) } : {}) })) } : {}),
         },
         // Stored items are stripped here, and this is the ONLY place their free-ness needs
         // defending. They are a visualisation aid — the customer's own mower and bikes, shown
@@ -14089,6 +14213,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         quotePdfUrl: result.quotePdfUrl || null,
         quoteEmailed: result.issuedBy === "structurestudio" ? result.quoteEmailed === true : null,
         quoteEmailReason: result.quoteEmailReason || null,
+        // Automatic delivery could not price this address (233): no delivery line went out.
+        deliveryUnpriced: result.deliveryUnpriced || null,
         changeOrder: result.changeOrder || null,
       });
       setSubmitted(true);
@@ -15715,6 +15841,48 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             </div>
           ) : null;
+          // ── Foundation (237) ──────────────────────────────────────────────────────
+          // One toggle per offered item (internal-only ones only in the rep designer), and for
+          // the three methods that need a number the building cannot supply, a small box beside
+          // the toggle — Qty / Feet / Sq ft — pre-filled with the default the server would use.
+          const fdOffered = foundationOffered(C, embedded);
+          const fdSelNow = Array.isArray(sel.foundation) ? sel.foundation : [];
+          const fdEntry = (id) => fdSelNow.find((f) => f && f.id === id) || null;
+          const fdToggle = (id) => setSel((p) => {
+            const cur = Array.isArray(p.foundation) ? p.foundation : [];
+            return { ...p, foundation: cur.some((f) => f.id === id) ? cur.filter((f) => f.id !== id) : [...cur, { id, qty: null }] };
+          });
+          const fdSetQty = (id, v) => setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).map((f) => (f.id === id ? { ...f, qty: v === "" ? null : v } : f)) }));
+          const fdCell = fdOffered.length ? (
+            <div>
+              <span style={{ ...S.lbl, display: "block", fontSize: 10, marginBottom: 6 }}>Foundation</span>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                {fdOffered.map((o) => {
+                  const en = fdEntry(o.id);
+                  const on = !!en;
+                  const basis = String(o.basis || "each");
+                  const word = basis === "each" ? "Qty" : basis === "lineal_ft" ? "Feet" : basis === "sqft_option" ? "Sq ft" : null;
+                  const dflt = basis === "each" ? "1" : basis === "sqft_option" ? String(Math.round((Number(bldgW) || 0) * (Number(bldgH) || 0))) : "";
+                  return (
+                    <span key={o.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => fdToggle(o.id)}
+                        style={{ padding: "5px 10px", borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                          background: on ? "#14B8A6" : "#F8FAFC", color: on ? "#FFF" : "#334155",
+                          border: `2px solid ${on ? "#14B8A6" : "#E2E8F0"}` }}>{foundationLabelOf(o)}</button>
+                      {on && word && (
+                        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "#64748B" }}>{word}
+                          <input type="number" min="0" step="1" value={en.qty != null ? en.qty : dflt} placeholder={dflt || "0"}
+                            readOnly={planLocked || undefined}
+                            onChange={(ev) => fdSetQty(o.id, ev.target.value.replace(/[^0-9.]/g, ""))}
+                            style={{ width: 58, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 6px", fontSize: 12, outline: "none", background: "#FFF" }} />
+                        </label>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null;
           // ── The electrical package ────────────────────────────────────────────────
           // One toggle. Turning it ON lays out the builder's standard at their own spacings;
           // turning it OFF removes exactly what it added and leaves anything hand-placed alone.
@@ -15795,6 +15963,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               );
             }
             if (insCell) cells.push(React.cloneElement(insCell, { key: "ss-insulation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
+            if (fdCell) cells.push(React.cloneElement(fdCell, { key: "ss-foundation", style: { gridColumn: cells.length % 2 === 0 ? 1 : 3, minWidth: 0 } }));
             return (
               <div key="ss-split" style={{ display: "grid", gridTemplateColumns: "1fr 1px 1fr", columnGap: 18, rowGap: 12, alignItems: "start", width: "100%" }}>
                 <div style={{ gridColumn: 2, gridRow: "1 / -1", background: "#CBD5E1", width: 1 }} />
@@ -16605,7 +16774,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               return s + amt * q;
             }, 0);
             const discountTotal = (sel.discounts || []).reduce((s, r) => s + Math.max(0, parseFloat(r && r.amount) || 0), 0);
-            const deliveryAmt = parseFloat(sel.deliveryFee) || 0;
+            // Automatic delivery (233): a rep-typed figure wins, else the rule's figure when the
+            // builder automated it — the same precedence submit-estimate applies.
+            const dlv = C.delivery || {};
+            const manualDlv = String(sel.deliveryFee || "") !== "";
+            const autoDlv = !manualDlv && dlv.automate && deliveryQuote && deliveryQuote.autoPriced ? deliveryQuote : null;
+            const dlvPending = !manualDlv && dlv.automate && deliveryQuote && !deliveryQuote.autoPriced ? deliveryQuote : null;
+            const dlvSuggest = embedded && deliveryQuote && deliveryQuote.autoPriced && deliveryQuote.fee != null ? Number(deliveryQuote.fee) : null;
+            const deliveryAmt = manualDlv ? (parseFloat(sel.deliveryFee) || 0) : (autoDlv ? (Number(autoDlv.fee) || 0) : 0);
             const showDelivery = deliveryOpen || String(sel.deliveryFee || "") !== "";
             // Any "% of subtotal" selection row is still unresolved at this point and reads as
             // 0 in the sum below — which is precisely the base it is a percentage OF. Fill it in
@@ -16675,6 +16851,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 const f = (Array.isArray(C.fixtures) ? C.fixtures : []).find((x) => x && String(x.id) === id);
                 return !!f && f.taxable === false;
               }
+              if (k.indexOf("foundation:") === 0) { const o = resolveFoundation(C, k.slice(11)); return !!o && o.taxable === false; }
+              // Delivery is taxed only when Settings → Options → Delivery says so (ss_tax_delivery).
+              if (k === "delivery") return !!(C.delivery) && C.delivery.taxable !== true;
               const li = ((C && C.layoutItems) || {})[k];
               return !!li && li.taxable === false;
             };
@@ -16700,6 +16879,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               // and outside the configuration panel — so it keeps its own planLocked guard, or
               // the lock is bypassable from Details (on the customer's share link too).
               const removePlaced = (r) => {
+                // A foundation row is a SELECTION, not a placed item: its × un-ticks the item.
+                if (String(r.key || "").indexOf("foundation:") === 0) {
+                  const fid = String(r.key).slice(11);
+                  setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).filter((f) => f.id !== fid) }));
+                  return;
+                }
                 // "each"-priced items step down one at a time (when several are placed, the
                 // plan asks which one); everything else clears the line and removes everything
                 // on it. priceRowMatcher, not `i.type === r.key`: catalog rows carry
@@ -16761,6 +16946,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </div>
                 {section("openings")}
                 {section("options")}
+                {section("services")}
               </>);
             })()}
 
@@ -16885,18 +17071,41 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             )}
 
+            {/* Automatic delivery (233): the rule's line, shown once the address is complete. A
+                rep-typed fee below replaces it, exactly as on the estimate. When the rule could
+                not price this address the line says so with no amount — the same words the
+                issued quote will carry. */}
+            {(autoDlv || dlvPending) && (
+              <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery{autoDlv ? noTaxPill({ key: "delivery", total: Number(autoDlv.fee) || 0 }) : null}</div>
+                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>{autoDlv ? autoDlv.desc : `To be confirmed — ${ssDeliveryReason(dlvPending.reason)}`}</div>
+                </div>
+                {autoDlv && C.showPricing && autoDlv.fee != null ? <div style={amtCell}>{fmtMoney2(autoDlv.fee)}</div> : <div style={amtCell} />}
+                <div style={actSpacer} />
+              </div>
+            )}
+
             {/* Delivery fee — last line before the subtotal (below the discounts); rendered once
                 "+ Add Delivery Fee" is clicked or a fee is already set; × clears and hides it. */}
             {showDelivery && (
               <div style={{ marginTop: 14, display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>Delivery Fee</div>
-                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>Non-taxable line on the estimate</div>
+                  <div style={{ fontSize: 10.5, color: "#94A3B8" }}>
+                    {C.delivery && C.delivery.taxable ? "Taxed with the estimate" : "Non-taxable line on the estimate"}
+                    {dlvSuggest != null && String(sel.deliveryFee || "") !== dlvSuggest.toFixed(2) && (
+                      <button onClick={() => setSel((p) => ({ ...p, deliveryFee: dlvSuggest.toFixed(2) }))}
+                        style={{ marginLeft: 6, background: "none", border: "none", color: "#1B7895", cursor: "pointer", fontSize: 10.5, fontWeight: 700, padding: 0 }}>
+                        Use {fmtMoney2(dlvSuggest)}{deliveryQuote.miles != null ? ` (${deliveryQuote.miles} mi${deliveryQuote.originName ? " from " + deliveryQuote.originName : ""})` : ""}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {embedded ? (
                   <div style={amtInputWrap}>
                     <span style={{ fontSize: 12, color: "#64748B", marginRight: 2, flexShrink: 0 }}>$</span>
-                    <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder="0.00"
+                    <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder={dlvSuggest != null ? dlvSuggest.toFixed(2) : "0.00"}
                       onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
                       style={{ flex: 1, minWidth: 0, width: "100%", border: "none", padding: "6px 0", fontSize: 12, outline: "none" }} />
                   </div>
@@ -16929,7 +17138,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   invent a delivery fee. Rows already ON a reopened design still render —
                   a rep-applied discount is part of the customer's real quote. */}
               {embedded && <button onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))} style={dashBtn}>+ Add Discount</button>}
-              {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee</button>}
+              {embedded && !showDelivery && <button onClick={() => setDeliveryOpen(true)} style={dashBtn}>+ Add Delivery Fee{dlvSuggest != null ? ` · ${fmtMoney2(dlvSuggest)} suggested` : ""}</button>}
             </div>
             <div style={{ fontSize: 10.5, color: "#94A3B8", marginTop: 6 }}>
               Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
@@ -17210,6 +17419,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                sending domain isn't live). Silence here reads as "the customer got it". */
             <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: "10px 14px", fontSize: 13, fontWeight: 600, textAlign: "left" }}>
               Not emailed{savedDesign.quoteEmailReason ? ` — ${savedDesign.quoteEmailReason}` : ""}. Print the quote or copy the customer link below and send it yourself.
+            </div>
+          )}
+          {savedDesign && savedDesign.deliveryUnpriced && (
+            <div style={{ maxWidth: 520, margin: "14px auto 0", background: "#FEF3C7", border: "1px solid #FDE68A", color: "#B45309", borderRadius: 10, padding: 12, fontSize: 12.5 }}>
+              Delivery isn&rsquo;t on this quote yet{savedDesign.deliveryUnpriced.miles != null ? ` (${savedDesign.deliveryUnpriced.miles} miles${savedDesign.deliveryUnpriced.originName ? " from " + savedDesign.deliveryUnpriced.originName : ""})` : ""} &mdash; it will be confirmed separately.
             </div>
           )}
           {savedDesign && (

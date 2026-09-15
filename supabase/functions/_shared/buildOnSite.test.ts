@@ -127,3 +127,39 @@ Deno.test("worked example: the numbers the Settings screen promises a builder", 
   // so the two lines on one estimate agree about the building they describe.
   assertStrictEquals(8 * bosQtyFor(bosBasisOf("perimeter_building"), AREA, PERIM), 576);
 });
+
+Deno.test("bosQtyFor: an explicit quantity wins for the three option-shaped bases", () => {
+  // Foundation items (2026-09-14): "each" is a pier count, "lineal ft" is fence footage and
+  // "option sq ft" is a pad or slab — none of which the building's own geometry can supply.
+  assertStrictEquals(bosQtyFor("each", AREA, PERIM, WALL, 6), 6);
+  assertStrictEquals(bosQtyFor("lineal_ft", AREA, PERIM, WALL, 120), 120);
+  assertStrictEquals(bosQtyFor("sqft_option", AREA, PERIM, WALL, 240), 240);
+  // Fractional feet are a real measurement, not junk.
+  assertStrictEquals(bosQtyFor("lineal_ft", AREA, PERIM, WALL, 12.5), 12.5);
+});
+
+Deno.test("bosQtyFor: whole-building bases IGNORE an explicit quantity", () => {
+  // Their quantity is a fact about the building. Honouring an override here would let one
+  // line describe a different building from the rest of the estimate.
+  assertStrictEquals(bosQtyFor("sqft_building", AREA, PERIM, WALL, 999), 288);
+  assertStrictEquals(bosQtyFor("perimeter_building", AREA, PERIM, WALL, 999), 72);
+  assertStrictEquals(bosQtyFor("pct_building_price", AREA, PERIM, WALL, 999), 1);
+  assertStrictEquals(bosQtyFor("pct_estimate_total", AREA, PERIM, WALL, 999), 1);
+});
+
+Deno.test("bosQtyFor: an unusable explicit quantity falls back to the whole-building reading", () => {
+  // A blank or junk field must never zero a line or multiply it by NaN; the fallback is the
+  // same number a whole-building caller (build-on-site) gets by passing nothing at all.
+  for (const bad of [0, NaN, -5, Infinity, -Infinity, null]) {
+    assertStrictEquals(bosQtyFor("each", AREA, PERIM, WALL, bad), 1, `each with ${bad}`);
+    assertStrictEquals(bosQtyFor("lineal_ft", AREA, PERIM, WALL, bad), 72, `lineal_ft with ${bad}`);
+    assertStrictEquals(bosQtyFor("sqft_option", AREA, PERIM, WALL, bad), 576, `sqft_option with ${bad}`);
+  }
+});
+
+Deno.test("bosQtyFor: whole-building callers that pass nothing are untouched by the new parameter", () => {
+  // The build-on-site call sites pass four arguments and must read exactly as before.
+  assertStrictEquals(bosQtyFor("each", AREA, PERIM, WALL), 1);
+  assertStrictEquals(bosQtyFor("lineal_ft", AREA, PERIM, WALL), 72);
+  assertStrictEquals(bosQtyFor("sqft_option", AREA, PERIM, WALL), 576);
+});

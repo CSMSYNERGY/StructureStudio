@@ -14,6 +14,9 @@ import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { bosBasisOf, bosQtyFor, bosCharges, bosAmountFor } from "../_shared/buildOnSite.ts";
+import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } from "../_shared/foundation.ts";
+import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
+import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
@@ -108,17 +111,7 @@ const escHtml = (v: unknown): string =>
 // SUPABASE_ANON_KEY: that env value and the literal baked into the browser bundle ship through
 // different pipelines, and the day they drift a compare would invert in silence (the reasoning
 // _shared/resolveTenant.ts records for its own classifier).
-const hasSubject = (token: string): boolean => {
-  try {
-    const part = token.split(".")[1];
-    if (!part) return false;
-    const b = part.replace(/-/g, "+").replace(/_/g, "/");
-    const claims = JSON.parse(atob(b + "=".repeat((4 - (b.length % 4)) % 4))) as Record<string, unknown>;
-    return typeof claims?.sub === "string" && (claims.sub as string).length > 0;
-  } catch {
-    return false;
-  }
-};
+// hasSubject() now lives in _shared/jwtSubject.ts (lifted 2026-09-14 so delivery-quote shares it).
 
 // PER-TENANT SUBMIT CAP (2026-09-06). This endpoint is reachable with the public anon key, and
 // one call spends the tenant's money: several CRM API calls, a branded email to whatever
@@ -316,6 +309,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // rep's debug channel and not something an anonymous shopper should read back. It costs at
   // most one auth round trip, and only for a request that actually presents a user token.
   let staffCaller = false;
+  // The signed-in rep, when there is one — kept for the delivery origin (233, origin_mode = rep
+  // measures from THIS person's home lot). Resolved inside the same auth round trip below.
+  let callerUserId: string | null = null;
   // MAY THIS PERSON AMEND A SIGNED ORDER? Separate from staffCaller on purpose: pricing a
   // quote and re-opening an agreement the customer already committed to are different acts,
   // and Carolyn granted them separately ("Change Orders is the only feature they shouldn't
@@ -335,6 +331,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       const { data: userData } = await supabase.auth.getUser(token);
       const userId = userData?.user?.id;
       if (userId) {
+        callerUserId = userId;
         const [memRes, opRes] = await Promise.all([
           // limit(1), not maybeSingle(): a duplicate client_users row must not lock a rep out
           // of their own tenant (the reasoning _shared/resolveTenant.ts records for its read).
@@ -469,6 +466,49 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // expired mid-designer shows up here, and a run of these is how you would notice.
       //   select message, count(*) from app_errors where severity='info' group by 1
       //   having count(*) > 20 order by 2 desc;
+      severity: "info",
+    }).catch(() => {});
+  }
+
+  // 2e. AUTOMATIC DELIVERY (233–236). Carolyn 2026-09-14: a builder sets delivery rules and
+  // says whether the fee "automatically add[s] based on their rules.. or not". A rep-typed fee
+  // (allowedDeliveryFee, staff-gated above) WINS — the rep looked at the suggestion and chose —
+  // otherwise, with automation on, the fee is worked out here from the customer's address by
+  // the same quoteDelivery the designer preview used, off the same whole-mile cache, so what the
+  // customer saw on screen is what goes on the paper.
+  //
+  // Two kinds of "can't price", handled differently on purpose:
+  //   MISCONFIGURATION (rules half-filled, no origin address, no Google key) → REFUSE, naming the
+  //   setting. The ss_tax_rate posture (158): the builder believes delivery is being added, and
+  //   issuing every quote silently without it is the outcome worth refusing over.
+  //   THIS ADDRESS (beyond the last band, no route, Google down) → ISSUE WITHOUT the line and
+  //   say so (deliveryUnpriced in the response, `delivery` in the snapshot). Carolyn defined
+  //   "beyond the last band" as left for the rep; a transient outage blocking every quote for
+  //   every automated tenant would be worse than one quote missing a rep-editable line; and
+  //   the designer already showed the customer the same "to be confirmed" state.
+  // Placed with the other refusals, before the contact upsert, so a refusal leaves nothing behind.
+  const manualDelivery = allowedDeliveryFee > 0;
+  let autoDelivery: DeliveryQuote | null = null;
+  if (!manualDelivery) {
+    const dq = await quoteDelivery(supabase, { clientId, address: addressFrom(contact || {}), repUserId: callerUserId });
+    if (dq.configured && dq.automate) {
+      if (dq.reason === "rule_incomplete" || dq.reason === "no_origin" || dq.reason === "distance_not_configured") {
+        const why = dq.reason === "rule_incomplete" ? "the fee rule is missing a number"
+          : dq.reason === "no_origin" ? "no origin address is on file"
+          : "distance lookups aren't configured";
+        return json({ error: `Delivery is set to be added automatically for ${businessName}, but it can't be priced yet — ${why}. (For the business: Settings → Options → Delivery.)` }, 400);
+      }
+      autoDelivery = dq;
+    }
+  }
+  const deliveryUnpriced = autoDelivery && !autoDelivery.autoPriced
+    ? { reason: autoDelivery.reason, miles: autoDelivery.miles, originName: autoDelivery.originName }
+    : null;
+  if (deliveryUnpriced) {
+    logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "delivery_unpriced",
+      message: `Automatic delivery could not price this address (${deliveryUnpriced.reason}); the estimate was issued without a delivery line.`,
+      context: { designId: String(designId), ...deliveryUnpriced },
       severity: "info",
     }).catch(() => {});
   }
@@ -1173,6 +1213,57 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         type: "one_time",
         description: `${sqft} sq ft at $${rate.toFixed(2)} per sq ft`,
       }, { kind: "insulation", nonTaxable: off.taxable === false }));
+    }
+  }
+
+  // ── Foundation (237) ───────────────────────────────────────────────────────────────────
+  // Site work the customer ticked in the designer: gravel pad, fence removal, piers, concrete
+  // slab — each priced by any of the seven methods, three of which take a quantity the customer
+  // entered (_shared/foundation.ts is the one rule for defaults and limits; the designer mirrors
+  // it). The cladding posture line for line: the rate is RE-READ, never trusted from the body;
+  // an item that isn't offered is a hard 400; a rate of 0 is included and produces no line.
+  // internal_only is NOT checked here — visibility only; a rep-selected item still prices.
+  // Not staff-gated: these are positive charges, so a shopper inflating a count only pays more.
+  {
+    // deno-lint-ignore no-explicit-any
+    const fdSel: any[] = Array.isArray((selections as any)?.foundation) ? (selections as any).foundation : [];
+    if (fdSel.length) {
+      const fdRes = await supabase.from("foundation_items")
+        .select("item_id, label_override, rate, basis, taxable, active")
+        .eq("client_id", clientId);
+      if (fdRes.error) return json({ error: "Could not read your foundation rates just now. Try resubmitting in a moment." }, 400);
+      const fdRows = (fdRes.data ?? []) as { item_id: string; label_override: string | null; rate: number | null; basis: string | null; taxable: boolean | null; active: boolean }[];
+      const seenFd = new Set<string>();
+      for (const raw of fdSel) {
+        const id = String(raw?.id ?? "").trim();
+        if (!isFoundationId(id) || seenFd.has(id)) continue;
+        seenFd.add(id);
+        const row = fdRows.find((r) => r.item_id === id);
+        const label = (row?.label_override || "").trim() || FOUNDATION_LABEL[id];
+        if (!row || !row.active || row.rate == null) {
+          return json({ error: `${label} isn't offered by ${businessName}. Set it in the portal under Settings → Options → Foundation, then resubmit.` }, 400);
+        }
+        const rate = Number(row.rate) || 0;
+        if (rate <= 0) continue;   // included at no charge: no line, not a $0 line
+        const basis = bosBasisOf(row.basis);
+        const { qty, error: qtyErr } = foundationQtyFor(basis, raw?.qty, { area: buildingArea, perimeter: buildingPerimeter });
+        if (qtyErr) return json({ error: `${label}: ${qtyErr}.` }, 400);
+        if (qty <= 0) continue;
+        const amount = bosAmountFor(basis, rate, buildingPrice);
+        const line = tagLine({
+          name: label,
+          qty,
+          amount,
+          priceId: "",
+          productId: "",
+          attachments: [],
+          currency: "USD",
+          type: "one_time",
+          description: foundationDesc(basis, qty, rate),
+        }, { kind: "foundation", nonTaxable: row.taxable === false });
+        targetItems.push(line);
+        if (basis === "pct_estimate_total") deferredPctLines.push({ item: line, rate });
+      }
     }
   }
 
@@ -2055,8 +2146,13 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // Category IDs and Names" support doc. Amount is the designer's optional delivery-fee field —
   // via allowedDeliveryFee, which step 2c zeroes for callers who aren't verified tenant staff
   // (audit 2026-08-20); omitted entirely when 0/blank.
-  const deliveryAmt = allowedDeliveryFee;
-  if (deliveryAmt > 0) {
+  // Since 233 the amount is EITHER the rep's figure OR the automatic one from step 2e. An
+  // automatic fee is pushed even at $0 (free within the radius): the customer was told delivery
+  // is free, and a line that says so is the proof. The description carries the miles and the
+  // origin, which is what reaches the PDF and the books.
+  const deliveryAmt = manualDelivery ? allowedDeliveryFee : (autoDelivery && autoDelivery.autoPriced ? (Number(autoDelivery.amount) || 0) : 0);
+  const pushDelivery = manualDelivery || !!(autoDelivery && autoDelivery.autoPriced);
+  if (pushDelivery) {
     targetItems.push(tagLine({
       name: "Delivery",
       qty: 1,
@@ -2066,7 +2162,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       attachments: [],
       currency: "USD",
       type: "one_time",
-      description: "Delivery fee (non-taxable)",
+      description: manualDelivery
+        ? (ssTaxDelivery ? "Delivery fee" : "Delivery fee (non-taxable)")
+        : autoDelivery!.desc,
       automaticTaxCategoryId: "6852749d6e0bd3b3466d14b6",   // GHL "Non-Taxable Product" (NT)
     }, { kind: "delivery", nonTaxable: !ssTaxDelivery }));
   }
@@ -2334,6 +2432,19 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     version: 1,
     styleId: styleRowId,
     discount: totalDiscount > 0 ? totalDiscount : 0,
+    // How the delivery line was arrived at (233): a rep's figure, the automatic rule (with the
+    // miles and origin it used), or an automatic rule that could not price this address —
+    // in which case there is no delivery line and the rep is expected to add one.
+    ...(manualDelivery
+      ? { delivery: { source: "manual", amount: allowedDeliveryFee } }
+      : autoDelivery
+        ? { delivery: {
+            source: autoDelivery.autoPriced ? "auto" : "unpriced",
+            amount: autoDelivery.autoPriced ? (Number(autoDelivery.amount) || 0) : null,
+            miles: autoDelivery.miles, originName: autoDelivery.originName,
+            originMode: autoDelivery.originMode, ruleType: autoDelivery.ruleType,
+            reason: autoDelivery.reason, resolvedAt: new Date().toISOString() } }
+        : {}),
     // Per-discount taxability, SS mode only (migration 148). `discount` above stays the single
     // clamped number every existing reader expects; this is the breakdown the two-pool totals
     // block is built from. Rows are UNCLAMPED — subtotalsFromSnapshot clamps each pool at >= 0
@@ -2845,6 +2956,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     return json({
       ok: true,
       issuedBy: "structurestudio",
+      ...(deliveryUnpriced ? { deliveryUnpriced } : {}),
       ...(persistErr
         ? { warning: "The quote was issued, but saving it to the design failed — the stored record may be out of date. The error was logged for support." }
         : {}),
@@ -3231,6 +3343,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
 
   return json({
     ok: true,
+    ...(deliveryUnpriced ? { deliveryUnpriced } : {}),
     ...(persistErr
       ? { warning: "The estimate was created and sent, but saving its reference to the design failed — resubmitting may create a duplicate estimate. The error was logged for support." }
       : {}),

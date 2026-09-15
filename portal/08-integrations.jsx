@@ -18,7 +18,15 @@ const QBO_KINDS = [
   ["layout_item", "Layout items", "One mapping per built-in placeable (lofts, workbenches, rough openings…)"],
   ["custom_option", "Custom options", "Tenant-defined add-on options"],
   ["discount", "Discount", "Optional — QuickBooks' built-in discount is used when unmapped"],
-  ["delivery", "Delivery", "Pushed non-taxable"],
+  ["delivery", "Delivery", "Non-taxable unless Settings → Options → Delivery says otherwise"],
+  // 239: the kinds the estimate already emitted but the map could not name, plus foundation.
+  ["wall_height", "Taller walls", "Wall-height increase lines"],
+  ["build_on_site", "Built on site", "The on-site build fee a tall wall triggers"],
+  ["cladding", "Cladding", "Priced siding lines"],
+  ["insulation", "Insulation", "One line per insulated area"],
+  ["electrical", "Electrical package", "The standard wiring package"],
+  ["electrical_item", "Electrical items", "Devices placed beyond the standard layout"],
+  ["foundation", "Foundation & site work", "Gravel pads, fence removal, piers and slabs"],
   ["fallback", "Fallback", "Used for any line with no mapping of its own"],
 ];
 
@@ -1953,6 +1961,7 @@ function CommissionTeamInner() {
             <th style={th}>Name</th>
             <th style={th}>Title</th>
             <th style={th}>Access</th>
+            {(data.locations || []).length > 0 && <th style={th} title="Their home sales lot. Delivery is measured from here when Settings → Options → Delivery says 'from the rep's location'.">Home lot</th>}
             {canSeeRates && <th style={th}>Commission&nbsp;%</th>}
             <th style={th}>Last active</th>
             {isOwner && <th style={th}>Sees all payouts</th>}
@@ -1981,6 +1990,16 @@ function CommissionTeamInner() {
                   )}
                 </td>
                 <td style={{ ...td, fontSize: 12, color: "#475569", maxWidth: 340, lineHeight: 1.45 }}>{ssAccessSummary(m, meta)}</td>
+                {(data.locations || []).length > 0 && <td style={td}>
+                  {(canManageTeam || m.isSelf)
+                    ? <select value={m.locationId || ""} disabled={busy}
+                        onChange={async (e) => { const v = e.target.value || null; setBusy(true); try { await call({ action: "set_home_location", userId: m.userId, locationId: v }); await load(); } catch (err) { setErr(err.message); } setBusy(false); }}
+                        style={{ ...S.input, width: 150, padding: "5px 8px", fontSize: 12 }}>
+                        <option value="">— none —</option>
+                        {data.locations.map((l) => <option key={l.id} value={l.id}>{l.name}{l.city ? " (" + l.city + ")" : ""}</option>)}
+                      </select>
+                    : <span style={{ fontSize: 12, color: "#475569" }}>{(data.locations.find((l) => l.id === m.locationId) || {}).name || <span style={{ color: "#94A3B8" }}>—</span>}</span>}
+                </td>}
                 {canSeeRates && <td style={td}>
                   {m.role === "owner"
                     ? <span style={{ color: "#94A3B8" }}>—</span>
@@ -2868,6 +2887,8 @@ function OptionsShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {sub === "interior" && <LayoutPricing {...p} />}
       {sub === "electrical" && <Electrical {...p} />}
       {sub === "insulation" && <Insulation {...p} />}
+      {sub === "delivery" && <DeliveryView {...p} />}
+      {sub === "foundation" && <Foundation {...p} />}
     </div>
   );
 }

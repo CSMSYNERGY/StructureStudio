@@ -397,14 +397,20 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
         // itself is written in exactly one place (portal-schedule's save_driver), so the
         // editor shows what is on file and points at that card rather than becoming a
         // second writer of the same row.
-        const [rowsRes, cmsRes, dpsRes] = await Promise.all([
-          admin.from("client_users").select("user_id, role, title, access, full_name, created_at").eq("client_id", clientId).order("created_at"),
+        const [rowsRes, cmsRes, dpsRes, locsRes] = await Promise.all([
+          // location_id (234): the person's home lot, the delivery origin when the builder
+          // measures "from the rep's location".
+          admin.from("client_users").select("user_id, role, title, access, full_name, created_at, location_id").eq("client_id", clientId).order("created_at"),
           admin.from("commission_members").select("user_id, commission_percent, sees_all_payouts, full_access").eq("client_id", clientId),
           admin.from("driver_profiles")
             .select("user_id, truck_name, deck_length_ft, max_width_ft, is_driver, active")
             .eq("client_id", clientId).eq("is_driver", true).eq("active", true),
+          // The lots a person can call home. Best-effort: a failed read hides the column, it
+          // does not break the roster.
+          admin.from("builder_locations").select("id, name, city").eq("client_id", clientId).eq("active", true).order("sort_order"),
         ]);
         if (rowsRes.error) throw rowsRes.error;
+        const locations = (locsRes.data || []).map((l: any) => ({ id: l.id, name: l.name, city: l.city || null }));
         const rows = rowsRes.data;
         const cmById = new Map((cmsRes.data || []).map((c: any) => [c.user_id, c]));
         const dpById = new Map((dpsRes.data || []).map((d: any) => [d.user_id, d]));
@@ -457,10 +463,11 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
             title: (r as any).title || null,
             access: ((r as any).access as Record<string, Level> | null) || null,
             effective: effectiveAccess((r as any).role, (r as any).title, (r as any).access),
+            locationId: (r as any).location_id || null,
           });
         }
         return json({
-          ok: true, clientId, role, canSeeRates, isOwner, members,
+          ok: true, clientId, role, canSeeRates, isOwner, members, locations,
           // The grid is rendered from what the server sends, never from a hard-coded list in
           // portal.html — a second copy of the areas would drift the day one is added, and a
           // permission table that drifts is a permission table that lies.
@@ -649,6 +656,27 @@ Deno.serve(withErrorLog("portal-commissions", async (req: Request) => {
       //
       // The order of the checks below is the security design; each one closes a specific
       // way this endpoint could be turned into a privilege-escalation tool.
+      // ── home lot (234): the delivery origin when origin_mode = rep ─────────────────
+      // Not an access change, so a person may set their OWN; anyone who manages the team may
+      // set anyone's. The FK cannot say "same tenant", so the lot is looked up under clientId.
+      case "set_home_location": {
+        const target = await requireMember(p.userId);
+        if (!canManageTeam && String(p.userId) !== user.id) {
+          return json({ error: "You don't have access to change someone else's home lot." }, 403);
+        }
+        const locId = p.locationId == null || p.locationId === "" ? null : String(p.locationId);
+        if (locId) {
+          if (!isUuid(locId)) return json({ error: "Invalid location." }, 400);
+          const loc = await admin.from("builder_locations").select("id").eq("client_id", clientId).eq("id", locId).maybeSingle();
+          if (loc.error) throw loc.error;
+          if (!loc.data) return json({ error: "That location isn't one of yours." }, 400);
+        }
+        const up = await admin.from("client_users").update({ location_id: locId }).eq("client_id", clientId).eq("user_id", target.user_id);
+        if (up.error) throw up.error;
+        await audit(`set_home_location ${target.user_id} -> ${locId || "none"}`);
+        return json({ ok: true, userId: target.user_id, locationId: locId });
+      }
+
       case "set_access": {
         if (!canManageTeam) return json({ error: "You don't have access to change people's access." }, 403);
         const target = await requireMember(p.userId);

@@ -659,6 +659,8 @@ const SETTINGS_TAB_AREA = {
   interior: "settings_options",
   electrical: "settings_options",
   insulation: "settings_options",
+  delivery: "settings_options",
+  foundation: "settings_options",
   // The wallet half of Billing (2026-09-11). Same area as the subscription half — it is the
   // same money and the same page, split in two for room, not a new permission surface.
   wallet: "settings_billing",
@@ -920,6 +922,11 @@ function ssOptionTabs() {
     ["interior", "Interior items", "Lofts, workbenches, shelving — anything placed inside", "Interior"],
     ["electrical", "Electrical", "Outlets, switches, lights and panels, and what each adds", "Interior"],
     ["insulation", "Insulation", "Insulation options and how they are priced", "Interior"],
+    // SERVICES (Carolyn 2026-09-14, "because we are incorporating tax codes"): things the
+    // builder DOES rather than sells — delivery to the site, and the site work before the
+    // building arrives. A contiguous run, because the run IS the heading.
+    ["delivery", "Delivery", "How delivery is priced from your lot to the customer", "Services"],
+    ["foundation", "Foundation", "Gravel pads, fence removal, piers and slabs", "Services"],
   ];
 }
 
