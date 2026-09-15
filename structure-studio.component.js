@@ -15870,7 +15870,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // ─── SUBMIT QUOTE ───
   const submitQuote = async () => {
     // An inventory MASTER is the lot building itself, never a customer estimate — a
-    // submit here would convert it (save_design promotion + a GHL estimate) and every
+    // submit here would convert it (a GHL estimate, which submit-estimate marks sent) and every
     // unit list/serial would point at a customer's quote. Quoting an inventory building
     // goes through the Inventory tab's "Send estimate", which loads it as a fresh design.
     if (inventoryMaster && currentDesignIdRef.current === inventoryMaster.code) {

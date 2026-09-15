@@ -1466,9 +1466,10 @@ function SsLock({ size = 13, color = "#94A3B8", title = "Locked" }) {
 // ─── Designs table ───
 // Fulfillment status (read-only badge). Value is a GHL-derived projection cached on
 // designs.status and refreshed by the sync-design-status edge function on load —
-// EXCEPT 'draft' (migration 063): a browsing lead's silently-saved design, written by
-// save_design alone. It has no GHL estimate, so the sync skips it; a real submit is
-// what promotes it to 'sent'.
+// EXCEPT 'draft' (migration 063): a design nothing has been issued for yet. It has no GHL
+// estimate, so the sync skips it. Since migration 241 (2026-09-15) save_design never
+// promotes: submit-estimate marks it 'sent' once the estimate or quote is actually issued,
+// so a refused Get Quote stays a draft instead of listing a quote nobody received.
 const STATUS_LABELS = { draft: "Draft", sent: "Sent", accepted: "Accepted", invoiced: "Invoiced", delivered: "Delivered" };
 const STATUS_COLORS = {
   draft:     { bg: "#F1F5F9", fg: "#475569" },
