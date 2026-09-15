@@ -3226,7 +3226,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
   // ghl_estimate_id, so a design whose estimate went out stays locked to its phone and email
   // even if this write fails and step 11 is what stores the id. Step 11 still writes both,
   // unchanged. A no-op for a resubmit (already past draft).
-  {
+  //
+  // NO ID, NO PROMOTE (review 2026-09-15). A create that answered 2xx without an `_id` leaves
+  // estimateId null on a first issue; step 10 then sends nothing ("no estimateId after
+  // create/update"), so marking it sent would be exactly the unissued 'sent' this write exists to
+  // rule out. The design stays an honest draft and the CRM's odd answer is logged as a fault.
+  if (!estimateId) {
+    await logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "ghl_estimate_no_id",
+      message: `GHL estimate ${existingEstimateId ? "update" : "create"} answered ok without an estimate id: the design was not marked sent and no email was sent`,
+      context: { designId: String(designId), estimateNumber, recreatedFromStale },
+    });
+  } else {
     const promoted = await promoteIssuedDesign(supabase, {
       clientId,
       designId: String(designId),

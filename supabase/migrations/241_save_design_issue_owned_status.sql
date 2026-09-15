@@ -4,6 +4,12 @@
 -- APPLY BY HAND (`supabase db query --linked` with the SQL INLINE, never --file; or the SQL
 -- editor), as the owner, then record version 241 in supabase_migrations.schema_migrations.
 -- NEVER `supabase db push`. Rehearse inside begin … rollback first.
+-- INLINE MEANS GIT BASH (checked 2026-09-15). This file starts with "--", and the CLI refuses an
+-- argument that starts with "--" as an unknown flag, so put a newline before it:
+-- --linked "<newline>$(cat 241_save_design_issue_owned_status.sql)". Never PowerShell 5.1: its
+-- "$(cat …)" joins the lines, everything after the first "--" becomes a comment, and the CLI exits
+-- 0 having run nothing. The CLI prints no notices either, so exit 0 proves nothing: read it back,
+-- `select position('241: born a draft.' in pg_get_functiondef('public.save_design'::regproc)) > 0`.
 --
 -- ⛔ DEPLOY submit-estimate FIRST, and prove the LIVE copy promotes (download it and grep for
 -- promoteIssuedDesign) before running this. This migration removes the only other draft → sent

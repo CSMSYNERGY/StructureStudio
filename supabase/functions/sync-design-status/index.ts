@@ -253,7 +253,9 @@ Deno.serve(withErrorLog("sync-design-status", async (req: Request) => {
     // Drafts (migration 063: a browsing lead's silently-saved design) have no estimate and
     // no opportunity — there is nothing in GHL to derive from, and the 'sent' baseline
     // below would otherwise promote every draft the moment the portal loads it. Their
-    // status belongs to save_design alone: a real submit is what turns draft into sent.
+    // status is not this function's to move: submit-estimate turns draft into sent at the moment
+    // the estimate or quote is issued (migration 241, _shared/designPromotion.ts), and since 241
+    // no save_design call moves status at all.
     // Inventory masters (migration 075: the design behind a physical unit on a sales lot)
     // are the same shape of exception — no GHL estimate exists, the status is owned by
     // portal-settings' save_inventory, and 'sent' here would surface a lot building as a
