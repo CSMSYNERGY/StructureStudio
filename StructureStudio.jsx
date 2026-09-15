@@ -10609,6 +10609,52 @@ const SSD_CSS = [
   // Docked 3D card: its look is inline (the calibration surface renders it outside this stylesheet); only hover lives here.
   '.ssd-3d-x:hover{background:var(--ss-panel)!important;color:var(--ss-ink)!important}',
   '.ssd-3d-edit:hover{filter:brightness(1.08)}',
+  // ── Section 04: customer information ──
+  // One height token for the form. 27px is what the text inputs measured before the redesign (the state
+  // select was 29), so every field, the address search box and View property line up at today's height.
+  '.ssd-frame{--ssd-field-h:27px}',
+  '.ssd-cf{display:flex;flex-direction:column;gap:12px;min-width:0}',
+  // Grid A: name, email, phone. The template comes from the fields present (--ssd-cf-a / --ssd-cf-a-md).
+  '.ssd-cf-a{display:grid;gap:12px;grid-template-columns:var(--ssd-cf-a)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-cf-a{grid-template-columns:var(--ssd-cf-a-md)}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-a,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-a{grid-template-columns:minmax(0,1fr)}',
+  // Grid B: street, city, state, ZIP (2fr 1.2fr 1fr .7fr of the fields present). md: street full, then two
+  // columns; sm/xs: street and city full, then state + ZIP.
+  '.ssd-cf-b{display:grid;gap:12px;grid-template-columns:var(--ssd-cf-b)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-cf-b{grid-template-columns:repeat(2,minmax(0,1fr))}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-cf-f.is-street{grid-column:1/-1}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-b,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-b{grid-template-columns:minmax(0,1fr) minmax(0,.8fr)}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-f.is-street,.ssd-frame[data-ssd-bp="sm"] .ssd-cf-f.is-city,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-f.is-street,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-f.is-city{grid-column:1/-1}',
+  '.ssd-cf-f{display:block;min-width:0}',
+  // Labels in sentence case, never text-transformed; " ✓ verified" is a nested span.
+  '.ssd-cf-l{display:block;margin:0 0 5px;font-size:11px;font-weight:500;line-height:1.3;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ssd-cf-v{font-weight:700;color:var(--ss-accent-text)}',
+  '.ssd-cf-in{display:block;width:100%;min-width:0;height:var(--ssd-field-h);box-sizing:border-box;margin:0;padding:0 10px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);font-family:inherit;font-size:13.5px;font-weight:400;line-height:normal;color:var(--ss-ink);transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-cf-in::placeholder{color:var(--ss-placeholder);opacity:1}',
+  '.ssd-cf-in:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-cf-in.is-verified{background:var(--ss-panel);border-color:var(--ss-line-card);color:var(--ss-muted);cursor:default}',
+  '.ssd-select.ssd-cf-sel{height:var(--ssd-field-h);padding-left:10px;font-size:13.5px;font-weight:400}',
+  // Address row: the search field takes the line; at sm/xs View property drops below it at full width.
+  '.ssd-cf-addr{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;min-width:0}',
+  '.ssd-cf-search{flex:1 1 240px;min-width:0}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-search,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-search{flex-basis:100%}',
+  '.ssd-cf-ac{display:flex;align-items:center;gap:8px;height:var(--ssd-field-h);box-sizing:border-box;padding:0 0 0 10px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-cf-ac:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-cf-ac:focus-within{border-color:var(--ss-accent-fill);box-shadow:0 0 0 3px var(--ss-accent-shadow)}',
+  '.ssd-cf-ac-ic{flex:0 0 auto;display:block;color:var(--ss-subtle)}',
+  // Google's element draws its own magnifier (probed 2026-09-15), so ours shows only until the widget mounts,
+  // or when it cannot load at all. The mounted element then takes the whole box.
+  '.ssd-cf-ac:has(> .ssd-cf-ac-mount > *){padding-left:0}',
+  '.ssd-cf-ac:has(> .ssd-cf-ac-mount > *) > .ssd-cf-ac-ic{display:none}',
+  '.ssd-cf-ac-mount{align-self:stretch;height:100%}',
+  // Google's element sets its own border, radius, face and height inline on its host (a closed shadow root
+  // hides the rest), so the wrapper's rules win with !important. Font properties cross the shadow boundary.
+  '.ssd-cf-ac-mount > *{height:100%!important;border:0!important;border-radius:0!important;background-color:var(--ss-surface)!important;font-family:inherit!important;font-size:13.5px!important;font-weight:400!important;color:var(--ss-ink)!important}',
+  '@media (pointer: coarse){.ssd-frame .ssd-cf-ac-mount > *{font-size:16px!important}}',
+  '.ssd-cf-vp{font-family:inherit;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:var(--ssd-field-h);box-sizing:border-box;margin:0;padding:0 13px;border:1px solid var(--ss-accent-fill);border-radius:4px;background:var(--ss-accent-wash);color:var(--ss-accent-text);font-size:12.5px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer;transition:box-shadow .15s ease}',
+  '.ssd-cf-vp:hover{box-shadow:inset 0 0 0 1px var(--ss-accent-fill)}',
+  '.ssd-cf-vp:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-cf-vp,.ssd-frame[data-ssd-bp="xs"] .ssd-cf-vp{flex:1 1 100%}',
 ].join("\n");
 
 // The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
@@ -20098,85 +20144,100 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <SSRow {...ssRowProps("customer")}>
         <div style={{ background: "#FFF" }}>
           <SSSecHead text={ssHead("customer")} />
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+          {/* Redesign 2026-09-15 (section 04): grid A (name, email, phone), the address search row, then
+              grid B (street, city, state, ZIP). The column templates are CSS variables built from the
+              fields this builder asks for, so a missing field drops its column; the breakpoint rules live
+              in SSD_CSS. Placeholders, types, formatting and the verified lock are unchanged. */}
+          <div className="ssd-cf">
+          {(C.contactFields.includes("name") || C.contactFields.includes("email") || C.contactFields.includes("phone")) && (
+            <div className="ssd-cf-a" style={{ "--ssd-cf-a": `repeat(${["name", "email", "phone"].filter((k) => C.contactFields.includes(k)).length}, minmax(0,1fr))`, "--ssd-cf-a-md": `repeat(${Math.min(2, ["name", "email", "phone"].filter((k) => C.contactFields.includes(k)).length)}, minmax(0,1fr))` }}>
             {C.contactFields.includes("name") && (
-              <div style={{ flex: "1 1 180px" }}>
-                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Name *</span>
-                <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+              <div className="ssd-cf-f">
+                <span className="ssd-cf-l">Name *</span>
+                <input type="text" value={contact.name} onChange={(e) => setContact((p) => ({ ...p, name: e.target.value }))} placeholder="Full Name" className="ssd-cf-in ssd-field" />
               </div>
             )}
             {/* A VERIFIED phone/email is read-only (Ahsan 2026-09-15): it is who the quote files
                 under, and the Quotes tab finds quotes by it. Public page only — custIdentity is
-                always null when embedded, so a rep's form is untouched. */}
+                always null when embedded, so a rep's form is untouched. The " ✓ verified" suffix is a
+                nested span, so the label's textContent stays "Phone * ✓ verified" (customer-login.spec). */}
             {C.contactFields.includes("email") && (
-              <div style={{ flex: "1 1 200px" }}>
-                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Email *{custIdentity && custIdentity.email ? " ✓ verified" : ""}</span>
+              <div className="ssd-cf-f">
+                <span className="ssd-cf-l">Email *{custIdentity && custIdentity.email ? <span className="ssd-cf-v">{" ✓ verified"}</span> : ""}</span>
                 <input type="email" value={contact.email} readOnly={Boolean(custIdentity && custIdentity.email)}
                   title={custIdentity && custIdentity.email ? "The email you signed in with — sign out to use another" : undefined}
                   onChange={(e) => { if (custIdentity && custIdentity.email) return; setContact((p) => ({ ...p, email: e.target.value })); }} placeholder="email@example.com"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", ...(custIdentity && custIdentity.email ? { background: "#F1F5F9", color: "#475569" } : {}) }} />
+                  className={"ssd-cf-in ssd-field" + (custIdentity && custIdentity.email ? " is-verified" : "")} />
               </div>
             )}
             {C.contactFields.includes("phone") && (
-              <div style={{ flex: "1 1 140px" }}>
-                <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Phone *{custIdentity && custIdentity.phone ? " ✓ verified" : ""}</span>
+              <div className="ssd-cf-f">
+                <span className="ssd-cf-l">Phone *{custIdentity && custIdentity.phone ? <span className="ssd-cf-v">{" ✓ verified"}</span> : ""}</span>
                 <input type="tel" inputMode="tel" autoComplete="tel" value={formatPhoneDisplay(contact.phone)} readOnly={Boolean(custIdentity && custIdentity.phone)}
                   title={custIdentity && custIdentity.phone ? "The number you signed in with — sign out to use another" : undefined}
                   onChange={(e) => { if (custIdentity && custIdentity.phone) return; setContact((p) => ({ ...p, phone: formatPhoneDisplay(e.target.value) })); }} placeholder="(555) 555-5555"
-                  style={{ ...S.sel, width: "100%", boxSizing: "border-box", ...(custIdentity && custIdentity.phone ? { background: "#F1F5F9", color: "#475569" } : {}) }} />
+                  className={"ssd-cf-in ssd-field" + (custIdentity && custIdentity.phone ? " is-verified" : "")} />
               </div>
             )}
-          </div>
+            </div>
+          )}
           {(C.googleMapsApiKey || DEFAULT_GOOGLE_MAPS_API_KEY) && C.contactFields.includes("street") && (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-              <span style={{ ...S.lbl, fontSize: 10, whiteSpace: "nowrap" }}>Search for address</span>
-              <div ref={attachStreetAutocomplete} style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
+            <div className="ssd-cf-addr">
+              <div className="ssd-cf-search">
+                <span className="ssd-cf-l">Search for address</span>
+                {/* The bordered field is this wrapper. attachStreetAutocomplete REPLACES the children of its
+                    own div with Google's element, so the magnifier sits beside that div, never inside it. */}
+                <div className="ssd-cf-ac">
+                  <svg className="ssd-cf-ac-ic" width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false"><circle cx="6" cy="6" r="4.2" /><path d="m9.2 9.2 3.3 3.3" /></svg>
+                  <div ref={attachStreetAutocomplete} className="ssd-cf-ac-mount" style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "stretch", boxSizing: "border-box" }} />
+                </div>
+              </div>
               {(() => {
                 // Open Google Maps directly to the address typed in the fields below. Built from the
                 // customer's own street/city/state/zip; disabled until at least one is filled.
                 const addr = [contact.street, contact.city, contact.state, contact.zip].map((s) => (s || "").trim()).filter(Boolean).join(", ");
                 return (
-                  <button type="button" disabled={!addr}
+                  <button type="button" className="ssd-cf-vp" disabled={!addr}
                     onClick={() => { if (addr) window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`, "_blank", "noopener,noreferrer"); }}
-                    title={addr ? "Open this address in Google Maps" : "Enter an address below first"}
-                    style={{ ...S.btn("#EEF2FF", "#4F46E5"), border: "1px solid #C7D2FE", flexShrink: 0, whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 4, opacity: addr ? 1 : 0.5, cursor: addr ? "pointer" : "not-allowed" }}>
-                    📍 View Property
+                    title={addr ? "Open this address in Google Maps" : "Enter an address below first"}>
+                    📍 View property
                   </button>
                 );
               })()}
             </div>
           )}
           {(C.contactFields.includes("street") || C.contactFields.includes("city")) && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            <div className="ssd-cf-b" style={{ "--ssd-cf-b": [["street", "2fr"], ["city", "1.2fr"], ["state", "1fr"], ["zip", ".7fr"]].filter(([k]) => C.contactFields.includes(k)).map(([, fr]) => `minmax(0,${fr})`).join(" ") }}>
               {C.contactFields.includes("street") && (
-                <div style={{ flex: "2 1 200px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Street Address *</span>
-                  <input type="text" autoComplete="street-address" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <div className="ssd-cf-f is-street">
+                  <span className="ssd-cf-l">Street address *</span>
+                  <input type="text" autoComplete="street-address" value={contact.street} onChange={(e) => setContact((p) => ({ ...p, street: e.target.value }))} placeholder="123 Main St" className="ssd-cf-in ssd-field" />
                 </div>
               )}
               {C.contactFields.includes("city") && (
-                <div style={{ flex: "1 1 130px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>City *</span>
-                  <input type="text" autoComplete="address-level2" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <div className="ssd-cf-f is-city">
+                  <span className="ssd-cf-l">City *</span>
+                  <input type="text" autoComplete="address-level2" value={contact.city} onChange={(e) => setContact((p) => ({ ...p, city: e.target.value }))} placeholder="City" className="ssd-cf-in ssd-field" />
                 </div>
               )}
               {C.contactFields.includes("state") && (
-                <div style={{ flex: "1 1 160px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>State *</span>
-                  <select autoComplete="address-level1" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box", color: contact.state ? undefined : "#94A3B8" }}>
+                <div className="ssd-cf-f">
+                  <span className="ssd-cf-l">State *</span>
+                  <select autoComplete="address-level1" value={contact.state} onChange={(e) => setContact((p) => ({ ...p, state: e.target.value }))} className={"ssd-select ssd-field ssd-cf-sel" + (contact.state ? "" : " is-empty")}>
                     <option value="">Select state…</option>
-                    {["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"].map((s) => <option key={s} value={s} style={{ color: "#1E293B" }}>{s}</option>)}
+                    {["Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware","District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia","Wisconsin","Wyoming"].map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </div>
               )}
               {C.contactFields.includes("zip") && (
-                <div style={{ flex: "0 1 100px" }}>
-                  <span style={{ ...S.lbl, fontSize: 10, display: "block", marginBottom: 3 }}>Zip *</span>
-                  <input type="text" inputMode="numeric" autoComplete="postal-code" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} placeholder="00000" maxLength={5} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <div className="ssd-cf-f">
+                  <span className="ssd-cf-l">ZIP *</span>
+                  <input type="text" inputMode="numeric" autoComplete="postal-code" value={contact.zip} onChange={(e) => setContact((p) => ({ ...p, zip: e.target.value.replace(/\D/g, "").slice(0, 5) }))} placeholder="00000" maxLength={5} className="ssd-cf-in ssd-field" />
                 </div>
               )}
             </div>
           )}
+          </div>
         </div>
         </SSRow>
       )}
