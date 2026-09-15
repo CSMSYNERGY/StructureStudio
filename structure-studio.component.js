@@ -10413,6 +10413,58 @@ const SSD_CSS = [
   '.ssd-sechead.is-sub{margin:18px 0 10px}',
   '.ssd-sechead.is-sub .ssd-sechead-t{letter-spacing:.14em}',
   '.ssd-sechead.is-sub .ssd-sechead-rule{background:var(--ss-line-faint)}',
+  // ── Section 01: style tiles (SSStyleStrip, and the image_cards option tiles) ──
+  // S.card is the box; the STATE colours live here, because an inline colour would beat :hover. A picked
+  // tile is ringed with box-shadow and never scaled: the strip's one-row test reads every tile's top.
+  '.ssd-tile{border-color:var(--ss-line);transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-tile:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-tile.is-on{border-color:var(--ss-accent-fill);box-shadow:0 0 0 1px var(--ss-accent-fill),0 2px 10px var(--ss-accent-shadow)}',
+  '.ssd-tile-art{position:relative;background:linear-gradient(var(--ss-tile-art-top),var(--ss-tile-art-bottom))}',
+  '.ssd-tile.is-on .ssd-tile-art{background:linear-gradient(var(--ss-tile-sel-top),var(--ss-tile-sel-bottom))}',
+  '.ssd-strip-arrow{font-family:inherit;position:absolute;top:50%;transform:translateY(-50%);z-index:2;width:30px;height:30px;box-sizing:border-box;margin:0;padding:0;border-radius:50%;border:1px solid var(--ss-line);background:rgba(255,255,255,.96);box-shadow:0 2px 8px var(--ssd-primary-a18);color:var(--ss-ink);font-size:18px;font-weight:700;line-height:26px;cursor:pointer;transition:border-color .15s ease}',
+  '.ssd-strip-arrow:hover{border-color:var(--ss-primary-line)}',
+  // ── Section 02: size / roof / cladding cards, native selects and the colour select ──
+  // One height token for the section's fields. 26px is the colour select's height before the redesign;
+  // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
+  '.ssd-frame{--ssd-select-h:26px}',
+  '.ssd-s2{display:grid;gap:12px;grid-template-columns:var(--ssd-s2-cols)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-s2{grid-template-columns:var(--ssd-s2-cols-md)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .is-wide{grid-column:1/-1}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-s2,.ssd-frame[data-ssd-bp="xs"] .ssd-s2{grid-template-columns:minmax(0,1fr)}',
+  '.ssd-card{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
+  '.ssd-card-t{display:block;margin:0 0 9px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ssd-flds{display:flex;gap:9px;min-width:0}',
+  '.ssd-fld{display:block;flex:1 1 0;min-width:0}',
+  '.ssd-fld.is-siding{flex-grow:1.1}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-flds,.ssd-frame[data-ssd-bp="xs"] .ssd-flds{flex-wrap:wrap}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-fld,.ssd-frame[data-ssd-bp="xs"] .ssd-fld{flex:1 1 140px}',
+  '.ssd-fld-l{display:block;margin:0 0 4px;font-size:11px;font-weight:500;line-height:1.3;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ssd-select{display:block;width:100%;min-width:0;height:var(--ssd-select-h);box-sizing:border-box;margin:0;padding:0 26px 0 9px;border:1px solid var(--ss-line);border-radius:4px;background-color:var(--ss-surface);background-image:var(--ssd-chevron);background-repeat:no-repeat;background-position:right 9px center;background-size:10px 10px;font-family:inherit;font-size:13px;font-weight:500;line-height:normal;color:var(--ss-ink);-webkit-appearance:none;appearance:none;cursor:pointer;white-space:nowrap;text-overflow:ellipsis;transition:border-color .15s ease,box-shadow .15s ease}',
+  '.ssd-select.is-size{font-size:13.5px}',
+  '.ssd-select.is-empty{color:var(--ss-placeholder)}',
+  '.ssd-select option{color:var(--ss-ink)}',
+  '.ssd-select:hover{border-color:var(--ss-primary-line)}',
+  '.ssd-cs{display:flex;align-items:center;gap:7px;padding:0 9px;background-image:none;text-align:left}',
+  '.ssd-cs-swatch{display:inline-block;flex:0 0 auto;width:15px;height:15px;box-sizing:border-box;border-radius:3px;border:1px solid rgba(0,0,0,.15)}',
+  '.ssd-cs-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+  // The "▾" stays in the DOM (the button's text is unchanged) but is painted with the native selects'
+  // chevron, so a colour select and a select side by side end the same way.
+  '.ssd-cs-chev{flex:0 0 auto;display:block;width:10px;height:10px;margin-left:auto;overflow:hidden;font-size:10px;line-height:10px;color:transparent;background:var(--ssd-chevron) no-repeat center/10px 10px}',
+  '.ssd-cs-list{position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:30;box-sizing:border-box;max-height:280px;overflow-y:auto;padding:4px 0;background:var(--ss-surface);border:1px solid var(--ss-line);border-radius:4px;box-shadow:0 8px 24px var(--ssd-primary-a14)}',
+  '.ssd-cs-row{display:flex;align-items:center;gap:7px;height:30px;box-sizing:border-box;padding:0 11px;font-size:13px;font-weight:500;color:var(--ss-ink);cursor:pointer}',
+  '.ssd-cs-row:hover{background:var(--ss-panel)}',
+  '.ssd-cs-row.is-on{background:var(--ss-primary-faint);font-weight:700}',
+  '.ssd-sel-wait{display:block;height:var(--ssd-select-h);box-sizing:border-box;padding:0 9px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:13px;font-style:italic;line-height:calc(var(--ssd-select-h) - 2px);color:var(--ss-placeholder);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+  '.ssd-input{display:block;width:100%;min-width:0;height:var(--ssd-select-h);box-sizing:border-box;margin:0;padding:0 9px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);font-family:inherit;font-size:13px;font-weight:400;color:var(--ss-ink)}',
+  '.ssd-input::placeholder{color:var(--ss-placeholder)}',
+  '@media (pointer: coarse){.ssd-frame .ssd-select.ssd-field,.ssd-frame .ssd-input.ssd-field{font-size:16px}}',
+  // Dynamic options: a card each under the three cards; counter choices are option chips.
+  '.ssd-opt{margin-top:12px}',
+  '.ssd-sechead + .ssd-opt{margin-top:0}',
+  '.ssd-opt > .ssd-card-t{white-space:normal}',
+  '.ssd-chip{border-color:var(--ss-line);background:var(--ss-surface);color:var(--ss-ink);font-weight:500;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
+  '.ssd-chip:hover{border-color:var(--ss-primary-line);background:var(--ss-panel)}',
+  '.ssd-chip.is-on{background:var(--ss-accent-fill);border-color:var(--ss-accent-fill);color:var(--ss-on-accent);font-weight:700}',
 ].join("\n");
 
 // The frame's custom properties: the palette as --ss-* plus the one derived value the header's solid
@@ -10425,6 +10477,12 @@ function ssdVarsFor(pal) {
     // "Log in" and a pressed Quotes/Invoices fill with the header's text colour, so their own text is
     // the page primary on a white fill, or white on the dark fill a light builder header gets.
     v["--ssd-hd-solid-fg"] = String(pal.onHeader).toLowerCase() === "#ffffff" ? pal.primary : "#ffffff";
+    // Two primary-tinted shadows (the style-strip arrows, the colour-select menu) and the select
+    // chevron drawn in `subtle`. A data URI cannot read a CSS variable, so it is built here per palette.
+    const pm = /^#[0-9a-f]{6}$/i.test(String(pal.primary)) ? hexToRgb(String(pal.primary)) : { r: 61, g: 54, b: 114 };
+    v["--ssd-primary-a18"] = `rgba(${pm.r}, ${pm.g}, ${pm.b}, 0.18)`;
+    v["--ssd-primary-a14"] = `rgba(${pm.r}, ${pm.g}, ${pm.b}, 0.14)`;
+    v["--ssd-chevron"] = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><path d="M1.5 3.5h7L5 7.5z" fill="${pal.subtle}"/></svg>`)}")`;
     SSD_VARS_CACHE.set(pal, v);
   }
   return v;
@@ -10661,14 +10719,14 @@ function SSStepWatcher({ ids, onChange }) {
 //
 // ⚠️ scrollLeft, NEVER scrollIntoView. scrollIntoView also scrolls every scrollable ancestor,
 // so loading a design would jump the page (and the portal's .ss-designer-host) to this row.
-// ⚠️ The padding is load-bearing: overflow-x:auto forces overflow-y to clip too, which cut off
-// the active tile's scale(1.03) and its 2px accent ring. scale(1.03) grows a tile by 1.5% of its
-// width on each side, so 12px sideways covers tiles up to ~600px wide (5 per row on a 3000px
-// screen); 8px above and 12px below cover the height. The matching negative margin keeps the
-// tiles lined up with the label above.
+// ⚠️ The padding is load-bearing: overflow-x:auto forces overflow-y to clip too, which would cut off
+// the picked tile's ring (a 1px box-shadow plus a soft 10px shadow under it) and the 2px keyboard
+// focus outline. 12px sideways, 8px above and 12px below cover both. The matching negative margin
+// keeps the tiles lined up with the heading above. (A picked tile used to scale(1.03); the redesign
+// rings it instead, so it is exactly as tall as its neighbours.)
 const SS_STRIP_GAP = 10;
 const SS_STRIP_PAD = 12; // sideways; also the scroll-padding, so snap positions line up
-function SSStyleStrip({ styles, value, onPick, perRow, S }) {
+function SSStyleStrip({ styles, value, onPick, perRow, S, disabled }) {
   const n = Math.min(8, Math.max(5, Math.round(Number(perRow)) || 8));
   const ref = useRef(null);
   // Which ends have tiles hidden past them. Both false = no overflow = no arrows, no fade.
@@ -10732,10 +10790,21 @@ function SSStyleStrip({ styles, value, onPick, perRow, S }) {
           scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "thin" }}>
         {styles.map((s) => {
           const active = value === s.value;
+          // A keyboard user picks a tile like a button: Enter or Space. On a locked plan the fieldset's
+          // pointer-events:none stops the mouse, but fieldset[disabled] cannot switch off a div, so the
+          // tile also leaves the tab order and ignores keys (`disabled` is planLocked).
           return (
-            <div key={s.value} data-ss-style={s.value} onClick={() => onPick(s.value)}
-              style={{ ...S.card(active), minWidth: 0, scrollSnapAlign: "start" }}>
-              <div style={{ position: "relative" }}>
+            <div key={s.value} data-ss-style={s.value} role="button" tabIndex={disabled ? -1 : 0}
+              aria-label={s.label} aria-pressed={active} aria-disabled={disabled || undefined}
+              className={active ? "ssd-tile is-on" : "ssd-tile"}
+              onClick={() => onPick(s.value)}
+              onKeyDown={(e) => {
+                if (disabled || (e.key !== "Enter" && e.key !== " ")) return;
+                e.preventDefault();
+                onPick(s.value);
+              }}
+              style={{ ...S.card, minWidth: 0, scrollSnapAlign: "start" }}>
+              <div className="ssd-tile-art">
                 <img src={s.img} alt={s.label} style={{ width: "100%", aspectRatio: "16 / 10", minHeight: 90, maxHeight: 170, objectFit: "cover", display: "block" }} />
                 {active && <div style={S.check}>✓</div>}
               </div>
@@ -10746,14 +10815,11 @@ function SSStyleStrip({ styles, value, onPick, perRow, S }) {
       </div>
       {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
         <div key={"fade" + d} aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, [side(d)]: 0, width: 36, zIndex: 1, pointerEvents: "none",
-          background: `linear-gradient(to ${side(-d)}, #FFF, rgba(255,255,255,0))` }} />
+          background: `linear-gradient(to ${side(-d)}, var(--ss-surface, #FFF), rgba(255,255,255,0))` }} />
       ))}
       {[-1, 1].filter((d) => edges[side(d)]).map((d) => (
         <button key={"arrow" + d} type="button" data-ss-strip-arrow={side(d)} aria-label={d < 0 ? "Previous styles" : "More styles"}
-          onClick={() => page(d)}
-          style={{ position: "absolute", top: "50%", [side(d)]: 2, transform: "translateY(-50%)", zIndex: 2, width: 30, height: 30,
-            borderRadius: 999, border: "1px solid #CBD5E1", background: "rgba(255,255,255,0.96)", boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
-            color: "#334155", fontSize: 18, fontWeight: 700, lineHeight: "26px", padding: 0, cursor: "pointer" }}>
+          onClick={() => page(d)} className="ssd-strip-arrow" style={{ [side(d)]: 2 }}>
           {d < 0 ? "‹" : "›"}
         </button>
       ))}
@@ -10775,21 +10841,22 @@ function ColorSelect({ value, colors, onPick }) {
     return () => { document.removeEventListener("mousedown", h); document.removeEventListener("touchstart", h); };
   }, [open]);
   const sel = colors.find((c) => c.label === value);
-  const chip = (hex) => <span style={{ width: 14, height: 14, borderRadius: 3, background: hex || "transparent", border: "1px solid rgba(0,0,0,0.25)", flexShrink: 0, display: "inline-block" }} />;
+  // Redesign 2026-09-15: the closed button is the section-02 select box (.ssd-select, the same height
+  // as the native selects beside it) and the menu takes the builder's palette. Behaviour unchanged.
+  const chip = (hex) => <span className="ssd-cs-swatch" style={{ background: hex || "transparent" }} />;
   return (
     <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
-      <button type="button" onClick={() => setOpen((o) => !o)}
-        style={{ width: "100%", display: "flex", alignItems: "center", gap: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, background: "#FFF", cursor: "pointer", color: sel ? "#334155" : "#94A3B8" }}>
+      <button type="button" onClick={() => setOpen((o) => !o)} className={sel ? "ssd-select ssd-cs" : "ssd-select ssd-cs is-empty"}>
         {sel && chip(sel.hex)}
-        <span style={{ flex: 1, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sel ? sel.label : "Select…"}</span>
-        <span style={{ fontSize: 10, color: "#94A3B8" }}>▾</span>
+        <span className="ssd-cs-name">{sel ? sel.label : "Select…"}</span>
+        <span className="ssd-cs-chev">▾</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30, background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.15)", maxHeight: 220, overflowY: "auto" }}>
+        <div className="ssd-cs-list">
           {colors.map((c) => (
             <div key={c.id || c.label} onClick={() => { onPick(c.label); setOpen(false); }}
-              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12, background: c.label === value ? "#F1F5F9" : "#FFF", color: "#334155" }}>
-              {chip(c.hex)}<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+              className={c.label === value ? "ssd-cs-row is-on" : "ssd-cs-row"}>
+              {chip(c.hex)}<span className="ssd-cs-name">{c.label}</span>
             </div>
           ))}
         </div>
@@ -17160,23 +17227,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     sel: { border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 13, fontWeight: 600, background: "#FFF", minWidth: 90 },
     lbl: { fontSize: 11, fontWeight: 700, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em" },
     btn: (bg, fg) => ({ background: bg, color: fg, border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }),
-    card: (active) => ({
-      cursor: "pointer", borderRadius: 10, overflow: "hidden", transition: "all 0.2s",
-      border: `3px solid ${active ? accent : "#E2E8F0"}`,
-      boxShadow: active ? `0 0 0 2px ${accent}, 0 4px 12px ${accent}40` : "0 2px 8px rgba(0,0,0,0.06)",
-      transform: active ? "scale(1.03)" : "scale(1)",
-    }),
+    // Style tiles and option chips (redesign 2026-09-15, DESIGN-SPEC 4.3 / 4.6). These are the BOX; each
+    // state colour (picked ring, hover, "on" fill) is a class in SSD_CSS, because an inline colour beats
+    // :hover. So S.card goes with className "ssd-tile" (+ " is-on") and S.pill with "ssd-chip" (+ " is-on").
+    // No transform: a scaled tile is taller than its row, and the strip test wants one shared top.
+    card: { cursor: "pointer", borderRadius: 4, overflow: "hidden", boxSizing: "border-box", borderWidth: 1, borderStyle: "solid", background: pal.surface },
     cardLabel: (active) => ({
-      padding: "6px 8px", textAlign: "center", fontWeight: 700, fontSize: 11,
-      background: active ? "#FFFBEB" : "#FAFBFC", color: active ? "#92400E" : "#334155",
+      padding: "6px 4px", textAlign: "center", fontSize: 11.5, lineHeight: 1.3, fontWeight: active ? 700 : 500, overflowWrap: "anywhere",
+      background: active ? accent : pal.surface, color: active ? pal.onAccent : pal.ink,
+      borderTop: `1px solid ${active ? accent : pal.lineSoft}`,
     }),
-    check: { position: "absolute", top: 4, right: 4, width: 20, height: 20, borderRadius: 99, background: accent, display: "flex", alignItems: "center", justifyContent: "center", color: pal.onAccent, fontSize: 11, fontWeight: 800 },
-    pill: (active) => ({
-      padding: "8px 14px", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 13, transition: "all 0.15s",
-      border: `2px solid ${active ? accent : "#E2E8F0"}`,
-      background: active ? "#FFFBEB" : "#FAFBFC", color: active ? "#92400E" : "#334155",
-      boxShadow: active ? `0 0 0 2px ${accent}` : "none",
-    }),
+    check: { position: "absolute", top: 5, right: 5, width: 20, height: 20, borderRadius: 10, background: pal.cta, color: pal.onCta, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, lineHeight: 1, boxShadow: "0 0 0 2px rgba(255,255,255,0.9)" },
+    pill: { display: "inline-flex", alignItems: "center", gap: 6, boxSizing: "border-box", padding: "8px 10px", borderRadius: 4, borderWidth: 1, borderStyle: "solid", fontSize: 12.5, lineHeight: "16px", cursor: "pointer" },
   };
 
   // ─── PAINT FIELDS (two cells of the Size/Roof/Cladding row) ───
@@ -17190,14 +17252,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // "Painted" once a chosen Body/Trim color differs from that side's default
   // color (or is a custom color).
   //
-  // 2026-09-15 (Carolyn 09-14, six selects on one row): paintField now returns a whole
-  // labelled grid CELL, and renderPaintFields returns the Body/Trim pair as a fragment so each
-  // is its own cell. Only the wrappers and labels changed. Every onChange/onSel line and the
+  // 2026-09-15 (Carolyn 09-14, six selects on one row): paintField returns one labelled FIELD
+  // of the Cladding card (redesign: .ssd-fld), and renderPaintFields returns the Body/Trim pair
+  // as a fragment so each is its own field. Only the wrappers and labels changed. Every onChange/onSel line and the
   // sel[opt.id] "Painted"/"No Paint" derivation are byte-identical to before — do not tidy
   // them while you are here; that value is what the estimate prices.
   const renderPaintFields = (opt) => {
     const palette = Array.isArray(C.colors) ? C.colors : [];
-    const PAINT_INPUT = { display: "block", width: "100%", minWidth: 0, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" };
     const defaultLabel = (k) => {
       const d = palette.find((c) => (k === "body" ? c.siding : c.trim) && c.isDefault);
       return d ? d.label : "";
@@ -17207,13 +17268,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const colors = palette.filter((c) => (kind === "body" ? c.siding : c.trim));
       const val = paintColors[kind] || "";
       const set = (v) => setPaintColors((p) => ({ ...p, [kind]: v }));
-      const labelTxt = kind === "body" ? "Body Color" : "Trim Color";
+      const labelTxt = kind === "body" ? "Body color" : "Trim color";
       const other = kind === "body" ? "trim" : "body";
-      // The tenant's optional paint photo (opt.img) was a 100px card beside the pair; a 150px
-      // cell has no room for it, so it shrinks to a thumbnail on the Body label. Sized and
+      // The tenant's optional paint photo (opt.img) was a 100px card beside the pair; a field
+      // has no room for it, so it shrinks to a thumbnail on the Body label. Sized and
       // aligned to the 11px label text so the Body select does not sit lower than its neighbours.
       const cellLbl = (
-        <span style={{ ...S.lbl, display: "block", marginBottom: 8, whiteSpace: "nowrap" }}>
+        <span className="ssd-fld-l">
           {labelTxt}
           {kind === "body" && opt.img && <img src={opt.img} alt={opt.label} style={{ width: 18, height: 11, objectFit: "cover", borderRadius: 2, marginLeft: 6, verticalAlign: "-1px" }} />}
         </span>
@@ -17221,10 +17282,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // No palette configured for this side → free-text. Any text on either side = painted.
       if (colors.length === 0) {
         return (
-          <label key={kind} style={{ display: "block", minWidth: 0 }}>{cellLbl}
+          <label key={kind} className="ssd-fld">{cellLbl}
             <input type="text" value={val}
               onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
-              placeholder="Enter color or leave blank" style={PAINT_INPUT} />
+              placeholder="Enter color or leave blank" className="ssd-input ssd-field" />
           </label>
         );
       }
@@ -17242,11 +17303,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         setSel((p) => ({ ...p, [opt.id]: painted ? "Painted" : "No Paint" }));
       };
       return (
-        <div key={kind} style={{ minWidth: 0 }}>
+        <div key={kind} className="ssd-fld">
           {cellLbl}
           <ColorSelect value={selectVal} colors={colors} onPick={onSel} />
           {isCustom && (
-            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" style={{ ...PAINT_INPUT, marginTop: 6 }} />
+            <input type="text" value={val} onChange={(e) => set(e.target.value)} placeholder="Exact color" className="ssd-input ssd-field" style={{ marginTop: 6 }} />
           )}
         </div>
       );
@@ -17256,22 +17317,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
   // ─── OPTION RENDERER ───
   const renderOption = (opt) => {
+    // Each dynamic option is a card under the size / roof / cladding cards (redesign 2026-09-15):
+    // image_cards as style tiles, counter choices as option chips. The clicks are unchanged.
     if (opt.type === "image_cards") {
       return (
-        <div key={opt.id} style={{ marginBottom: 14 }}>
-          <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
+        <div key={opt.id} className="ssd-card ssd-opt">
+          <span className="ssd-card-t">{opt.label}</span>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {opt.choices.map((ch) => {
               const active = sel[opt.id] === ch.value;
               return (
-                <div key={ch.value} onClick={() => setSel((p) => ({ ...p, [opt.id]: ch.value }))} style={{ ...S.card(active), width: 130, flex: "0 0 auto" }}>
+                <div key={ch.value} onClick={() => setSel((p) => ({ ...p, [opt.id]: ch.value }))} className={active ? "ssd-tile is-on" : "ssd-tile"} style={{ ...S.card, width: 130, flex: "0 0 auto" }}>
                   {ch.img ? (
-                    <div style={{ position: "relative" }}>
+                    <div className="ssd-tile-art">
                       <img src={ch.img} alt={ch.label} style={{ width: "100%", height: 85, objectFit: "cover", display: "block" }} />
                       {active && <div style={S.check}>✓</div>}
                     </div>
                   ) : (
-                    <div style={{ height: 85, background: active ? "#FEF3C7" : "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: active ? "#92400E" : "#64748B", position: "relative" }}>
+                    <div className="ssd-tile-art" style={{ height: 85, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: active ? pal.accentDeep : pal.muted }}>
                       {ch.label.includes("None") || ch.label.includes("No ") ? "None" : ch.label}
                       {active && <div style={S.check}>✓</div>}
                     </div>
@@ -17290,17 +17353,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       if (opt.id === "paint") return null;
       const hasImage = !!opt.img;
       return (
-        <div key={opt.id} style={{ marginBottom: 14 }}>
-          <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>{opt.label}</span>
+        <div key={opt.id} className="ssd-card ssd-opt">
+          <span className="ssd-card-t">{opt.label}</span>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
             {hasImage && (
-              <div style={{ flex: "0 0 auto", width: 100, borderRadius: 10, overflow: "hidden", border: "2px solid #E2E8F0" }}>
+              <div style={{ flex: "0 0 auto", width: 100, borderRadius: 4, overflow: "hidden", border: `1px solid ${pal.lineCard}` }}>
                 <img src={opt.img} alt={opt.label} style={{ width: "100%", height: 80, objectFit: "cover", display: "block" }} />
               </div>
             )}
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
+            <div style={{ display: "flex", gap: 7, flexWrap: "wrap", flex: 1, alignItems: "center", minWidth: 0 }}>
               {opt.options.map((o) => (
-                <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} style={{ ...S.pill(sel[opt.id] === o), flexShrink: 0 }}>{o}</div>
+                <div key={o} onClick={() => setSel((p) => ({ ...p, [opt.id]: o }))} className={sel[opt.id] === o ? "ssd-chip is-on" : "ssd-chip"} style={{ ...S.pill, flexShrink: 0 }}>{o}</div>
               ))}
             </div>
           </div>
@@ -18433,6 +18496,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The rail buttons sit outside them, so they still scroll on a locked plan.
   const ssLockStyle = { display: "block", border: "none", padding: 0, margin: 0, minWidth: 0,
     ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) };
+  // Section 02's card columns, from the cards that render: size 0.8fr, roof 1.3fr, cladding 2.1fr
+  // (DESIGN-SPEC 4.4); one card alone is at most 520px. The -md template leaves Cladding out, because
+  // at a 740–999px designer it takes a row of its own. The breakpoint CSS picks which one applies.
+  const ssS2Fr = [sizeOpts.length > 0 && 0.8, roofTypes.length > 0 && 1.3, (claddingChoices.length > 0 || Boolean(paintOpt)) && 2.1].filter(Boolean);
+  const ssS2Cols = ssS2Fr.length === 1 ? "minmax(0, 520px)" : ssS2Fr.map((f) => `minmax(0, ${f}fr)`).join(" ");
+  const ssS2Short = ssS2Fr.filter((f) => f !== 2.1);
+  const ssS2ColsMd = ssS2Fr.length === 1 ? ssS2Cols
+    : ssS2Short.length > 1 ? ssS2Short.map((f) => `minmax(0, ${f}fr)`).join(" ") : "minmax(0, 1fr)";
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
@@ -18701,7 +18772,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               SSStyleStrip. The click still sets the style and clears the size, as it always did. */}
           <div>
             <SSSecHead text={ssHead("style")} />
-            <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S}
+            <SSStyleStrip styles={C.buildingStyles} value={sel.style} perRow={C.branding.stylesPerRow} S={S} disabled={planLocked}
               onPick={(v) => setSel((p) => ({ ...p, style: v, size: "" }))} />
           </div>
         </fieldset>
@@ -18711,23 +18782,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         <fieldset disabled={planLocked || undefined} aria-disabled={planLocked || undefined} style={ssLockStyle}>
           <SSSecHead text={ssHead("size")} />
 
-          {/* Building Size · Roof Type · Roof Color · Cladding · Body Color · Trim Color — six
-              compact cells on ONE grid row (Carolyn 2026-09-14: all six selects on one line, and
-              they "don't need to be as wide"). It was a gap-24 flex row whose Roof and Paint groups
-              each stacked two controls under one heading. auto-FILL, not auto-fit: empty tracks
-              are kept, so on a wide screen each cell stays ~160px instead of stretching across
-              1880px; near 900px it wraps 5+1 and a phone gets two a row. Every cell is still
-              conditional, so any subset lays out. Cladding still sits between the roof and the
-              paint, which is where Carolyn drew it (2026-08-18). minWidth:0 on each cell is
-              load-bearing: a grid item defaults to min-width:auto, and a long colour name would
-              otherwise widen its track past the page on a phone. */}
+          {/* Size, roof and cladding as three cards (redesign 2026-09-15, DESIGN-SPEC 4.4): Building size ·
+              Roof options (Type, Color) · Cladding (Siding, Body color, Trim color). The six selects stay
+              on ONE line down to a 1000px designer (Carolyn 2026-09-14: all six on one line, and they
+              "don't need to be as wide"); at 740–999px Cladding takes its own row, and a phone gets one
+              card a row with its fields two-up. The columns come from the cards present (ssS2Cols) and
+              the breakpoint CSS picks the template. Every card is still conditional, so any subset lays
+              out, and Cladding still sits between the roof and the paint, where Carolyn drew it
+              (2026-08-18). minWidth:0 on each card and field is load-bearing: a long colour name would
+              otherwise widen its track past the page on a phone.
+              ⚠️ "Building Size" is the card-title span and its PARENT holds the select (designer.spec.mjs
+              finds the select by that xpath). The "Roof " before Type and Color is visually hidden only,
+              so a screen reader and the harness still read "Roof Type" / "Roof Color". */}
           {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px 14px", alignItems: "start", marginBottom: 14 }}>
+            <div className="ssd-s2" style={{ "--ssd-s2-cols": ssS2Cols, "--ssd-s2-cols-md": ssS2ColsMd }}>
               {sizeOpts.length > 0 && (
-                <div style={{ minWidth: 0 }}>
-                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Building Size</span>
+                <div className="ssd-card">
+                  <span className="ssd-card-t">Building Size</span>
                   <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.size ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
+                    className={"ssd-select ssd-field is-size" + (sel.size ? "" : " is-empty")}>
                     <option value="" disabled>Select a size…</option>
                     {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -18750,41 +18823,53 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   if (c && c.allowCustom) { setRoofCustom(true); setSel((p) => ({ ...p, roofColor: "" })); }
                   else { setRoofCustom(false); setSel((p) => ({ ...p, roofColor: label })); }
                 };
-                // Two cells, Type then Color. Before a type is picked the Color cell shows a greyed
+                // One card, Type then Color. Before a type is picked the Color field shows a greyed
                 // box the height of a select, so the row's controls still line up.
-                return (<>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Type</span>
-                    <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
-                      style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.roofType ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
-                      <option value="">Select…</option>
-                      {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
-                    </select>
+                return (
+                  <div className="ssd-card">
+                    <span className="ssd-card-t">Roof options</span>
+                    <div className="ssd-flds">
+                      <div className="ssd-fld">
+                        <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Type</span>
+                        <select value={sel.roofType || ""} onChange={(e) => onRoofType(e.target.value)}
+                          className={"ssd-select ssd-field" + (sel.roofType ? "" : " is-empty")}>
+                          <option value="">Select…</option>
+                          {roofTypes.map((t) => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </div>
+                      <div className="ssd-fld">
+                        <span className="ssd-fld-l"><span className="ssd-sr">Roof </span>Color</span>
+                        {sel.roofType
+                          ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
+                          : <div className="ssd-sel-wait">Pick a roof type first</div>}
+                        {rIsCustom && sel.roofType && (
+                          <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
+                            className="ssd-input ssd-field" style={{ marginTop: 6 }} />
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ minWidth: 0 }}>
-                    <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Roof Color</span>
-                    {sel.roofType
-                      ? <ColorSelect value={rSelectVal} colors={roofList} onPick={onRoofColor} />
-                      : <div style={{ border: "1px solid #E2E8F0", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: "#94A3B8", background: "#F8FAFC", fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Pick a roof type first</div>}
-                    {rIsCustom && sel.roofType && (
-                      <input type="text" value={sel.roofColor || ""} onChange={(e) => setSel((p) => ({ ...p, roofColor: e.target.value }))} placeholder="Exact color"
-                        style={{ display: "block", width: "100%", marginTop: 6, border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, outline: "none" }} />
-                    )}
-                  </div>
-                </>);
+                );
               })()}
-              {claddingChoices.length > 0 && (
-                <div style={{ minWidth: 0 }}>
-                  <span style={{ ...S.lbl, display: "block", marginBottom: 8 }}>Cladding</span>
-                  <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
-                    style={{ width: "100%", border: "1px solid #CBD5E1", borderRadius: 6, padding: "5px 8px", fontSize: 12, color: sel.cladding ? "#334155" : "#94A3B8", background: "#FFF", cursor: "pointer" }}>
-                    <option value="">Builder's standard</option>
-                    {claddingChoices.map((o) => <option key={o.id} value={o.id}>{claddingLabelOf(o, o.id)}</option>)}
-                  </select>
+              {(claddingChoices.length > 0 || paintOpt) && (
+                <div className="ssd-card is-wide">
+                  <span className="ssd-card-t">Cladding</span>
+                  <div className="ssd-flds">
+                    {claddingChoices.length > 0 && (
+                      <div className="ssd-fld is-siding">
+                        <span className="ssd-fld-l">Siding</span>
+                        <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
+                          className={"ssd-select ssd-field" + (sel.cladding ? "" : " is-empty")}>
+                          <option value="">Builder's standard</option>
+                          {claddingChoices.map((o) => <option key={o.id} value={o.id}>{claddingLabelOf(o, o.id)}</option>)}
+                        </select>
+                      </div>
+                    )}
+                    {/* Body and Trim are two fields of this card — renderPaintFields returns the pair. */}
+                    {paintOpt && renderPaintFields(paintOpt)}
+                  </div>
                 </div>
               )}
-              {/* Body and Trim are two cells of this grid — renderPaintFields returns the pair. */}
-              {paintOpt && renderPaintFields(paintOpt)}
             </div>
           )}
 
@@ -18796,11 +18881,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       )}
 
       {/* What the plan just did (loft support, a size change's reflow): an empty-rail row between
-          sections 02 and 03, in the same DOM position as before. */}
+          sections 02 and 03, in the same DOM position as before, styled as warning cards
+          (DESIGN-SPEC 8: fixed amber, never the builder's colours). */}
       {(unattachedLofts.length > 0 || (reflowNote && reflowNote.length > 0)) && (
       <SSRow>
       {unattachedLofts.length > 0 && (
-        <div style={{ background: "#FEF3C7", borderBottom: "1px solid #FCD34D", padding: "10px 16px", fontSize: 12, color: "#92400E" }}>
+        <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "10px 14px", fontSize: 12, color: "#92400E" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>⚠️ Loft support warning — {unattachedLofts.length} loft{unattachedLofts.length > 1 ? "s" : ""} not properly supported</div>
           <div style={{ fontWeight: 500 }}>Each loft must have <b>both ends</b> of at least one axis (left+right OR top+bottom) resting on a wall or another loft. Adjust position or size to fix.</div>
         </div>
@@ -18813,7 +18899,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           NOT reported: it is what anyone expects when a building grows or shrinks, and
           listing it would bury the two changes that actually matter. */}
       {reflowNote && reflowNote.length > 0 && (
-        <div style={{ background: "#EFF6FF", borderBottom: "1px solid #BFDBFE", padding: "10px 16px", fontSize: 12, color: "#1E3A8A", display: "flex", gap: 10, alignItems: "flex-start" }}>
+        <div style={{ background: "#FEF3C7", border: "1px solid #FCD34D", borderRadius: 4, padding: "10px 14px", marginTop: unattachedLofts.length > 0 ? 8 : 0, fontSize: 12, color: "#92400E", display: "flex", gap: 10, alignItems: "flex-start" }}>
           <span style={{ flexShrink: 0 }}>📐</span>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 700, marginBottom: 4 }}>Your layout moved to fit the new size</div>
@@ -18830,7 +18916,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             </div>
           </div>
           <button type="button" onClick={() => setReflowNote(null)}
-            style={{ background: "none", border: "none", color: "#1E3A8A", cursor: "pointer", fontSize: 15, fontWeight: 800, lineHeight: 1, flexShrink: 0 }}>✕</button>
+            style={{ background: "none", border: "none", color: "#92400E", cursor: "pointer", fontSize: 15, fontWeight: 800, lineHeight: 1, flexShrink: 0 }}>✕</button>
         </div>
       )}
       </SSRow>
