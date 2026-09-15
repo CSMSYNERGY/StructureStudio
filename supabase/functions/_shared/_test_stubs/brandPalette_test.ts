@@ -58,7 +58,8 @@ const FALLBACK: Pal = {
   danger: "#a8342f", dangerWash: "#fdf4f4", dangerLine: "#efc9c9", bolt: "#e0a11b",
   headerBg: "linear-gradient(97deg, #3d3672 0%, #2f4a7f 52%, #1b7895 100%)",
   onHeader: "#ffffff", onHeaderMuted: "rgba(255, 255, 255, 0.94)",
-  headerChipBg: "rgba(255, 255, 255, 0.16)", headerChipLine: "rgba(255, 255, 255, 0.28)", headerLine: "transparent",
+  // 0.04, not the mockup's 0.16: white text on a 16% white chip over the teal end is 3.73:1.
+  headerChipBg: "rgba(255, 255, 255, 0.04)", headerChipLine: "rgba(255, 255, 255, 0.28)", headerLine: "transparent",
 };
 
 const SLATE = "linear-gradient(135deg, #1E293B 0%, #334155 100%)";
@@ -143,6 +144,40 @@ Deno.test("ssPalInput: one colour set keeps today's fallback for the other half"
   const both = { accentColor: "#123456", headerBg: "#654321", companyName: "X" };
   assertEquals(P.ssPalInput(both), both);
   assertEquals(P.ssPal(P.ssPalInput({})), FALLBACK);
+});
+
+Deno.test("ssPalInput: a colour the palette cannot read counts as not set", () => {
+  // The portal's free-text box saves these and ssBrandPalette ignores them, so the one-colour
+  // fallback must still apply instead of the mockup's teal/indigo half.
+  assertEquals(P.ssPalInput({ accentColor: "D97706", headerBg: "#14213D" }).accentColor, "#D97706");
+  assertEquals(P.ssPalInput({ accentColor: "#E8590C", headerBg: "transparent" }).headerBg, SLATE);
+  assertEquals(P.ssPalInput({ accentColor: "#E8590C", headerBg: "none" }).headerBg, SLATE);
+  assertEquals(P.ssPal(P.ssPalInput({ headerBg: "none" })), FALLBACK);
+  assertEquals(P.ssPal(P.ssPalInput({ accentColor: "D97706" })), FALLBACK);
+});
+
+Deno.test("header chip text reaches 4.5:1 over every header stop", () => {
+  const cases: Pal[] = [
+    {}, { accentColor: "#15803D", headerBg: "#14532D" }, { accentColor: "#D97706", headerBg: "#1E293B" },
+    { headerBg: "#1E293B" }, { accentColor: "#2F7D32" }, ...HARNESS_BRANDS,
+  ];
+  for (const b of cases) assertEquals(P.checkPalette(P.ssPal(P.ssPalInput(b))), [], JSON.stringify(b));
+  // A chip that already passed keeps the design's 16% white.
+  assertEquals(P.ssPal(P.ssPalInput({ headerBg: "#14213D", accentColor: "#1B2A4A" })).headerChipBg, "rgba(255, 255, 255, 0.16)");
+  // And checkPalette really measures it: the mockup's own 16% chip on its teal end must fail.
+  const old = { ...FALLBACK, headerChipBg: "rgba(255, 255, 255, 0.16)" };
+  assert(P.checkPalette(old).some((f) => f.startsWith("onHeader/headerChipBg")), JSON.stringify(P.checkPalette(old)));
+  assert(P.checkPalette({ ...FALLBACK, headerChipBg: "var(--x)" }).length > 0, "an unreadable chip must fail, not skip");
+});
+
+Deno.test("ssOnFill reaches 4.5:1 on the fill as given, for any raw fill", () => {
+  for (let r = 0; r < 256; r += 17) for (let g = 0; g < 256; g += 17) for (let b = 0; b < 256; b += 17) {
+    const h = "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+    const c = P.contrast(P.hexToRgb(P.ssOnFill(h)), P.hexToRgb(h));
+    assert(c >= 4.5, `${h} -> ${P.ssOnFill(h)} ${c.toFixed(3)}`);
+  }
+  // pickOn alone answers these by moving the FILL; the text on the caller's own colour was 4.17:1 and 4.47:1.
+  for (const h of ["#7d8200", "#1483c4"]) assert(P.contrast(P.hexToRgb(P.ssOnFill(h)), P.hexToRgb(h)) >= 4.5, h);
 });
 
 Deno.test("ssPal caches by the two inputs", () => {

@@ -3450,8 +3450,13 @@ function ssBrandPalette(branding) {
       }
     }
   }
-  // The mockup's own header too: 0.72 white fails 4.5:1 over its teal end, where "Powered by" sits.
-  if (!hdrStops.length && !accentIn) t.onHeaderMuted = rgba(WHITE, alphaFor(WHITE, colorStops(MOCKUP.headerBg), 4.5))
+  // The mockup's own header too: 0.72 white fails 4.5:1 over its teal end, where "Powered by" sits,
+  // and so does white text on its 16% white chip.
+  if (!hdrStops.length && !accentIn) {
+    const stops = colorStops(MOCKUP.headerBg)
+    t.onHeaderMuted = rgba(WHITE, alphaFor(WHITE, stops, 4.5))
+    t.headerChipBg = headerChipFor(WHITE, stops)
+  }
   return t
 }
 function setHeaderText(t, bgCss, fg, stops) {
@@ -3459,9 +3464,22 @@ function setHeaderText(t, bgCss, fg, stops) {
   t.headerBg = bgCss
   t.onHeader = hex(fg)
   t.onHeaderMuted = rgba(fg, alphaFor(fg, stops, 4.5))
-  t.headerChipBg = light ? 'rgba(255, 255, 255, 0.16)' : 'rgba(0, 0, 0, 0.06)'
+  t.headerChipBg = headerChipFor(fg, stops)
   t.headerChipLine = light ? 'rgba(255, 255, 255, 0.28)' : 'rgba(0, 0, 0, 0.16)'
   t.headerLine = light ? 'transparent' : t.lineCard                                // a light header needs an edge against the page
+}
+// The header chips (Log in, Quotes, "Not you? Start over", the initials badge) print onHeader text on a
+// translucent pill. The design's pill is 16% white under light text (6% black under dark text), but over
+// a light gradient end that takes 11px text under 4.5:1 (the mockup's own teal end does). So the pill
+// fades toward the header first, then becomes a scrim the other way: the closest look to the design
+// whose text passes over EVERY stop. Integer steps and 0.05 of headroom, as alphaFor.
+function headerChipFor(fg, stops) {
+  const BLACK = { r: 0, g: 0, b: 0 }
+  const light = lum(fg) > 0.5, same = light ? WHITE : BLACK, away = light ? BLACK : WHITE
+  const passes = (c, a) => stops.every((s) => contrast(fg, over(c, a, s)) >= 4.5 + 0.05)
+  for (let i = light ? 8 : 3; i >= 0; i--) if (passes(same, i / 50)) return rgba(same, i / 50)
+  for (let i = 1; i <= 35; i++) if (passes(away, i / 50)) return rgba(away, i / 50)
+  return rgba(away, 0.7)
 }
 
 // Every text/UI pair the components use, for tests.
@@ -3476,6 +3494,17 @@ const PAIRS = [
 function checkPalette(t) {
   const fails = []
   for (const [fg, bg, min] of PAIRS) { const c = contrast(hexToRgb(t[fg]), hexToRgb(t[bg])); if (c < min) fails.push(`${fg}/${bg} ${c.toFixed(2)} < ${min}`) }
+  // Header chip text: onHeader on the translucent chip, over every stop the header paints (through
+  // the scrim, when ssBrandPalette added one). An unreadable chip value fails instead of skipping.
+  const BLACK = { r: 0, g: 0, b: 0 }
+  const scrim = /^linear-gradient\(rgba\(0, 0, 0, ([\d.]+)\), rgba\(0, 0, 0, \1\)\), (.*)$/.exec(t.headerBg)
+  const stops = scrim ? colorStops(scrim[2]).map((c) => over(BLACK, +scrim[1], c)) : colorStops(t.headerBg)
+  const chip = /^rgba\((\d+), (\d+), (\d+), ([\d.]+)\)$/.exec(t.headerChipBg)
+  if (!chip || !stops.length) fails.push(`headerChipBg/headerBg unreadable: ${t.headerChipBg} on ${t.headerBg}`)
+  else for (const s of stops) {
+    const c = contrast(hexToRgb(t.onHeader), over({ r: +chip[1], g: +chip[2], b: +chip[3] }, +chip[4], s))
+    if (c < 4.5) fails.push(`onHeader/headerChipBg ${c.toFixed(2)} < 4.5`)
+  }
   return fails
 }
 const toCssVars = (t) => Object.fromEntries(Object.entries(t).map(([k, v]) => ['--ss-' + k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase()), v]))
@@ -3492,11 +3521,13 @@ function ssPal(branding) {
 // Ahsan's decision 1: the mockup's indigo/teal/mint is for a tenant with NO branding. A tenant who
 // set only one of the two colours keeps today's fallback for the other half (the designer's
 // long-standing "#D97706" accent, or the slate header gradient), so their page does not suddenly
-// pick up half of someone else's palette.
+// pick up half of someone else's palette. "Set" means a colour ssBrandPalette can READ: the portal's
+// free-text box saves "none", "transparent" or "D97706" without its #, which the palette ignores,
+// so a plain non-empty test skipped the fallback and painted the mockup's teal/indigo half anyway.
 function ssPalInput(b) {
   const src = b || {};
-  const hasAccent = Boolean(String(src.accentColor || "").trim());
-  const hasHeader = Boolean(String(src.headerBg || "").trim());
+  const hasAccent = colorStops(src.accentColor).length > 0;
+  const hasHeader = colorStops(src.headerBg).length > 0;
   if (hasAccent === hasHeader) return src;
   return {
     ...src,
@@ -3504,10 +3535,15 @@ function ssPalInput(b) {
     headerBg: hasHeader ? src.headerBg : "linear-gradient(135deg, #1E293B 0%, #334155 100%)",
   };
 }
-// Readable text for any fill colour (hex, rgb(), a name, or a gradient's first stop). For the
-// module-level components that only receive `accent` (LoginSheet, CustomerAccount, …).
+// Readable text for a fill colour (hex, rgb(), a name, or a gradient's first stop), for the
+// module-level components that only receive `accent` (LoginSheet, CustomerAccount, …). Inside
+// StructureStudioInner use pal.onAccent on pal.accentFill instead. 4.5:1 on the fill AS GIVEN: pickOn
+// can answer a hard fill by moving the FILL, which a caller painting its own colour never does, so
+// here the text moves instead (black or white always reaches 4.5:1).
 function ssOnFill(css) {
-  return hex(pickOn(parseColor(css) || colorStops(css)[0] || hexToRgb("#1b7895")).fg);
+  const bg = parseColor(css) || colorStops(css)[0] || hexToRgb("#1b7895");
+  const fg = pickOn(bg).fg;
+  return hex(contrast(fg, bg) >= 4.5 ? fg : ensureContrast(fg, bg, 4.5));
 }
 // ss-brand-palette:end
 
@@ -10507,6 +10543,9 @@ const SSD_CSS = [
   '.ssd-seg-b:hover{background:var(--ss-panel)}',
   '.ssd-seg-b.is-on{background:var(--ss-accent-fill);color:var(--ss-on-accent);font-weight:700}',
   '.ssd-frame .ssd-seg-b:focus-visible{outline-offset:-3px}',
+  // The inset ring sits ON the selected segment's accent fill, so in accent-fill it vanished (1:1 in
+  // every brand). onAccent is the palette's contrast-checked colour on that fill.
+  '.ssd-frame .ssd-seg-b.is-on:focus-visible{outline-color:var(--ss-on-accent)}',
   // Coverage chip (insulation areas; "Entire building" is the dashed one).
   '.ssd-cov{font-family:inherit;display:inline-flex;align-items:center;min-height:var(--ssd-chip-h);box-sizing:border-box;margin:0;padding:0 11px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);color:var(--ss-ink);font-size:12.5px;font-weight:500;line-height:1.2;white-space:nowrap;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,color .15s ease}',
   '.ssd-cov:hover{border-color:var(--ss-primary-line);background:var(--ss-panel)}',

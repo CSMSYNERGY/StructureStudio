@@ -12,10 +12,15 @@
 <link rel="preconnect" href="https://jzeamjbhdrsbygdnphbm.supabase.co" crossorigin/>
 <link rel="dns-prefetch" href="https://jzeamjbhdrsbygdnphbm.supabase.co"/>
 <!-- The Designer tab's type (redesign 2026-09-15): DM Sans + Play, display=swap with system
-     fallbacks in the designer's own stylesheet, so a blocked font never moves a control. -->
+     fallbacks in the designer's own stylesheet, so a blocked font never moves a control.
+     NON-BLOCKING on purpose, same as index.html: a plain stylesheet link holds first paint and every
+     script below until Google answers, so a dropped (not refused) request blanked the whole portal
+     for the connection timeout. preload + onload applies it whenever it arrives; the font files
+     themselves are only fetched once the Designer tab puts DM Sans / Play on screen. -->
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Play:wght@700&display=swap"/>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Play:wght@700&display=swap" onload="this.onload=null;this.rel='stylesheet'"/>
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Play:wght@700&display=swap"/></noscript>
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
 <link rel="manifest" href="/manifest.json"/>
 <meta name="theme-color" content="#3D3672"/>
@@ -258,7 +263,7 @@ input::placeholder,textarea::placeholder{color:#CBD5E1;opacity:1;font-weight:500
 
      index.html is UNCHANGED and must stay that way: there the module IS the page, so it
      loads eagerly and its absence is a boot failure, not a degraded tab. -->
-<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=f94d2946"></script>
+<script type="ss/designer-src" src="/structure-studio.component.compiled.js?v=758b901e"></script>
 <script defer src="/portal.app.compiled.js?v=7e0ff4ae" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script>
 // PWA service worker (see sw.js — minimal, no app-asset caching so pushes to
