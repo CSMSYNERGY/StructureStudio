@@ -11,6 +11,8 @@ import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
+// The accept race (2026-09-17): the total the customer SAW, checked against the one about to freeze.
+import { checkExpectedTotal } from "../_shared/acceptTotal.ts";
 
 // customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
 //
@@ -850,6 +852,15 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
 
   // ── Evidence snapshot inputs ─────────────────────────────────────────────────────────
   const total = totalFromSnapshot(design.estimate_lines);
+  // THE ACCEPT RACE (2026-09-17). A rep can re-price an unsigned quote from the portal, so the
+  // total read here may not be the one on the customer's screen. When the page says what it
+  // rendered (expectedTotalCents) and that is not this total, refuse BEFORE anything is
+  // recorded and hand back the current figure: the customer reloads and signs what they see.
+  // Absent means today's behaviour exactly — production's frontend never sends it.
+  {
+    const expected = checkExpectedTotal(body?.expectedTotalCents, total);
+    if (!expected.ok) return json(expected.body, expected.status);
+  }
   const totalDisplay = total == null ? null : fmtMoney(total);
   // A click and a signature agree to DIFFERENT sentences, and the stored text is the
   // evidence — so it is chosen by what the customer actually did, never by a request field.

@@ -12,8 +12,11 @@ import {
   finishedColumns,
   finishLookup,
   insertLookup,
+  PING_CLIENT_ID,
+  pingResponse,
 } from "./taxLookups.ts";
-import type { AvalaraResult } from "./salesTax.ts";
+import { pingAvalara } from "./salesTax.ts";
+import type { AvalaraPing, AvalaraResult } from "./salesTax.ts";
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
   const sa = JSON.stringify(a), sb = JSON.stringify(b);
@@ -220,4 +223,61 @@ Deno.test({
     ]);
     for (const o of produced) assert(outcomes.includes(o), `${o} is not allowed by 242`);
   },
+});
+
+// ── The operator ping: what leaves admin-catalog ─────────────────────────────────────────────
+// Avalara's ping body names the account id, the user and the user id behind the key. The
+// console is told five fields and nothing else — pinned end to end from a stubbed ping body, and
+// again against an AvalaraPing that has somehow grown a field, because a spread is the one-word
+// edit that would ship the account id to a browser.
+
+const SECRETS = ["2000123456", "ops@example.test", "987654", "test-key", "test-account"];
+
+Deno.test("pingResponse: a real ping body's account id, user and key never reach the response", async () => {
+  const saved = ["AVALARA_ACCOUNT_ID", "AVALARA_LICENSE_KEY", "AVALARA_API_BASE"].map((k) => [k, Deno.env.get(k)] as const);
+  Deno.env.set("AVALARA_ACCOUNT_ID", "test-account");
+  Deno.env.set("AVALARA_LICENSE_KEY", "test-key");
+  Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (() => {
+    calls++;
+    return Promise.resolve(new Response(JSON.stringify({
+      version: "26.9.0", authenticated: true, authenticationType: "AccountIdLicenseKey",
+      authenticatedUserName: "ops@example.test", authenticatedUserId: 987654, authenticatedAccountId: 2000123456,
+      crmid: "0010000000", licenseKey: "test-key",
+    }), { status: 200 }));
+  }) as typeof fetch;
+  try {
+    const out = pingResponse(await pingAvalara());
+    assertEquals(calls, 1);
+    assertEquals(out, { ok: true, configured: true, authenticated: true, authenticationType: "AccountIdLicenseKey", httpStatus: 200 });
+    const wire = JSON.stringify(out);
+    for (const secret of SECRETS) assert(!wire.includes(secret), `the response carries ${secret}`);
+  } finally {
+    globalThis.fetch = original;
+    for (const [k, v] of saved) v == null ? Deno.env.delete(k) : Deno.env.set(k, v);
+  }
+});
+
+Deno.test("pingResponse: a whitelist, not a spread — extra fields, an identity-shaped type and a bad status are dropped", () => {
+  const grown = {
+    configured: true, authenticated: true, authenticationType: "ops@example.test", httpStatus: 42,
+    authenticatedAccountId: 2000123456, authenticatedUserName: "ops@example.test",
+  } as unknown as AvalaraPing;
+  const out = pingResponse(grown);
+  assertEquals(Object.keys(out).sort(), ["authenticated", "authenticationType", "configured", "httpStatus", "ok"]);
+  assertEquals([out.authenticationType, out.httpStatus], [null, null]);
+  for (const secret of SECRETS) assert(!JSON.stringify(out).includes(secret), `the response carries ${secret}`);
+
+  // Not configured: nothing was asked, so nothing can read as authenticated.
+  assertEquals(pingResponse({ configured: false, authenticated: true, authenticationType: "None", httpStatus: null }),
+    { ok: true, configured: false, authenticated: false, authenticationType: null, httpStatus: null });
+  assertEquals(pingResponse({ configured: true, authenticated: false, authenticationType: "None", httpStatus: 200 }),
+    { ok: true, configured: true, authenticated: false, authenticationType: "None", httpStatus: 200 });
+});
+
+Deno.test("PING_CLIENT_ID is never a tenant slug, and fits migration 242's client_id CHECK", () => {
+  assert(!/^[a-z0-9][a-z0-9-]*$/.test(PING_CLIENT_ID), "a tenant could be created with this slug");
+  assert(PING_CLIENT_ID.length >= 1 && PING_CLIENT_ID.length <= 100);
 });

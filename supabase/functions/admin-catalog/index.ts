@@ -2,9 +2,11 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { checkAdminPassword } from "../_shared/adminGate.ts";
 import { checkAdminAuth } from "../_shared/adminAuth.ts";
-import { withErrorLog } from "../_shared/logError.ts";
+import { logEdgeError, withErrorLog } from "../_shared/logError.ts";
 import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
+import { pingAvalara } from "../_shared/salesTax.ts";
+import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -856,6 +858,44 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           sb.from("wallet_reconcile").select("*").eq("client_id", clientId).maybeSingle(),
         ]);
         return json({ ok: true, account: acct.data ?? null, transactions: txs.data ?? [], reconcile: recon.data ?? null });
+      }
+
+      // ── Avalara credential check (2026-09-17) ─────────────────────────────────────
+      // Do the platform's Avalara credentials work? GET /api/v2/utilities/ping, run on purpose by
+      // an operator. Deliberately NOT in READ_ONLY_ACTIONS: whether Avalara bills a ping is not
+      // documented, so it is treated as a counted call. It needs can_write, and it writes a
+      // ledger row like every other lookup.
+      //
+      // Recorded in tax_lookups as kind 'ping' under PING_CLIENT_ID, not under a tenant: it
+      // checks our credentials, not a builder's (see that constant for the choice), and the
+      // daily cap does not count pings. The row goes in BEFORE the request, and a row that
+      // cannot be written refuses the ping: a call nothing recorded is the one the ledger is
+      // for. With no credentials configured, no request is made and the row closes as
+      // not_configured.
+      //
+      // The answer names the account id and the user behind the key. None of that leaves this
+      // case: pingAvalara whitelists four fields, and pingResponse whitelists them again.
+      case "avalara_ping": {
+        const lookupId = await insertLookup(sb, {
+          clientId: PING_CLIENT_ID,
+          kind: "ping",
+          actorUserId: identity.via === "operator" ? identity.userId : null,
+          operator: true,
+        });
+        if (!lookupId) {
+          return json({ error: "Couldn't record the ping in the tax lookup ledger, so it wasn't sent. Try again in a minute." }, 503);
+        }
+        const ping = await pingAvalara();
+        if (!(await finishLookup(sb, lookupId, ping))) {
+          // Best-effort: the request already happened. The row stays in flight; pings are not
+          // capped, so it blocks nothing, but it should not be invisible either.
+          logEdgeError({
+            fn: "admin-catalog", req, clientId: null, code: "tax_lookup_unclosed",
+            message: "avalara_ping: the ledger row could not be closed",
+            context: { lookupId },
+          }).catch(() => {});
+        }
+        return json(pingResponse(ping));
       }
 
       case "set_feature_grants": {

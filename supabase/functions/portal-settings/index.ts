@@ -6,7 +6,7 @@ import { withErrorLog, logEdgeError, SS_REFUSAL_HEADER } from "../_shared/logErr
 import { getQboConnection, qboFetch, qboOauthReady, QboApiError, QboBroken, QboNotConnected } from "../_shared/qboToken.ts";
 import { qboEndpoints } from "../_shared/qboDiscovery.ts";
 import { pushQboInvoice } from "../_shared/qboInvoice.ts";
-import { chargeTaxCalculation, taxInvoiceIdem, taxLookupIdem } from "../_shared/taxMeter.ts";
+import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 import { deriveLifecycle, LIFECYCLE_LABEL, type StageKind } from "../_shared/inventoryLifecycle.ts";
 import { invoiceTypeFor } from "../_shared/invoiceType.ts";
 import {
@@ -40,6 +40,13 @@ import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
   parseSetSalesLocation, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
 } from "../_shared/locationTax.ts";
+// The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
+// `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
+import {
+  chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupSwitchRefusal, paidLookup,
+  parseVerifyTax, quoteSentRefusal, rateBucket, rateLimitedRefusal, verifiedTax, VERIFY_BUCKET_MAX,
+  VERIFY_BUCKET_WINDOW_MS, verifyBucket, verifyLookupRefusal, verifyQuoteRefusal,
+} from "../_shared/taxSpend.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
@@ -197,6 +204,11 @@ const GATES: GateTable = {
   // was sold, the way set_expected_close works — plus the row scope in the branch. It re-prices
   // with FREE rates only (the location's, else the company's); it can never make a paid lookup.
   set_design_sales_location: { area: "designs", level: "edit" },
+  // The Verify button: a PAID Avalara lookup for one quote's delivery address. settings_crm, the
+  // company rate's area, NOT designs:edit — every Sales Rep holds designs:edit, and today no rep
+  // can spend a cent; a button that bills the builder's allowance belongs to whoever may set the
+  // builder's tax rates. The branch adds the row scope (refuseUnlessDesignVisible) on top.
+  verify_tax:        { area: "settings_crm", level: "edit" },
 
   // ── QuickBooks ───────────────────────────────────────────────────────────
   // Same two-question split as Real-Time Pricing above: these gates answer "may this person
@@ -7759,6 +7771,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *   5. write estimate_lines + total_cents (+ alsoSet) as a compare-and-swap on updated_at
    *      (designs_set_updated_at bumps it on every update) and accepted_at still null, checked:
    *      no row means somebody else wrote first → 409 `changed`;
+   *   5b. `afterWrite`, when given — the one thing that must follow the write immediately and
+   *      only if it landed (verify_tax's charge: a document is written before it is paid for,
+   *      and a slow PDF or email must not stand between the two). Awaited, but it cannot
+   *      refuse: the quote is already written, and a throw is swallowed;
    *   6. regenerate the quote PDF, best-effort (regenerateQuotePdf's own contract);
    *   7. when the quote had been emailed and its total moved, send it again through
    *      sendQuoteEmail, but only when step 6 rebuilt the PDF (restampResend). The email
@@ -7779,7 +7795,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // deno-lint-ignore no-explicit-any
     d: any,
     tax: Record<string, unknown>,
-    opts: { confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string },
+    opts: { confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string; afterWrite?: () => Promise<void> },
   ): Promise<
     | { ok: false; response: Response }
     | {
@@ -7839,6 +7855,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: wrote, error: writeErr } = await write.select("short_code");
     if (writeErr) return { ok: false, response: dbFail(req, clientId, opts.where, writeErr) };
     if (!Array.isArray(wrote) || wrote.length !== 1) return { ok: false, response: changedUnderneath() };
+
+    if (opts.afterWrite) {
+      try {
+        await opts.afterWrite();
+      } catch (_e) {
+        // The quote is written; whatever followed it reports its own failure.
+      }
+    }
 
     const quotePdfUrl = fresh.ss_quote_number
       ? await regenerateQuotePdf(admin, req, clientId, shortCode, {
@@ -7954,6 +7978,132 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ok: true, salesLocationId: locationId, tax: out.tax, totalCents: out.totalCents,
       previousTotalCents: out.previousTotalCents, resent: out.resent, resendReason: out.resendReason,
       quotePdfUrl: out.quotePdfUrl,
+    });
+  }
+
+  // ── verify_tax: a PAID rate lookup for one issued quote, pressed on purpose (2026-09-17) ──
+  //
+  // The only estimate-time path allowed to call Avalara. Every submit, resubmit, change order and
+  // location change stamps a free default (taxChain.ts); this is how a rate for the delivery
+  // address gets onto a quote, and it costs a lookup the account is billed for. So everything
+  // that can refuse does so BEFORE the ledger row, and nothing about the quote changes unless a
+  // rate came back:
+  //   0. row scope, first — a rep narrowed to their own customers learns nothing about this code;
+  //   1. the tenant's switch (tax_lookup_enabled), StructureStudio paperwork, credentials;
+  //   2. an accepted or ordered quote: a new total there is a change order, never a re-stamp;
+  //   3. no issued quote → "issue the quote first"; 4. no usable state + ZIP;
+  //   5. an operator in view-as: confirmVerify, and a STRICT audit row (no row, no spend);
+  //   6. an emailed quote: confirmResend, asked now because after the lookup the call is paid;
+  //   7. the per-minute bucket; 8-10. paidLookup: the daily cap (fails closed), the ledger row,
+  //      the request, the row closed;
+  //   on failure: the quote is untouched. A verified rate the builder paid for earlier is never
+  //      replaced by a fallback because the service was down this time;
+  //   11. restampQuoteTax writes estimate_lines + total_cents, checked, and only then
+  //   12. the charge, keyed on the ledger row (disarmed meters make it a no-op), then
+  //   13. the PDF, and a re-send when the emailed total moved.
+  // A write refused after the lookup (a resubmit landed, the customer accepted) returns that
+  // refusal and charges nothing: the call was made and is on the ledger, and nobody is billed for
+  // a rate that never reached a document.
+  if (action === "verify_tax") {
+    const parsed = parseVerifyTax(payload);
+    if (!parsed.ok) return json(parsed.refusal.body, parsed.refusal.status);
+    const { shortCode, confirmResend, confirmVerify } = parsed.value;
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("invoice_in_ghl, tax_lookup_enabled, ss_tax_label").eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your tax settings", csErr);
+    {
+      const off = lookupSwitchRefusal({
+        lookupEnabled: cs?.tax_lookup_enabled === true, ssMode: cs?.invoice_in_ghl === false, configured: avalaraConfigured(),
+      });
+      if (off) return json(off.body, off.status);
+    }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select(`${RESTAMP_DESIGN_COLUMNS}, contact`)
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found.", reason: "not_found" }, 404);
+    { const agreed = await refuseIfAgreed(d); if (agreed) return agreed; }
+
+    const address = addressFrom(d.contact);
+    {
+      const r = verifyQuoteRefusal({ snap: d.estimate_lines, address, operator: !!operator, confirmVerify });
+      if (r) return json(r.body, r.status);
+    }
+    if (operator) {
+      try {
+        await auditStrict("operator_verify_tax_attempt", null, `short_code=${shortCode}`);
+      } catch (e) {
+        return json({ error: (e as Error).message, reason: "audit_unavailable" }, 503);
+      }
+    }
+    {
+      const r = quoteSentRefusal({
+        sent: !!d.ss_quote_sent_at, confirmResend, quoteNumber: d.ss_quote_number, totalCents: designTotalCents(d.estimate_lines),
+      });
+      if (r) return json(r.body, r.status);
+    }
+    {
+      const bucket = await rateBucket(admin, verifyBucket(clientId), VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS);
+      if (bucket.over) {
+        const r = rateLimitedRefusal();
+        return json(r.body, r.status);
+      }
+    }
+
+    // deno-lint-ignore no-explicit-any
+    const storedTax: any = (d.estimate_lines as any)?.tax ?? null;
+    const lookup = await paidLookup(admin, {
+      clientId, kind: "verify", shortCode, address, fallbackRate: storedTax?.rate,
+      actorUserId: userId ?? null, operator: !!operator,
+    });
+    if (lookup.lookupId && !lookup.ledgerClosed) {
+      logEdgeError({
+        fn: "portal-settings", req, clientId, code: "tax_lookup_unclosed",
+        message: `verify_tax: the ledger row for ${shortCode} could not be closed`,
+        context: { lookupId: lookup.lookupId },
+      }).catch(() => {});
+    }
+    if (!lookup.ok) {
+      await audit("portal_verify_tax", 0, `design=${shortCode} outcome=${lookup.failure} lookup=${lookup.lookupId ?? "none"}`);
+      const r = verifyLookupRefusal(lookup.failure);
+      return json(r.body, r.status);
+    }
+
+    const tax = verifiedTax({ snap: d.estimate_lines, lookup, companyLabel: cs?.ss_tax_label, address });
+    // verifyQuoteRefusal already refused a snapshot with no pools; this is the type's null.
+    if (!tax) return json({ error: "This design has no quote yet — issue the quote first, then verify its tax.", reason: "no_quote" }, 409);
+
+    let charge: Awaited<ReturnType<typeof chargeLookup>> = { charged: false, reason: "no_rate" };
+    const out = await restampQuoteTax(d, tax, {
+      confirmResend,
+      where: "save the verified tax rate",
+      afterWrite: async () => {
+        charge = await chargeLookup(admin, lookup, {
+          clientId, kind: "tax_lookup", refType: "design", refId: shortCode,
+          memo: `Verified sales tax rate${lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+          actorUserId: userId ?? null,
+        });
+        if (!charge.charged && charge.reason === "error") {
+          logEdgeError({
+            fn: "portal-settings", req, clientId, code: "tax_meter",
+            message: `tax_lookup charge failed for verified tax on ${shortCode}`,
+            context: { lookupId: lookup.lookupId },
+          }).catch(() => {});
+        }
+      },
+    });
+    if (!out.ok) {
+      await audit("portal_verify_tax", 0, `design=${shortCode} outcome=ok written=no lookup=${lookup.lookupId}`);
+      return out.response;
+    }
+    await audit("portal_verify_tax", 1,
+      `design=${shortCode} lookup=${lookup.lookupId} total=${out.previousTotalCents}->${out.totalCents} resent=${out.resent} charged=${charge.charged}`);
+    return json({
+      ok: true, tax: out.tax, totalCents: out.totalCents, previousTotalCents: out.previousTotalCents,
+      resent: out.resent, resendReason: out.resendReason, quotePdfUrl: out.quotePdfUrl, charged: charge.charged,
     });
   }
 
@@ -9717,7 +9867,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             if (out2.sent) {
               await admin.from("invoice_sends").update({ status: "sent", error: null, updated_at: new Date().toISOString() })
                 .eq("client_id", clientId).eq("short_code", shortCode);
-              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true, attested: false, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()) });
+              // taxCheck: an email retry of an invoice issued earlier makes no lookup (see the
+              // invoice-time check at the end of this branch).
+              return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true, attested: false, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()), taxCheck: { status: "skipped", reason: "reissue" } });
             }
             // A real send failure stays a 502 fault. The reason is a sentence, never the bare
             // status ("failed") and never the provider's raw string — that stays in
@@ -10102,29 +10254,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           }, collision ? 409 : 502);
         }
 
-        // METERED (migration 179), and this is the right side of the record: the invoice now
-        // EXISTS and every retry from here re-sends this same number, so the charge keys on
-        // that number and a resend collapses onto it rather than billing twice. Only charged
-        // when the tax on it came from Avalara — a fallback rate cost us nothing to produce.
-        // Inert until `tax_invoice` is armed, and it cannot fail the send: the invoice is
-        // already recorded and the customer is waiting for it.
-        if ((agreedLines as { tax?: { source?: unknown } } | null)?.tax?.source === "avalara") {
-          const meter = await chargeTaxCalculation(admin, {
-            clientId,
-            kind: "tax_invoice",
-            idem: taxInvoiceIdem(clientId, shortCode, invNumber),
-            refType: "invoice",
-            refId: String(invNumber),
-            memo: `Sales tax on invoice ${invNumber}`,
-            actorUserId: userId ?? null,
-          });
-          if (!meter.charged && meter.reason === "error") {
-            logEdgeError({
-              fn: "portal-settings", req, clientId, code: "tax_meter",
-              message: `tax_invoice charge failed for ${shortCode} (invoice ${invNumber})`,
-            }).catch(() => {});
-          }
-        }
+        // (The `tax_invoice` charge that sat here until 2026-09-17 billed when the AGREED tax had
+        // come from Avalara, with no call behind it. It is gone: the invoice meter now charges
+        // only for the invoice-time lookup below, keyed on that lookup's ledger row.)
 
         // The email. Contact read only here (the PII discipline of 2026-08-07). There is
         // NO GHL fallback in SS mode — there is no GHL invoice object to email.
@@ -10247,10 +10379,72 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           });
         }
 
+        // ── THE INVOICE-TIME TAX CHECK (2026-09-17) — INFORMATIONAL ONLY ─────────────────
+        // When the tenant's switch is on, one paid lookup for the delivery address, reported
+        // beside the rate the customer agreed to (`taxCheck`). It NEVER changes the invoice: the
+        // customer accepted a stated total, the invoice above was built from that agreement, and
+        // a different rate is something for the builder to see and decide on, not a number to
+        // swap in behind the customer's back. It NEVER blocks either — it runs last, after the
+        // invoice is recorded, emailed, pushed to the books and the order filled, so a slow or
+        // failed lookup costs nothing but its own answer.
+        //
+        // ⚠️ OPEN WITH THE PRODUCT OWNER (plan v2, Q1): should the invoice RE-PRICE from a fresh
+        // lookup instead of only reporting one? Not confirmed. Until it is, this only reports.
+        //
+        // One lookup per issued invoice: a re-send or a regenerate of an invoice that already has
+        // its number (recoveredNumber) makes no call, so retrying the email never bills again.
+        // Same cap, ledger and failure taxonomy as verify_tax (paidLookup). The charge is keyed
+        // on this lookup's ledger row and posted only when a rate came back — the `tax_invoice`
+        // meter is disarmed, so today it is a no-op.
+        //
+        // The switch is read on its own, never folded into cur0's select: if migration 242 is
+        // not applied yet, an unknown column there would null cur0 and send an SS tenant down the
+        // CRM branch. Here it only means the check is skipped.
+        let taxCheck: InvoiceTaxCheck = { status: "skipped", reason: "lookup_disabled" };
+        {
+          const { data: sw, error: swErr } = await admin.from("client_settings")
+            .select("tax_lookup_enabled").eq("client_id", clientId).maybeSingle();
+          const plan = invoiceTaxCheckPlan({
+            lookupEnabled: !swErr && sw?.tax_lookup_enabled === true,
+            configured: avalaraConfigured(),
+            reissue: !!recoveredNumber,
+            agreedTax: (agreedLines as { tax?: unknown } | null)?.tax ?? null,
+            address: addressFrom(c?.contact),
+          });
+          if (!plan.lookup) {
+            taxCheck = plan.taxCheck;
+          } else {
+            const lookup = await paidLookup(admin, {
+              clientId, kind: "invoice", shortCode, invoiceNumber: invNumber, address: addressFrom(c?.contact),
+              fallbackRate: plan.agreedRate, actorUserId: userId ?? null, operator: !!operator,
+            });
+            taxCheck = invoiceTaxCheck(plan.agreedRate, lookup);
+            if (lookup.lookupId && !lookup.ledgerClosed) {
+              logEdgeError({
+                fn: "portal-settings", req, clientId, code: "tax_lookup_unclosed",
+                message: `send_invoice: the ledger row for invoice ${invNumber} could not be closed`,
+                context: { lookupId: lookup.lookupId },
+              }).catch(() => {});
+            }
+            const meter = await chargeLookup(admin, lookup, {
+              clientId, kind: "tax_invoice", refType: "invoice", refId: String(invNumber),
+              memo: `Sales tax check on invoice ${invNumber}${lookup.ok && lookup.jurisdiction ? ` — ${lookup.jurisdiction}` : ""}`,
+              actorUserId: userId ?? null,
+            });
+            if (!meter.charged && meter.reason === "error") {
+              logEdgeError({
+                fn: "portal-settings", req, clientId, code: "tax_meter",
+                message: `tax_invoice charge failed for ${shortCode} (invoice ${invNumber})`,
+                context: { lookupId: lookup.lookupId },
+              }).catch(() => {});
+            }
+          }
+        }
+
         // attested says whether THIS call performed the acceptance, so the designer can tell
         // the rep "invoiced" from "recorded their approval and invoiced". orderId is the
         // navigation target. sent:false is not a failure — the email never gates the invoice.
-        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, attested, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()), ...(sent ? {} : { emailReason: sendReason }) });
+        return json({ ok: true, invoiceNumber: invNumber, invoicePdfUrl, issuedBy: "structurestudio", sent, attested, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()), ...(sent ? {} : { emailReason: sendReason }), taxCheck });
       }
     }
 

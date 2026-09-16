@@ -31,8 +31,10 @@
 --    lookup took (a retried 5xx reads 2).
 --      client_id  NOT NULL, text like client_settings.client_id, no FK — the ledger row must
 --                 never be the thing that blocks (ai_style_calls, 086, has none either). The
---                 operator ping has no builder tenant, so it records the operator's own home
---                 tenant; the cap counts verify + invoice only, so a ping spends no allowance.
+--                 operator ping has no builder tenant, so it records the fixed value
+--                 '_platform' (_shared/taxLookups.ts PING_CLIENT_ID — no tenant slug can start
+--                 with an underscore); the cap counts verify + invoice only, so a ping spends
+--                 no allowance.
 --      kind       NOT NULL (stricter than a bare CHECK: a row with no kind is uncountable).
 --      Free text is length-checked; _shared/taxLookups.ts clips to the same lengths, so a long
 --      value is shortened rather than refused.

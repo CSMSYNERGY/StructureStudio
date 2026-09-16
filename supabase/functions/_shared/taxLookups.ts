@@ -7,7 +7,8 @@
 // thing, so the cost unit gets its own table, and that table is also the SPEND CAP: the daily
 // count below is taken from it before any request is made.
 //
-// THE ORDER A CALLER FOLLOWS (verify_tax, the invoice-time check, the operator ping):
+// THE ORDER A CALLER FOLLOWS (verify_tax and the invoice-time check do it through one function,
+// taxSpend.ts' paidLookup; the operator ping in admin-catalog does steps 2-4 itself):
 //   1. countLookups24h — refuse when it returns null (unreadable) or reaches the cap;
 //   2. insertLookup    — refuse when it returns null. The row IS the cap: a lookup with no
 //                        row is a lookup nothing counts;
@@ -166,6 +167,43 @@ export async function finishLookup(
   } catch {
     return false;
   }
+}
+
+/**
+ * The `client_id` an operator's credential ping is recorded under. A ping checks the PLATFORM's
+ * credentials and belongs to no builder, so it is not filed under anybody's tenant — not even the
+ * operator's own, which is a real builder account whose usage query should read only its own
+ * calls. The column is text with no foreign key (deliberately, migration 242), so a fixed value
+ * is allowed; the leading underscore is one no tenant slug can have (slugs are
+ * `^[a-z0-9][a-z0-9-]*$`), so it can never collide with a tenant created later. Pings are not in
+ * the capped kinds either way.
+ */
+export const PING_CLIENT_ID = "_platform";
+
+/**
+ * What the operator console is told about a ping, and nothing else. pingAvalara already
+ * whitelists; this is the second whitelist, at the response boundary, so a field added to
+ * AvalaraPing later does not ride out to a browser by being spread. `ok` is the console's usual
+ * "the action ran" (a refusal carries `error` instead); whether the credentials work is
+ * `authenticated`.
+ */
+export function pingResponse(ping: AvalaraPing): {
+  ok: true;
+  configured: boolean;
+  authenticated: boolean;
+  authenticationType: string | null;
+  httpStatus: number | null;
+} {
+  const configured = ping?.configured === true;
+  const type = ping?.authenticationType;
+  const s = ping?.httpStatus;
+  return {
+    ok: true,
+    configured,
+    authenticated: configured && ping?.authenticated === true,
+    authenticationType: configured && typeof type === "string" && /^[A-Za-z]{1,40}$/.test(type) ? type : null,
+    httpStatus: typeof s === "number" && Number.isInteger(s) && s >= 100 && s <= 599 ? s : null,
+  };
 }
 
 /**
