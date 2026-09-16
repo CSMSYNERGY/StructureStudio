@@ -10845,9 +10845,16 @@ const SSD_CSS = [
   '.ssd-main.ssd-foot{margin-top:20px;padding:14px 24px;border-top:1px solid var(--ss-line-card);background:var(--ss-panel)}',
   '.ssd-frame[data-ssd-bp="lg"] .ssd-main.ssd-foot{padding:14px 20px}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="sm"] .ssd-main.ssd-foot,.ssd-frame[data-ssd-bp="xs"] .ssd-main.ssd-foot{padding:14px 16px}',
-  // The portal's Designer tab: its fixed Feedback pill (right 20, bottom 20, 38px tall) sat over Get Quote at the
-  // end of the scroll. The bar keeps 72px under its buttons so they finish above the pill at every width.
+  // The portal's Designer tab floats a fixed "Feedback" pill in the bottom-right corner of the viewport
+  // (right 20, bottom 20, 114x38, z-index 900). It takes two rules to keep the footer buttons out from under it.
+  // The bar holds 72px under the buttons, so they come to rest above the pill at the end of the scroll; and the
+  // buttons also stop short of the pill's column, because a page that is still scrolling carries them up through
+  // that 72px band, and a tap on Get Quote there opened Feedback instead. The pill owns the last 134px of the
+  // viewport's width (114 wide + 20 from the edge) and the bar's own right padding is 16-24, so 128px more clears
+  // it at every width, with ~10px to spare if the pill measures wider elsewhere (its emoji is a font away from
+  // being a different width). On a phone that leaves too little room for both buttons on one line, so they stack.
   '.ssd-frame.is-embedded .ssd-main.ssd-foot{padding-bottom:72px}',
+  '.ssd-frame.is-embedded .ssd-ft-btns{box-sizing:border-box;padding-right:128px}',
   '.ssd-ft-err{margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
   '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0}',
   '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
