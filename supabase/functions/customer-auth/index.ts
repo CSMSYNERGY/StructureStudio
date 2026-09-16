@@ -7,6 +7,7 @@ import {
   TwilioNotConfigured,
   twCheckVerification,
   twilioConfigured,
+  twStartFailureKind,
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import {
@@ -123,6 +124,13 @@ const MSG_EMAIL_NOT_CONFIGURED = "Sign-in by email isn't available yet.";
 // distinctions are real but telling them apart is a probing oracle, and none of them change
 // what the customer should do next: ask for another code.
 const MSG_EMAIL_CODE_BAD = "That code didn't match or has expired — request a new one.";
+
+// Twilio codes already written up as a `twilio_config` error row by THIS isolate. A service or
+// account refusal (60204, 20404) fails every send identically, and the refused send gives its
+// slots back (Twilio sent nothing), so no cap stops the requests. One error row per isolate per
+// code is enough to put the fault in front of someone. withErrorLog still files every 503 as an
+// info row, so the repetition stays visible.
+const configFaultLogged = new Set<number>();
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -553,8 +561,12 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     const claimed = [phoneBucketKey, ipBucketKey, tenantBucketKey]
       .filter((_b, i) => slots[i] === "ok");
 
+    // ONE claim covers the whole send, including the transport's single unbranded resend
+    // after a 60204 brand refusal: that refusal sent nothing, so the resend is still one
+    // text and is charged once.
+    let sent: Awaited<ReturnType<typeof twStartVerification>>;
     try {
-      await twStartVerification(e164, brand);
+      sent = await twStartVerification(e164, brand);
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
         await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
@@ -566,14 +578,31 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
         // A transient failure keeps them: a send may well have gone out, and over-counting
         // is the safe direction for a cap.
         if (e.permanent) await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
-        if (e.code === 60203) {
-          // Twilio's own max-send lock — the verification is frozen until its TTL, so
+        const kind = twStartFailureKind(e);
+        if (kind === "locked") {
+          // Twilio's own max-attempts lock — the verification is frozen until its TTL, so
           // surface the same "wait it out" message as our lockout.
           return json({ error: MSG_TOO_MANY_CODES }, 429);
         }
-        if (e.permanent) {
+        if (kind === "number") {
           // Malformed/unreachable/landline — an identical retry fails identically.
           return json({ error: "We couldn't text that number." }, 400);
+        }
+        if (kind === "config") {
+          // The Verify service or account refuses EVERY send (60204 with no brand left to
+          // drop, or 20404: the service SID points at nothing). Blaming the customer's number
+          // or offering "try again" are both wrong, so this is the not-available answer; the
+          // designer's login sheet turns a 503 into "keep designing" and the email route.
+          // The error row is written once per isolate per code (see configFaultLogged).
+          if (!configFaultLogged.has(e.code)) {
+            configFaultLogged.add(e.code);
+            await logEdgeError({
+              fn: "customer-auth", req, clientId, code: "twilio_config",
+              message: `Twilio Verify refused the send as a service/account configuration fault: ${e.message}`,
+              context: { twilioStatus: e.status, twilioCode: e.code },
+            });
+          }
+          return refusal({ error: MSG_NOT_CONFIGURED });
         }
         // Transient (Twilio 429/5xx/network). withErrorLog also records the 502 below,
         // but only this row carries the Twilio verdict. e.message is safe by the
@@ -589,6 +618,19 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     }
 
     // Sent — and already counted in all three buckets by the claim above.
+
+    // Sent, but under the service's own name: Twilio refused the builder's name (60204,
+    // Custom Company Name not enabled) and the transport resent without it. A warning, not
+    // an error — the customer got their code. The transport reports this only on the call
+    // that discovered it, so it is one row per isolate. No phone in the row.
+    if (sent.brandRefused) {
+      await logEdgeError({
+        fn: "customer-auth", req, clientId, code: "twilio_brand_refused", severity: "warn",
+        message: "Twilio refused the builder name on the login text (60204, Custom Company Name "
+          + "not enabled on the Verify service). The code was sent under the service name instead.",
+        context: { twilioCode: 60204 },
+      });
+    }
 
     // Housekeeping (adminGate.ts's pattern, audit 2026-08-20): an XFF-rotating caller
     // writes one junk 'ip:<forged>' row per request that is never read again — without a

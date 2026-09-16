@@ -15,12 +15,14 @@
  */
 
 import {
+  _resetBrandRefusedForTests,
   toE164US,
   twCheckVerification,
   twilioConfigured,
   TwilioApiError,
   TwilioNotConfigured,
   twSanitizeBrand,
+  twStartFailureKind,
   twStartVerification,
 } from "./twilioVerify.ts";
 
@@ -97,12 +99,14 @@ const PHONE_DIGITS = "5005550006";
 const PHONE_E164 = "+15005550006";
 
 function setup() {
+  _resetBrandRefusedForTests();
   Deno.env.set("TWILIO_ACCOUNT_SID", ACCOUNT_SID);
   Deno.env.set("TWILIO_AUTH_TOKEN", AUTH_TOKEN);
   Deno.env.set("TWILIO_VERIFY_SERVICE_SID", VERIFY_SID);
 }
 function teardown() {
   globalThis.fetch = realFetch;
+  _resetBrandRefusedForTests();
   Deno.env.delete("TWILIO_ACCOUNT_SID");
   Deno.env.delete("TWILIO_AUTH_TOKEN");
   Deno.env.delete("TWILIO_API_KEY");
@@ -370,6 +374,207 @@ Deno.test("an UNKNOWN code stays TRANSIENT — permanence is claimed only on pos
   }
 });
 
+// ── 60204: the brand refusal ───────────────────────────────────────────────────────────────
+// Twilio refuses every send carrying CustomFriendlyName (HTTP 403, code 60204) until Twilio
+// Sales enables "Custom Company Name" on the service. Every branded login text from 2026-08-26
+// to 2026-09-16 died this way behind a "try again" answer. The transport now resends ONCE
+// without the name. What these pin: exactly how many requests go out (an extra successful
+// request is a second text to a real phone), what the resend carries, when the fallback is
+// remembered, and that nothing except a 403/60204 on a BRANDED send is ever resent.
+
+const BRAND = "Example Barns";
+const UNBRANDED_BODY = "To=%2B15005550006&Channel=sms";
+
+const refused = () => twilioError(60204, "Service does not support this feature", 403);
+const pending = () => jsonResponse(PENDING_VERIFICATION, 201);
+
+/** Answer each request from `responses` in order. A request past the end is answered 599 so
+ *  it cannot pass as a send, and the calls.length assertions name it. */
+function sequence(responses: Array<() => Response>): Call[] {
+  let i = 0;
+  return stub(() => {
+    const next = responses[i++];
+    return next ? next() : new Response("unexpected extra request", { status: 599 });
+  });
+}
+
+function friendlyName(call: Call): string | null {
+  return new URLSearchParams(call.body ?? "").get("CustomFriendlyName");
+}
+
+Deno.test("an accepted brand goes out as CustomFriendlyName in ONE request", async () => {
+  setup();
+  try {
+    const calls = sequence([pending]);
+    const out = await twStartVerification(PHONE_E164, "Example's Barns & Sheds, LLC");
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0].body, `${UNBRANDED_BODY}&CustomFriendlyName=Example+s+Barns+Sheds+LLC`);
+    assertEquals(out.status, "pending");
+    assertEquals(out.brandRefused, false);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("403/60204 on a BRANDED send resends once without the name: one code goes out", async () => {
+  setup();
+  try {
+    const calls = sequence([refused, pending]);
+    const out = await twStartVerification(PHONE_E164, BRAND);
+    assertEquals(calls.length, 2, "exactly one refused request and one resend");
+    assertEquals(friendlyName(calls[0]), BRAND, "the first request carries the brand");
+    assertEquals(calls[1].body, UNBRANDED_BODY, "the resend is To + Channel only");
+    assertEquals(out.status, "pending");
+    assertEquals(out.sid, "VEtestverificationsid");
+    assertEquals(out.brandRefused, true, "the call that fell back says so, so the caller can log it");
+
+    // Same isolate, the next customer: the brand is not offered again and nothing is re-reported.
+    const next = sequence([pending]);
+    const out2 = await twStartVerification(PHONE_E164, "Summit Sheds");
+    assertEquals(next.length, 1, "a remembered refusal costs no second round trip");
+    assertEquals(next[0].body, UNBRANDED_BODY);
+    assertEquals(out2.brandRefused, false, "only the call that discovered the refusal reports it");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("60204 on an UNBRANDED send is not retried and is a permanent config fault", async () => {
+  setup();
+  try {
+    const calls = sequence([refused]);
+    const err = await expectApiError(() => twStartVerification(PHONE_E164), "unbranded 60204");
+    assertEquals(calls.length, 1, "no brand to drop, so nothing to retry");
+    assertEquals(err.status, 403);
+    assertEquals(err.code, 60204);
+    assertEquals(err.permanent, true, "only Twilio can enable the feature; a retry fails identically");
+    assertEquals(twStartFailureKind(err), "config");
+
+    // A brand that sanitizes to nothing is the same as no brand.
+    const blank = sequence([refused]);
+    await expectApiError(() => twStartVerification(PHONE_E164, "!!!"), "blank-brand 60204");
+    assertEquals(blank.length, 1);
+    assertEquals(friendlyName(blank[0]), null);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("60204 on the resend too: two requests, a permanent refusal, and the brand is NOT written off", async () => {
+  setup();
+  try {
+    const calls = sequence([refused, refused]);
+    const err = await expectApiError(() => twStartVerification(PHONE_E164, BRAND), "60204 twice");
+    assertEquals(calls.length, 2, "one resend, never a loop");
+    assertEquals(friendlyName(calls[1]), null);
+    assertEquals(err.code, 60204);
+    // permanent is what makes customer-auth hand the three send slots back: nothing was sent.
+    assertEquals(err.permanent, true);
+    assertEquals(twStartFailureKind(err), "config");
+
+    // The unbranded send never worked, so the brand is not the proven cause and is offered again.
+    const next = sequence([pending]);
+    const out = await twStartVerification(PHONE_E164, BRAND);
+    assertEquals(next.length, 1);
+    assertEquals(friendlyName(next[0]), BRAND);
+    assertEquals(out.brandRefused, false);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("a transient failure on the RESEND is rethrown unchanged: still transient, no third request", async () => {
+  setup();
+  try {
+    const cases: Array<[string, () => Response, number]> = [
+      ["429", () => twilioError(20429, "Too Many Requests", 429), 429],
+      ["500", () => new Response("<html>Internal Server Error</html>", { status: 500 }), 500],
+    ];
+    for (const [label, second, status] of cases) {
+      _resetBrandRefusedForTests();
+      const calls = sequence([refused, second]);
+      const err = await expectApiError(() => twStartVerification(PHONE_E164, BRAND), `resend ${label}`);
+      assertEquals(calls.length, 2, `${label}: no third request`);
+      assertEquals(err.status, status, `${label}: the resend's own error comes back`);
+      // transient keeps customer-auth's slots claimed: a send may have gone out.
+      assertEquals(err.permanent, false, `${label}: must stay retryable`);
+      assertEquals(twStartFailureKind(err), "transient");
+    }
+
+    _resetBrandRefusedForTests();
+    let n = 0;
+    const calls = stub(() => {
+      n++;
+      if (n === 1) return refused();
+      throw new TypeError("network unreachable");
+    });
+    const netErr = await expectApiError(() => twStartVerification(PHONE_E164, BRAND), "resend network");
+    assertEquals(calls.length, 2);
+    assertEquals(netErr.status, 0);
+    assertEquals(netErr.permanent, false);
+
+    // None of those proved the brand was the problem, so it is still offered.
+    const next = sequence([pending]);
+    await twStartVerification(PHONE_E164, BRAND);
+    assertEquals(friendlyName(next[0]), BRAND);
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("only 403/60204 triggers the resend: other failures on a branded send go out ONCE", async () => {
+  setup();
+  try {
+    const cases: Array<[string, () => Response]> = [
+      ["429/20429", () => twilioError(20429, "Too Many Requests", 429)],
+      ["500", () => new Response("<html>Internal Server Error</html>", { status: 500 })],
+      ["400/60200", () => twilioError(60200, `Invalid parameter \`To\`: ${PHONE_E164}`, 400)],
+      ["400/60204 (not a 403)", () => twilioError(60204, "Service does not support this feature", 400)],
+    ];
+    for (const [label, only] of cases) {
+      const calls = sequence([only, pending]);
+      await expectApiError(() => twStartVerification(PHONE_E164, BRAND), label);
+      assertEquals(calls.length, 1, `${label}: must not be resent`);
+    }
+    const net = stub(() => {
+      throw new TypeError("network unreachable");
+    });
+    await expectApiError(() => twStartVerification(PHONE_E164, BRAND), "network");
+    assertEquals(net.length, 1, "a network error is never resent: the first request may have landed");
+  } finally {
+    teardown();
+  }
+});
+
+Deno.test("twStartFailureKind: every permanent start code has a meaning, everything else is transient", async () => {
+  setup();
+  try {
+    const table: Array<[number, number, string]> = [
+      [60203, 429, "locked"],
+      [60202, 429, "locked"],
+      [60204, 403, "config"],
+      [20404, 404, "config"],
+      [60200, 400, "number"],
+      [60205, 403, "number"],
+      [20429, 429, "transient"],
+      [60299, 400, "transient"],
+    ];
+    for (const [code, status, kind] of table) {
+      stub(() => twilioError(code, "whatever", status));
+      const err = await expectApiError(() => twStartVerification(PHONE_E164), `${status}/${code}`);
+      assertEquals<string>(twStartFailureKind(err), kind, `${status}/${code}`);
+    }
+    stub(() => new Response("<html>Internal Server Error</html>", { status: 500 }));
+    assertEquals(twStartFailureKind(await expectApiError(() => twStartVerification(PHONE_E164), "500")), "transient");
+    stub(() => {
+      throw new TypeError("network unreachable");
+    });
+    assertEquals(twStartFailureKind(await expectApiError(() => twStartVerification(PHONE_E164), "net")), "transient");
+  } finally {
+    teardown();
+  }
+});
+
 // ── The phone number never reaches a thrown error ──────────────────────────────────────────
 
 Deno.test("the raw provider body is NEVER surfaced — Twilio echoes the phone number in `message`", async () => {
@@ -451,25 +656,29 @@ Deno.test("toE164US: everything else is null — the caller strips formatting, t
 
 // ── twSanitizeBrand ────────────────────────────────────────────────────────────────────
 // This runs on a string the BUILDER typed into a settings box, and its output goes to
-// Twilio as CustomFriendlyName. Twilio 400s the whole send on a name it dislikes, and a
-// rejected send means the builder's CUSTOMER cannot log in to see their quote. So the
+// Twilio as CustomFriendlyName. A name Twilio cannot take must not become a rejected send,
+// because that means the builder's CUSTOMER cannot log in to see their quote. So the
 // interesting cases here are all "ugly input must not become a failed login".
 
 Deno.test("twSanitizeBrand: an ordinary business name passes through", () => {
-  assertEquals(twSanitizeBrand("YoderBarn"), "YoderBarn");
-  assertEquals(twSanitizeBrand("Junior Barns"), "Junior Barns");
+  assertEquals(twSanitizeBrand("ExampleBarns"), "ExampleBarns");
+  assertEquals(twSanitizeBrand("Summit Sheds"), "Summit Sheds");
 });
 
 Deno.test("twSanitizeBrand: punctuation real businesses actually use is stripped, not rejected", () => {
-  // The whole point: "Yoder's Barns & Sheds, LLC" is a name someone will type.
-  assertEquals(twSanitizeBrand("Yoder's Barns & Sheds, LLC"), "Yoder s Barns Sheds LLC");
+  // The whole point: "Example's Barns & Sheds, LLC" is a name someone will type.
+  assertEquals(twSanitizeBrand("Example's Barns & Sheds, LLC"), "Example s Barns Sheds LLC");
   assertEquals(twSanitizeBrand("A+B  Structures"), "A B Structures");
 });
 
-Deno.test("twSanitizeBrand: capped at 32 chars with no trailing space", () => {
+Deno.test("twSanitizeBrand: capped at Twilio's 30 chars with no trailing space", () => {
   const out = twSanitizeBrand("Abcdefghij Klmnopqrst Uvwxyz Abcdefghij");
-  assert(out.length <= 32, `expected <=32, got ${out.length}`);
-  assertEquals(out, out.trim(), "a cap must never leave a trailing space");
+  assertEquals(out, "Abcdefghij Klmnopqrst Uvwxyz A", "a long name is cut at exactly 30");
+  assertEquals(out.length, 30);
+  // Character 30 is a space here: the cut must not hand Twilio a trailing space.
+  const cutAtSpace = twSanitizeBrand("Abcdefghij Klmnopqrst Uvwxyza Bcd");
+  assertEquals(cutAtSpace, "Abcdefghij Klmnopqrst Uvwxyza");
+  assertEquals(cutAtSpace, cutAtSpace.trim(), "a cap must never leave a trailing space");
 });
 
 Deno.test("twSanitizeBrand: nothing usable returns empty, so the caller omits the override", () => {

@@ -19,7 +19,14 @@
  * next attempt, and that is the more expensive mistake — the exact polarity qboFetch and
  * postmark.ts settled.
  *
- * Two Twilio facts callers must not have to re-learn:
+ * Three Twilio facts callers must not have to re-learn:
+ *   - HTTP 403 with code 60204 on the START path means the Verify service refused a premium
+ *     parameter it has not been enabled for. For us that is `CustomFriendlyName` ("Custom
+ *     Company Name", which only Twilio Sales can switch on), and it refuses EVERY send that
+ *     carries it. Every branded text login request from 2026-08-26 to 2026-09-16 was
+ *     refused this way, and the 502 "try again" answer hid it as a transient fault.
+ *     `twStartVerification` now resends once without the name, and 60204 is permanent
+ *     everywhere else.
  *   - On VerificationCheck, HTTP 404 with code 20404 is the NORMAL wrong-flow case, not an
  *     outage: the verification expired (Twilio's default 10-minute TTL) or was already
  *     consumed by a prior approved check. `twCheckVerification` maps it to
@@ -140,8 +147,10 @@ export class TwilioApiError extends Error {
  *   60205  SMS is not supported by this landline number
  *   60203  max send attempts reached — locked until the verification's TTL expires
  *   60202  max check attempts reached — same lock, on the check side
+ *   60204  premium feature not enabled on the Verify service (e.g. Custom Company Name);
+ *          only Twilio can switch it on, so an identical retry fails identically
  */
-const PERMANENT_CODES = new Set([60200, 20404, 60205, 60203, 60202]);
+const PERMANENT_CODES = new Set([60200, 20404, 60205, 60203, 60202, 60204]);
 
 /** Pull ONLY the enum-ish `code` out of a Twilio error body. `message` is never read —
  *  see the header: it echoes the phone number. */
@@ -221,20 +230,23 @@ async function twFetch(
 /**
  * Twilio's default Verify body is "Your <friendly name> verification code is 123456", and
  * the friendly name is a property of the SERVICE — one service, one brand, every tenant.
- * So a customer logging in to YoderBarn's portal got a code branded "StructureStudio"
- * (Carolyn, 2026-08-25: "if it's YoderBarn, can we change it to where it says your YoderBarn
- * verification?"). A white-label product naming its own vendor to the end customer is the
+ * So a customer logging in to a builder's portal got a code branded with OUR name, not
+ * the builder's. A white-label product naming its own vendor to the end customer is the
  * one place the label slips.
  *
  * `CustomFriendlyName` overrides it PER REQUEST, which is why this is a parameter and not a
  * service per tenant: a service each would mean provisioning on signup, a SID to store and
  * migrate, and a second thing to go wrong at 2am — for a string substitution.
  *
- * ⚠️ Twilio REJECTS the whole send (HTTP 400) on a friendly name it does not like, so this
- * sanitizes rather than trusts: letters, digits and spaces only, collapsed, capped at 32.
- * A tenant's business name is free text they typed — "Yoder's Barns & Sheds, LLC" must not
- * be able to stop their customers logging in. If nothing survives, the parameter is omitted
- * and Twilio falls back to the service default, which is exactly today's behaviour.
+ * ⚠️ THE PARAMETER IS A PREMIUM FEATURE ("Custom Company Name"). Twilio refuses every send
+ * that carries it (HTTP 403, code 60204) until Twilio Sales enables it on the service, so
+ * twStartVerification falls back to an unbranded send when it is refused.
+ *
+ * Twilio documents a 30-character limit, and a name it cannot take must not be able to stop
+ * a customer logging in, so this sanitizes rather than trusts: letters, digits and spaces
+ * only, collapsed, capped at 30. A tenant's business name is free text they typed —
+ * "Example Barns & Sheds, LLC" is a normal thing to type. If nothing survives, the parameter
+ * is omitted and Twilio falls back to the service default.
  */
 export function twSanitizeBrand(name: unknown): string {
   if (typeof name !== "string") return "";
@@ -242,8 +254,21 @@ export function twSanitizeBrand(name: unknown): string {
     .replace(/[^A-Za-z0-9 ]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 32)
+    .slice(0, 30)
     .trim();
+}
+
+/** True once THIS isolate has seen Twilio refuse the brand (403/60204) AND the unbranded
+ *  resend go through. From then on the brand is not offered, so an isolate pays the refused
+ *  round trip once instead of on every send. It is module state on purpose: it dies with the
+ *  isolate, so once Twilio enables the feature, fresh isolates brand codes again with no code
+ *  change (a redeploy makes that immediate). It flips only on PROOF — an unbranded send that
+ *  worked — so a service refusing 60204 for some other reason never silently loses the brand. */
+let brandRefused = false;
+
+/** Tests only: forget what this module learned about the brand. */
+export function _resetBrandRefusedForTests(): void {
+  brandRefused = false;
 }
 
 /**
@@ -252,21 +277,63 @@ export function twSanitizeBrand(name: unknown): string {
  * the CHECK path keys on the phone number, not the sid, so nothing breaks if it is lost.
  *
  * `brand` is the tenant's own name for the message body (see twSanitizeBrand). Omit it and
- * the behaviour is byte-identical to before this parameter existed.
+ * the request is exactly `To` + `Channel`.
+ *
+ * THE ONE RETRY. When a BRANDED send comes back HTTP 403 with code 60204, the send goes again
+ * once with `To` + `Channel` only. That is safe to repeat because a 60204 refusal creates no
+ * verification: Twilio never sent anything, so the retry is the only text that can go out.
+ * Every other failure (a 429, a 5xx, a network error, a 60204 on an UNBRANDED send, or a
+ * 60204 without the 403) is thrown as-is and never retried here. Whatever the retry throws
+ * is rethrown unchanged, so a 429 or a network error on the second call stays transient.
+ * `brandRefused` is true on the call that fell back, so the caller can log the fallback once;
+ * later calls in the same isolate send unbranded straight away and report false.
  */
 export async function twStartVerification(
   toE164: string,
   brand?: string,
-): Promise<{ status: string; sid: string }> {
+): Promise<{ status: string; sid: string; brandRefused: boolean }> {
   const creds = requireCreds();
-  const params: Record<string, string> = { To: toE164, Channel: "sms" };
-  const friendly = twSanitizeBrand(brand);
-  if (friendly) params.CustomFriendlyName = friendly;
-  const raw = await twFetch(creds, "Verifications", params);
+  const plain: Record<string, string> = { To: toE164, Channel: "sms" };
+  const friendly = brandRefused ? "" : twSanitizeBrand(brand);
+  let raw: Record<string, unknown>;
+  let fellBack = false;
+  if (!friendly) {
+    raw = await twFetch(creds, "Verifications", plain);
+  } else {
+    try {
+      raw = await twFetch(creds, "Verifications", { ...plain, CustomFriendlyName: friendly });
+    } catch (e) {
+      if (!(e instanceof TwilioApiError && e.status === 403 && e.code === 60204)) throw e;
+      raw = await twFetch(creds, "Verifications", plain);
+      brandRefused = true;
+      fellBack = true;
+    }
+  }
   return {
     status: typeof raw.status === "string" ? raw.status : "",
     sid: typeof raw.sid === "string" ? raw.sid : "",
+    brandRefused: fellBack,
   };
+}
+
+/** What a failed START means for the person waiting on the code. */
+export type TwStartFailure = "locked" | "number" | "config" | "transient";
+
+/**
+ * Sort a thrown start failure into what the caller should tell the customer, so the caller
+ * branches on meaning instead of keeping its own copy of the code list in step with this file.
+ *   transient  anything not permanent (429, 5xx, network, unknown codes): retrying may work
+ *   locked     60203/60202: Twilio's own attempt lock, lifted when the verification expires
+ *   config     60204/20404: the Verify service or account refuses the send for EVERY number
+ *              (a feature not enabled, a service SID that points at nothing). The customer
+ *              cannot fix it; an operator has to
+ *   number     60200/60205, and any other permanent code: this number cannot get a text
+ */
+export function twStartFailureKind(e: TwilioApiError): TwStartFailure {
+  if (!e.permanent) return "transient";
+  if (e.code === 60203 || e.code === 60202) return "locked";
+  if (e.code === 60204 || e.code === 20404) return "config";
+  return "number";
 }
 
 /**
