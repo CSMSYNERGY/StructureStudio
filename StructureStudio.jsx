@@ -10635,9 +10635,20 @@ const SSD_CSS = [
   // ONE WIDTH and ONE SET OF COLUMNS for every field in the section (Ahsan 2026-09-16). ssdFitS2 writes the
   // narrowest field's width to --ssd-fld-w on .ssd-s2, and no field grows past it, so a card that wraps
   // onto a row of its own (Cladding under size and roof) keeps the width of the fields above instead of
-  // spreading two or three fields across the whole row; the spare room stays at the end of that card.
-  // It also writes --ssd-fld-shift on a field of that card, so the field starts under the column above.
+  // spreading two or three fields across the whole row. It also writes --ssd-fld-shift on a field of that
+  // card, so the field starts under the column above (see ssdFitS2 for when).
   '.ssd-s2 .ssd-fld{max-width:var(--ssd-fld-w,none);margin-left:var(--ssd-fld-shift,0px)}',
+  // md, lg and xl: no card is wider than its fields, so a card on a row of its own is never an empty
+  // bordered box past its last field; the spare room stays outside the cards. The cap, --ssd-card-max, is
+  // n fields at --ssd-fld-w plus the card's gaps, padding and border, plus --ssd-card-moved (how far
+  // ssdFitS2 moved the card's fields right). ssdFitS2 also writes --ssd-card-shift, the left margin that
+  // puts a card under the first-row card holding as many fields (Body and Trim under Type and Color).
+  // While the fit measures, --ssd-fld-w is unset, so --ssd-card-max is invalid and max-width is none.
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2 > .ssd-card,.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card,.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .ssd-card{--ssd-card-max:calc(var(--ssd-n,1) * var(--ssd-fld-w) + (var(--ssd-n,1) - 1) * 9px + 28px + var(--ssd-card-moved,0px));max-width:var(--ssd-card-max);margin-left:var(--ssd-card-shift,0px)}',
+  // md: a capped Cladding card is narrower than its 100% basis, so on its own it could move up beside a
+  // lone Roof options card. Its margins fill the rest of the row, so it keeps a row of its own. With no
+  // cap the calc is invalid and the margin is 0.
+  '.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .is-wide{margin-right:calc(100% - var(--ssd-card-max) - var(--ssd-card-shift,0px))}',
   '.ssd-card{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
   '.ssd-card-t{display:block;margin:0 0 9px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.ssd-flds{display:flex;gap:9px;min-width:0}',
@@ -10660,6 +10671,8 @@ const SSD_CSS = [
   '.ssd-sel-wait{display:block;height:var(--ssd-select-h);box-sizing:border-box;padding:0 9px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:13px;font-style:italic;line-height:calc(var(--ssd-select-h) - 2px);color:var(--ss-placeholder);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.ssd-input{display:block;width:100%;min-width:0;height:var(--ssd-select-h);box-sizing:border-box;margin:0;padding:0 9px;border:1px solid var(--ss-line);border-radius:4px;background:var(--ss-surface);font-family:inherit;font-size:13px;font-weight:400;color:var(--ss-ink)}',
   '.ssd-input::placeholder{color:var(--ss-placeholder)}',
+  // Section 02: a hint or a typed colour too long for its box ends in "…", like the colour selects' names.
+  '.ssd-s2 .ssd-input{text-overflow:ellipsis}',
   // On a touch screen the native selects and inputs are 16px (iOS zooms the page on focus below that). The
   // colour select and the "Pick a roof type first" box beside them take the same 16px, so every control in
   // section 02 shows one text size. Their boxes stay --ssd-select-h tall; the name still ends in "…".
@@ -11074,10 +11087,13 @@ function ssdFitAttr(el, name, values, fits) {
 
 // Fits an element's text to the room it really has: runs fit(el) after every render that changes `deps`,
 // whenever the element changes size, and when the web fonts finish loading (DM Sans is wider than the
-// fallback face). Returns a callback ref. fit only writes data-* attributes that React never renders, so
-// fitting never re-renders the designer. The ResizeObserver only SCHEDULES the fit, one frame later, for
-// the reason SSDesignerFrame gives: a layout write inside the callback is a window "ResizeObserver loop"
-// error, and an app_errors row, on every change.
+// fallback face). Returns a callback ref. fit only writes data-* attributes, or CSS custom properties
+// (ssdFitS2: --ssd-fld-w, --ssd-fld-shift, --ssd-card-shift, --ssd-card-moved), that React never renders,
+// so fitting never re-renders the designer and a render never undoes a fit. React updates only the style
+// properties it renders, so a fit's property may sit beside them (--ssd-n on a section 02 card), but never
+// write one React renders too. The ResizeObserver only SCHEDULES the fit, one frame later, for the reason
+// SSDesignerFrame gives: a layout write inside the callback is a window "ResizeObserver loop" error, and
+// an app_errors row, on every change.
 function useSsdFit(fit, deps) {
   const elRef = useRef(null);
   const fitRef = useRef(fit);
@@ -11130,17 +11146,21 @@ function ssdFitProgress(bar) {
 // Section 02 (.ssd-s2): one width and one set of columns for every field in the section. The CSS wraps
 // the cards on their floors and shares each row's width out per field, so the fields on one row already
 // match. A card that wraps onto a row of its own (Cladding under size and roof) is the problem: it would
-// spread its fields across the whole row, and even at the same width its fields would start left of the
-// columns above, because between two cards the gap is 40px (both cards' padding and the 12px between
+// spread its fields across the whole row, and even at the same width its fields would not start under
+// the columns above, because between two cards the gap is 40px (both cards' padding and the 12px between
 // them) while inside one it is 9px.
 //  1. Measure the fields with no cap and no shift. The narrowest width goes to --ssd-fld-w on .ssd-s2,
-//     which is every field's max-width.
-//  2. The first card row's fields are the columns. A card alone on a later row moves each field right
-//     (--ssd-fld-shift, its left margin) to start under the column with the same number, where there is
-//     one; if the card has no room for that, nothing moves. Fields wrapped onto several lines (sm, xs)
-//     sit in a grid that already shares its columns.
-// React renders no style on .ssd-s2 or on a .ssd-fld, so it never overwrites either property. Width 0 is
-// a hidden portal tab: leave it until the tab shows.
+//     which is every field's max-width and, from md up, caps every card at its fields (SSD_CSS).
+//  2. The first card row is the grid. A card alone on a later row sits under the first-row card that
+//     holds as many fields, by a left margin (--ssd-card-shift): Body and Trim under Roof options' Type
+//     and Color, Siding alone under Building size. Where no card holds as many (Siding, Body and Trim
+//     under Size, Type and Color), it moves each field right (--ssd-fld-shift) to start under the column
+//     with the same number and grows by what they moved (--ssd-card-moved). If the card has no room for
+//     either, nothing moves. Fields wrapped onto several lines (sm, xs) sit in a grid that already shares
+//     its columns, and there every card starts at the left, so nothing moves.
+// React renders no style on .ssd-s2 or on a .ssd-fld, and on a card only --ssd-n; it updates only the
+// properties it renders, so it never overwrites these. Width 0 is a hidden portal tab: leave it until the
+// tab shows.
 function ssdFitS2(row) {
   if (!row.clientWidth) return;
   // The layout depends on the frame's breakpoint, which the frame's own observer may not have written
@@ -11150,8 +11170,13 @@ function ssdFitS2(row) {
   const cards = [...row.children].filter((c) => c.classList.contains("ssd-card"));
   const fldsOf = (card) => [...card.querySelectorAll(".ssd-fld")];
   const all = cards.flatMap(fldsOf);
+  const unshift = (card) => {
+    card.style.removeProperty("--ssd-card-shift");
+    card.style.removeProperty("--ssd-card-moved");
+    fldsOf(card).forEach((f) => f.style.removeProperty("--ssd-fld-shift"));
+  };
   row.style.removeProperty("--ssd-fld-w");
-  all.forEach((f) => f.style.removeProperty("--ssd-fld-shift"));
+  cards.forEach(unshift);
   let w = 0;
   all.forEach((f) => {
     const fw = f.getBoundingClientRect().width;
@@ -11168,23 +11193,33 @@ function ssdFitS2(row) {
   if (rows.length < 2) return;
   const first = rows[0].cards.flatMap(fldsOf).map((f) => f.getBoundingClientRect());
   const cols = first.filter((b) => Math.abs(b.top - first[0].top) < 1).map((b) => b.left);
+  const rowRight = row.getBoundingClientRect().right;
   for (const r of rows.slice(1)) {
     if (r.cards.length !== 1) continue;
     const card = r.cards[0];
     const flds = fldsOf(card);
     const boxes = flds.map((f) => f.getBoundingClientRect());
-    if (flds.length < 2 || boxes.some((b) => Math.abs(b.top - boxes[0].top) >= 1)) continue;
-    let moved = 0;
-    for (let i = 1; i < flds.length && i < cols.length; i++) {
-      const d = (cols[i] - cols[0]) - (boxes[i].left - boxes[0].left) - moved;
-      if (d > 0.5) { flds[i].style.setProperty("--ssd-fld-shift", d + "px"); moved += d; }
+    if (!flds.length || boxes.some((b) => Math.abs(b.top - boxes[0].top) >= 1)) continue;
+    const twin = rows[0].cards.find((c) => fldsOf(c).length === flds.length);
+    let changed = false;
+    if (twin) {
+      const d = twin.getBoundingClientRect().left - card.getBoundingClientRect().left;
+      if (d > 0.5) { card.style.setProperty("--ssd-card-shift", d + "px"); changed = true; }
+    } else {
+      let moved = 0;
+      for (let i = 1; i < flds.length && i < cols.length; i++) {
+        const d = (cols[i] - cols[0]) - (boxes[i].left - boxes[0].left) - moved;
+        if (d > 0.5) { flds[i].style.setProperty("--ssd-fld-shift", d + "px"); moved += d; }
+      }
+      if (moved) { card.style.setProperty("--ssd-card-moved", moved + "px"); changed = true; }
     }
-    if (!moved) continue;
+    if (!changed) continue;
     const cs = getComputedStyle(card);
-    const room = card.getBoundingClientRect().right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
+    const box = card.getBoundingClientRect();
+    const room = box.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
     const after = flds.map((f) => f.getBoundingClientRect());
-    if (after[after.length - 1].right > room + 0.5 || after.some((b) => b.width < w - 0.5)) {
-      flds.forEach((f) => f.style.removeProperty("--ssd-fld-shift"));
+    if (box.right > rowRight + 0.5 || after[after.length - 1].right > room + 0.5 || after.some((b) => b.width < w - 0.5)) {
+      unshift(card);
     }
   }
 }
@@ -11279,8 +11314,9 @@ function SSRow({ stepKey, step, total, label, short, done, current, first, last,
 }
 
 // Section 02's row of cards (Building size, Roof options, Cladding). ssdFitS2 gives every field in it one
-// width and one set of columns; fitKey names the cards that render and how many fields each holds, so
-// the fit runs again when that changes. A resize refits through the observer.
+// width and one set of columns, and from md up no card is wider than its fields. fitKey names the cards
+// that render and how many fields each holds, so the fit runs again when that changes. A resize refits
+// through the observer.
 function SSSizeCards({ fitKey, children }) {
   const fitRef = useSsdFit(ssdFitS2, [fitKey]);
   return <div ref={fitRef} className="ssd-s2">{children}</div>;
@@ -18155,7 +18191,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <label key={kind} className="ssd-fld">{cellLbl}
             <input type="text" value={val}
               onChange={(e) => { const v = e.target.value; set(v); setSel((p) => ({ ...p, [opt.id]: (v || paintColors[other]) ? "Painted" : "No Paint" })); }}
-              placeholder="Enter color or leave blank" className="ssd-input ssd-field" />
+              placeholder="Optional" className="ssd-input ssd-field" />
           </label>
         );
       }
@@ -19684,18 +19720,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
           {/* Size, roof and cladding as three cards (redesign 2026-09-15, DESIGN-SPEC 4.4): Building size ·
               Roof options (Type, Color) · Cladding (Siding, Body color, Trim color). The six selects share
-              ONE line whenever each gets 155px (180px on a touch screen), which is every xl designer and
-              lg from about 1110px (Carolyn 2026-09-14: all six on one line, and they "don't need to be as
-              wide"). Narrower than that the colour names were cut ("Coffee Bro…"), so Cladding takes its
-              own row there, as it does at 740–999px, and a phone gets one card a row with the fields in
-              shared columns.
+              ONE line whenever each gets 155px, which with a mouse is every xl designer and lg from about
+              1110px (Carolyn 2026-09-14: all six on one line, and they "don't need to be as wide"). On a
+              touch screen each needs 180px, so the six wrap on the narrower xl designers too. Narrower
+              than that the colour names were cut ("Coffee Bro…"), so Cladding takes its own row there, as
+              it does at 740–999px, and a phone gets one card a row with the fields in shared columns.
               UNIFORM (Ahsan 2026-09-16): every card is built the same way (title, then a label row per
               field, then the control), which is why Building size has its own "Size" label. Each card
               carries --ssd-n, its field count, so the CSS gives every field on a line the same width, and
               SSSizeCards caps every field at the narrowest one's width and lines a card on a row of its
-              own up under the columns above. Every field in the section is one width and one text size,
-              and the selects, the labels and the titles each share one line. Every card is
-              still conditional, so any subset lays out, and Cladding still sits between the roof and the
+              own up under the cards and columns above, with no card wider than its fields (Cladding's
+              Body and Trim sit under Roof options, not in a row-wide box). Every field in the section is
+              one width and one text size, and the selects, the labels and the titles each share one line.
+              Every card is still conditional, so any subset lays out, and Cladding still sits between the roof and the
               paint, where Carolyn drew it (2026-08-18). minWidth:0 on each card and field is load-bearing:
               a long colour name would otherwise widen its card past the page on a phone.
               ⚠️ "Building Size" is the card-title span and its PARENT (the card) holds the select as a
