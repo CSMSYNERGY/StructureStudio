@@ -276,12 +276,44 @@ interface KeyableAddress {
 const norm = (v: unknown): string => String(v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 
 /**
- * The cache key for an address: lowercase, trimmed, whitespace collapsed, field-separated.
- * Two spellings that differ only in case or spacing are the same trip and must share one
- * cached distance — that is the whole point of the cache, since each miss is a paid call.
+ * Full state name → USPS abbreviation, for the CACHE KEY only.
+ *
+ * ⚠️ THE TWO SIDES OF A TRIP SPELL THE STATE DIFFERENTLY, and until this existed that split
+ * every destination into two cache rows (found in beta testing 2026-09-15). The designer's
+ * address form uses a dropdown of FULL NAMES, so a customer sends "Tennessee"; builder
+ * addresses — client_settings.business_address and builder_locations — are typed by hand and
+ * are almost always "TN". Same trip, two keys, two paid Google lookups, and a builder who
+ * tested an address in the portal warmed a row the live designer could never hit.
+ */
+const STATE_ABBR: Record<string, string> = {
+  alabama: "al", alaska: "ak", arizona: "az", arkansas: "ar", california: "ca", colorado: "co",
+  connecticut: "ct", delaware: "de", "district of columbia": "dc", florida: "fl", georgia: "ga",
+  hawaii: "hi", idaho: "id", illinois: "il", indiana: "in", iowa: "ia", kansas: "ks",
+  kentucky: "ky", louisiana: "la", maine: "me", maryland: "md", massachusetts: "ma",
+  michigan: "mi", minnesota: "mn", mississippi: "ms", missouri: "mo", montana: "mt",
+  nebraska: "ne", nevada: "nv", "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm",
+  "new york": "ny", "north carolina": "nc", "north dakota": "nd", ohio: "oh", oklahoma: "ok",
+  oregon: "or", pennsylvania: "pa", "rhode island": "ri", "south carolina": "sc",
+  "south dakota": "sd", tennessee: "tn", texas: "tx", utah: "ut", vermont: "vt",
+  virginia: "va", washington: "wa", "west virginia": "wv", wisconsin: "wi", wyoming: "wy",
+};
+
+/** The state as the KEY sees it: "Tennessee" and "TN" are one place. Unknown values pass through. */
+const normState = (v: unknown): string => {
+  const s = norm(v);
+  return STATE_ABBR[s] ?? s;
+};
+
+/**
+ * The cache key for an address: lowercase, trimmed, whitespace collapsed, field-separated,
+ * with the state canonicalised to its abbreviation.
+ * Two spellings that differ only in case, spacing or state form are the same trip and must
+ * share one cached distance — that is the whole point of the cache, since each miss is a paid
+ * call. Note this is the KEY only: addressLine below still sends Google whatever the person
+ * actually typed, which Google reads either way.
  */
 export function addressKey(a: KeyableAddress): string {
-  return [norm(a?.street), norm(a?.city), norm(a?.state), norm(a?.zip)].join("|");
+  return [norm(a?.street), norm(a?.city), normState(a?.state), norm(a?.zip)].join("|");
 }
 
 /**

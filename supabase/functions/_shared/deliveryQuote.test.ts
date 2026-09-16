@@ -12,6 +12,10 @@ Deno.env.set("GOOGLE_ROUTES_API_BASE", "https://routes.test");
 import { assertEquals } from "jsr:@std/assert@1";
 
 const { quoteDelivery } = await import("./deliveryQuote.ts");
+// The real key builder, so a seeded cache row matches what the resolver looks up. Importing it
+// (rather than hand-writing "1 shop rd|macon|ga|31201") is what keeps this test honest if the
+// normalisation ever changes.
+const { addressKey } = await import("./deliveryFee.ts");
 
 type Row = Record<string, unknown>;
 
@@ -225,7 +229,7 @@ Deno.test("no delivery_settings row → configured false, not_configured, taxabl
   });
 });
 
-Deno.test("no Google key → distance_not_configured, and the fetch stub is never reached", async () => {
+Deno.test("no Google key and NOTHING cached → distance_not_configured, and the fetch stub is never reached", async () => {
   Deno.env.delete("GOOGLE_MAPS_SERVER_KEY");
   try {
     const { admin } = db();
@@ -234,6 +238,36 @@ Deno.test("no Google key → distance_not_configured, and the fetch stub is neve
     assertEquals(calls.length, 0);
     assertEquals([q.configured, q.distanceConfigured, q.reason, q.amount, q.originMode, q.ruleType],
       [true, false, "distance_not_configured", null, "nearest", "base_plus"]);
+  } finally {
+    Deno.env.set("GOOGLE_MAPS_SERVER_KEY", "test-key");
+  }
+});
+
+// Found in beta testing, 2026-09-15: the quote used to refuse on a missing key BEFORE reading
+// the cache, throwing away distances already paid for. The danger was never the test — a key
+// rotated or briefly revoked would stop pricing trips already computed, and a customer could be
+// shown a delivery fee in the designer and then receive an estimate with no delivery line.
+Deno.test("no Google key but the trip IS cached → still prices, from the cache", async () => {
+  Deno.env.delete("GOOGLE_MAPS_SERVER_KEY");
+  try {
+    const { admin } = adminStub({
+      delivery_settings: [BASE_PLUS],
+      client_settings: [BUSINESS],
+      builder_locations: [LOT_PERRY],
+      client_users: [],
+      delivery_distance_cache: [{
+        client_id: CLIENT,
+        origin_key: addressKey({ street: "1 Shop Rd", city: "Macon", state: "GA", zip: "31201" }),
+        dest_key: addressKey(DEST),
+        miles: 30,
+        resolved_at: new Date().toISOString(),
+      }],
+    });
+    const { impl, calls } = routesStub({});
+    const q = await quoteDelivery(admin, { clientId: CLIENT, address: DEST, repUserId: null, fetchImpl: impl });
+    assertEquals(calls.length, 0);                       // the key is gone; nothing was called
+    assertEquals([q.distanceConfigured, q.autoPriced, q.miles, q.reason], [false, true, 30, null]);
+    assertEquals(q.amount, 100 + 2 * 30);                // base 100 + $2 × 30 miles
   } finally {
     Deno.env.set("GOOGLE_MAPS_SERVER_KEY", "test-key");
   }

@@ -269,6 +269,27 @@ Deno.test("addressKey: case, trim and inner whitespace do not make a new key", (
   assertEquals(addressKey({ street: null, city: null, state: null, zip: null }), "|||");
 });
 
+// Found in beta testing 2026-09-15: the designer's state dropdown sends FULL NAMES and builder
+// addresses are hand-typed abbreviations, so one destination was becoming two cache rows and
+// every trip was paid for twice.
+Deno.test("addressKey: a full state name and its abbreviation are ONE key", () => {
+  const abbr = addressKey({ street: "99 Far Rd", city: "Memphis", state: "TN", zip: "38103" });
+  assertEquals(addressKey({ street: "99 Far Rd", city: "Memphis", state: "Tennessee", zip: "38103" }), abbr);
+  assertEquals(addressKey({ street: "99 Far Rd", city: "Memphis", state: "  tennessee ", zip: "38103" }), abbr);
+  // Two-word states and DC resolve too.
+  assertEquals(addressKey({ city: "Raleigh", state: "North Carolina", zip: "27601" }), "|raleigh|nc|27601");
+  assertEquals(addressKey({ city: "Washington", state: "District of Columbia", zip: "20001" }), "|washington|dc|20001");
+  // Anything that is not a state name passes through untouched rather than being invented.
+  assertEquals(addressKey({ city: "Toronto", state: "Ontario", zip: "M5H" }), "|toronto|ontario|m5h");
+});
+
+Deno.test("addressLine: the state is NOT rewritten — Google gets what the person typed", () => {
+  assertEquals(
+    addressLine({ street: "99 Far Rd", city: "Memphis", state: "Tennessee", zip: "38103" }),
+    "99 Far Rd, Memphis, Tennessee 38103, USA",
+  );
+});
+
 Deno.test("addressLine: what Google is sent, blanks skipped, country pinned", () => {
   assertEquals(addressLine({ street: "100 Example Rd", city: "Macon", state: "GA", zip: "31201" }), "100 Example Rd, Macon, GA 31201, USA");
   assertEquals(addressLine({ street: null, city: "Macon", state: "GA", zip: "31201" }), "Macon, GA 31201, USA");

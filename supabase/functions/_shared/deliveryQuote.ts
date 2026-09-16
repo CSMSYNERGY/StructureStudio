@@ -192,11 +192,20 @@ export async function quoteDelivery(
   }
 
   if (candidates.length === 0) return quote({ ...base, reason: "no_origin" });
-  if (!distanceConfigured) return quote({ ...base, reason: "distance_not_configured" });
 
+  // THE CACHE IS CONSULTED EVEN WITH NO KEY, and that ordering is load-bearing (fixed
+  // 2026-09-15, found in beta testing). resolveDistances reads delivery_distance_cache first
+  // and only calls Google for a miss, and drivingMiles already returns nulls when the key is
+  // unset — so bailing out ahead of it threw away answers we already had. The failure that
+  // mattered was not the test: a key that is rotated, revoked or briefly misconfigured would
+  // stop pricing trips already computed, and a customer could be shown a delivery fee in the
+  // designer and then get an estimate with no delivery line at all. Whether a trip is
+  // priceable is a question about the trip, not about today's key.
   const resolved = await resolveDistances(admin, clientId, candidates, address, { fetchImpl: opts.fetchImpl });
   const nearest = nearestOrigin(resolved);
-  if (!nearest) return quote({ ...base, reason: "no_route" });
+  // Nothing resolved: say WHY. No key is a configuration problem the builder can fix (and the
+  // portal card says so); a key that answered with no route is a fact about this address.
+  if (!nearest) return quote({ ...base, reason: distanceConfigured ? "no_route" : "distance_not_configured" });
 
   const fee = feeFor(rules, nearest.miles, nearest.name);
   return quote({
