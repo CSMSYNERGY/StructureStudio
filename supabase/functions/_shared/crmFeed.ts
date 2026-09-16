@@ -505,7 +505,7 @@ function labelActivity(k: string): string {
 // Moved verbatim in spirit from portal/02-sales.jsx's diffVersionSelections. It lives here
 // now so the browser is not re-deriving on every render what the server already assembled.
 const CLADDING_LABELS: Record<string, string> = {
-  panel: "Panel Siding", lap: "Lap Siding", batten: "Board & Batten", agpanel: "Metal",
+  panel: "Panel Siding", lap: "Lap Siding", batten: "Board & Batten", agpanel: "AG Panel",
 };
 function diffSelections(a: Record<string, any>, b: Record<string, any>): string[] {
   const out: string[] = [];

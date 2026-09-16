@@ -114,9 +114,18 @@ Deno.serve(withErrorLog("admin-save-settings", async (req: Request) => {
     // straight through the very safeguard built for it (audit 2026-08-19), so the lock
     // held for builders and not for the people most likely to bulk-edit.
     const { data: lockRow } = await supabase.from("building_styles")
-      .select("model_status").eq("client_id", clientId.trim()).eq("key", styleValue).maybeSingle();
+      .select("model_status, d3").eq("client_id", clientId.trim()).eq("key", styleValue).maybeSingle();
     if (lockRow && lockRow.model_status === "locked") {
       return json({ error: "This style's 3D setup is locked. Unlock it first if you really need to change the shape." }, 409);
+    }
+    // roofProfile (2026-09-15): absence is not a clear -- see portal-settings' twin. An operator
+    // page served by an older bundle sends a d3 without the key, and must not silently put a
+    // post-frame style back to AG Panel; the current editor sends null to clear it.
+    {
+      const stored = (lockRow?.d3 as Record<string, unknown> | null | undefined)?.roofProfile;
+      if (d3 && typeof d3 === "object" && !("roofProfile" in d3) && (stored === "agpanel" || stored === "standingseam")) {
+        clean.d3.roofProfile = stored;
+      }
     }
 
     // Matched on the style KEY, which is what the editor knows as `value`;

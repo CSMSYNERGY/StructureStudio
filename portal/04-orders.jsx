@@ -757,7 +757,8 @@ function MySubmissions({ refreshKey }) {
 // operator accounts carry a client_users row for structure-studio, which has its own
 // 19-step list). portal-setup is in SS_TENANT_SCOPED_FNS, so it answers for the VIEWED
 // tenant; it is also where the gating verdict is computed, because entitlement is a
-// server-side question and featureOn() in the browser is never true for an operator.
+// server-side question — and since 2026-09-15 featureOn() in the browser mirrors the viewed
+// tenant for every operator, so the two now agree instead of the server correcting a blanket.
 //
 // `items` and `counts` are owned by ReleasesView above (one fetch feeds both the tab badge
 // and this list, so they cannot disagree). A `locked` row is a paid add-on this builder has
@@ -2352,7 +2353,7 @@ const ssUsd = (n) => {
 // validated against the matching server list and `next.cladding` defaults to the design's
 // CURRENT value — so a design saved as Board & Batten made every attribute change on its order
 // fail with "That cladding isn't offered", including a pure roof-colour edit. All four now.
-const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "Metal" };
+const SS_CLADDING_NAMES = { lap: "Lap Siding", panel: "Panel Siding", batten: "Board & Batten", agpanel: "AG Panel" };
 const SS_CLADDING_ORDER = ["panel", "lap", "batten", "agpanel"];
 // `offered` is order_paperwork's list: [{ id, label }] with label = the tenant's override or
 // null. An empty/absent list means "this tenant has not configured cladding", which reads as

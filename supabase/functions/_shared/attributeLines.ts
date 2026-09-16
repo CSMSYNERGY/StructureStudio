@@ -150,7 +150,7 @@ export const CLADDING_OPTIONS: { id: string; label: string }[] = [
   { id: "lap", label: "Lap Siding" },
   { id: "panel", label: "Panel Siding" },
   { id: "batten", label: "Board & Batten" },
-  { id: "agpanel", label: "Metal" },
+  { id: "agpanel", label: "AG Panel" },
 ];
 /** The built-in name. Pass `overrides` (cladding_id → label_override) to prefer what this
  *  tenant calls it — the order screen and the change-order sentence both should, or the

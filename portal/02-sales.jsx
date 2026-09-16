@@ -862,7 +862,7 @@ function diffVersionSelections(va, vb) {
   // selections.cladding holds the designer's stable id; show the label the customer
   // picked (mirrors D3_CLADDING in structure-studio.component.js). Unknown ids pass
   // through raw — a cryptic diff beats a silent one.
-  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "Metal", batten: "Board & Batten" };
+  const CLADDING_LABELS = { lap: "Lap Siding", panel: "Panel Siding", agpanel: "AG Panel", batten: "Board & Batten" };
   const KEYS = [["style", "style"], ["size", "size"], ["roofType", "roof type"], ["roofColor", "roof color"], ["cladding", "cladding"]];
   const parts = [];
   const push = (lbl, av, bv) => { if (av !== bv && (av || bv)) parts.push(`${lbl}: ${av || "—"} → ${bv || "—"}`); };

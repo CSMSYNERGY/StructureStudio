@@ -19,9 +19,12 @@ import { FOUNDATION_LABEL, isFoundationId, foundationQtyFor, foundationDesc } fr
 import { quoteDelivery, type DeliveryQuote } from "../_shared/deliveryQuote.ts";
 import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
+import { cladLineName } from "../_shared/claddingLineName.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate, taxOn } from "../_shared/salesTax.ts";
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
+// draft → sent is this function's job since migration 241; save_design no longer promotes.
+import { promoteIssuedDesign } from "../_shared/designPromotion.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -264,7 +267,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     .from("designs")
     // accepted_snapshot (153) is the change-order baseline. It MUST be selected here: this
     // handler overwrites estimate_lines below, so estimate_lines cannot be that baseline.
-    .select("client_id, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
+    // status (241, 2026-09-15): save_design no longer promotes, so a first submit arrives as a
+    // draft and the ISSUED steps below mark it sent. Read here only to skip that write for a
+    // design already past draft; the write itself re-checks draft in its WHERE.
+    .select("client_id, status, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -1124,9 +1130,17 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         : /* each / pct_* */               { qty: 1,                 unit: "" };
       // The tenant's own name for it, falling back to the built-in — the customer must read the
       // same words on the estimate that they read on the designer.
-      const cladName = (sc.label_override || "").trim()
-        || (String((selections as Record<string, unknown>).cladding ?? "").trim())
-        || claddingId;
+      // ...except on a SIGNED order whose cladding is unchanged, which keeps the name the customer
+      // agreed to: a cladding line's name is its change-order identity, so relabelling a built-in
+      // (Metal -> AG Panel, 2026-09-15) must not raise a change order nobody made. The id decides,
+      // so a real swap still reads as one. See _shared/claddingLineName.ts.
+      const cladName = cladLineName({
+        override: sc.label_override,
+        browserLabel: (selections as Record<string, unknown>).cladding,
+        claddingId,
+        accepted: !!(existingDesign.accepted_at || existingDesign.accepted_snapshot),
+        agreed: agreedBaseline(existingDesign),
+      });
       if (cladShape.qty > 0) {
         // pct_building_price resolves here (the base price is already known). pct_estimate_total
         // CANNOT: it is a share of every OTHER line, so it goes out at 0 and joins the existing
@@ -2541,6 +2555,43 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
       }, 400);
     }
+    // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
+    // Only a design the customer already signed can be an amendment. BEFORE the first write,
+    // which is the whole point: the design's priced revision lands in the change-order block
+    // below and the guard trigger would refuse the change order a moment later — leaving the
+    // design revised, no change order recorded, and the customer's quote email already out.
+    // Refusing first leaves nothing half-done.
+    //
+    // MOVED UP (2026-09-15): same inputs, same answers, earlier. It used to sit inside the
+    // change-order block, after the sales-tax lookup and the quote PDF, so a REFUSED amendment
+    // had already run a possibly metered Avalara lookup and upserted a revised document over
+    // floor-plans/<client>/<code>-quote.pdf, the signed customer's own quote, for a change
+    // nobody was allowed to make. The gate reads designs.accepted_at, client_settings,
+    // change_orders, orders and order_unlocks, and mayAmendCaller is settled at the auth step;
+    // the tax lookup, the meter and the PDF upload that used to run first write none of those.
+    //
+    // Both answers come from the same places the rest of the system asks: the gate
+    // function migration 210 installed (which the change_orders trigger also calls, so a
+    // refusal here and a refusal there can never disagree), and the one permission model.
+    if (existingDesign.accepted_at) {
+      const { data: gate } = await supabase.rpc("order_amendment_gate", {
+        p_client_id: clientId, p_short_code: designId,
+      });
+      if (gate && (gate as Record<string, unknown>).open !== true) {
+        return json({
+          error: String((gate as Record<string, unknown>).reason ??
+            "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
+          reason: "locked",
+        }, 409);
+      }
+      if (!mayAmendCaller) {
+        return json({
+          error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
+          reason: "not_permitted",
+        }, 403);
+      }
+    }
+
     const taxAddr = addressFrom(contact);
     const resolved = await resolveRate(taxAddr, ssTaxRate);
     {
@@ -2704,33 +2755,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // Only on the post-acceptance path, because that is the only place a CO can be raised,
       // and it is a re-write of the same value the persist below sends — idempotent, so a
       // failure here changes nothing that the persist below does not already report durably.
-      // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07) ─────────────────
-      // BEFORE the first write, which is the whole point of putting it here. The design's
-      // priced revision lands two lines down and the guard trigger would refuse the change
-      // order a moment later — leaving the design revised, no change order recorded, and
-      // the customer's quote email already out. Refusing first leaves nothing half-done.
-      //
-      // Both answers come from the same places the rest of the system asks: the gate
-      // function migration 210 installed (which the change_orders trigger also calls, so a
-      // refusal here and a refusal there can never disagree), and the one permission model.
-      {
-        const { data: gate } = await supabase.rpc("order_amendment_gate", {
-          p_client_id: clientId, p_short_code: designId,
-        });
-        if (gate && (gate as Record<string, unknown>).open !== true) {
-          return json({
-            error: String((gate as Record<string, unknown>).reason ??
-              "This order is signed. Ask an admin or crew leader to unlock it before changing it."),
-            reason: "locked",
-          }, 409);
-        }
-        if (!mayAmendCaller) {
-          return json({
-            error: "This order is signed, so changing it raises a change order — and your account isn't set up to do that. Ask an owner or admin to turn on Change Orders for you in Settings → Team.",
-            reason: "not_permitted",
-          }, 403);
-        }
-      }
+      // The amendment gate that has to refuse BEFORE this write now runs further up, ahead of
+      // the tax lookup and the quote PDF (moved 2026-09-15; see "MAY THIS ORDER BE AMENDED").
 
       const { error: preCoErr } = await supabase.from("designs")
         .update({ estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines), updated_at: new Date().toISOString() })
@@ -2840,6 +2866,34 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
             });
           }
         }
+      }
+    }
+
+    // ── ISSUED: draft → sent (migration 241, 2026-09-15) ────────────────────────────────────
+    // Every refusal on this path is behind us and the quote number, lines and document exist,
+    // so this is where the design becomes a sent quote: BEFORE the email, so a customer never
+    // holds a quote whose design still reads draft (customer-quotes hides drafts and offers
+    // Accept only on a sent one). save_design used to promote on the browser's save, before
+    // any of the refusals above had run, and a refused Get Quote stayed 'sent'. Not earlier
+    // than here either: a throw between the number and this line leaves an honest draft.
+    // The number and lines ride in the same guarded write, so a failed persist below cannot
+    // leave a sent quote without them; the persist still writes both, unchanged. A no-op for
+    // resubmits, accepted designs and change orders (already past draft).
+    {
+      const promoted = await promoteIssuedDesign(supabase, {
+        clientId,
+        designId: String(designId),
+        currentStatus: existingDesign.status,
+        fields: { ss_quote_number: ssQuoteNumber, estimate_lines: estimateLines, total_cents: designTotalCents(estimateLines) },
+      });
+      if (promoted.error) {
+        // A FAULT, not a refusal: the quote is numbered and about to be emailed while its design
+        // reads draft, invisible on the customer's quotes page. Never fails the submit.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "design_promote_failed",
+          message: `draft -> sent failed for an issued SS quote: ${promoted.error}`,
+          context: { designId: String(designId), issuedBy: "structurestudio", ssQuoteNumber },
+        });
       }
     }
 
@@ -3170,6 +3224,44 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     estimateNumber = String(d?.estimateNumber ?? d?.estimate?.estimateNumber ?? d?.invoiceNumber ?? uniqueSequence);
   } catch (e) {
     return json({ error: `Estimate ${existingEstimateId ? "update" : "create"} error: ${(e as Error).message}` }, 502);
+  }
+
+  // ── ISSUED: draft → sent (migration 241, 2026-09-15) ──────────────────────────────────────
+  // The estimate now exists in the CRM, so the design is a sent quote: written BEFORE the send
+  // below, so an emailed estimate is never attached to a draft. save_design used to promote on
+  // the browser's save, before any refusal above had run, and a refused Get Quote stayed 'sent'.
+  // The id and number ride in the same guarded write: in CRM mode they are the only proof of
+  // issue (ss_quote_number is always null here), and 241 extends 240's contact lock to hold on
+  // ghl_estimate_id, so a design whose estimate went out stays locked to its phone and email
+  // even if this write fails and step 11 is what stores the id. Step 11 still writes both,
+  // unchanged. A no-op for a resubmit (already past draft).
+  //
+  // NO ID, NO PROMOTE (review 2026-09-15). A create that answered 2xx without an `_id` leaves
+  // estimateId null on a first issue; step 10 then sends nothing ("no estimateId after
+  // create/update"), so marking it sent would be exactly the unissued 'sent' this write exists to
+  // rule out. The design stays an honest draft and the CRM's odd answer is logged as a fault.
+  if (!estimateId) {
+    await logEdgeError({
+      fn: "submit-estimate", req, clientId, code: "ghl_estimate_no_id",
+      message: `GHL estimate ${existingEstimateId ? "update" : "create"} answered ok without an estimate id: the design was not marked sent and no email was sent`,
+      context: { designId: String(designId), estimateNumber, recreatedFromStale },
+    });
+  } else {
+    const promoted = await promoteIssuedDesign(supabase, {
+      clientId,
+      designId: String(designId),
+      currentStatus: existingDesign.status,
+      fields: { ghl_estimate_id: estimateId, ghl_estimate_number: estimateNumber },
+    });
+    if (promoted.error) {
+      // A FAULT, not a refusal: the estimate exists and is about to be emailed while its design
+      // reads draft, invisible on the customer's quotes page. Never fails the submit.
+      await logEdgeError({
+        fn: "submit-estimate", req, clientId, code: "design_promote_failed",
+        message: `draft -> sent failed for an issued CRM estimate: ${promoted.error}`,
+        context: { designId: String(designId), issuedBy: "crm", estimateId, estimateNumber },
+      });
+    }
   }
 
   // 10. Send (re-emails on update, per requirements). Routed per the header: tenants with
