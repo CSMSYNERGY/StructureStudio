@@ -74,6 +74,59 @@ Deno.test("the operator consoles stay reachable from a locked tenant", () => {
   );
 });
 
+// ── The SUPPORT half of the mirror (2026-09-15, second pass) ──────────────────
+// A support operator wears the VIEWED tenant's owner map. Three things stopped that map
+// reaching the screen, and all three failed silently, so they are pinned here.
+
+Deno.test("a failed view-as lookup is never stored as an answer", () => {
+  const block = codeBetween(SHELL, "const load = async (attempt) =>", "load(0);", "viewedCtx load");
+  // supabase-js RESOLVES {data,error}; without these tests a 403 was written in as "this
+  // tenant has no access map and no entitlement" and never revisited.
+  assert(/st\.error/.test(block) && /bl\.error/.test(block), "the load must treat a resolved {error} as a failure");
+  assert(block.includes("load(attempt + 1)"), "a failed lookup must be retried, not accepted");
+  assert(block.includes("viewed_ctx_unreadable"), "a definitive failure must be logged, not swallowed");
+  assert(
+    !/access:\s*\(st\.data\s*&&/.test(block),
+    "the old `(st.data && st.data.access) || null` shape is back — it records a non-answer",
+  );
+});
+
+Deno.test("support never falls back to the OPERATOR'S OWN access map", () => {
+  const block = codeBetween(SHELL, "const myAccess = supportView", "const mirrorAccess", "myAccess");
+  assert(block.includes("? (viewedCtx ? viewedCtx.access : null)"), "support must read only the viewed tenant's map");
+  // The NON-support branch reads tenant.access and should — that is the caller's own portal.
+  // What must never come back is the `|| tenant.access` fallback ON the support branch.
+  assert(
+    !/viewedCtx && viewedCtx\.access\)\s*\|\|/.test(block),
+    "support falls back to the operator's own tenant map again — that is the god view",
+  );
+});
+
+Deno.test("content surfaces get the mirrored access map, so the builder's own rules govern", () => {
+  assert(SHELL.includes("const mirrorAccess = supportView ? myAccess : (viewing ? null : myAccess);"));
+  assert(SHELL.includes("const settingsAccess = mirrorAccess;"),
+    "the settings rail is back on a null map — that offers a support operator Billing, Wallet and SMS");
+  // The three schedule boards derive their own canEdit from this prop.
+  const n = (SHELL.match(/access=\{mirrorAccess\}/g) || []).length;
+  assert(n >= 3, `expected the three schedule boards to take mirrorAccess, found ${n}`);
+  assert(!SHELL.includes("access={viewing ? null : myAccess}"), "a content surface still nulls the map in view-as");
+});
+
+Deno.test("owner-level row actions follow the owner, not the tab clamp", () => {
+  assert(SHELL.includes("const mirrorAdmin = supportView ? true : canAdmin;"));
+  // canAdmin must still be the thing ssClampTab is given, or the narrowed map governs nothing.
+  assert(/ssClampTab\(tab, isOperator, canAdmin, myAccess, supportView/.test(SHELL),
+    "ssClampTab must keep receiving canAdmin, never mirrorAdmin");
+  assert(!/isAdmin=\{canAdmin\}/.test(SHELL), "a row-action surface still keys on canAdmin");
+});
+
+Deno.test("admin-import-monday refuses a support account", async () => {
+  const src = await Deno.readTextFile(new URL("../../admin-import-monday/index.ts", import.meta.url));
+  const code = src.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  assert(/select\([^)]*support_only/.test(code), "the operator lookup must select support_only");
+  assert(/if \(op\.support_only\)/.test(code), "a support account must be refused the Projects import");
+});
+
 Deno.test("portal-settings has no operator exemption from the paid-feature checks", () => {
   const code = SETTINGS.split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   assert(!code.includes("entitlementExempt"), "entitlementExempt is back in portal-settings");

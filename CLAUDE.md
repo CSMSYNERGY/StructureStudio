@@ -514,6 +514,26 @@ same way, modelled on scheduling:
   RTP / CRM / QuickBooks actions on an unpaid tenant 403 like the builder's would. Comp the
   feature (`client_feature_grants`) or have the tenant subscribe — do not put the blanket back.
   `_test_stubs/operatorMirror_test.ts` pins all of this against the shipped source.
+
+- **The SUPPORT half of the mirror (`app_operators.support_only`, migration 176).** A support
+  operator wears the VIEWED tenant's OWNER access map, minus Billing. Three things stopped that
+  map reaching the screen and all were fixed 2026-09-15: `settingsAccess` passed **null** in
+  view-as, and `ssSettingsTabs` short-circuits on a null map, so Billing/Wallet/SMS were offered
+  to the one account clamped out of them; the three schedule boards took the same null map and
+  rendered read-only though the server would have allowed the writes; and `isAdmin={canAdmin}`
+  hid send-invoice / delete-design / the built-before-delivered override. `canAdmin` answers
+  **"unclamp every tab"** and must stay false for support — `mirrorAccess` and `mirrorAdmin`
+  answer **"what would the owner see?"** and are what content surfaces now take. Both are
+  identical to the old expressions for everyone who is not a support operator.
+- ⚠️ **`sb.functions.invoke` RESOLVES `{data, error}` — a 403 or 5xx never reaches a `catch`.**
+  The view-as context fetch stored that as "this tenant has no access map and no entitlement"
+  and never revisited it, so one bad answer stripped every paid feature for the session and
+  dropped a support operator back onto the OPERATOR'S OWN map — the god view. It now retries
+  twice, logs `viewed_ctx_unreadable`, and leaves the state null (still-loading) rather than
+  recording a non-answer. Do not reintroduce a `(res.data && res.data.x) || null` there.
+- ⚠️ **Nobody holds `support_only` today** (both operator rows are platform accounts), so every
+  support behaviour above is dormant and cannot be verified by clicking. Flag a test account
+  before trusting any of it in front of a customer.
   `schedUnlocked` is just `featureOn("schedule_builds")`.
 - The nav tab **stays visible and clickable**. Clicking renders `<ComingSoon>` with a `cta`
   that deep-links to `navigate("settings", "billing")` — the **billing sub-tab** specifically,

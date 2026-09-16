@@ -566,23 +566,49 @@ function Dashboard({ session }) {
   useEffect(() => {
     if (!mirrorView) { setViewedCtx(null); return; }
     let cancelled = false;
-    (async () => {
+    let timer = null;
+    // ⚠️ A FAILED invoke IS NOT AN ANSWER OF "nothing", and this effect used to record it as
+    // one. supabase-js RESOLVES `{data, error}` rather than rejecting, so a 403, a 5xx or an
+    // empty body never reached the catch: `(st.data && st.data.access) || null` wrote NULL
+    // into this state as though the tenant genuinely had no access map and no entitlement.
+    // Nothing ever revisited it — the deps are the tenant and the token — so one bad answer
+    // stuck for the whole session, and it lied in two directions at once. featureOn saw a
+    // truthy viewedCtx with a null entitlement and read EVERY paid add-on as off, so a
+    // paying builder's portal looked stripped; and myAccess fell through to the operator's
+    // OWN map, which for a support account is precisely the god view this mirror exists to
+    // remove. Same posture as the three rpcs above: keep "not loaded" rather than store a
+    // non-answer, and ask again.
+    const load = async (attempt) => {
+      let st = null, bl = null;
       try {
         // Both are in SS_TENANT_SCOPED_FNS, so the wrapper injects targetClientId and these
         // answer for the VIEWED tenant — which is exactly what is wanted here and exactly
         // what the two effects above must avoid.
-        const [st, bl] = await Promise.all([
+        [st, bl] = await Promise.all([
           sb.functions.invoke("portal-settings", { body: { action: "status" } }),
           sb.functions.invoke("portal-billing", { body: { action: "status" } }),
         ]);
-        if (cancelled) return;
-        setViewedCtx({
-          access: (st.data && st.data.access) || null,
-          entitlement: (bl.data && bl.data.entitlement) || null,
-        });
-      } catch (_e) { /* leave null — the fallbacks below keep the portal usable */ }
-    })();
-    return () => { cancelled = true; };
+      } catch (_e) { /* handled as a failure below, like a resolved {error} */ }
+      if (cancelled) return;
+      if (!st || st.error || !st.data || !bl || bl.error || !bl.data) {
+        // Two more tries before giving up: this is one call behind a cold isolate, and a
+        // blip must not decide what an operator is shown for the rest of the session.
+        if (attempt < 2) { timer = setTimeout(() => load(attempt + 1), 600 * (attempt + 1)); return; }
+        // Definitive failure. LEAVE IT NULL, which every reader below treats as STILL
+        // LOADING: the entitlement half then reads generous (never paywall a builder who
+        // may well have paid — portal-billing's own fail-open posture), and the access half
+        // no longer falls back to the operator's own map (see myAccess). Loud in app_errors
+        // rather than silent, because a portal that quietly shows the wrong account's
+        // permissions is the failure nobody reports.
+        const why = (st && st.error && st.error.message) || (bl && bl.error && bl.error.message) || "empty response";
+        ssLogError("portal", `view-as context unreadable for ${(viewing && viewing.clientId) || "?"}: ${why}`,
+          "viewed_ctx_unreadable", { clientId: viewing && viewing.clientId });
+        return;
+      }
+      setViewedCtx({ access: st.data.access || null, entitlement: bl.data.entitlement || null });
+    };
+    load(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [mirrorView, viewing && viewing.clientId, session.access_token]);
 
   // Keep the address bar honest about where you actually are.
@@ -1058,6 +1084,18 @@ function Dashboard({ session }) {
   // THE LINE THAT UNCLAMPS EVERY TAB. For a support operator it must be false, or
   // ssClampTab returns every tab unmodified and the narrowed access map governs nothing.
   const canAdmin = viewing ? (isOperator && !supportView) : isAdmin;
+  // canAdmin answers TWO different questions, and a support operator needs opposite answers.
+  //   (1) "unclamp every tab" — must be FALSE, or ssClampTab returns every tab unmodified and
+  //       the narrowed access map governs nothing. That is what canAdmin keeps meaning.
+  //   (2) "would the owner of this account see this button?" — for the row-level affordances
+  //       (send invoice, delete design, the built-before-delivered override) the answer is
+  //       YES: a support operator wears the viewed tenant's OWNER map, an owner short-circuits
+  //       to edit everywhere, and the server already permits these for any operator holding
+  //       can_write. Answering (2) with canAdmin hid them, so the browser withheld what the
+  //       server would have allowed — the mirror failing in the quiet direction.
+  // Billing is NOT among them: those CTAs stay on canAdmin, because a support operator
+  // genuinely cannot bill and resolveTenant clamps settings_billing to "none".
+  const mirrorAdmin = supportView ? true : canAdmin;
 
   // HOISTED above setup3d (2026-08-21). It used to live ~200 lines further down, which is
   // why the 3D calibration editor was never gated on it: setup3d is the last hook and could
@@ -1613,12 +1651,20 @@ function Dashboard({ session }) {
   // The caller's resolved per-area map, straight from the status call (migration 100).
   // Operators viewing a tenant have none — their rights come from app_operators — and
   // canAdmin short-circuits every check below for them.
-  // Support reads the VIEWED tenant's resolved map. While it is still loading, fall back to
-  // the operator's own rather than to null: null clamps to a fallback tab, so the generous
-  // direction for a fraction of a second beats bouncing Jonathan off the page he opened.
+  // Support reads the VIEWED tenant's resolved map, and ONLY that. It used to fall back to
+  // the operator's own map while the fetch was in flight — defensible for the fraction of a
+  // second that was meant to be, and a permanent god view once a failed call could park a
+  // null in viewedCtx forever (see the effect above, which no longer stores one). The
+  // fallback is gone rather than re-timed: the operator's own map is never a safe stand-in
+  // for a builder's, and the brief clamp to a fallback tab is the cheaper wrong answer.
   const myAccess = supportView
-    ? ((viewedCtx && viewedCtx.access) || ((tenant && tenant !== "none") ? tenant.access : null))
+    ? (viewedCtx ? viewedCtx.access : null)
     : ((tenant && tenant !== "none") ? tenant.access : null);
+  // The access map to hand a CONTENT surface. Support gets the viewed tenant's real map, so
+  // the builder's own rules govern what the page offers; a platform operator gets null and
+  // rides canAdmin, as before. Identical to the old `viewing ? null : myAccess` for everyone
+  // who is not a support operator.
+  const mirrorAccess = supportView ? myAccess : (viewing ? null : myAccess);
   // The tab cache has to know WHICH ROWS this map allows, not just who is asking. `contacts`
   // gained an 'own' level on 2026-09-05 that narrows the rows every contact-and-design read
   // returns, so the same person on the same tenant gets a different payload before and after
@@ -1864,7 +1910,12 @@ function Dashboard({ session }) {
   // hard 403. Derive once, pass to both.
   const settingsIsOwner = !viewing && tenant.role === "owner";
   const settingsIsAdmin = !viewing && (tenant.role === "owner" || tenant.role === "admin");
-  const settingsAccess = viewing ? null : myAccess;
+  // mirrorAccess, not `viewing ? null : myAccess`: ssSettingsTabs short-circuits on a null
+  // map and offers EVERY sub-tab, so a support operator was handed Billing, Wallet and SMS —
+  // the three areas resolveTenant deliberately clamps to "none" for them. The server withheld
+  // the numbers, so what they actually got was a hollow Billing page and buttons that could
+  // only come back 403: the "disabled UI fails silently" shape, one level up.
+  const settingsAccess = mirrorAccess;
   // Accounts and Admin moved INTO this rail, so it has to stay up on their pages too or
   // clicking one would throw you straight back to the nav you just left. The settings half is
   // the IDENTICAL predicate the body render uses — copy it if you change either.
@@ -2383,7 +2434,7 @@ function Dashboard({ session }) {
                 key={sub}
                 kind={sub.charAt(0) === "c" ? "contact" : "design"}
                 recordId={sub.slice(2)}
-                isAdmin={canAdmin}
+                isAdmin={mirrorAdmin}
                 canEdit={canAdmin || !!(myAccess && myAccess.contacts === "edit")}
                 /* The DESIGN record reaches this line without a subscription — the branch
                    above turns a CONTACT record away, but a design record is what the free
@@ -2437,7 +2488,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "designs" && sub !== "people" && !(sub && /^[cd]-/.test(sub)) && (
               <DesignsTable key={"t-" + effClientId} clientId={effClientId}
                 fetchDesigns={viewing ? viewingFetch : null} refreshKey={designsRefreshKey}
-                isAdmin={canAdmin} crmUnlocked={crmUnlocked}
+                isAdmin={mirrorAdmin} crmUnlocked={crmUnlocked}
                 onSeeBilling={() => navigate("settings", "billing")}
                 viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
                 /* PIPELINE OPENS THE CUSTOMER, not the deal. Carolyn 2026-09-04 @1:07:19,
@@ -2473,7 +2524,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "contacts" && !(sub && /^[cd]-/.test(sub)) && (
               crmUnlocked ? (
                 <LeadsTable key={"t-" + effClientId} clientId={effClientId}
-                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={canAdmin}
+                  fetchDesigns={viewing ? viewingFetch : null} isAdmin={mirrorAdmin}
                   onOpenRecord={(contactId) => navigate("contacts", "c-" + contactId)}
                   onOpenDesign={openInDesigner} />
               ) : (
@@ -2567,7 +2618,7 @@ function Dashboard({ session }) {
             {!gateLocked && activeTab === "support" && (
               <ReleasesView submissionsKey={feedbackKey}
                 sub={activeTab === "support" ? sub : null} onSub={(x) => navigate("support", x)}
-                onNavigate={navigate} canAdmin={canAdmin} />
+                onNavigate={navigate} canAdmin={mirrorAdmin} />
             )}
             {/* Admits exactly who the server admits: every qbo_* action in portal-settings'
                 GATES is gated on settings_quickbooks, and TAB_AREA routes the tab through
@@ -2640,8 +2691,8 @@ function Dashboard({ session }) {
                 pointing admins at Billing. */}
             {!gateLocked && activeTab === "build-schedule" && (
               schedUnlocked ? (
-                <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess}
+                <BuildScheduleTab key={"bsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess}
                   onOpenDesign={(code) => openInDesigner(code)} />
               ) : (
               <ComingSoon
@@ -2660,8 +2711,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "delivery-schedule" && (
               schedUnlocked ? (
-                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess} />
+                <DeliveryScheduleTab key={"dsched-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess} />
               ) : (
               <ComingSoon
                 title="Delivery Schedule"
@@ -2681,7 +2732,7 @@ function Dashboard({ session }) {
                 purpose. Queueing a build lives on the Build Schedule; loads live on the
                 Delivery Schedule; a sale follows the customer's invoice. */}
             {!gateLocked && activeTab === "inventory" && (
-              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={canAdmin}
+              <InventoryTable key={"inv-" + effClientId} clientId={effClientId} isAdmin={mirrorAdmin}
                 refreshKey={designsRefreshKey}
                 onOpenDesign={openInDesigner}
                 onSendEstimate={(u) => openInDesigner(u.shortCode, null, { asNew: true, inventoryUnitId: u.id, unitSerial: u.serial, unitLifecycle: u.lifecycle })}
@@ -2693,8 +2744,8 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "repairs" && (
               schedUnlocked ? (
-                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={canAdmin}
-                  access={viewing ? null : myAccess} />
+                <RepairsTab key={"reps-" + effClientId} clientId={effClientId} canAdmin={mirrorAdmin}
+                  access={mirrorAccess} />
               ) : (
               <ComingSoon
                 title="Repairs"
@@ -2712,7 +2763,7 @@ function Dashboard({ session }) {
             )}
             {!gateLocked && activeTab === "view-3d" && (
               view3dUnlocked
-                ? <Studio3DStatus clientId={effClientId} canAdmin={canAdmin} navigate={navigate} />
+                ? <Studio3DStatus clientId={effClientId} canAdmin={mirrorAdmin} navigate={navigate} />
                 : <ComingSoon
                     title="3D Design"
                     icon={ICONS["view-3d"]}

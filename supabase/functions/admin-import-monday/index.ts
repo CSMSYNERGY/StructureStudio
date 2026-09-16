@@ -87,8 +87,17 @@ Deno.serve(withErrorLog("admin-import-monday", async (req: Request) => {
 
   const admin = createClient(supabaseUrl, serviceKey);
   const { data: op } = await admin.from("app_operators")
-    .select("user_id, email, can_write").eq("user_id", user.id).maybeSingle();
+    .select("user_id, email, can_write, support_only").eq("user_id", user.id).maybeSingle();
   if (!op) return json({ error: "Operator access required." }, 403);
+  // A support account stands in a BUILDER's shoes and has no business in the internal
+  // Projects boards this function writes to — portal-projects refuses them for exactly that
+  // reason, and this file was the one door left unlocked. No portal screen calls it, so the
+  // hole was only ever reachable by a direct POST with a held session; zero support operators
+  // exist today, so nothing has leaked. Checked here rather than left to the missing UI,
+  // because a hidden button is a courtesy and not a control.
+  if (op.support_only) {
+    return json({ error: "Support accounts can't import into Projects — that console is for platform operators." }, 403);
+  }
   if (!op.can_write) return json({ error: "This operator account is read-only." }, 403);
 
   // deno-lint-ignore no-explicit-any
