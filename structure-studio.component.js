@@ -846,7 +846,7 @@ const SS_OPT_GROUPS = [
   { key: "building", label: "Building", tabs: [["wallHeight", "Wall height"]] },
   { key: "exterior", label: "Exterior", tabs: [["doors", "Doors"], ["windows", "Windows"]] },
   { key: "interior", label: "Interior", tabs: [["interior", "Interior items"], ["electrical", "Electrical"], ["insulation", "Insulation"]] },
-  { key: "services", label: "Services", tabs: [["foundation", "Foundation"]] },
+  { key: "services", label: "Services", tabs: [["delivery", "Delivery"], ["foundation", "Foundation"]] },
 ];
 // Which tab a palette tool lives on. Its palette group decides when it has one. A tool without one
 // (a tenant config from before palette groups) goes by what it is, and anything still unrecognised
@@ -895,6 +895,21 @@ function VentPicker({ vents, onPick, onCancel }) {
       </div>
     </div>
   );
+}
+
+// The delivery figures for one design, read by BOTH the Details subtotal and Services › Delivery
+// (Carolyn 2026-09-16 moved delivery up into Services), so the two can never disagree. The
+// precedence is submit-estimate's: a fee typed by the rep wins; else, when the builder automated
+// delivery, the rule's figure once delivery-quote has priced the address; else nothing. `pending`
+// is an address the rule could not price. `suggest` is the rule's figure offered to a rep.
+function ssDeliveryView(C, sel, deliveryQuote, embedded) {
+  const dlv = (C && C.delivery) || {};
+  const manual = String((sel && sel.deliveryFee) || "") !== "";
+  const auto = !manual && dlv.automate && deliveryQuote && deliveryQuote.autoPriced ? deliveryQuote : null;
+  const pending = !manual && dlv.automate && deliveryQuote && !deliveryQuote.autoPriced ? deliveryQuote : null;
+  const suggest = embedded && deliveryQuote && deliveryQuote.autoPriced && deliveryQuote.fee != null ? Number(deliveryQuote.fee) : null;
+  const amount = manual ? (parseFloat(sel.deliveryFee) || 0) : (auto ? (Number(auto.fee) || 0) : 0);
+  return { manual, auto, pending, suggest, amount };
 }
 
 // Which price applies is decided by ONE thing: whether the customer has the package. Carolyn:
@@ -10821,6 +10836,16 @@ const SSD_CSS = [
   '.ssd-frame[data-ssd-bp="xs"] .ssd-opp{order:1;flex:0 0 100%;display:none;margin-top:6px}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-opc.is-focus > .ssd-opp{display:block}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-opc:not(.is-focus) .ssd-opt.is-on{color:var(--ss-ink);border-bottom-color:var(--ss-line)}',
+  // Services › Delivery: the figure (or why there is none yet), then the rep's fee editor.
+  '.ssd-dlv{display:flex;flex-direction:column;gap:8px;min-width:0;width:100%}',
+  '.ssd-dlv-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;font-size:12.5px;line-height:1.35;color:var(--ss-ink)}',
+  '.ssd-dlv-t{min-width:0}',
+  '.ssd-dlv-amt{font-weight:700;white-space:nowrap}',
+  '.ssd-dlv-go{font-family:inherit;margin:0;padding:0;border:0;background:none;color:var(--ss-accent-text);font-size:12px;font-weight:700;text-decoration:underline;cursor:pointer}',
+  '.ssd-dlv-edit{display:flex;flex-wrap:wrap;align-items:center;gap:7px}',
+  '.ssd-dlv-money{display:inline-flex;align-items:center;gap:3px}',
+  '.ssd-dlv-edit .ssd-fd-q .ssd-input{width:84px}',
+  '.ssd-dlv-note{flex:0 0 100%;font-size:11px;line-height:1.3;color:var(--ss-muted)}',
   '.ssd-ogc{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
   '.ssd-ogc-b{display:flex;flex-wrap:wrap;align-items:center;gap:7px;min-width:0}',
   '.ssd-ogc-line{flex:0 0 100%;display:flex;min-width:0}',
@@ -13785,8 +13810,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // "each"-priced items of that type are placed — the plan highlights them and the
   // rest of the page is blocked until the user clicks one (or cancels).
   const [pendingRemoval, setPendingRemoval] = useState(null);
-  // "+ Add Delivery Fee" clicked — shows the delivery row before a value is typed.
-  const [deliveryOpen, setDeliveryOpen] = useState(false);
   // ── Automatic delivery (233–236) ───────────────────────────────────────────────────
   // Once the address is complete, ask delivery-quote for the miles and the fee the builder's
   // rules give. Asked when the builder automated delivery (the customer sees the line) OR in
@@ -13813,12 +13836,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     }, 600);
     return () => clearTimeout(t);
   }, [contact.street, contact.city, contact.state, contact.zip, C && C.delivery, C.clientId, embedded]);
-  useEffect(() => {
-    // Reopened designs restore sel.deliveryFee without deliveryOpen; latch the row
-    // open so clearing the amount mid-edit doesn't unmount the input underneath the
-    // user (only the row's × closes it).
-    if (!deliveryOpen && String(sel.deliveryFee || "") !== "") setDeliveryOpen(true);
-  }, [deliveryOpen, sel.deliveryFee]);
   useEffect(() => {
     if (!pendingRemoval) return;
     // ESC cancels. Every other key is swallowed in the capture phase: the scrim only
@@ -20085,18 +20102,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       <SSSecHead text={ssHead("options")} />
       {/* Tool Palette. The ROW stays — Export and the 3D teaser live in it and neither
           touches the building. Only the plan-editing controls inside it go away when the
-          plan is locked (hiding the whole row took Export with it). */}
+          plan is locked (hiding the whole row took Export with it): every tab but Services ›
+          Delivery is empty then, so a locked plan shows at most that one panel. */}
       <div style={{ background: "#FFF", padding: "10px 0", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {!planLocked && (() => {
+        {(() => {
           const btn = ssToolBtn;
           // `entries` is the PALETTE (its own tool button); `incl` is the included row, which is
           // built from actionableIncludedKeys instead so it still offers items that carry
           // noPalette — a retired built-in, or a shelf collapsed behind the shelving picker. See
           // the note on actionableIncludedKeys for why the two lists must not share a filter.
-          const entries = Object.entries(ITEMS).filter(([k, c]) =>
+          const entries = planLocked ? [] : Object.entries(ITEMS).filter(([k, c]) =>
             c && !c.noPalette && (embedded || !c.internalOnly) && ANNOTATE_KEYS.indexOf(k) === -1);
           const inclSet = new Set(actionableIncludedKeys);
-          const incl = actionableIncludedKeys.length
+          const incl = !planLocked && actionableIncludedKeys.length
             ? Object.entries(ITEMS).filter(([k]) => inclSet.has(k))   // ITEMS order, not inclusion-map order
             : [];
           // An included item is never ALSO an "additional" tool — it is offered once, in the row
@@ -20190,7 +20208,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { ...p, insulationType: t, insulation: cur.filter((s) => keep.indexOf(s.area) !== -1).map((s) => ({ ...s, type: t })) };
           });
           const insAll = insAreas.length > 1 && insAreas.every(insHas);
-          const insBody = insAreas.length ? (
+          const insBody = !planLocked && insAreas.length ? (
             <>
               {insTypes.length > 1 && (
                 <div className="ssd-ogc-line">
@@ -20226,7 +20244,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { ...p, foundation: cur.some((f) => f.id === id) ? cur.filter((f) => f.id !== id) : [...cur, { id, qty: null }] };
           });
           const fdSetQty = (id, v) => setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).map((f) => (f.id === id ? { ...f, qty: v === "" ? null : v } : f)) }));
-          const fdBody = fdOffered.length ? fdOffered.map((o) => {
+          const fdBody = !planLocked && fdOffered.length ? fdOffered.map((o) => {
             const en = fdEntry(o.id);
             const on = !!en;
             const basis = String(o.basis || "each");
@@ -20250,7 +20268,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // ── The electrical package ────────────────────────────────────────────────
           // One toggle. Turning it ON lays out the builder's standard at their own spacings;
           // turning it OFF removes exactly what it added and leaves anything hand-placed alone.
-          const elecCfg = (embedded || !(C.electrical && C.electrical.internalOnly)) ? electricalOffered(C) : null;
+          const elecCfg = !planLocked && (embedded || !(C.electrical && C.electrical.internalOnly)) ? electricalOffered(C) : null;
           const elecOn = !!(sel && sel.electrical);
           const elecAutoN = elecCfg ? electricalAutoCounts(elecCfg, bldgW, bldgH) : null;
           const toggleElectrical = () => {
@@ -20285,12 +20303,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           // ── Wall height ───────────────────────────────────────────────────────────
           // Only when THIS style offers increases — hauling limits differ per style and most styles
           // have none. It used to sit hard left in the floor-plan toolbar (Carolyn 2026-09-02); it is
-          // Building's tab now, and like every tab here it is gone while the plan is locked, which is
-          // the gate a pricing control needs.
+          // Building's tab now, and gone while the plan is locked, which is the gate a pricing control
+          // needs.
           const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
           const whPick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
           const whCur = Number(sel.wallHeightDeltaIn) || 0;
-          const whBody = whList.length ? (
+          const whBody = !planLocked && whList.length ? (
             <div className="ssd-seg">
               <button onClick={() => whPick(0)} aria-pressed={whCur === 0} className={whCur === 0 ? "ssd-seg-b is-on" : "ssd-seg-b"}>Standard</button>
               {whList.map((o) => (
@@ -20300,6 +20318,49 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
                 </button>
               ))}
+            </div>
+          ) : null;
+          // ── Delivery (Services, Carolyn 2026-09-16) ───────────────────────────────
+          // What the Details subtotal charges for delivery, read from the same ssDeliveryView. A customer
+          // sees the automatic figure once their address is in (the amount behind the Details lead gate);
+          // the rep sets or clears a fee here, which used to be Details' "+ Add delivery fee". Offered in the
+          // portal always, and to a customer only when the builder automated delivery or a fee is already on
+          // the design. Unlike every other tab it stays on a locked plan: an inventory sale still ships.
+          const dv = ssDeliveryView(C, sel, deliveryQuote, embedded);
+          const dlvAuto = !!(C.delivery && C.delivery.automate);
+          const dlvShowAmt = !!C.showPricing && !detailsLocked;
+          const deliveryBody = (embedded || dlvAuto || dv.manual) ? (
+            <div className="ssd-dlv" data-ss-delivery-panel="1">
+              {dv.manual && !embedded ? (
+                <div className="ssd-dlv-line"><span className="ssd-dlv-t">Delivery fee</span>{dlvShowAmt && <span className="ssd-dlv-amt">{fmtMoney2(dv.amount)}</span>}</div>
+              ) : dv.auto ? (
+                <div className="ssd-dlv-line"><span className="ssd-dlv-t">{dv.auto.desc || "Delivery"}</span>{dlvShowAmt && dv.auto.fee != null && <span className="ssd-dlv-amt">{fmtMoney2(dv.auto.fee)}</span>}</div>
+              ) : dv.pending ? (
+                <div className="ssd-dlv-line"><span className="ssd-dlv-t">To be confirmed — {ssDeliveryReason(dv.pending.reason)}</span></div>
+              ) : (dlvAuto && !embedded) ? (
+                <div className="ssd-dlv-line">
+                  <span className="ssd-dlv-t">Priced from your delivery address</span>
+                  {ssSteps.some((s) => s.key === "customer") && <button type="button" className="ssd-dlv-go" onClick={() => ssGo("customer")}>Add your address</button>}
+                </div>
+              ) : null}
+              {embedded && (
+                <div className="ssd-dlv-edit">
+                  <label className="ssd-fd-q">Fee
+                    <span className="ssd-dlv-money">$
+                      <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder={dv.suggest != null ? dv.suggest.toFixed(2) : "0.00"}
+                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
+                        data-ss-delivery-fee="1" className="ssd-input ssd-field" />
+                    </span>
+                  </label>
+                  {dv.suggest != null && String(sel.deliveryFee || "") !== dv.suggest.toFixed(2) && (
+                    <button type="button" className="ssd-tool" onClick={() => setSel((p) => ({ ...p, deliveryFee: dv.suggest.toFixed(2) }))}>
+                      Use {fmtMoney2(dv.suggest)}{deliveryQuote && deliveryQuote.miles != null ? ` (${deliveryQuote.miles} mi${deliveryQuote.originName ? " from " + deliveryQuote.originName : ""})` : ""}
+                    </button>
+                  )}
+                  {dv.manual && <button type="button" className="ssd-tool" onClick={() => setSel((p) => ({ ...p, deliveryFee: "" }))}>Clear</button>}
+                  <span className="ssd-dlv-note">{C.delivery && C.delivery.taxable ? "Taxed with the estimate" : "Non-taxable line on the estimate"}</span>
+                </div>
+              )}
             </div>
           ) : null;
           // ── The option tabs (Carolyn 2026-09-16) ──────────────────────────────────
@@ -20317,6 +20378,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             // The package sits with the devices it lays out, first, under one tab.
             electrical: orNull([elecBtn].filter(Boolean).concat(toolsOn("electrical"))),
             insulation: insBody,
+            delivery: deliveryBody,
             foundation: fdBody,
           };
           const optGroups = SS_OPT_GROUPS.map((g) => {
@@ -21204,13 +21266,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             const discountTotal = (sel.discounts || []).reduce((s, r) => s + Math.max(0, parseFloat(r && r.amount) || 0), 0);
             // Automatic delivery (233): a rep-typed figure wins, else the rule's figure when the
             // builder automated it — the same precedence submit-estimate applies.
-            const dlv = C.delivery || {};
-            const manualDlv = String(sel.deliveryFee || "") !== "";
-            const autoDlv = !manualDlv && dlv.automate && deliveryQuote && deliveryQuote.autoPriced ? deliveryQuote : null;
-            const dlvPending = !manualDlv && dlv.automate && deliveryQuote && !deliveryQuote.autoPriced ? deliveryQuote : null;
-            const dlvSuggest = embedded && deliveryQuote && deliveryQuote.autoPriced && deliveryQuote.fee != null ? Number(deliveryQuote.fee) : null;
-            const deliveryAmt = manualDlv ? (parseFloat(sel.deliveryFee) || 0) : (autoDlv ? (Number(autoDlv.fee) || 0) : 0);
-            const showDelivery = deliveryOpen || String(sel.deliveryFee || "") !== "";
+            // The figures come from ssDeliveryView, which Services › Delivery reads too.
+            const dlvView = ssDeliveryView(C, sel, deliveryQuote, embedded);
+            const autoDlv = dlvView.auto, dlvPending = dlvView.pending, deliveryAmt = dlvView.amount;
+            // A fee is SET in Services › Delivery now (Carolyn 2026-09-16); Details lists it once there is one.
+            const showDelivery = dlvView.manual;
+            const openDeliveryTab = () => { setSsOptTab((p) => ({ ...p, services: "delivery", focus: "services" })); ssGo("options"); };
             // Any "% of subtotal" selection row is still unresolved at this point and reads as
             // 0 in the sum below — which is precisely the base it is a percentage OF. Fill it in
             // first, against a base that excludes delivery and discounts exactly as
@@ -21521,35 +21582,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
             )}
 
-            {/* Delivery fee — last line before the subtotal (below the discounts); rendered once
-                "+ Add Delivery Fee" is clicked or a fee is already set; × clears and hides it. */}
+            {/* Delivery fee — last line before the subtotal (below the discounts), once a fee is set.
+                It is typed in Services › Delivery; × clears it. */}
             {showDelivery && (
-              <div className="ssd-dt-row is-edit">
+              <div className="ssd-dt-row">
                 <div className="ssd-dt-name">
                   <div className="ssd-dt-n">Delivery Fee</div>
                   <div className="ssd-dt-d">
                     {C.delivery && C.delivery.taxable ? "Taxed with the estimate" : "Non-taxable line on the estimate"}
-                    {dlvSuggest != null && String(sel.deliveryFee || "") !== dlvSuggest.toFixed(2) && (
-                      <button type="button" className="ssd-dt-suggest" onClick={() => setSel((p) => ({ ...p, deliveryFee: dlvSuggest.toFixed(2) }))}>
-                        Use {fmtMoney2(dlvSuggest)}{deliveryQuote.miles != null ? ` (${deliveryQuote.miles} mi${deliveryQuote.originName ? " from " + deliveryQuote.originName : ""})` : ""}
-                      </button>
-                    )}
+                    {embedded && <button type="button" className="ssd-dt-suggest" onClick={openDeliveryTab}>Edit in Services</button>}
                   </div>
                 </div>
                 <div className="ssd-dt-r">
-                  {embedded ? (
-                    <div className="ssd-dt-money">
-                      <span className="ssd-dt-cur">$</span>
-                      <input type="text" inputMode="decimal" value={sel.deliveryFee || ""} placeholder={dlvSuggest != null ? dlvSuggest.toFixed(2) : "0.00"}
-                        onChange={(e) => { const v = e.target.value.replace(/[^0-9.]/g, ""); setSel((p) => ({ ...p, deliveryFee: v })); }}
-                        className="ssd-dt-money-in ssd-field" />
-                    </div>
-                  ) : (
-                    <div className="ssd-dt-amt">${Number(sel.deliveryFee || 0).toFixed(2)}</div>
-                  )}
+                  <div className="ssd-dt-amt">${Number(sel.deliveryFee || 0).toFixed(2)}</div>
                   {embedded
                     ? <button type="button" className="ssd-dt-x" title="Remove the delivery fee" aria-label="Remove the delivery fee"
-                        onClick={() => { setDeliveryOpen(false); setSel((p) => ({ ...p, deliveryFee: "" })); }}>×</button>
+                        onClick={() => setSel((p) => ({ ...p, deliveryFee: "" }))}>×</button>
                     : <span className="ssd-dt-sp" />}
                 </div>
               </div>
@@ -21570,7 +21618,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   invent a delivery fee. Rows already ON a reopened design still render —
                   a rep-applied discount is part of the customer's real quote. */}
               {embedded && <button type="button" className="ssd-dt-addb" onClick={() => setSel((p) => ({ ...p, discounts: [...(p.discounts || []), { description: "", amount: "", taxable: true }] }))}>+ Add discount</button>}
-              {embedded && !showDelivery && <button type="button" className="ssd-dt-addb" onClick={() => setDeliveryOpen(true)}>+ Add delivery fee{dlvSuggest != null ? ` · ${fmtMoney2(dlvSuggest)} suggested` : ""}</button>}
+              {embedded && !showDelivery && <button type="button" className="ssd-dt-addb" onClick={openDeliveryTab}>+ Add delivery fee{dlvView.suggest != null ? ` · ${fmtMoney2(dlvView.suggest)} suggested` : ""}</button>}
               <div className="ssd-dt-note">
                 Custom options add charges · discounts reduce the estimate total · sales tax is worked out from the delivery address when the quote is issued, so it is not in the subtotal above.
               </div>

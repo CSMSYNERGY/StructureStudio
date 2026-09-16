@@ -476,6 +476,49 @@ for (const n of [1, 2]) {
   });
 }
 
+// Delivery moved up into Services (Carolyn 2026-09-16: "services are delivery and foundation"). A
+// builder who automated delivery shows the customer how it is priced before there is an address, then
+// the rule's figure once the address is in (the amount behind the same contact gate as Details), and
+// Details charges exactly that figure — both read ssDeliveryView.
+test("Services › Delivery: priced from the address, and Details charges the same figure", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => { j.delivery = { automate: true, configured: true, taxable: false, ruleType: "base_plus" }; };
+  const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, x-client-info, apikey, content-type", "access-control-allow-methods": "POST, OPTIONS" };
+  const quotes = [];
+  // Registered after routeLayout, so it answers first.
+  await page.route(`${SUPABASE_URL}/functions/v1/delivery-quote`, (route) => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 200, headers: CORS, body: "ok" });
+    quotes.push(route.request().postData());
+    return route.fulfill({ status: 200, headers: { ...CORS, "content-type": "application/json" },
+      body: JSON.stringify({ ok: true, ready: true, autoPriced: true, fee: 150, miles: 12, originName: "Main Lot", desc: "12 mi from Main Lot" }) });
+  });
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const panel = page.locator("[data-ss-delivery-panel]");
+  await expect(page.locator('[data-ss-opt-tab="delivery"]'), "Delivery opens Services").toHaveAttribute("aria-selected", "true");
+  await expect(panel).toContainText("Priced from your delivery address");
+  await page.getByPlaceholder("123 Main St").fill("1 Test Way");
+  await page.getByPlaceholder("City").fill("Kansas City");
+  await page.locator("select").filter({ has: page.locator("option", { hasText: "Select state…" }) }).selectOption({ label: "Missouri" });
+  await page.getByPlaceholder("00000").fill("64105");
+  await expect(panel).toContainText("12 mi from Main Lot");
+  await expect(panel, "no amount before the contact is complete").not.toContainText("$150.00");
+  await page.getByPlaceholder("Full Name").fill("Pat Tester");
+  await page.getByPlaceholder("email@example.com").fill("pat@example.com");
+  await page.getByPlaceholder("(555) 555-5555").fill("5550104477");
+  await expect(panel).toContainText("$150.00");
+  await page.getByRole("button", { name: /See your quote details/ }).click();
+  const row = page.locator(".ssd-dt-row").filter({ hasText: "12 mi from Main Lot" });
+  await expect(row).toContainText("$150.00");
+  expect(quotes.length, "delivery-quote was asked").toBeGreaterThan(0);
+  expect(errors, "page errors").toEqual([]);
+});
+
 // "All designs on this estimate" was a "▾ N versions" toggle nobody opened (Carolyn 2026-09-14).
 // It is always open now: newest first, the one on the plan marked Viewing, the newest marked
 // Latest, and Open loads that version, moves Viewing, puts v= in the URL and scrolls to the plan.

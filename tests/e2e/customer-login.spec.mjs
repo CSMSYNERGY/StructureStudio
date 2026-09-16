@@ -1272,6 +1272,31 @@ async function mountEmbedded(page) {
   }));
 }
 
+// The rep's delivery fee is typed in Services › Delivery since 2026-09-16 (it was Details' "+ Add delivery
+// fee" row). Details lists the fee once there is one, its "+ Add delivery fee" opens that tab, and
+// clearing the fee in the panel takes the Details line away again.
+test("portal Services › Delivery: the fee typed there is the Details line, and Clear removes it", async ({ page }) => {
+  const errors = watchConsole(page);
+  await mountEmbedded(page);
+  await stubBackend(page, { rpc: { list_design_versions: { status: 200, body: [] } } });
+  await boot(page);
+  await pickFirstStyle(page);
+  await sizeSelectOf(page).selectOption({ index: 1 });
+  const panel = page.locator("[data-ss-delivery-panel]");
+  await expect(panel.locator("[data-ss-delivery-fee]")).toBeVisible();
+  await page.getByRole("button", { name: "Show details ▾" }).click();
+  const feeRow = page.locator(".ssd-dt-row").filter({ hasText: "Delivery Fee" });
+  await expect(feeRow).toHaveCount(0);
+  await page.getByRole("button", { name: /\+ Add delivery fee/ }).click();
+  await expect(page.locator('[data-ss-opt-tab="delivery"]')).toHaveAttribute("aria-selected", "true");
+  await panel.locator("[data-ss-delivery-fee]").fill("75");
+  await expect(feeRow).toContainText("$75.00");
+  await expect(feeRow.getByRole("button", { name: "Edit in Services" })).toBeVisible();
+  await panel.getByRole("button", { name: "Clear" }).click();
+  await expect(feeRow).toHaveCount(0);
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
 for (const c of [
   { name: "texted", res: { quoteTexted: true, quoteTextReason: null }, line: `Texted a login link to ${PHONE_SHOWN}.`, shot: "22-portal-success-texted" },
   { name: "not texted", res: { quoteTexted: false, quoteTextReason: "not_active" }, line: "Not texted — texting isn't switched on for your business yet." },
