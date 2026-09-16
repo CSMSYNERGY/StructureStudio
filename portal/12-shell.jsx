@@ -462,7 +462,8 @@ function Dashboard({ session }) {
   // Fetches the entitlement declared above — split from its useState and placed BELOW
   // `viewing` because Babel compiles const to var, so a `viewing` read above its useState
   // is silently `undefined`, never a throw (the canAdminForUrl comment tells that story).
-  // This state is the OPERATOR's OWN entitlement (gateLocked/featureOn depend on that),
+  // This state is the OPERATOR's OWN entitlement (it is what gateEnt/featureOn read on the
+  // operator's own portal; in view-as they read viewedCtx instead — see mirrorView below),
   // but portal-billing is in SS_TENANT_SCOPED_FNS: with view-as armed the invoke wrapper
   // injects targetClientId, so a TOKEN_REFRESHED re-render used to store the VIEWED
   // tenant's entitlement here and lock the operator's own portal after Exit (audit
@@ -536,20 +537,34 @@ function Dashboard({ session }) {
   // a normal user of the CSM Synergy tenant, and narrowing there would lock them out of
   // their own account.
   const supportView = !!viewing && isSupportOp;
+  // TWO HALVES OF THE MIRROR, and they have different audiences (Carolyn 2026-09-15: "that
+  // account should show for me exactly as it shows for that user … if there are parts of the
+  // software they haven't paid for … it shouldn't be accessible to me either").
+  //   * The ACCESS-MAP half (which tabs the per-area rules allow) is support-only, above: a
+  //     platform operator wears the owner's full map in the viewed tenant, which is what the
+  //     owner sees anyway.
+  //   * The ENTITLEMENT half (what the builder has PAID for) applies to EVERY operator in
+  //     view-as. Until this date platform operators carried an `isOperator ||` blanket over
+  //     every paid add-on, the 3D grant and the billing lock, so Carolyn could never see a
+  //     builder's real portal from inside it.
+  const mirrorView = !!viewing;
 
   // ⚠️ A SEPARATE STATE, NOT `tenant` / `entitlement` — and that separation IS the fix from
   // audit 2026-08-20. Both of those hold the OPERATOR'S OWN values and both effects above
   // skip while viewing, precisely because the invoke wrapper injects targetClientId and a
   // TOKEN_REFRESHED re-render would otherwise overwrite them with the viewed tenant's and
   // lock the operator's own portal after Exit. Writing the viewed values into a third place
-  // gets the support view what it needs without reintroducing that bug.
+  // gets view-as what it needs without reintroducing that bug.
   //
   // Null means NOT LOADED, never "nothing" — the readers below fall back to the operator's
   // own values while it is null, so a slow call shows the old behaviour for a moment rather
-  // than flashing an empty portal at Jonathan mid-call.
+  // than flashing an empty portal at Jonathan mid-call. `entitlement: null` INSIDE a loaded
+  // object is the other state — the billing call answered without one — and the paid-feature
+  // readers treat that as OFF (fail closed on a paid feature), while the base gate treats it
+  // as not locked (fail open, portal-billing's own posture).
   const [viewedCtx, setViewedCtx] = useState(null);
   useEffect(() => {
-    if (!supportView) { setViewedCtx(null); return; }
+    if (!mirrorView) { setViewedCtx(null); return; }
     let cancelled = false;
     (async () => {
       try {
@@ -568,7 +583,7 @@ function Dashboard({ session }) {
       } catch (_e) { /* leave null — the fallbacks below keep the portal usable */ }
     })();
     return () => { cancelled = true; };
-  }, [supportView, viewing && viewing.clientId, session.access_token]);
+  }, [mirrorView, viewing && viewing.clientId, session.access_token]);
 
   // Keep the address bar honest about where you actually are.
   //
@@ -592,8 +607,10 @@ function Dashboard({ session }) {
   // `wanted` holds the URL's request until the gates have actually resolved, so an operator
   // whose app_operators row is still in flight is not mistaken for a refusal.
   // A support operator is NOT an admin of the tenant they are viewing — the clamp has to
-  // apply to them so the access map governs which tabs resolve. Platform operators keep the
-  // blanket, which is what stops a subscription lapse locking us out of fixing an account.
+  // apply to them so the access map governs which tabs resolve. Platform operators wear the
+  // owner's full map (which the owner also has), so the clamp has nothing to narrow for them;
+  // what the tenant has PAID for is a separate question, answered by gateEnt below for every
+  // operator alike since 2026-09-15.
   const canAdminForUrl = viewing ? (isOperator && !supportView) : (tenant && tenant !== "none" && (tenant.role === "owner" || tenant.role === "admin"));
   // ⚠️ canProjects belongs in BOTH clamps or a typed /portal/projects gets rewritten away
   // under a team member while the page itself renders correctly — the exact silent,
@@ -1062,14 +1079,15 @@ function Dashboard({ session }) {
   //
   // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
   // featureOn, or the blanket returns with it.
-  // Support reads the VIEWED tenant's grant, not the operator blanket — otherwise a
-  // support account is shown a 3D tab on a builder who was never granted it.
-  const view3dUnlocked = supportView
+  // View-as reads the VIEWED tenant's grant, for every operator (Carolyn 2026-09-15) — the
+  // old `isOperator ||` blanket showed a 3D tab on a builder who was never granted it. A null
+  // viewedCtx is still loading and reads as on, the same rule featureOn uses. On the
+  // operator's own portal the operator's own grant decides, exactly like any tenant.
+  const view3dUnlocked = viewing
     ? (!viewedCtx || (!!viewedCtx.entitlement && Array.isArray(viewedCtx.entitlement.granted)
         && viewedCtx.entitlement.granted.indexOf("view_3d") !== -1))
-    : (isOperator
-      || (!viewing && !!entitlement && Array.isArray(entitlement.granted)
-          && entitlement.granted.indexOf("view_3d") !== -1));
+    : (!!entitlement && Array.isArray(entitlement.granted)
+        && entitlement.granted.indexOf("view_3d") !== -1);
   // The tenant every surface should read and write. Feeds the clientId props and the
   // remount keys; the invoke wrapper handles the edge functions. Null until the tenant
   // resolves — every real read happens below the early returns.
@@ -1095,10 +1113,11 @@ function Dashboard({ session }) {
   // opens a full editable Structure3DViewer. 3D was reachable by a builder who had not been
   // granted it (found 2026-08-21; shipped 2026-08-04 in 81299d9, so it predates the dock).
   //
-  // Operators keep calibration everywhere, which is the point: view3dUnlocked is
-  // `isOperator || (!viewing && granted has view_3d)`, so an operator passes on their own
-  // portal AND while impersonating a tenant. The operator's PUBLIC-page route
-  // (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
+  // Since 2026-09-15 an operator in view-as gets calibration only where the VIEWED tenant
+  // holds a view_3d grant — the same door the owner uses — because view3dUnlocked mirrors
+  // the viewed entitlement rather than an operator blanket. Comp the grant from the admin
+  // console to calibrate a builder who has not been granted 3D. The operator's PUBLIC-page
+  // route (index.html?admin=1) never came through here at all -- showCal3D is `isAdmin ||
   // Boolean(setup3d)` and isAdmin short-circuits it -- so that flow is untouched.
   const setup3d = useMemo(() => (!canAdmin || !view3dUnlocked ? null : {
     // d3VideoFrames rides along from 2026-09-10: the walk-around's frames are persisted beside
@@ -1672,31 +1691,40 @@ function Dashboard({ session }) {
   const shownBusiness = viewing ? (viewing.companyName || viewing.clientId) : tenant.businessName;
   const tenantInitials = String(shownBusiness || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
 
+  // THE entitlement this shell renders from. In view-as it is the VIEWED tenant's (from
+  // viewedCtx, which the effect above fills for every operator); on your own portal it is
+  // your own. Null = still loading. Every gate, banner and paid-feature switch below reads
+  // this and nothing else, so an operator can never see a portal the builder does not have
+  // (Carolyn 2026-09-15). Before this, view-as read the OPERATOR's own entitlement — which
+  // is why every gate carried a `!viewing` / `isOperator ||` escape hatch.
+  const gateEnt = viewing ? (viewedCtx ? viewedCtx.entitlement : null) : entitlement;
   // Billing gate. Locked = the required subscription isn't active. Nav stays fully
   // visible (locked items get a padlock) and the CONTENT area shows the gate whatever
   // they click — so they can see the whole product and always land on how to switch it
-  // on. Never gate an operator viewing someone else's account: the entitlement loaded
-  // here is the operator's own, not the tenant's.
-  const gateLocked = !viewing && !!entitlement && entitlement.locked;
+  // on. An operator viewing a locked tenant sees the same gate; only the operator
+  // consoles (Accounts / Admin / Projects) stay open, so they can leave. Null reads as
+  // NOT locked — never flash the gate at a paying customer while the answer is in flight.
+  const gateLocked = !!gateEnt && gateEnt.locked;
   // Scheduling suite (Build Schedule + Delivery Schedule + Repairs — ONE feature,
-  // decision 12): live for operators (own tenant or view-as) and for tenants whose
-  // entitlement carries schedule_builds. PAY-ONLY (Carolyn 2026-08-04): portal-billing
-  // requires a real active/grace subscription for this feature — the exempt and
-  // free-period blankets deliberately do NOT cover it, so grandfathered tenants see
-  // the teaser like everyone else until they subscribe.
+  // decision 12): live for tenants whose entitlement carries schedule_builds. PAY-ONLY
+  // (Carolyn 2026-08-04): portal-billing requires a real active/grace subscription for
+  // this feature — the exempt and free-period blankets deliberately do NOT cover it, so
+  // grandfathered tenants see the teaser like everyone else until they subscribe.
   // Is a PAID ADD-ON switched on for this tenant? The one rule for every billable
   // feature — nothing reads entitlement.features directly any more.
   //
-  //   * Operators are never gated (their own tenant or view-as), because the entitlement
-  //     loaded here is the OPERATOR's, not the viewed tenant's.
-  //   * entitlement === null means "still loading" and must NOT read as off, or every page
-  //     load would flash an upgrade card at a paying customer (same reason gateLocked
-  //     tolerates null).
+  //   * In view-as the VIEWED tenant's features decide, for every operator. A null viewedCtx
+  //     is STILL LOADING and reads as on: flashing an upgrade card at a paying builder mid
+  //     support call is the worse failure, and the base gate above tolerates null the same
+  //     way. A loaded viewedCtx with no entitlement (the billing call answered without one)
+  //     reads as OFF — fail closed on a paid feature.
+  //   * On your own portal, entitlement === null (still loading) reads as OFF, and that is
+  //     deliberate, not an oversight:
   //
-  // ⚠️ THE TENANT BRANCH SAYS THE OPPOSITE OF THAT SENTENCE, and it must keep saying it until
-  // the server can answer for these keys. Audit 2026-09-06 (F052) proposed making null read as
-  // ON, which is the right shape for a gate that is only presentation — but it is NOT the shape
-  // for `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
+  // ⚠️ THE TENANT BRANCH FAILS CLOSED, and it must keep doing so until the server can answer
+  // for these keys. Audit 2026-09-06 (F052) proposed making null read as ON, which is the
+  // right shape for a gate that is only presentation — but it is NOT the shape for
+  // `schedule_builds` and `quickbooks_sync`, where THIS LINE IS THE ONLY ENFORCEMENT
   // ANYWHERE: portal-billing's PAID_ONLY_FEATURES set decides who may subscribe, and nothing
   // re-checks those two on the actions themselves. Null-reads-on would hand every tenant the
   // paid scheduler and QuickBooks for the whole load window, and permanently after one failed
@@ -1704,12 +1732,14 @@ function Dashboard({ session }) {
   // token. Fail-closed on a paid feature beats fail-open; the real repair is a third state
   // (loading, which shows neither the feature nor its upsell) plus a server-side check for
   // those two keys, and that is a bigger change than a boolean.
-  // Support resolves the VIEWED tenant's subscription — the whole point of the flag. A null
-  // viewedCtx is STILL LOADING, never "off", the same rule the operator branch already uses:
-  // flashing an upgrade card at a paying builder mid support call is the worse failure.
-  const featureOn = (key) => (supportView
+  //
+  // There is NO operator branch any more. `isOperator ||` used to sit here and it meant
+  // Carolyn could not see what a builder actually had (Carolyn 2026-09-15). On the operator's
+  // own tenant the operator's own entitlement decides, like any tenant — structure-studio is
+  // an internal account, so that is everything.
+  const featureOn = (key) => (viewing
     ? (!viewedCtx || !!(viewedCtx.entitlement && viewedCtx.entitlement.features && viewedCtx.entitlement.features[key]))
-    : (isOperator || (!viewing && !!entitlement && !!(entitlement.features && entitlement.features[key]))));
+    : (!!entitlement && !!(entitlement.features && entitlement.features[key])));
   const schedUnlocked = featureOn("schedule_builds");
   // QuickBooks Sync is a paid add-on ($75/mo) that was SOLD BUT NEVER ENFORCED — the tab was
   // gated on canAdmin alone, so any admin used it free and buying it changed nothing. Gated
@@ -1748,15 +1778,17 @@ function Dashboard({ session }) {
   // both or neither, and an approver who cannot raise a change is a normal, intended state.
   // `change_order_approve` has two levels only (none/edit), like `commissions`.
   const coApproveCanEdit = canAdmin || !!(myAccess && myAccess.change_order_approve === "edit");
-  const gateGrace = !viewing && !!entitlement && entitlement.state === "grace";
-  const graceDaysLeft = gateGrace && entitlement.graceEndsAt
-    ? Math.max(0, Math.ceil((Date.parse(entitlement.graceEndsAt) - Date.now()) / 86400000))
+  // Grace / transition banners read gateEnt too: in view-as they are the VIEWED tenant's
+  // countdowns, so an operator sees exactly the warning the builder sees.
+  const gateGrace = !!gateEnt && gateEnt.state === "grace";
+  const graceDaysLeft = gateGrace && gateEnt.graceEndsAt
+    ? Math.max(0, Math.ceil((Date.parse(gateEnt.graceEndsAt) - Date.now()) / 86400000))
     : null;
   // Dated free period: everything works, with a countdown and the real rate. Distinct from
   // grace — nothing has failed here, they simply haven't started paying yet, so the copy must
   // not imply a payment problem.
-  const gateTransition = !viewing && !!entitlement && entitlement.state === "transition";
-  const transEndsAt = gateTransition && entitlement.transitionEndsAt ? Date.parse(entitlement.transitionEndsAt) : null;
+  const gateTransition = !!gateEnt && gateEnt.state === "transition";
+  const transEndsAt = gateTransition && gateEnt.transitionEndsAt ? Date.parse(gateEnt.transitionEndsAt) : null;
   // Counted in whole CALENDAR days in the viewer's own timezone, which is how people read a
   // deadline. An elapsed-milliseconds ceil() says "9 days" when 8 days and 2 hours remain.
   const transDaysLeft = transEndsAt
@@ -1765,7 +1797,12 @@ function Dashboard({ session }) {
   const transDateLabel = transEndsAt
     ? new Date(transEndsAt).toLocaleDateString(undefined, { month: "long", day: "numeric" })
     : null;
-  const rate = (entitlement && entitlement.requiredRate) || null;
+  const rate = (gateEnt && gateEnt.requiredRate) || null;
+  // Who may act on a billing banner / the gate: the tenant's owner or admin, or an operator
+  // in view-as (canAdmin is the operator grant there; isAdmin describes the operator's OWN
+  // client_users row and is routinely "user"). Support operators resolve canAdmin false and
+  // get the "ask your account owner" copy, which is right — they cannot bill.
+  const billingActor = viewing ? canAdmin : isAdmin;
 
   // Never nag an operator who is looking at someone else's account — the prompt is about
   // the signed-in person's own details, and it would read as if it were the tenant's.
@@ -1786,15 +1823,19 @@ function Dashboard({ session }) {
   // showing it would just be a dead end. accounts/admin are operator-gated separately.
   const navHidden = (id) =>
     id !== "accounts" && id !== "admin" && id !== "projects" && !canAdmin && !ssCanSeeTab(id, myAccess);
+  // The operator consoles are never padlocked: they are not part of the viewed tenant's
+  // product, and they are how an operator leaves a locked account (their content renders
+  // outside `!gateLocked` below for the same reason).
+  const gateLockedFor = (id) => gateLocked && id !== "accounts" && id !== "admin" && id !== "projects";
   const navItem = (id, label, badge) => navHidden(id) ? null : (
     <a href={ssPagePath(id, null)} className={activeTab === id ? "active" : ""}
       aria-current={activeTab === id ? "page" : undefined}
-      title={gateLocked ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
+      title={gateLockedFor(id) ? `${label} — activate your account to use this` : (badge ? `${label} — ${badge.toLowerCase()}` : label)}
       onClick={ssNavClick(() => navigate(id))}>
       {ICONS[id]}
       <span className="lbl">{label}</span>
       {badge && <span className="soon">{badge}</span>}
-      {gateLocked && (
+      {gateLockedFor(id) && (
         <svg className="lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-label="locked"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
       )}
     </a>
@@ -2271,7 +2312,7 @@ function Dashboard({ session }) {
                     BillingGate embeds the picker wherever they click), the transition and grace
                     states rely entirely on these two buttons to reach payment, so a non-technical
                     owner concludes the button is broken and may let the grace period lapse. */}
-                {isAdmin && (
+                {billingActor && (
                   <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#1D4ED8", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Choose your plan</button>
                 )}
@@ -2286,13 +2327,18 @@ function Dashboard({ session }) {
                   Your last payment didn't go through.
                   {graceDaysLeft !== null && ` Access continues for ${graceDaysLeft} more day${graceDaysLeft === 1 ? "" : "s"}.`}
                 </span>
-                {isAdmin && (
+                {billingActor && (
                   <button type="button" onClick={() => navigate("settings", "billing")}
                     style={{ ...S.btn("#92400E", "#FFF"), marginLeft: "auto", padding: "6px 12px", fontSize: 12 }}>Update payment</button>
                 )}
               </div>
             )}
-            {gateLocked && <BillingGate reason={entitlement.reason} isAdmin={isAdmin} />}
+            {/* gateEnt, not entitlement: in view-as the operator's own entitlement is never
+                fetched (null), and this used to read `.reason` off it — a throw the moment an
+                operator could be locked. A platform operator gets the embedded plan picker;
+                portal-billing still refuses card entry on a tenant's behalf and only lets an
+                operator subscribe against a card the owner already vaulted. */}
+            {gateLocked && <BillingGate reason={gateEnt.reason} isAdmin={billingActor} />}
             {/* THE PIPEDRIVE-STYLE RECORD PAGE. Carolyn, 2026-08-24: "the view of being in
                 an opportunity and the view of being in a person are different, but they're
                 the same."
@@ -2446,7 +2492,10 @@ function Dashboard({ session }) {
                 />
               )
             )}
-            {!gateLocked && activeTab === "accounts" && isOperator && (
+            {/* Deliberately NOT behind `!gateLocked`, like Admin and Projects below: since view-as
+                mirrors the viewed tenant's billing lock (2026-09-15), the switcher is how an
+                operator LEAVES a locked account. Behind the gate it would trap them there. */}
+            {activeTab === "accounts" && isOperator && (
               <AccountsTab viewing={viewing} onOpen={openAccount}
                 onEditUser={(c, u) => setEditUser({ clientId: c.clientId, companyName: c.companyName, user: u })}
                 usersRefreshKey={usersRefreshKey} />

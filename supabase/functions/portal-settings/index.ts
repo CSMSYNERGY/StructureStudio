@@ -806,16 +806,16 @@ Deno.serve(withErrorLog("portal-settings", async (req: Request) => {
   // Reads are logged best-effort; writes get a durable row (below, per action).
   if (operator) audit(`operator_${action}`).catch(() => {});
 
-  // WHO SKIPS THE PAID-FEATURE CHECKS. A platform operator does, and must: they are CSM
-  // Synergy staff configuring, demoing and repairing an account, and a subscription lapse
-  // cannot be allowed to lock us out of fixing it.
-  //
-  // A SUPPORT operator does NOT, and that is the entire point of the flag. They exist to see
-  // what the builder sees; an exemption here would show them Real-Time Pricing and the CRM on
-  // a tenant that never bought either, which is the opposite of mirroring — and it is the
-  // shape of bug that gets support to confidently talk a customer through a screen the
-  // customer does not have.
-  const entitlementExempt = Boolean(operator && !operator.supportOnly);
+  // NOBODY SKIPS THE PAID-FEATURE CHECKS — not even a platform operator (Carolyn 2026-09-15:
+  // "if there are parts of the software they haven't paid for and it isn't accessible for
+  // them, then it shouldn't be accessible to me either in their account"). Until then an
+  // `entitlementExempt` flag here let CSM Synergy staff use Real-Time Pricing, the CRM and
+  // QuickBooks on a tenant that never bought them, so an operator could confidently talk a
+  // customer through a screen the customer did not have. The accepted cost is that a lapsed
+  // subscription now blocks operator repairs on those three settings surfaces until the
+  // tenant pays or the feature is comped (client_feature_grants, where the plan allows it).
+  // `internal_account` still short-circuits inside hasPaidFeature, so our own tenant is
+  // unaffected.
 
   // ══ ROW SCOPE — contacts:'own' (migration 193) ═══════════════════════════════════════
   //
@@ -1955,11 +1955,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //
   // ENTITLEMENT, server-side. on_demand_pricing is PAY-ONLY (portal-billing) and has been
   // on sale since migration 124, so a direct POST from a tenant who never bought it must
-  // 403 here regardless of what the browser hides. Operators pass: they set the feature
-  // up FOR tenants (the same isOperator bypass featureOn() has). Errors reading billing
-  // fail CLOSED — a paid gate that fails open is no gate (the wallet's posture).
+  // 403 here regardless of what the browser hides. Operators are checked the same way since
+  // 2026-09-15 (see the note above the row scope). Errors reading billing fail CLOSED — a
+  // paid gate that fails open is no gate (the wallet's posture).
   const RTP_ACTIONS = new Set(["rtp_data", "save_rtp_material", "delete_rtp_material", "reorder_rtp_materials", "save_rtp_bom", "save_rtp_overhead", "import_rtp_workbook", "set_rtp_enabled"]);
-  if (RTP_ACTIONS.has(action) && !entitlementExempt) {
+  if (RTP_ACTIONS.has(action)) {
     let paid = false;
     try { paid = await hasPaidFeature(admin, clientId, "on_demand_pricing"); }
     catch (e) { return dbFail(req, clientId, "check your Real-Time Pricing subscription", e); }
@@ -2006,10 +2006,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // — same shape as the per-area CONTACT SCOPE check that sits next to it.
   const crmGated = action.startsWith("crm_") &&
     !(action === "crm_record" && payload?.kind === "design");
-  // Default true so an operator (entitlementExempt) and every non-CRM action keep today's
-  // behaviour without paying for a billing read they do not need.
+  // Default true so every non-CRM action keeps today's behaviour without paying for a
+  // billing read it does not need. Operators are resolved like everyone else (2026-09-15).
   let crmPaid = true;
-  if (!entitlementExempt && (crmGated || action === "crm_record")) {
+  if (crmGated || action === "crm_record") {
     try { crmPaid = await hasPaidFeature(admin, clientId, "crm"); }
     catch (e) { return dbFail(req, clientId, "check your CRM subscription", e); }
     if (crmGated && !crmPaid) return json({ error: "The built-in CRM is not part of your subscription - add it under Settings -> Billing." }, 403);
@@ -2036,7 +2036,6 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // down, which are reached through send_invoice rather than through a qbo_* action.
   let qboPaidCache: boolean | null = null;
   const qboEntitled = async (): Promise<boolean> => {
-    if (entitlementExempt) return true;
     if (qboPaidCache === null) qboPaidCache = await hasPaidFeature(admin, clientId, "quickbooks_sync");
     return qboPaidCache;
   };
@@ -2056,7 +2055,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return false;
     }
   };
-  if (QBO_ACTIONS.has(action) && !entitlementExempt) {
+  if (QBO_ACTIONS.has(action)) {
     let paid = false;
     try { paid = await qboEntitled(); }
     catch (e) { return dbFail(req, clientId, "check your QuickBooks subscription", e); }

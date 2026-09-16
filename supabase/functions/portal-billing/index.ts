@@ -99,8 +99,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
   // Auth + tenant resolution, shared with portal-settings / sync-design-status.
-  // requireBilling: an operator additionally needs the can_bill capability here, because
-  // every non-read action on this function moves real money against the tenant's card.
+  // requireBilling: an operator additionally needs the can_bill capability for every WRITE
+  // here, because every non-read action on this function moves real money against the
+  // tenant's card. `status` (GATES: "open") is a read and any operator may make it — it is
+  // how view-as learns what the viewed tenant is entitled to (2026-09-15); the commercial
+  // half of its answer is filtered below by `mine`.
   const admin = createClient(supabaseUrl, serviceKey);
   const r = await resolveTenant(req, admin, {
     gates: GATES,
@@ -509,7 +512,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
     // the portal, and withholding it would lock the product instead of the tab. Nobody but
     // an owner gets the commercial detail: what this business pays, what discount it has,
     // whether a card is on file, or the checkout keys to put a new one there.
-    const mine = canRead("settings_billing");
+    // An operator without can_bill can READ status since 2026-09-15 (resolveTenant refuses
+    // them writes only). Their area map is the owner's, so canRead alone would say yes;
+    // the can_bill axis is checked here explicitly so the money fields stay with people
+    // who may act on them. Support operators already resolve settings_billing to "none".
+    const mine = canRead("settings_billing") && !(operator && !operator.canBill);
 
     // WALLET. Behind the same field filter as the rest of the commercial detail: a
     // balance is what this business has paid for, so it belongs with `discount` and
