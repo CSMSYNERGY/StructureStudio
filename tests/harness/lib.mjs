@@ -18,9 +18,9 @@ import { chromium } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bypassGate } from "../e2e/helpers.mjs";
+import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
 
-export { bypassGate };
+export { bypassGate, showOptTab, revealTool };
 export const REF = "jzeamjbhdrsbygdnphbm";
 export const BASE = process.env.SS_BASE || "http://127.0.0.1:8125";
 

@@ -17,7 +17,7 @@
 //
 // PW_SHOTS=<dir> also saves screenshots of each state (for Carolyn's review).
 import { test, expect } from "@playwright/test";
-import { CLIENT, watchConsole } from "./helpers.mjs";
+import { CLIENT, watchConsole, revealTool } from "./helpers.mjs";
 
 // 555-01xx is reserved for fiction, so even a stub that leaked could never reach a person.
 const PHONE10 = "5550104477";
@@ -117,7 +117,7 @@ async function boot(page, path = `/?client=${CLIENT}`) {
 
 // Working the canvas is what pops the gate: arming any tool does it.
 async function armATool(page) {
-  await page.getByRole("button", { name: /Workbench|Loft Area|Window wall$/ }).first().click();
+  await (await revealTool(page, /Workbench|Loft Area|Window wall$/)).click();
 }
 
 // The test tenant's catalog is LIVE and moves under the suite: on 2026-09-15 pw-demo-barns went

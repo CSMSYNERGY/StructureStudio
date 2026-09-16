@@ -15,7 +15,7 @@
 //   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventStyle.mjs                    (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, bypassGate, BASE } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, bypassGate, BASE, revealTool } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES, pickStyle, chooseCladding } from "./gableProbe.mjs";
 
 const W = 12, L = 32, SIZE = `${W}x${L}`;
@@ -51,7 +51,7 @@ async function clickSouth(page, xSvg) {
 }
 async function placeVentAt(page, xSvg) {
   const before = new Set(((await readItems(page)) || []).map((i) => i.id));
-  await page.getByRole("button", { name: /Standard Vent/ }).first().click();
+  await (await revealTool(page, /Standard Vent/)).click();
   await settle(page, 250);
   const p = await clickSouth(page, xSvg);
   await page.mouse.click(p.x, p.y);

@@ -18,7 +18,7 @@
 // names no client: Outlet 18" (package), Light Switch 48", Light (ceiling), Flood Light 120"
 // (wall), Ceiling Fan (ceiling), and the builder's shelving with a deliberately LONG shelf name.
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, recordRefusals, refusalsSince, waitNoRefusal, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir } from "./lib.mjs";
+import { launch, stubSupabase, recordRefusals, refusalsSince, waitNoRefusal, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool } from "./lib.mjs";
 
 const CLIENT = "harness-electrical";
 const W = 12, L = 24;
@@ -74,7 +74,7 @@ async function northWall(page, alongFt) {
 // wall"), so a /Shelving/ locator stops matching after the first placement.
 async function armSlab(page, label) {
   if (await page.getByText("Add an electrical item").count()) await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: /^📚/ }).first().click();
+  await (await revealTool(page, /^📚/)).click();
   await settle(page, 300);
   await page.getByText(label, { exact: true }).last().click();
   await settle(page, 300);
@@ -107,7 +107,7 @@ export async function main() {
     await settle(page, 600);
 
     // ── 1. The package lays out its outlets ──────────────────────────────────
-    await page.getByRole("button", { name: /Electrical Package/ }).first().click();
+    await (await revealTool(page, /Electrical Package/)).click();
     await settle(page, 600);
     let items = await readItems(page);
     const outlets = () => items.filter((i) => i.type === "e-out");
@@ -177,7 +177,7 @@ export async function main() {
     {
       await waitNoRefusal(page);
       const t0 = await page.evaluate(() => Date.now());
-      await page.getByRole("button", { name: /Electrical Items/ }).first().click();
+      await (await revealTool(page, /Electrical Items/)).click();
       await settle(page, 300);
       await page.getByText("Flood Light", { exact: true }).first().click();
       await settle(page, 300);

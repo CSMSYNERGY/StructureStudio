@@ -19,7 +19,7 @@
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/elec3d.mjs                  (exit 0 = every check held)
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, recordRefusals, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir } from "./lib.mjs";
+import { launch, stubSupabase, recordRefusals, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool } from "./lib.mjs";
 import { CONFIG as BASE_CONFIG, chooseSize } from "./electrical.mjs";
 
 const W = 12, L = 24, T = 0.3;
@@ -63,7 +63,7 @@ async function insidePoint(page, xFt, yFt) {
 async function placeElec(page, name, type, pointFn) {
   if (await page.getByText("Add an electrical item").count()) await page.keyboard.press("Escape");
   const before = ((await readItems(page)) || []).filter((i) => i.type === type).length;
-  await page.getByRole("button", { name: /Electrical Items/ }).first().click();
+  await (await revealTool(page, /Electrical Items/)).click();
   await settle(page, 300);
   await page.getByText(name, { exact: true }).first().click();
   await settle(page, 300);
@@ -76,7 +76,7 @@ async function placeElec(page, name, type, pointFn) {
 
 async function placeBench(page, alongFt) {
   if (await page.getByText("Add an electrical item").count()) await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: /^📚/ }).first().click();
+  await (await revealTool(page, /^📚/)).click();
   await settle(page, 300);
   await page.getByText("Workbench", { exact: true }).last().click();
   await settle(page, 300);
@@ -230,7 +230,7 @@ export async function main() {
     await settle(page, 600);
 
     // ── Place everything in 2D ────────────────────────────────────────────────
-    await page.getByRole("button", { name: /Electrical Package/ }).first().click();
+    await (await revealTool(page, /Electrical Package/)).click();
     await settle(page, 600);
     const bench = await placeBench(page, 6);
     ok("workbench placed on the north wall (the pick control)", bench && bench.wall === "north");

@@ -19,7 +19,7 @@
 //   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventMove.mjs                     (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, recordRefusals, waitNoRefusal, refusalsSince } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, recordRefusals, waitNoRefusal, refusalsSince, revealTool } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES as GABLE_FIXTURES, pickStyle, chooseCladding, openEditor, sceneMeshes, shot } from "./gableProbe.mjs";
 
 const W = 12, L = 32, H = 7.5;
@@ -73,7 +73,7 @@ async function wallPoint(page, wall, alongFt, w, l) {
 }
 async function placeOnPlan(page, toolName, wall, alongFt, w, l) {
   const before = new Set(((await readItems(page)) || []).map((i) => i.id));
-  await page.getByRole("button", { name: new RegExp(toolName) }).first().click();
+  await (await revealTool(page, new RegExp(toolName))).click();
   await settle(page, 250);
   const p = await wallPoint(page, wall, alongFt, w, l);
   await page.mouse.click(p.x, p.y);

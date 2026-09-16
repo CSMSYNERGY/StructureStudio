@@ -2,10 +2,11 @@
 // collision refusals, and the window-overlap rule. Real mouse clicks (the app snaps by the
 // click's client coordinates, so a synthetic click with the wrong CTM lands elsewhere).
 import { test, expect } from "@playwright/test";
-import { CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint } from "./helpers.mjs";
+import { CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool } from "./helpers.mjs";
 
 async function arm(page, label) {
-  await page.getByRole("button", { name: label }).first().click();
+  // revealTool opens the option tab the tool lives on (section 03 is tabbed since 2026-09-16).
+  await (await revealTool(page, label)).click();
   await page.waitForTimeout(250); // React commit; a click in the same tick places the previous tool
 }
 async function clickPlan(page, fx, fy) {
@@ -351,7 +352,7 @@ test("style bar is one row of N tiles: 8 by default, the builder's 5, bad values
 
 // Carolyn 2026-09-14: "place or decline" moves BELOW Additional options, just above the floor-plan
 // toolbar, in a green callout. Order in the DOM is the whole requirement, so that is what is asserted.
-test("the Included callout sits after Additional options and before Clear floorplan", async ({ page }) => {
+test("the Included callout sits after the option tabs and before Clear floorplan", async ({ page }) => {
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   const o = await routeLayout(page);
@@ -372,13 +373,49 @@ test("the Included callout sits after Additional options and before Clear floorp
   await expect(callout).toContainText(/Included/i);
   const order = await page.evaluate(() => {
     const inc = document.querySelector("[data-ss-included]");
-    // Redesign S3: the sub-head reads "Additional options" (no colon) and carries a hook attribute.
+    // The option tabs block carries the hook the "Additional options" sub-head used to (2026-09-16).
     const lbl = document.querySelector("[data-ss-additional-options]");
     const clear = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Clear floorplan");
     const after = (a, b) => !!(a && b && (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
     return { label: !!lbl, clear: !!clear, afterLabel: after(lbl, inc), beforeClear: after(inc, clear) };
   });
   expect(order).toEqual({ label: true, clear: true, afterLabel: true, beforeClear: true });
+  expect(errors, "page errors").toEqual([]);
+});
+
+// Section 03 is a tab bar since 2026-09-16 (Building | Exterior | Interior | Services). Before it,
+// Insulation, Foundation and the Electrical Package were only drawn when a builder's palette had TWO
+// or more groups, so a builder selling only interior items silently lost all three. Here the palette
+// is one group (interior only: no catalog doors, windows, ramps or electrical items) and every one of
+// the three must still be offered, each on its own tab, and a tab switch must show its options.
+test("a builder with a single palette group still gets Insulation, Foundation and the package", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => {
+    j.layoutItems = Object.fromEntries(Object.entries(j.layoutItems || {}).filter(([, c]) => c && c.group === "interior"));
+    j.electricalItems = [];
+    j.foundationItems = [{ id: "gravel_pad", rate: 2.5, basis: "sqft_option", label: null, charged: true }];
+  };
+  // Registered after routeLayout, so it answers first: no catalog doors, windows or ramps.
+  await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], ramp: { enabled: false } }) }));
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  const strip = page.locator("[data-ss-opt-strip]");
+  await expect(strip).toBeVisible();
+  const tabs = await strip.locator("[data-ss-opt-tab]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-opt-tab")));
+  expect(tabs, "no Exterior tabs without doors or windows").toEqual(expect.not.arrayContaining(["doors", "windows"]));
+  expect(tabs).toEqual(expect.arrayContaining(["interior", "electrical", "insulation", "foundation"]));
+  await strip.locator('[data-ss-opt-tab="foundation"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="services"]')).toContainText("Gravel pad");
+  await strip.locator('[data-ss-opt-tab="electrical"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="interior"]').getByRole("button", { name: /Electrical Package/ })).toBeVisible();
+  await strip.locator('[data-ss-opt-tab="insulation"]').click();
+  await expect(strip.locator('[data-ss-opt-panel="interior"]')).toContainText(/Floor|Walls|Roof/);
   expect(errors, "page errors").toEqual([]);
 });
 

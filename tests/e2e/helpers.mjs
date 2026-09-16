@@ -48,6 +48,26 @@ export async function bypassGate(page, clientId) {
   }, clientId);
 }
 
+// Section 03's tools live on option tabs (Carolyn 2026-09-16): only each group's chosen tab is
+// rendered, so a tool on a closed tab is not in the page at all. Open a tab by its key
+// (data-ss-opt-tab); a no-op where there are no tabs, e.g. a locked plan.
+export async function showOptTab(page, key) {
+  const tab = page.locator(`[data-ss-opt-tab="${key}"]`).first();
+  if (await tab.count()) { await tab.click(); await page.waitForTimeout(150); }
+}
+// The tool button named `name` (a string or RegExp, matched like getByRole), after opening
+// whichever option tab holds it. Tabs are role="tab", so they never match a tool's name.
+export async function revealTool(page, name) {
+  const btn = page.getByRole("button", { name }).first();
+  if (await btn.isVisible().catch(() => false)) return btn;
+  const keys = await page.locator("[data-ss-opt-tab]").evaluateAll((els) => els.map((e) => e.getAttribute("data-ss-opt-tab")));
+  for (const k of keys) {
+    await showOptTab(page, k);
+    if (await btn.isVisible().catch(() => false)) return btn;
+  }
+  return btn;
+}
+
 // Collect console errors for the lifetime of a page; ignore third-party noise we do not own.
 export function watchConsole(page) {
   const errors = [];

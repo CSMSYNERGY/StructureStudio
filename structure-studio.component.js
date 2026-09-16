@@ -835,6 +835,31 @@ function ShelfPicker({ items, itemTypes, rates, showPricing, onPick, onCancel })
 // opens this modal, and picking a card arms the tool for THAT item.
 const ELEC_ITEM_PICKER_CFG = { label: "Electrical Items", color: "#7C3AED", icon: "\u26a1", isElecItemPicker: true, group: "electrical" };
 
+// ── Section 03's option tabs (Carolyn 2026-09-16) ─────────────────────────────────────────
+// The options area is the portal's Settings > Options tab bar in miniature: each group's label over
+// its tabs, and under every group ONE panel showing its chosen tab, so a customer can have Wall
+// height, Doors and Foundation open side by side. Carolyn pointed at Settings > Options and asked for
+// "the same look as this"; Exterior keeps two tabs rather than Settings' four, so no tab holds a single
+// button (Ahsan, same day). Tab KEYS are what the markup carries (data-ss-opt-tab), so tests and CSS
+// never match display text.
+const SS_OPT_GROUPS = [
+  { key: "building", label: "Building", tabs: [["wallHeight", "Wall height"]] },
+  { key: "exterior", label: "Exterior", tabs: [["doors", "Doors"], ["windows", "Windows"]] },
+  { key: "interior", label: "Interior", tabs: [["interior", "Interior items"], ["electrical", "Electrical"], ["insulation", "Insulation"]] },
+  { key: "services", label: "Services", tabs: [["foundation", "Foundation"]] },
+];
+// Which tab a palette tool lives on. Its palette group decides when it has one. A tool without one
+// (a tenant config from before palette groups) goes by what it is, and anything still unrecognised
+// lands in Interior items: a dropped tool is invisible, and invisible is the worst failure here.
+function ssOptTabOf(key, cfg) {
+  const c = cfg || {};
+  if (c.group && PALETTE_GROUP_LABEL[c.group]) return c.group;
+  if (c.doorSnap || c.isDoorPicker || c.isFixtureDoor || /door/i.test(String(key || ""))) return "doors";
+  if (c.isElecItemPicker || c.electricalItemId) return "electrical";
+  if (c.isWindowPicker || c.includedFixture || /window|vent/i.test(String(key || ""))) return "windows";
+  return "interior";
+}
+
 // Which price applies is decided by ONE thing: whether the customer has the package. Carolyn:
 // "One is for this additional item to be added TO the existing package and the other is that
 // there is no package and they are selling this item individually." A builder charges less
@@ -10693,33 +10718,40 @@ const SSD_CSS = [
   // row of mixed chips lines up and nothing grows. min-height, so a catalogue name too long for a narrow
   // card wraps inside its chip instead of pushing the page sideways.
   '.ssd-frame{--ssd-chip-h:28px}',
-  // The palette row is a wrapping flex row; the sub-head, the grid and the callout each take a full line.
-  '.ssd-sechead.ssd-pal-sub{flex:0 0 100%;margin:0 0 4px}',
-  // A WRAPPING FLEX ROW, not a grid. A grid keeps its tracks on the last row, so any tenant whose
-  // options do not divide by the column count left a card stranded beside empty space — with the four
-  // demo groups, Insulation sat alone with 1115px of nothing to its right on a 1600 designer. Flex
-  // items on the last row share out what is left, so the row ends flush whatever a tenant has.
-  // The basis is a quarter minus the gap, plus 3px of slack so a sub-pixel width can never drop the
-  // fourth card onto a line of its own; flex-grow then spends the remainder.
-  '.ssd-og{flex:0 0 100%;min-width:0;display:flex;flex-wrap:wrap;gap:11px;align-items:stretch}',
-  '.ssd-og > .ssd-ogc{flex:1 1 calc(25% - 9px)}',
-  // lg (a 1000–1179 designer): four cards only when each is at least 250px wide, else three, so a label like
-  // "Rough Opening (Window)" with its WALL tag stays on one line on a 1024 laptop.
-  '.ssd-frame[data-ssd-bp="lg"] .ssd-og > .ssd-ogc{flex:1 1 250px}',
-  '.ssd-frame[data-ssd-bp="md"] .ssd-og > .ssd-ogc,.ssd-frame[data-ssd-bp="sm"] .ssd-og > .ssd-ogc{flex:1 1 calc(50% - 7px)}',
-  '.ssd-frame[data-ssd-bp="xs"] .ssd-og > .ssd-ogc{flex:1 1 100%}',
-  '.ssd-og > .is-solo{flex-basis:100%}',
-  // Insulation and Foundation are SELECTIONS rather than placeable tools, and the mockup draws them as
-  // a full-width bar under the cards: the heading inline on the left, one line of chips beside it. Only
-  // on a wide designer — narrower than xl the bar would wrap into something taller than the card it
-  // replaced, so there they stay cards like the rest. At lg the card is already wide enough for the
-  // type segment to sit beside the areas instead of taking a line of its own.
-  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar{flex-basis:100%;display:flex;align-items:center;gap:14px;padding:9px 13px}',
-  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar > .ssd-ogc-t{flex:0 0 auto;margin:0}',
-  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar > .ssd-ogc-b{flex:1 1 auto}',
-  '.ssd-frame[data-ssd-bp="xl"] .ssd-og > .is-bar .ssd-ogc-line,.ssd-frame[data-ssd-bp="lg"] .ssd-og > .is-bar .ssd-ogc-line{flex:0 0 auto}',
+  // ── The option tabs (Carolyn 2026-09-16: "the same look as" Settings > Options) ──
+  // A grid of group COLUMNS: the group's label over its tabs, then that group's panel. Each column is a
+  // subgrid spanning two rows, so every header shares one row height and every panel starts on one line
+  // whichever group's tabs are tallest, and each header's rule runs into the gap so the tabs read as one
+  // strip, as they do in Settings. A column is never narrower than its row of tabs, which does not wrap on a
+  // laptop; otherwise the columns share the width equally, so switching a tab never moves the column beside
+  // it (panels are min-width:0 and wrap their chips). Two by two at tablet widths; on a phone the headers
+  // flow as one wrapping strip and only the group tapped last (.is-focus) shows its panel, so the plan stays
+  // near the top of the screen.
+  '.ssd-op{flex:0 0 100%;min-width:0;display:grid;grid-template-columns:repeat(var(--ssd-opn,4),minmax(auto,1fr));column-gap:11px;row-gap:0}',
+  '.ssd-opc{display:grid;grid-row:span 2;grid-template-rows:subgrid}',
+  '.ssd-oph{display:flex;flex-direction:column;justify-content:flex-end;border-bottom:2px solid var(--ss-line-card)}',
+  '.ssd-opc:not(:last-child) > .ssd-oph{margin-right:-11px;padding-right:11px}',
+  '.ssd-oph-t{padding:0 2px;font-size:9.5px;font-weight:800;line-height:1.3;letter-spacing:.13em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
+  '.ssd-oph-tabs{display:flex;flex-wrap:nowrap;gap:2px}',
+  '.ssd-opt{font-family:inherit;flex:0 0 auto;margin:0 0 -2px;padding:8px 9px 7px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--ss-muted);font-size:12.5px;font-weight:700;line-height:1.2;letter-spacing:.2px;white-space:nowrap;cursor:pointer}',
+  '.ssd-opt:hover{color:var(--ss-ink)}',
+  '.ssd-opt.is-on{color:var(--ss-primary);border-bottom-color:var(--ss-primary)}',
+  '.ssd-opt:focus-visible{outline:2px solid var(--ss-primary-line);outline-offset:-2px}',
+  '.ssd-opp{margin-top:9px}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-op,.ssd-frame[data-ssd-bp="sm"] .ssd-op{grid-template-columns:repeat(2,minmax(0,1fr))}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-op[data-ssd-opn="1"],.ssd-frame[data-ssd-bp="sm"] .ssd-op[data-ssd-opn="1"]{grid-template-columns:minmax(0,1fr)}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-opc,.ssd-frame[data-ssd-bp="sm"] .ssd-opc{min-width:0}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-opc:nth-child(2n) > .ssd-oph,.ssd-frame[data-ssd-bp="sm"] .ssd-opc:nth-child(2n) > .ssd-oph{margin-right:0;padding-right:0}',
+  '.ssd-frame[data-ssd-bp="md"] .ssd-opc:nth-child(n+3) > .ssd-oph,.ssd-frame[data-ssd-bp="sm"] .ssd-opc:nth-child(n+3) > .ssd-oph{margin-top:13px}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-oph-tabs{flex-wrap:wrap}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-op{display:flex;flex-wrap:wrap;align-items:flex-end;column-gap:14px;row-gap:4px}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-opc{display:contents}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-oph{margin:0;padding:0;border-bottom:0}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-oph-tabs{flex-wrap:wrap}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-opp{order:1;flex:0 0 100%;display:none;margin-top:6px}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-opc.is-focus > .ssd-opp{display:block}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-opc:not(.is-focus) .ssd-opt.is-on{color:var(--ss-ink);border-bottom-color:var(--ss-line)}',
   '.ssd-ogc{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
-  '.ssd-ogc-t{display:block;margin:0 0 10px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.ssd-ogc-b{display:flex;flex-wrap:wrap;align-items:center;gap:7px;min-width:0}',
   '.ssd-ogc-line{flex:0 0 100%;display:flex;min-width:0}',
   // Option chip: the tool buttons (ssToolBtn), the electrical package and the foundation toggles.
@@ -10787,14 +10819,11 @@ const SSD_CSS = [
   // the redesign (Center and Rotate were 27, Remove 28, Note and Line 33), so the whole bar lines up at
   // the smallest of them and nothing grows. A segmented control in the bar is 26 overall, borders in.
   '.ssd-frame{--ssd-tb-h:26px}',
-  // Wall height hard left, the actions hard right and ending with 3D (Carolyn 2026-09-02: "same line as
-  // the 3D button"). Both halves wrap, so a phone stacks them instead of pushing the page sideways.
+  // The actions hard right, ending with 3D (Carolyn 2026-09-02). Wall height left the bar for Building's tab
+  // (Carolyn 2026-09-16). The group wraps, so a phone stacks it instead of pushing the page sideways.
   '.ssd-tb{flex:0 0 100%;min-width:0;box-sizing:border-box;display:flex;flex-wrap:wrap;align-items:center;gap:9px;margin-top:7px;padding:9px 13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
   '.ssd-tb.is-empty{display:none}',
-  '.ssd-tb-l{display:inline-flex;flex-wrap:wrap;align-items:center;gap:10px;min-width:0;max-width:100%}',
-  '.ssd-tb-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-primary);white-space:nowrap}',
-  // The action group takes the rest of the line (flex-basis 0) and wraps inside itself. Its minimum is its
-  // widest control, so the bar only drops it under the wall height when not even that fits (a phone).
+  // The action group takes the rest of the line (flex-basis 0) and wraps inside itself.
   '.ssd-tb-r{flex:1 1 0px;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:9px;max-width:100%}',
   '.ssd-frame[data-ssd-bp="lg"] .ssd-tb,.ssd-frame[data-ssd-bp="lg"] .ssd-tb-r{column-gap:7px}',
   '.ssd-seg.is-tb .ssd-seg-b{height:calc(var(--ssd-tb-h) - 2px)}',
@@ -10828,7 +10857,6 @@ const SSD_CSS = [
   // A selected vent adds six controls (the zone pair, ▲ ▼ and the readout). Tighter air while they show, at
   // the same heights and type, keeps that on one line on a 1250px designer as it was before the redesign.
   '.ssd-tb.is-dense,.ssd-tb.is-dense .ssd-tb-r{column-gap:5px}',
-  '.ssd-tb.is-dense .ssd-tb-l{gap:7px}',
   '.ssd-tb.is-dense .ssd-tb-btn,.ssd-tb.is-dense .ssd-tool.is-tb,.ssd-tb.is-dense .ssd-seg-b{padding:0 8px}',
   '.ssd-tb.is-dense .ssd-tb-btn.is-arrow{padding:0 7px}',
   '.ssd-tb.is-dense .ssd-tb-div{margin:0}',
@@ -13799,6 +13827,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [viewingVersion, setViewingVersion] = useState(null);
   // "Additional options" (custom line items) is collapsed by default behind a subtle toggle.
   const [additionalOpen, setAdditionalOpen] = useState(false);
+  // Section 03's option tabs: the chosen tab per group ({ exterior: "windows", … }) plus `focus`, the
+  // group tapped last, which is the one panel a phone shows. View state only — never in `sel`, never
+  // saved. A group with no choice yet, or whose choice has nothing to offer now, shows its first tab.
+  const [ssOptTab, setSsOptTab] = useState({});
   // The stepper rail / progress bar's current step, reported by SSStepWatcher from the scroll
   // position. null = not measured yet, which shows the first step that isn't done as current.
   const [ssStepCur, setSsStepCur] = useState(null);
@@ -20012,34 +20044,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   className="ssd-incl-x">✕</button>
               </span>
             ); };
-          // Sections (Doors · Windows · Interior · …). An item carrying no `group` — which is
-          // every item in every tenant config until it is regenerated — lands in the unlabelled
-          // tail, and a list with NO groups at all returns null so the row renders exactly as it
-          // always has. An unrecognised group name also falls to the tail rather than being
-          // filtered away: a dropped tool is invisible, and invisible is the worst failure here.
-          const sectionsOf = (list) => {
-            if (!list.some(([, c]) => c && c.group)) return null;
-            const by = {};
-            list.forEach((e) => {
-              const g = (e[1] && e[1].group) || "";
-              const k = PALETTE_GROUP_LABEL[g] ? g : "";
-              (by[k] = by[k] || []).push(e);
-            });
-            const out = [];
-            // The group KEY rides along with the label so a cell can be recognised without
-            // string-matching its display text — the Monday label-rename lesson, in miniature.
-            PALETTE_GROUP_ORDER.forEach((g) => { if (by[g] && by[g].length) out.push([PALETTE_GROUP_LABEL[g], by[g], g]); });
-            // In the split every cell carries a heading, so the ungrouped tail (Note, Line) gets
-            // one too rather than sitting under a blank space.
-            if (by[""] && by[""].length) out.push(["Annotate", by[""]]);
-            return out;
-          };
-          // Groups are cards in one wrapping row (redesign S3): 4 across a wide designer, 2 at tablet
-          // widths, 1 on a phone — the old two-column split with a rule down the centre never collapsed,
-          // so a phone got two cramped columns. Order: the groups, the electrical-only card, Insulation,
-          // Foundation. The breakpoint is the frame's data-ssd-bp, so the widths are classes, and the
-          // last row shares out whatever is left rather than stranding a card beside empty space.
-          // Insulation and Foundation carry is-bar: on a wide designer they are a full-width strip.
           // One type for the whole building, then the areas — which is how it is sold. The data
           // model keeps a type PER AREA so a mixed job stays expressible, but offering that in
           // the UI would mean three type pickers in one grid cell.
@@ -20063,32 +20067,29 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { ...p, insulationType: t, insulation: cur.filter((s) => keep.indexOf(s.area) !== -1).map((s) => ({ ...s, type: t })) };
           });
           const insAll = insAreas.length > 1 && insAreas.every(insHas);
-          const insCell = insAreas.length ? (
-            <div key="ss-insulation" className="ssd-ogc is-bar">
-              <span className="ssd-ogc-t">Insulation</span>
-              <div className="ssd-ogc-b">
-                {insTypes.length > 1 && (
-                  <div className="ssd-ogc-line">
-                    <div className="ssd-seg">
-                      {insTypes.map((t) => (
-                        <button key={t} onClick={() => insSetType(t)} aria-pressed={insType === t}
-                          className={insType === t ? "ssd-seg-b is-on" : "ssd-seg-b"}>{INSULATION_TYPE_LABEL[t] || t}</button>
-                      ))}
-                    </div>
+          const insBody = insAreas.length ? (
+            <>
+              {insTypes.length > 1 && (
+                <div className="ssd-ogc-line">
+                  <div className="ssd-seg">
+                    {insTypes.map((t) => (
+                      <button key={t} onClick={() => insSetType(t)} aria-pressed={insType === t}
+                        className={insType === t ? "ssd-seg-b is-on" : "ssd-seg-b"}>{INSULATION_TYPE_LABEL[t] || t}</button>
+                    ))}
                   </div>
-                )}
-                {insAreas.map((a) => (
-                  <button key={a} onClick={() => insToggle(a)} aria-pressed={insHas(a)}
-                    className={insHas(a) ? "ssd-cov is-on" : "ssd-cov"}>{INSULATION_AREA_LABEL[a]}</button>
-                ))}
-                {insAreas.length > 1 && (
-                  <button onClick={() => setSel((p) => ({ ...p, insulation: insAll ? [] : insAreas.map((a) => ({ type: insType, area: a })) }))}
-                    className={insAll ? "ssd-cov is-all is-on" : "ssd-cov is-all"}>
-                    {insAll ? "Clear" : "Entire building"}
-                  </button>
-                )}
-              </div>
-            </div>
+                </div>
+              )}
+              {insAreas.map((a) => (
+                <button key={a} onClick={() => insToggle(a)} aria-pressed={insHas(a)}
+                  className={insHas(a) ? "ssd-cov is-on" : "ssd-cov"}>{INSULATION_AREA_LABEL[a]}</button>
+              ))}
+              {insAreas.length > 1 && (
+                <button onClick={() => setSel((p) => ({ ...p, insulation: insAll ? [] : insAreas.map((a) => ({ type: insType, area: a })) }))}
+                  className={insAll ? "ssd-cov is-all is-on" : "ssd-cov is-all"}>
+                  {insAll ? "Clear" : "Entire building"}
+                </button>
+              )}
+            </>
           ) : null;
           // ── Foundation (237) ──────────────────────────────────────────────────────
           // One toggle per offered item (internal-only ones only in the rep designer), and for
@@ -20102,34 +20103,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             return { ...p, foundation: cur.some((f) => f.id === id) ? cur.filter((f) => f.id !== id) : [...cur, { id, qty: null }] };
           });
           const fdSetQty = (id, v) => setSel((p) => ({ ...p, foundation: (Array.isArray(p.foundation) ? p.foundation : []).map((f) => (f.id === id ? { ...f, qty: v === "" ? null : v } : f)) }));
-          const fdCell = fdOffered.length ? (
-            <div key="ss-foundation" className="ssd-ogc is-bar">
-              <span className="ssd-ogc-t">Foundation</span>
-              <div className="ssd-ogc-b">
-                {fdOffered.map((o) => {
-                  const en = fdEntry(o.id);
-                  const on = !!en;
-                  const basis = String(o.basis || "each");
-                  const word = basis === "each" ? "Qty" : basis === "lineal_ft" ? "Feet" : basis === "sqft_option" ? "Sq ft" : null;
-                  const dflt = basis === "each" ? "1" : basis === "sqft_option" ? String(Math.round((Number(bldgW) || 0) * (Number(bldgH) || 0))) : "";
-                  return (
-                    <span key={o.id} className="ssd-fd">
-                      <button onClick={() => fdToggle(o.id)} aria-pressed={on}
-                        className={on ? "ssd-tool is-on" : "ssd-tool"}>{foundationLabelOf(o)}</button>
-                      {on && word && (
-                        <label className="ssd-fd-q">{word}
-                          <input type="number" min="0" step="1" value={en.qty != null ? en.qty : dflt} placeholder={dflt || "0"}
-                            readOnly={planLocked || undefined}
-                            onChange={(ev) => fdSetQty(o.id, ev.target.value.replace(/[^0-9.]/g, ""))}
-                            className="ssd-input ssd-field" />
-                        </label>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-            </div>
-          ) : null;
+          const fdBody = fdOffered.length ? fdOffered.map((o) => {
+            const en = fdEntry(o.id);
+            const on = !!en;
+            const basis = String(o.basis || "each");
+            const word = basis === "each" ? "Qty" : basis === "lineal_ft" ? "Feet" : basis === "sqft_option" ? "Sq ft" : null;
+            const dflt = basis === "each" ? "1" : basis === "sqft_option" ? String(Math.round((Number(bldgW) || 0) * (Number(bldgH) || 0))) : "";
+            return (
+              <span key={o.id} className="ssd-fd">
+                <button onClick={() => fdToggle(o.id)} aria-pressed={on}
+                  className={on ? "ssd-tool is-on" : "ssd-tool"}>{foundationLabelOf(o)}</button>
+                {on && word && (
+                  <label className="ssd-fd-q">{word}
+                    <input type="number" min="0" step="1" value={en.qty != null ? en.qty : dflt} placeholder={dflt || "0"}
+                      readOnly={planLocked || undefined}
+                      onChange={(ev) => fdSetQty(o.id, ev.target.value.replace(/[^0-9.]/g, ""))}
+                      className="ssd-input ssd-field" />
+                  </label>
+                )}
+              </span>
+            );
+          }) : null;
           // ── The electrical package ────────────────────────────────────────────────
           // One toggle. Turning it ON lays out the builder's standard at their own spacings;
           // turning it OFF removes exactly what it added and leaves anything hand-placed alone.
@@ -20165,128 +20159,101 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               {elecOn ? "✓ " : ""}{elecCfg.label || "Electrical Package"}
             </button>
           ) : null;
-          const renderAddl = () => {
-            const secs = sectionsOf(addl);
-            // No groups at all — every tenant whose config predates palette groups. Unchanged.
-            if (!secs) return addl.map(btn);
-            const cellOf = ([label, list, gkey], i) => (
-              <div key={label || ("ss-ungrouped-" + i)} className="ssd-ogc">
-                {label && <span className="ssd-ogc-t">{label}</span>}
-                <div className="ssd-ogc-b">
-                  {/* The package sits with the devices it lays out, under one heading, rather
-                      than as a second cell also called Electrical. */}
-                  {gkey === "electrical" && elecBtn}
-                  {list.map(btn)}
-                </div>
-              </div>
-            );
-            // One group renders as one full-width card, with the same buttons as before (its own only).
-            if (secs.length === 1) {
-              return (
-                <div key="ss-one-group" className="ssd-og">
-                  <div className="ssd-ogc is-solo">
-                    {secs[0][0] && <span className="ssd-ogc-t">{secs[0][0]}</span>}
-                    <div className="ssd-ogc-b">{secs[0][1].map(btn)}</div>
+          // ── Wall height ───────────────────────────────────────────────────────────
+          // Only when THIS style offers increases — hauling limits differ per style and most styles
+          // have none. It used to sit hard left in the floor-plan toolbar (Carolyn 2026-09-02); it is
+          // Building's tab now, and like every tab here it is gone while the plan is locked, which is
+          // the gate a pricing control needs.
+          const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
+          const whPick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
+          const whCur = Number(sel.wallHeightDeltaIn) || 0;
+          const whBody = whList.length ? (
+            <div className="ssd-seg">
+              <button onClick={() => whPick(0)} aria-pressed={whCur === 0} className={whCur === 0 ? "ssd-seg-b is-on" : "ssd-seg-b"}>Standard</button>
+              {whList.map((o) => (
+                <button key={o.deltaIn} onClick={() => whPick(Number(o.deltaIn))}
+                  aria-pressed={whCur === Number(o.deltaIn)} className={whCur === Number(o.deltaIn) ? "ssd-seg-b is-on" : "ssd-seg-b"}
+                  title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
+                  +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
+                </button>
+              ))}
+            </div>
+          ) : null;
+          // ── The option tabs (Carolyn 2026-09-16) ──────────────────────────────────
+          // Every tab's content, by tab key. A tab with nothing in it is not offered and a group with
+          // no tab left is not drawn, so a builder who sells no foundation gets three columns sharing
+          // the width. Insulation, Foundation and the package used to render only when a builder had
+          // two or more palette groups; each now shows whenever it is offered.
+          const toolsOn = (tab) => addl.filter(([k, c]) => ssOptTabOf(k, c) === tab).map(btn);
+          const orNull = (list) => (list.length ? list : null);
+          const tabBody = {
+            wallHeight: whBody,
+            doors: orNull(toolsOn("doors")),
+            windows: orNull(toolsOn("windows")),
+            interior: orNull(toolsOn("interior")),
+            // The package sits with the devices it lays out, first, under one tab.
+            electrical: orNull([elecBtn].filter(Boolean).concat(toolsOn("electrical"))),
+            insulation: insBody,
+            foundation: fdBody,
+          };
+          const optGroups = SS_OPT_GROUPS.map((g) => {
+            const tabs = g.tabs.filter(([t]) => tabBody[t]);
+            if (!tabs.length) return null;
+            return { ...g, tabs, active: tabs.find(([t]) => t === ssOptTab[g.key]) || tabs[0] };
+          }).filter(Boolean);
+          const optFocus = optGroups.some((g) => g.key === ssOptTab.focus) ? ssOptTab.focus : (optGroups[0] ? optGroups[0].key : null);
+          const pickOptTab = (gk, tk) => setSsOptTab((p) => ({ ...p, [gk]: tk, focus: gk }));
+          // data-ss-additional-options is kept on the tab block: designer.spec proves by it that the
+          // Included callout comes after the options and before the toolbar.
+          const optionTabs = optGroups.length ? (
+            <div key="ss-opt" className="ssd-op" data-ss-opt-strip="1" data-ss-additional-options="1"
+              data-ssd-opn={optGroups.length} style={{ "--ssd-opn": optGroups.length }}>
+              {optGroups.map((g) => (
+                <div key={g.key} className={g.key === optFocus ? "ssd-opc is-focus" : "ssd-opc"} data-ss-opt-group={g.key}>
+                  <div className="ssd-oph">
+                    <span className="ssd-oph-t">{g.label}</span>
+                    <div className="ssd-oph-tabs" role="tablist" aria-label={g.label}>
+                      {g.tabs.map(([tk, tl]) => (
+                        <button key={tk} type="button" role="tab" aria-selected={tk === g.active[0]} data-ss-opt-tab={tk}
+                          onClick={() => pickOptTab(g.key, tk)} className={tk === g.active[0] ? "ssd-opt is-on" : "ssd-opt"}>{tl}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="ssd-ogc ssd-opp" role="tabpanel" aria-label={g.active[1]} data-ss-opt-panel={g.key}>
+                    <div className="ssd-ogc-b">{tabBody[g.active[0]]}</div>
                   </div>
                 </div>
-              );
-            }
-            // Insulation joins the grid as another cell (Carolyn: "in with all the options").
-            // It is a SELECTION, not a placeable tool, so it is appended here rather than routed
-            // through ITEMS — but it renders as the same toggle buttons, which is what makes it
-            // read as one of the options rather than a stray control.
-            const cells = secs.map(cellOf);
-            // A builder can price the PACKAGE without pricing any individual device — extras
-            // are simply not offered then (hidden_until_priced). That leaves no electrical
-            // group for the button to live in, so it gets its own cell.
-            if (elecBtn && !secs.some((s) => s[2] === "electrical")) {
-              cells.push(
-                <div key="ss-electrical" className="ssd-ogc">
-                  <span className="ssd-ogc-t">{PALETTE_GROUP_LABEL.electrical}</span>
-                  <div className="ssd-ogc-b">{elecBtn}</div>
-                </div>
-              );
-            }
-            if (insCell) cells.push(insCell);
-            if (fdCell) cells.push(fdCell);
-            return (
-              <div key="ss-split" className="ssd-og">
-                {cells}
-              </div>
-            );
-          };
-          if (incl.length === 0) {
-            // With sections each carries its own heading, so the single "Place" sub-head would
-            // just be a fifth heading with nothing under it.
-            return (<>
-              {!sectionsOf(addl) && <SSSecHead sub text="Place" className="ssd-pal-sub" />}
-              {renderAddl()}
-            </>);
-          }
-          // Additional options FIRST, then the included items LAST, in a light green callout right
-          // above the Wall height / Note / Line / Clear floorplan row (Carolyn 2026-09-14: move
-          // "place or decline" below Additional Options, just above the floor-plan toolbar). It
-          // used to open the palette, above a full-width rule; the callout box is the separator
-          // now and makes it read as the step still to do. The box only pads AROUND the chips —
-          // tool buttons, ✕ and Undo are the same elements at the same size — and the submit gate
-          // (every included item placed or declined, in submitQuote) is untouched. width:100%
-          // children force line breaks inside the wrapping flex row.
-          // Redesign S3: the same order and the same elements, restyled — a sub-head carrying the
-          // data-ss-additional-options hook (designer.spec finds it by that), the group cards, then the
-          // callout with its title and a plain-language subtitle, and each chip a span around the tool
-          // button and its decline button.
-          return (<>
-            <SSSecHead sub text="Additional options" className="ssd-pal-sub" tProps={{ "data-ss-additional-options": "1" }} />
-            {renderAddl()}
-            <div data-ss-included="1" className="ssd-incl">
-              <div className="ssd-incl-head">
-                <span className="ssd-incl-t">Included with this building — place or decline</span>
-                <span className="ssd-incl-sub">These are already in the price</span>
-              </div>
-              <div className="ssd-incl-chips">{incl.map(inclBtn)}</div>
+              ))}
             </div>
+          ) : null;
+          // The options FIRST, then the included items LAST, in a light green callout right above the
+          // Note / Line / Clear floorplan row (Carolyn 2026-09-14: move "place or decline" below the
+          // options, just above the floor-plan toolbar). The box only pads AROUND the chips — tool
+          // buttons, ✕ and Undo are the same elements at the same size — and the submit gate (every
+          // included item placed or declined, in submitQuote) is untouched.
+          return (<>
+            {optionTabs}
+            {incl.length > 0 && (
+              <div data-ss-included="1" className="ssd-incl">
+                <div className="ssd-incl-head">
+                  <span className="ssd-incl-t">Included with this building — place or decline</span>
+                  <span className="ssd-incl-sub">These are already in the price</span>
+                </div>
+                <div className="ssd-incl-chips">{incl.map(inclBtn)}</div>
+              </div>
+            )}
           </>);
         })()}
-        {/* The bottom line: wall height hard left, the action buttons hard right (Carolyn
-            2026-09-02). flex-basis 100% forces it onto a line of its own, so the two ends stay
-            opposite each other no matter how the tool buttons above happen to wrap — which is
-            what "same line as the 3D button" actually requires. */}
-        {/* Redesign S4: the bar is the toolbar card (.ssd-tb in SSD_CSS). Both halves wrap: at a phone
+        {/* The floor-plan toolbar: the action buttons hard right (Carolyn 2026-09-02), ending with 3D.
+            flex-basis 100% forces it onto a line of its own. Wall height left it for Building's tab
+            (Carolyn 2026-09-16). */}
+        {/* Redesign S4: the bar is the toolbar card (.ssd-tb in SSD_CSS). Its group wraps: at a phone
             width the right-hand group used to push the page sideways (600px wide at 414 on beta).
             The active-tool hint moved INTO the bar, in the slot "Selected: …" uses while nothing is
             armed; outside it, arming a tool added a line above the bar and pushed the plan down. A
             locked plan with no dock has nothing to show here, so that empty bar is hidden. */}
         <div className={(planLocked && !(dockOn && view3dOn) ? "ssd-tb is-empty" : "ssd-tb")
           + (selectedId && !planLocked && items.some((i) => i.id === selectedId && isVentItem(i) && i.wall) ? " is-dense" : "")}>
-          {/* Wall height USED to sit in the top selection row, inside <fieldset disabled=
-              {planLocked}>, so the lock greyed it out for free. Out here it must gate itself —
-              and it follows its new neighbours (the tools, which vanish) rather than its old
-              ones. Export and 3D deliberately survive the lock; a pricing control must not. */}
-          {!planLocked && (() => {
-            // Only when THIS style offers increases — hauling limits differ per style and most
-            // styles have none.
-            const whList = wallHeightOptionsFor(C, sel.style, bldgW, embedded);
-            if (!whList.length) return null;
-            const pick = (d) => setSel((p) => ({ ...p, wallHeightDeltaIn: d, wallHeight: 0 }));
-            const cur = Number(sel.wallHeightDeltaIn) || 0;
-            // The segmented control at the bar's 26px, the same height as the 3D button beside it: the
-            // price is INLINE rather than a second line, which alone would double the height.
-            return (
-              <div className="ssd-tb-l">
-                <span className="ssd-tb-t">Wall Height</span>
-                <div className="ssd-seg is-tb">
-                  <button onClick={() => pick(0)} aria-pressed={cur === 0} className={cur === 0 ? "ssd-seg-b is-on" : "ssd-seg-b"}>Standard</button>
-                  {whList.map((o) => (
-                    <button key={o.deltaIn} onClick={() => pick(Number(o.deltaIn))}
-                      aria-pressed={cur === Number(o.deltaIn)} className={cur === Number(o.deltaIn) ? "ssd-seg-b is-on" : "ssd-seg-b"}
-                      title={o.buildOnSite ? "Too tall to haul — this building would be assembled on your site" : ""}>
-                      +{o.deltaIn}&Prime;{o.buildOnSite ? " · on site" : ""}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            );
-          })()}
         <div className="ssd-tb-r">
           {/* Slot 1: the armed tool's hint, else the selected item's name, the one the 3D footer's
               "Remove …" uses. One text node, so a getByText(name, exact) never lands on this label. */}
