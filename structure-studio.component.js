@@ -10453,6 +10453,15 @@ const SSD_CSS = [
   '.ssd-row{display:grid;grid-template-columns:minmax(0,1fr);scroll-margin-top:var(--ssd-sticky-top)}',
   '.ssd-row svg{scroll-margin-top:var(--ssd-sticky-top)}',
   '.ssd-frame[data-ssd-bp="xl"] .ssd-row{grid-template-columns:62px minmax(0,1fr)}',
+  // A row that owns a rail cell is never shorter than that cell's own label needs. Without this floor a
+  // short section starves it — the locked Details strip is 95px on the public page and 53px in the
+  // portal — and ssdFitRailCell falls through to data-ssd-fit="none", leaving a bare numbered dot
+  // between two labelled steps on the very view a customer lands on. 120px is the tallest short label
+  // ("Details", 41px once it is the current step) plus the cell's 68px of padding, dot, gaps and
+  // connector, with room to spare, so the label never changes as you scroll past. It also lets the last
+  // step show "Get quote" in full on the public page, as the portal already did. Rail rows only: a
+  // banner or warning row has an empty rail cell (.is-note) and stays exactly as tall as its content.
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-row[data-ss-step]{min-height:120px}',
   '.ssd-rail{display:none}',
   '.ssd-frame[data-ssd-bp="xl"] .ssd-rail{display:block;position:relative;min-height:1px;background:var(--ss-panel);border-right:1px solid var(--ss-line-card)}',
   '.ssd-main{min-width:0;padding:22px 24px 0}',
@@ -10469,6 +10478,8 @@ const SSD_CSS = [
   '.ssd-step-label{flex:0 1 auto;min-height:0;overflow:hidden;writing-mode:vertical-rl;transform:rotate(180deg);white-space:nowrap;letter-spacing:.02em;font-size:11.5px;font-weight:500;line-height:1.2;color:var(--ss-muted)}',
   // Fitted to the row's height by ssdFitRailCell (data-ssd-fit on the button): the full label, else the
   // short one, else no label at all. Never an ellipsis. The dot and the accessible name stay either way.
+  // The row floor above buys every real section room for its short label, so "none" is a last-resort
+  // guard (a zoomed-in browser, a larger minimum font size) rather than something a customer meets.
   '.ssd-step-label.is-short{display:none}',
   '.ssd-step[data-ssd-fit="short"] .ssd-step-label.is-full{display:none}',
   '.ssd-step[data-ssd-fit="short"] .ssd-step-label.is-short{display:block}',
@@ -10987,7 +10998,9 @@ function useSsdFit(fit, deps) {
   return attach;
 }
 
-// Rail cell: the full label if the row is tall enough, else the short label, else none.
+// Rail cell: the full label if the row is tall enough, else the short label, else none. The rail row's
+// min-height in SSD_CSS keeps the short label fitting in every real section, so the last rung is a
+// guard, not a state the page normally reaches.
 function ssdFitRailCell(btn) {
   if (!btn.clientHeight) return;   // the rail is hidden below xl, or the portal tab is
   ssdFitAttr(btn, "data-ssd-fit", [null, "short", "none"], (v) => {
