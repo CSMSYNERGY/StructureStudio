@@ -12,7 +12,7 @@ import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend
 import { portalOrderUrl } from "../_shared/customerPortalUrl.ts";
 import { consentSentence, consentSentenceClick, consentSentenceInvoice, fmtMoney } from "../_shared/consentSentences.ts";
 // The accept race (2026-09-17): the total the customer SAW, checked against the one about to freeze.
-import { checkExpectedTotal } from "../_shared/acceptTotal.ts";
+import { checkExpectedTotal, promoteMiss } from "../_shared/acceptTotal.ts";
 
 // customer-accept: every write a CUSTOMER can perform on their own paperwork (migration 124).
 //
@@ -45,11 +45,18 @@ import { checkExpectedTotal } from "../_shared/acceptTotal.ts";
 // ORDER OF WRITES — accept_quote (each step's failure story):
 //   1. insert design_acceptances — THE record, and the concurrency claim (unique index:
 //      one 'quote' acceptance per design). Everything after is presentation.
-//   2. upload the drawn signature PNG — failure logs; the typed-name/consent/IP row stands.
-//      Skipped entirely for a click, which has no image to store.
-//   3. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
+//   2. promote the design (status 'sent' -> 'accepted', accepted_at once) + ensure the
 //      orders row — failure logs loudly; sync-design-status cannot repair this in SS mode,
-//      so the error is surfaced in the response for support.
+//      so the error is surfaced in the response for support. The promote is a
+//      compare-and-swap against the design as this handler read it (the lines step 1
+//      froze): a quote re-priced since WITHDRAWS the step-1 row and refuses 409 repriced (the accept race,
+//      _shared/acceptTotal.ts promoteMiss). That withdrawal is the one delete this flow
+//      makes. It happens before anything else refers to the row, and before the customer
+//      has been told anything was recorded.
+//   3. upload the drawn signature PNG — failure logs; the typed-name/consent/IP row stands.
+//      Skipped entirely for a click, which has no image to store. After the promote since
+//      2026-09-17, so a withdrawn acceptance never leaves an image behind and the storage
+//      round trip no longer sits inside the race window.
 //   3b. raise the INVOICE REQUEST (migration 229) and email the builder's owners + admins —
 //      best-effort from end to end: a failure logs and the accept still answers ok. The
 //      request is a draft; nothing is numbered or sent until the builder approves it.
@@ -815,8 +822,9 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // ── The design, owned by this verified customer (phone or email) ────────────────────
   const { data: design, error: designErr } = await admin
     .from("designs")
-    // selections + paint_colors ride along only for the accepted_snapshot stamp below (153).
-    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, selections, paint_colors, accepted_at, inventory_unit_id")
+    // selections + paint_colors ride along only for the accepted_snapshot stamp below (153);
+    // updated_at only for the promote's compare-and-swap (the accept race).
+    .select("short_code, status, contact, ss_quote_number, ss_quote_pdf_url, estimate_lines, selections, paint_colors, accepted_at, inventory_unit_id, updated_at")
     .eq("client_id", identity.clientId)
     .eq("short_code", quoteRef)
     .maybeSingle();
@@ -857,6 +865,8 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
   // rendered (expectedTotalCents) and that is not this total, refuse BEFORE anything is
   // recorded and hand back the current figure: the customer reloads and signs what they see.
   // Absent means today's behaviour exactly — production's frontend never sends it.
+  // This only catches a re-price that landed BEFORE the read above; one that lands after it is
+  // caught by the promote's compare-and-swap in step 2.
   {
     const expected = checkExpectedTotal(body?.expectedTotalCents, total);
     if (!expected.ok) return json(expected.body, expected.status);
@@ -913,20 +923,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     return dbFail(req, identity.clientId, "record the signature", insErr);
   }
 
-  // ── 2. The drawn image (best-effort; the row's typed fields are already evidence) ────
-  let signaturePath: string | null = null;
-  if (signaturePng) {
-    const path = `${identity.clientId}/${quoteRef}/${acceptanceId}.png`;
-    const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
-    if (up.error) {
-      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `signature upload failed: ${up.error.message}`, context: { path } }).catch(() => {});
-    } else {
-      signaturePath = path;
-      await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
-    }
-  }
-
-  // ── 3. Promote the design + ensure the order row ─────────────────────────────────────
+  // ── 2. Promote the design + ensure the order row ─────────────────────────────────────
   // status only ever climbs 'sent' -> 'accepted' here; anything else keeps its status and
   // just gains the timestamp. sync-design-status's SS fence (deployed with this slice)
   // preserves whatever is written here.
@@ -950,11 +947,59 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       },
     };
     if (status === "sent" || status === "") patch.status = "accepted";
-    const { error: updErr } = await admin.from("designs").update(patch)
-      .eq("client_id", identity.clientId).eq("short_code", quoteRef);
-    if (updErr) {
+    // THE ACCEPT RACE, SECOND HALF (review, 2026-09-17). The expectedTotalCents check compared
+    // against this handler's READ. A rep's re-price (Verify, a sales-location change) can land
+    // after that read and before this write; restampQuoteTax sees accepted_at still null and no
+    // order, writes new lines, and emails this customer the new total. An unguarded promote would
+    // then freeze the OLD lines as the agreement and fill the order from them. So the promote is
+    // a compare-and-swap on the updated_at we read (designs_set_updated_at bumps it on every
+    // update) with accepted_at still null, the same guard restampQuoteTax writes with, and
+    // whichever of the two lands second matches no row. On a miss, promoteMiss reads why:
+    //   repriced: withdraw the acceptance recorded in step 1 and refuse with the current total.
+    //     Always, not only when the page sent a total: the customer's page is showing the old
+    //     one either way, and every frontend prints the refusal's sentence. The withdrawal
+    //     happens before anything refers to the row (the image, the invoice request and the
+    //     emails all come later), and without it the quote_once index would answer the
+    //     customer's retry with "already accepted" for a design that never was.
+    //   retry: an unrelated write moved updated_at, and the lines are still the accepted
+    //     ones. Swap against the new value, a bounded number of times.
+    //   stop, or retries spent: today's promote-failure story below, logged loudly.
+    const PROMOTE_ATTEMPTS = 3;
+    let casUpdatedAt: string | null = typeof design.updated_at === "string" ? design.updated_at : null;
+    for (let attempt = 1; attempt <= PROMOTE_ATTEMPTS; attempt++) {
+      let promote = admin.from("designs").update(patch)
+        .eq("client_id", identity.clientId).eq("short_code", quoteRef).is("accepted_at", null);
+      promote = casUpdatedAt ? promote.eq("updated_at", casUpdatedAt) : promote.is("updated_at", null);
+      const { data: promoted, error: updErr } = await promote.select("short_code");
+      if (updErr) {
+        promoteWarning = "recorded, but the status update needs attention";
+        logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote failed: ${updErr.message}`, context: { quoteRef } }).catch(() => {});
+        break;
+      }
+      if (Array.isArray(promoted) && promoted.length === 1) break;
+
+      const { data: now, error: nowErr } = await admin.from("designs")
+        .select("estimate_lines, accepted_at, updated_at")
+        .eq("client_id", identity.clientId).eq("short_code", quoteRef).maybeSingle();
+      const miss = nowErr ? null : promoteMiss(design.estimate_lines, now);
+      if (miss?.kind === "repriced") {
+        const { error: withdrawErr } = await admin.from("design_acceptances").delete()
+          .eq("id", acceptanceId).eq("client_id", identity.clientId);
+        if (withdrawErr) {
+          // The row stands for a quote that no longer exists, and the customer's retry will be
+          // told "already accepted". Support has to remove it by hand; this is the only trace.
+          logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: "accept_withdraw_failed", message: `repriced quote: acceptance withdraw failed: ${withdrawErr.message}`, context: { quoteRef, acceptanceId } }).catch(() => {});
+        }
+        return json(miss.body, miss.status);
+      }
+      if (miss?.kind === "retry" && attempt < PROMOTE_ATTEMPTS) {
+        casUpdatedAt = miss.updatedAt;
+        continue;
+      }
       promoteWarning = "recorded, but the status update needs attention";
-      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote failed: ${updErr.message}`, context: { quoteRef } }).catch(() => {});
+      const why = nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "stop" ? miss.why : "the design kept changing";
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `design promote did not land: ${why}`, context: { quoteRef, attempt } }).catch(() => {});
+      break;
     }
     // The designs_ensure_order trigger fires on the status change where it exists, but the
     // flow must not depend on an out-of-band trigger (its CREATE lives on wip/orders) —
@@ -978,6 +1023,19 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
       if (totErr) {
         logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `order total fill failed: ${totErr.message}`, context: { quoteRef } }).catch(() => {});
       }
+    }
+  }
+
+  // ── 3. The drawn image (best-effort; the row's typed fields are already evidence) ────
+  let signaturePath: string | null = null;
+  if (signaturePng) {
+    const path = `${identity.clientId}/${quoteRef}/${acceptanceId}.png`;
+    const up = await admin.storage.from("signatures").upload(path, signaturePng, { contentType: "image/png" });
+    if (up.error) {
+      logEdgeError({ fn: "customer-accept", req, clientId: identity.clientId, code: 500, message: `signature upload failed: ${up.error.message}`, context: { path } }).catch(() => {});
+    } else {
+      signaturePath = path;
+      await admin.from("design_acceptances").update({ signature_image_path: path }).eq("id", acceptanceId);
     }
   }
 

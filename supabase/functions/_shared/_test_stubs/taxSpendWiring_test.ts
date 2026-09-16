@@ -13,7 +13,10 @@
 //   5. the switch read folded into send_invoice's settings select, where an unapplied 242 would
 //      null the row and send an SS tenant down the CRM path;
 //   6. avalara_ping added to the read-only list, or answering with the raw ping;
-//   7. the accept-race check placed after the acceptance is recorded.
+//   7. the accept-race check placed after the acceptance is recorded;
+//   8. the accept promote losing its compare-and-swap, or a re-price caught there refused AFTER the
+//      order, the signature image or the emails — the old lines frozen beside the new quote, or a
+//      withdrawn acceptance that something already refers to.
 // Same technique as locationTaxWiring_test: read the source, so a drift fails the push. If an
 // anchor moves, re-point it — do not delete the test.
 
@@ -192,4 +195,33 @@ Deno.test("customer-accept: the accept race is refused before anything is record
   assert(owns < check, "the total is revealed before ownership is checked");
   assert(already < check, "a re-tap on an accepted quote would be refused instead of reported done");
   assert(check < insert, "the acceptance is recorded before the total is checked");
+});
+
+Deno.test("customer-accept: the promote is a compare-and-swap, and a re-price caught there withdraws the acceptance first", () => {
+  const acceptQuote = ACCEPT.slice(at(ACCEPT, "const quoteRef = typeof body?.quoteRef", "customer-accept"));
+  const read = acceptQuote.slice(at(acceptQuote, '.from("designs")', "accept_quote"), at(acceptQuote, ".maybeSingle()", "accept_quote"));
+  assert(/\.select\("[^"]*[ "]updated_at(?=[,"])[^"]*"\)/.test(read), "accept_quote's design read no longer selects updated_at — the promote has nothing to swap against");
+
+  const insert = at(acceptQuote, 'from("design_acceptances").insert(', "accept_quote");
+  const promote = at(acceptQuote, 'from("designs").update(patch)', "accept_quote");
+  const swapEnd = at(acceptQuote, '.select("short_code")', "accept_quote", promote);
+  const swap = acceptQuote.slice(promote, swapEnd);
+  assert(/\.is\("accepted_at", null\)/.test(swap), "the promote no longer requires accepted_at to still be null");
+  assert(/\.eq\("updated_at", casUpdatedAt\)/.test(swap), "the promote is no longer a compare-and-swap on updated_at");
+  assert((acceptQuote.match(/from\("designs"\)\.update\(/g) ?? []).length === 1, "accept_quote writes the design somewhere other than the guarded promote");
+
+  const miss = at(acceptQuote, "promoteMiss(design.estimate_lines", "accept_quote");
+  const withdraw = at(acceptQuote, 'from("design_acceptances").delete()', "accept_quote");
+  const refuse = at(acceptQuote, "return json(miss.body, miss.status)", "accept_quote");
+  const orders = at(acceptQuote, 'from("orders")', "accept_quote");
+  const image = at(acceptQuote, 'storage.from("signatures")', "accept_quote");
+  const request = at(acceptQuote, "raiseInvoiceRequest(", "accept_quote");
+  const email = at(acceptQuote, "sendTenantEmail(", "accept_quote");
+  assert(insert < promote && promote < miss, "the promote no longer follows the record, or the miss is not read after it");
+  assert(miss < withdraw && withdraw < refuse, "a re-price is refused without withdrawing the acceptance first");
+  assert(refuse < orders, "the order is ensured or filled before a re-price can refuse — from the old lines");
+  assert(refuse < image && refuse < request && refuse < email, "the image, the invoice request or an email precedes the re-price refusal");
+  const withdrawal = acceptQuote.slice(withdraw, refuse);
+  assert(/\.eq\("id", acceptanceId\)/.test(withdrawal), "the withdrawal is not keyed on this request's own acceptance row");
+  assert((acceptQuote.match(/\.delete\(\)/g) ?? []).length === 1, "accept_quote deletes something other than its own withdrawn acceptance");
 });

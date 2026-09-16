@@ -7730,14 +7730,25 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // re-price would never reach them and the PDF, the order and the commission base would
   // disagree. The agreement test is migration 197's (accepted_at, or the status ladder), and
   // the order read fails CLOSED: an unreadable orders table is not "no order".
+  //
+  // A RECORDED QUOTE ACCEPTANCE IS AGREEMENT TOO, even while designs.accepted_at is still null
+  // (review, 2026-09-17). customer-accept records the acceptance first and promotes the design
+  // after it, so for a moment a signed quote reads unsigned here, and a promote that failed
+  // leaves it reading unsigned for good. This read fails CLOSED like the order read. It narrows
+  // the accept race but cannot close it (a check, then a write): what closes it is
+  // customer-accept's compare-and-swap promote, which refuses the customer and withdraws the
+  // acceptance when a re-price lands first.
+  const agreedRefusal = () => json({
+    error: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
+    reason: "accepted",
+  }, 409);
   // deno-lint-ignore no-explicit-any
   const refuseIfAgreed = async (d: any): Promise<Response | null> => {
-    if (isAgreedDesign(d)) {
-      return json({
-        error: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
-        reason: "accepted",
-      }, 409);
-    }
+    if (isAgreedDesign(d)) return agreedRefusal();
+    const { data: acc, error: accErr } = await admin.from("design_acceptances").select("id")
+      .eq("client_id", clientId).eq("short_code", String(d.short_code)).eq("subject", "quote").limit(1);
+    if (accErr) return dbFail(req, clientId, "check whether this quote has been accepted", accErr);
+    if ((acc ?? []).length) return agreedRefusal();
     const { data: ord, error: ordErr } = await admin.from("orders").select("id")
       .eq("client_id", clientId).eq("short_code", String(d.short_code)).limit(1);
     if (ordErr) return dbFail(req, clientId, "check whether this quote has an order", ordErr);

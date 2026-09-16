@@ -66,6 +66,16 @@ Deno.test("restampQuoteTax's write is checked: a compare-and-swap, never onto an
   assert(/\.\.\.\(opts\.alsoSet \?\? \{\}\), estimate_lines/.test(write), "alsoSet must be spread FIRST, so it can never overwrite the money columns");
 });
 
+Deno.test("refuseIfAgreed: a recorded quote acceptance is agreement, and an unreadable one is refused", () => {
+  const refuse = block(SRC, "const refuseIfAgreed = async", "const restampQuoteTax = async", "refuseIfAgreed");
+  const acc = at(refuse, 'from("design_acceptances")', "refuseIfAgreed");
+  const read = refuse.slice(acc, at(refuse, "if (accErr)", "refuseIfAgreed"));
+  assert(/\.eq\("subject", "quote"\)/.test(read), "the acceptance read is no longer narrowed to the quote subject");
+  assert(/if \(accErr\) return dbFail\(/.test(refuse), "an unreadable acceptance table no longer fails closed");
+  assert(/\(acc \?\? \[\]\)\.length\) return agreedRefusal\(\)/.test(refuse), "a recorded acceptance no longer refuses the re-price");
+  assert(acc < at(refuse, 'from("orders")', "refuseIfAgreed"), "the acceptance check moved below the order read");
+});
+
 Deno.test("set_design_sales_location: row scope first, agreement refused, free rates only", () => {
   const scope = at(SET_LOCATION, "refuseUnlessDesignVisible(shortCode)", "set_design_sales_location");
   const firstRead = at(SET_LOCATION, "admin.from(", "set_design_sales_location");
