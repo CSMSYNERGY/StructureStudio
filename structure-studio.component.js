@@ -10715,6 +10715,15 @@ const SSD_CSS = [
   // border each side), so plan and dock stay a centred pair.
   '.ssd-plan{width:100%;min-width:0;box-sizing:border-box;padding:11px 16px 14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface)}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-plan{padding:10px 10px 12px}',
+  // ⚠️ The drawing BLEEDS back over that side padding whenever the row is too tight to give it
+  // dispMaxW. Padding around the plan is drag room taken away from it (Carolyn: dragging is what the
+  // plan is for), and the row is tight at every width where the dock is open — the card cost the
+  // drawing 4–10% of its width against beta. Both the percentage and --ssd-plan-w (the svg's own
+  // dispMaxW, set inline beside it) resolve against the card's content box, so the bleed is half of
+  // what the drawing is short, never more than the padding: full mockup padding while the row has
+  // room, flush to the card's border when it has not.
+  '.ssd-plan > svg{--ssd-plan-bleed:clamp(0px,calc((var(--ssd-plan-w,0px) - 100%)/2),16px)}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-plan > svg{--ssd-plan-bleed:clamp(0px,calc((var(--ssd-plan-w,0px) - 100%)/2),10px)}',
   '.ssd-plan-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;margin:0 0 6px}',
   '.ssd-plan-t{font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
   '.ssd-plan-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;font-size:11.5px;font-weight:500;line-height:1.3;color:var(--ss-subtle);white-space:nowrap}',
@@ -20027,7 +20036,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             the selection, so "the plan must not move when an item is selected" still holds. */}
         {/* Redesign S4: the column holds the plan CARD ("Floorplan" + the size), so the basis is
             dispMaxW + 34, the card's 16px padding and 1px border each side, and the drawing inside
-            it is still dispMaxW. Still 0 1 and a column, for every reason above. */}
+            it is still dispMaxW. Still 0 1 and a column, for every reason above. When the row is
+            too tight for that basis, the drawing bleeds back over the card's side padding instead
+            of shrinking with it (--ssd-plan-bleed), so the card costs no drag room. */}
         <div style={{ flex: `0 1 ${dispMaxW + 34}px`, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center" }}>
         <div className="ssd-plan">
         <div className="ssd-plan-head">
@@ -20038,7 +20049,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             ATTRIBUTE (helpers, the harness and snap.mjs find the plan by it) and is painted by the
             inline style, which beats a presentation attribute. The PDF draws its own canvas. */}
         <svg ref={svgRef} viewBox={`${frame.x} ${frame.y} ${frame.w} ${frame.h}`}
-          style={{ display: "block", width: "100%", maxWidth: dispMaxW, height: "auto", boxSizing: "border-box", background: pal.panel, borderRadius: 4, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "none", border: `1px solid ${pal.lineCard}`, userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
+          style={{ display: "block", "--ssd-plan-w": `${dispMaxW}px`, width: "calc(100% + 2 * var(--ssd-plan-bleed, 0px))", marginLeft: "calc(-1 * var(--ssd-plan-bleed, 0px))", marginRight: "calc(-1 * var(--ssd-plan-bleed, 0px))", maxWidth: dispMaxW, height: "auto", boxSizing: "border-box", background: pal.panel, borderRadius: 4, boxShadow: pendingRemoval ? "0 0 0 3px #F59E0B, 0 4px 24px rgba(0,0,0,0.35)" : "none", border: `1px solid ${pal.lineCard}`, userSelect: "none", position: "relative", zIndex: pendingRemoval ? 901 : "auto" }}
           onClick={handleClick}>
           {/* Visible page background — only the area above the auto info band */}
           <rect x={0} y={0} width={cW} height={TEXT_BAND_TOP} fill={pal.panel} />
