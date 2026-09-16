@@ -3946,7 +3946,11 @@ function DriversTerritoriesCard({ section = "all" }) {
 //     never sees a rate box that could only 403.
 //   • Hidden for a CRM-mode tenant (`ssMode` false). Their CRM figures tax on its own
 //     documents, so a rate here would be a number nothing reads — a builder types it, believes
-//     it, and every quote keeps charging whatever the CRM says.
+//     it, and every quote keeps charging whatever the CRM says. Hidden means NO sales-tax text
+//     at all, a failed read included: this card cannot know the mode until tax_settings
+//     answers, so a failure shows its sentence only once an earlier answer in this mount has
+//     said SS mode, and a function older than this page shows nothing (ssTaxReadUnavailable
+//     in 03-catalog.jsx).
 //   • "Your local rate", never "the correct rate". It is the number the builder typed. Only a
 //     verified lookup is checked against a delivery address, and that lives on the quote.
 function LocationsCard({ canReadTax = false, canEditTax = false }) {
@@ -3954,13 +3958,16 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
   const [form, setForm] = useState(null);        // { id?, name, street, city, state, zip } | null
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
-  const [tax, setTax] = useState(null);          // tax_settings answer | { err } | null (not asked, or loading)
+  const [tax, setTax] = useState(null);          // tax_settings answer | { err, unavailable } | null (not asked, or loading)
   const [taxForm, setTaxForm] = useState(null);  // { id, name, rate, label } while one location's rate is open
   const [taxBusy, setTaxBusy] = useState(null);  // id of the location whose rate is saving
   const [taxMsg, setTaxMsg] = useState(null);    // { id, ok } | { id, err } — rendered on that location's row
   // Latest load wins. `canReadTax` can flip once the access map lands, and a slower first
   // answer arriving after the second would put a stale refusal (or a stale rate) back.
   const loadSeq = useRef(0);
+  // Has a tax_settings answer in this mount said SS mode? The only thing that lets a failed
+  // re-read show its sentence — see the CRM-mode note above the component.
+  const taxSeenSs = useRef(false);
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     const [res, taxRes] = await Promise.all([
@@ -3975,8 +3982,14 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
     // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's
     // own sentence, so error.message is what the server said.
     if (taxRes.error || !taxRes.data || taxRes.data.error) {
-      setTax({ err: (taxRes.data && taxRes.data.error) || (taxRes.error && taxRes.error.message) || "Couldn't load your sales tax rates." });
-    } else setTax(taxRes.data);
+      setTax({
+        err: (taxRes.data && taxRes.data.error) || (taxRes.error && taxRes.error.message) || "Couldn't load your sales tax rates.",
+        unavailable: ssTaxReadUnavailable(taxRes.error),
+      });
+    } else {
+      if (taxRes.data.ssMode === true) taxSeenSs.current = true;
+      setTax(taxRes.data);
+    }
   }, [canReadTax]);
   useEffect(() => { load(); }, [load]);
   const saveLoc = async () => {
@@ -4062,8 +4075,10 @@ function LocationsCard({ canReadTax = false, canEditTax = false }) {
       </div>
       {msg && msg.ok && <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", color: "#15803D", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 600, marginBottom: 10 }}>{msg.ok}</div>}
       {msg && msg.err && <div style={{ ...S.err, marginBottom: 10 }}>{msg.err}</div>}
-      {/* The tax read failing must not take the lots with it — they came from their own call. */}
-      {canReadTax && tax && tax.err && (
+      {/* The tax read failing must not take the lots with it — they came from their own call.
+          Shown only where this mount has already seen an SS-mode answer, and never for an
+          answer that means "no tax section here" — see the note above the component. */}
+      {canReadTax && tax && tax.err && !tax.unavailable && taxSeenSs.current && (
         <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginBottom: 10 }}>Sales tax rates couldn't load: {tax.err}</div>
       )}
       {locs === null && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}

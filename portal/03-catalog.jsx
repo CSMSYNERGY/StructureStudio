@@ -1,4 +1,24 @@
 // ─── Settings (via portal-settings edge function; API key is write-only) ───
+
+// Is a failed `tax_settings` read a "no tax section here" rather than a fault to show?
+// These answers qualify, and each renders NOTHING (the sales-tax UI on CRM Connection and
+// on Company → Locations reads this):
+//   • A portal-settings OLDER than this page. The frontend deploys itself on push and edge
+//     functions deploy separately, so for a while the page can be ahead of the function.
+//     An old function has no GATES line for the action, and resolveTenant fails closed with
+//     403 `Unrecognised action`; one with the gate but not the branch falls to the
+//     dispatcher's 400 `Unknown action`. Either way that window must look like "no tax UI
+//     yet", not a broken screen — on every tenant, CRM-mode ones included.
+//   • Any other 403 — the caller cannot read settings_crm. The browser's access map keeps
+//     most of them from asking; this covers the ones it cannot see (view-as, a stale map).
+// Keyed on the status the invoke wrapper records (`ssStatus`), plus the dispatcher's own
+// sentence for the 400, since that branch carries no `reason` code.
+function ssTaxReadUnavailable(err) {
+  if (!err) return false;
+  if (err.ssStatus === 403) return true;
+  return err.ssStatus === 400 && /^Unknown action\b/i.test(String(err.message || ""));
+}
+
 function SettingsView({ section }) {
   // Which settings cards to render: "connection" (GHL creds + pipeline mapping)
   // or "branding" (customer-link look & feel + business details + pricing
@@ -228,26 +248,41 @@ function SettingsView({ section }) {
   // it here, never flip it. No price is shown — the meters are off, and a price read follows
   // the catalog redaction precedent when it is needed.
   //
-  // Asked only on the CRM Connection screen, only once `status` has landed, and only in SS
-  // mode: a CRM-mode tenant never reaches the tax block, so the call would be for nothing.
-  // Re-asked when `status` is re-read after a save, so the location count stays current.
+  // Asked only on the CRM Connection screen, and only when the SAVED row is SS mode —
+  // `status.invoiceInGhl === false`, the same test submit-estimate makes
+  // (`invoice_in_ghl !== false` is the CRM path). NOT `ssMode` above: that one is true for a
+  // grandfathered tenant without the capability whose row still says CRM, so their
+  // numbering fields show — but every quote they issue still goes through the CRM. A
+  // CRM-mode tenant sees no sales-tax box and makes no tax call at all. Re-asked when
+  // `status` is re-read after a save, so the box appears the moment a save flips the row to
+  // SS mode and the location count stays current.
   // ⚠️ These hooks sit ABOVE the skeleton's early return below — a hook added under it
   // white-screens the page with React #310 the first time status lands.
-  const [taxInfo, setTaxInfo] = useState(null);   // tax_settings answer | { err } | null
-  const wantTaxInfo = Boolean(status) && ssMode && show("connection");
+  const [taxInfo, setTaxInfo] = useState(null);   // tax_settings answer | { err, unavailable } | null
+  const savedSsMode = Boolean(status && status.invoiceInGhl === false);
+  const wantTaxInfo = savedSsMode && show("connection");
   useEffect(() => {
-    if (!wantTaxInfo) return;
+    // Cleared when the row leaves SS mode, so switching back never flashes the old answer.
+    if (!wantTaxInfo) { setTaxInfo(null); return; }
     let alive = true;
     sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }).then(({ data, error: err }) => {
       if (!alive) return;
       if (err || !data || data.error) {
-        setTaxInfo({ err: (data && data.error) || (err && err.message) || "Couldn't check your sales tax settings." });
+        setTaxInfo({
+          err: (data && data.error) || (err && err.message) || "Couldn't check your sales tax settings.",
+          unavailable: ssTaxReadUnavailable(err),
+        });
         return;
       }
       setTaxInfo(data);
     });
     return () => { alive = false; };
   }, [wantTaxInfo, status]);
+  // Rendered only on an answer: the server saying SS mode, or a real failure for a tenant
+  // whose saved row is SS mode. Nothing while it loads, nothing when the server says CRM
+  // mode, and nothing when the function is older than this page (ssTaxReadUnavailable).
+  const showTaxBox = ssMode && wantTaxInfo && !!taxInfo
+    && (taxInfo.err ? !taxInfo.unavailable : taxInfo.ssMode === true);
 
   // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
   // the three fields are presence-based on the server, so sending only these leaves every
@@ -569,12 +604,11 @@ function SettingsView({ section }) {
             are on for this account. See the note on `taxInfo` above. "Verified against the
             delivery address", never "exact" — the lookup is an approximate rate for general
             goods, and the copy must not promise more than that. */}
-        {ssMode && (
+        {showTaxBox && (
           <div style={{ marginTop: 12, maxWidth: 620, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
             <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginBottom: 4 }}>Sales tax</div>
-            {taxInfo === null && <div style={{ color: "#94A3B8" }}>Checking your sales tax settings…</div>}
-            {taxInfo && taxInfo.err && <div style={{ color: "#B45309", fontWeight: 600 }}>{taxInfo.err}</div>}
-            {taxInfo && !taxInfo.err && (() => {
+            {taxInfo.err && <div style={{ color: "#B45309", fontWeight: 600 }}>{taxInfo.err}</div>}
+            {!taxInfo.err && (() => {
               const withRate = (taxInfo.locations || []).filter((l) => l.active !== false && l.taxRatePct != null).length;
               return (<>
                 <div>
