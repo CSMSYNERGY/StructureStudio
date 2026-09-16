@@ -2345,6 +2345,23 @@ const ssUsd = (n) => {
   const [int, frac] = Math.abs(v).toFixed(2).split(".");
   return `${v < 0 ? "-" : ""}$${int.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${frac}`;
 };
+// The tax a customer agreed to, from an acceptance row's frozen columns (migration 158):
+// "incl. $912.38 sales tax · 7.25% · Bibb County, GA · verified". Null when the row carries no
+// tax — every CRM-mode acceptance, and every one from before tax shipped — so "was not taxed"
+// never renders as "$0.00 tax". `tax_source` has only two values: "avalara" is a rate verified
+// for the delivery address; "fallback" is one of the builder's own rates (a location's or the
+// company's — the row does not record which, so this does not guess).
+function ssSignedTaxText(a) {
+  if (!a || a.tax_amount == null || !isFinite(Number(a.tax_amount))) return null;
+  const parts = [`incl. ${ssUsd(Number(a.tax_amount))} sales tax`];
+  const rate = Number(a.tax_rate);
+  if (a.tax_rate != null && isFinite(rate)) parts.push(`${Math.round(rate * 1000000) / 10000}%`);
+  const where = String(a.tax_jurisdiction || "").trim();
+  if (where) parts.push(where);
+  if (a.tax_source === "avalara") parts.push("verified");
+  else if (a.tax_source === "fallback") parts.push("your rate");
+  return parts.join(" · ");
+}
 // The built-in cladding names — the FALLBACK, not the authority. Since 207 the offered set and
 // the customer-facing name are per tenant, per style (style_cladding), and order_paperwork
 // carries this design's own list; this is what an account with no rows yet falls back to.
@@ -2897,9 +2914,12 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
     const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
     setBusy(false);
     if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+    // The invoice-time tax check is a NOTE beside the outcome, never the outcome: it cannot change
+    // the invoice (the customer agreed to that total) and cannot block it (ssTaxCheckNote).
+    const note = ssTaxCheckNote(data && data.taxCheck);
     onMsg(data && data.sent === false
-      ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.` }
-      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.` });
+      ? { err: `Invoice ${data.invoiceNumber || ""} created, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — they can't sign it until they get it. Print it or copy the customer link.`, note }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — awaiting the customer's signature.`, note });
     onChanged();
   };
   // "Not now" (portal-settings dismiss_invoice_request). Issues, numbers and emails nothing;
@@ -2933,6 +2953,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         ? `Authorised by ${acceptance.recorded_by_name || "your team"} · ${fmtDate(acceptance.accepted_at)}`
         : `Accepted ${fmtDate(acceptance.accepted_at)}`,
       amountText: ssUsd(running), tone: "base",
+      // The tax INSIDE that accepted total, from the columns frozen with it — not the snapshot.
+      sub: ssSignedTaxText(acceptance),
     });
     // ⚠️ EACH CHANGE'S OWN DELTA, NOT A CHAIN THROUGH `total_after_cents` (2026-09-07).
     // That column is "the whole order after this change" as computed FROM THE DESIGN'S LINES
@@ -3142,7 +3164,13 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
         )}
         {totals.tax != null && (
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 13, padding: "2px 0", color: "#64748B" }}>
-            <span>{totals.taxLabel}</span><span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
+            {/* Which rate priced it (Avalara stage): verified for the delivery address, the sales
+                location's rate, or the company rate. Screen only — the PDF prints the label. */}
+            <span style={{ textAlign: "right" }}>
+              {totals.taxLabel}
+              {ssTaxBasisText(snap.tax) && <span style={{ display: "block", fontSize: 11, color: "#94A3B8" }}>{ssTaxBasisText(snap.tax)}</span>}
+            </span>
+            <span style={{ minWidth: 92, textAlign: "right", color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssUsd(totals.tax)}</span>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 40, fontSize: 16, fontWeight: 800, padding: "5px 0 2px", color: "#1E293B" }}>
@@ -3157,7 +3185,8 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                 fontWeight: t.tone === "final" ? 800 : 500,
                 borderTop: t.tone === "final" ? "1px solid #E2E8F0" : "none",
                 marginTop: t.tone === "final" ? 3 : 0, paddingTop: t.tone === "final" ? 4 : 2 }}>
-                <span>{t.label}</span><span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
+                <span>{t.label}{t.sub && <span style={{ display: "block", fontSize: 11, color: "#94A3B8", fontWeight: 500 }}>{t.sub}</span>}</span>
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>{t.amountText}</span>
               </div>
             ))}
           </div>
@@ -3214,13 +3243,15 @@ function OrderDocumentCard({ clientId, o, st, doc, busyExt, onMsg, onChanged, on
                         : await sb.functions.invoke("portal-settings", { body: { action: "send_invoice", shortCode: o.short_code } });
                       setBusy(false);
                       if (error || (data && data.error)) { onMsg({ err: (data && data.error) || error.message }); return; }
+                      // Same informational tax note as the first send, if this answer carries one.
+                      const note = ssTaxCheckNote(data && data.taxCheck);
                       onMsg(data && data.sent === false
                         ? (regen
                           // The document IS rebuilt — say so, or a builder reads a send
                           // failure as "nothing happened" and clicks again forever.
-                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.` }
-                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.` })
-                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.` });
+                          ? { ok: `Invoice ${data.invoiceNumber || ""} rebuilt with the current totals. Not emailed${data.sendReason ? ` — ${data.sendReason}` : ""}; print it or copy the customer link.`, note }
+                          : { err: `Invoice ${data.invoiceNumber || ""} is ready but the customer was NOT emailed${data.emailReason || data.sendReason ? ` (${data.emailReason || data.sendReason})` : ""} — print it or copy the customer link.`, note })
+                        : { ok: `Invoice ${(data && data.invoiceNumber) || ""} ${regen ? "rebuilt and " : ""}sent again — still awaiting their signature.`, note });
                       onChanged();
                     }}
                     style={{ ...S.btn(regen ? "#B45309" : "#0F172A", "#FFF"), padding: "8px 14px", fontSize: 12.5, opacity: anyBusy ? 0.6 : 1 }}>
@@ -3639,8 +3670,11 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         // `revision` since migration 213: an amended order is signed AGAIN, so there is now
         // more than one subject='invoice' row and the highest revision is the one that
         // governs. Without the column the reader below picks whichever row came back first.
+        // tax_rate / tax_amount / tax_jurisdiction / tax_source (migration 158) are the tax as the
+        // customer agreed to it, frozen on the evidence row. The design's snapshot is the tax NOW,
+        // and a change order or a re-stamp moves it — so "what they signed for" is read from here.
         sb.from("design_acceptances")
-          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name")
+          .select("subject, revision, signer_name, accepted_at, total, method, recorded_by_name, tax_rate, tax_amount, tax_jurisdiction, tax_source")
           .eq("client_id", clientId).eq("short_code", o.short_code),
         sb.from("change_orders")
           .select("id, co_no, source, status, description, total_before_cents, total_after_cents, fee_cents, fee_tax_cents, raised_under, acknowledged_at")
@@ -3798,6 +3832,7 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
         style={{ background: "none", border: "none", color: ACCENT, fontSize: 12.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", padding: 0, marginBottom: 12 }}>← All orders</button>
       {msg && msg.err && <div style={S.err}>{msg.err}</div>}
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
+      {msg && msg.note && <div style={SS_TAX_NOTE_STYLE}>{msg.note}</div>}
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1.5fr) minmax(0,1fr)", gap: 14, alignItems: "start" }} className="ss-order-grid">
         <div>
@@ -4120,6 +4155,14 @@ function OrderDetail({ row, clientId, onBack, onChanged, stateOf, nameOf, bldgOf
               {ssAcceptance && ssAcceptance.method === "rep"
                 ? kv("Invoice authorised", `${fmtDate(ssAcceptance.accepted_at)} · by ${ssAcceptance.recorded_by_name || "your team"}`)
                 : kv("Accepted", ssAcceptance ? fmtDate(ssAcceptance.accepted_at) : "not yet")}
+              {/* The tax they agreed to, off the frozen evidence columns. The signed invoice
+                  governs once there is one (the highest revision, as above); before that, the
+                  quote acceptance. Absent when neither row carries tax. */}
+              {(() => {
+                const gov = ssInvoiceAcceptance && ssInvoiceAcceptance.tax_amount != null ? ssInvoiceAcceptance : ssAcceptance;
+                const txt = ssSignedTaxText(gov);
+                return txt ? kv(gov === ssInvoiceAcceptance ? "Tax signed" : "Tax accepted", txt.replace(/^incl\. /, "")) : null;
+              })()}
               {kv("Change orders", (() => {
                 const cs = (ssDoc && ssDoc.cos) || [];
                 const acked = cs.filter((c) => c.status === "acknowledged").length;

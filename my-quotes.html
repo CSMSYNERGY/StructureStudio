@@ -1354,11 +1354,39 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
       if (!consentBox.checked) { setError(errEl, "Please tick the agreement box to accept."); return; }
       submit.disabled = true;
       submit.textContent = "Accepting…";
-      callFn("customer-accept", {
+      var acceptBody = {
         action: "accept_quote", token: token, quoteRef: q.quoteRef,
         signerName: signerName, consent: true, method: "click",
-      })
+      };
+      // THE TOTAL THIS PANEL SHOWED, in cents. The builder can re-price a quote while it is open
+      // here (a verified sales tax, a new sales location), and customer-accept freezes whatever
+      // the quote says at the moment it records the acceptance — so without this the customer
+      // could accept a figure they never saw. Sent only when a total was on screen; the server
+      // treats an absent value as it always has.
+      var shownTotal = typeof q.total === "number" ? q.total : parseFloat(q.total);
+      if (q.total != null && isFinite(shownTotal)) acceptBody.expectedTotalCents = Math.round(shownTotal * 100);
+      callFn("customer-accept", acceptBody)
         .then(function (r) {
+          // Re-priced since this page loaded: say so in the server's words, and offer the one
+          // thing that helps. Accept stays disabled — pressing it again would only repeat this.
+          // ⚠️ BEFORE invalidSession, not after: its sentence test reads "sign in" into
+          // "signing", and this refusal's sentence ends "before signing." — checked second, it
+          // would sign the customer out for a quote that merely changed.
+          if (r.status === 409 && r.data && r.data.reason === "repriced") {
+            setError(errEl, errText(r, "This quote was updated. Reload to see the current total before signing."));
+            submit.textContent = "Accept Quote";
+            if (!panel.querySelector("[data-reload-quotes]")) {
+              var reloadBtn = document.createElement("button");
+              reloadBtn.type = "button";
+              reloadBtn.className = "btn btn-secondary";
+              reloadBtn.setAttribute("data-reload-quotes", "1");
+              reloadBtn.textContent = "Reload";
+              reloadBtn.style.marginTop = "8px";
+              reloadBtn.addEventListener("click", function () { loadQuotes(); });
+              panel.insertBefore(reloadBtn, submit);
+            }
+            return;
+          }
           if (invalidSession(r)) {
             token = null;
             lsDel(tokenKey);

@@ -393,9 +393,12 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
     const outcome = data && data.issuedBy === "structurestudio"
       ? `${est} is awaiting the customer's signature`
       : `${est} is now Invoiced`;
+    // `note` rides beside either outcome: the invoice-time tax check (Avalara stage) informs, it
+    // never decides, so it is not folded into the ok/err sentence.
+    const note = ssTaxCheckNote(data && data.taxCheck);
     setInvMsg(data && data.sent === false
-      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.` }
-      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.` });
+      ? { err: `Invoice ${(data && data.invoiceNumber) || ""} is created and ${outcome}, but the customer was NOT emailed${data.emailReason ? ` (${data.emailReason})` : ""} — print the invoice PDF or copy the customer link.`, note }
+      : { ok: `Invoice ${(data && data.invoiceNumber) || ""} sent — ${outcome}.`, note });
     load();
   };
 
@@ -526,7 +529,8 @@ function DesignsTable({ clientId, refreshKey = 0, fetchDesigns = null, isAdmin =
       )}
       {rows && rows.length > 0 && <StatusChips counts={statusCounts} value={statusFilter} onChange={setStatusFilter} />}
       {delMsg && <div style={delMsg.err ? S.err : S.okMsg}>{delMsg.err || delMsg.ok}</div>}
-      {invMsg && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
+      {invMsg && (invMsg.err || invMsg.ok) && <div style={invMsg.err ? S.err : S.okMsg}>{invMsg.err || invMsg.ok}</div>}
+      {invMsg && invMsg.note && <div style={SS_TAX_NOTE_STYLE}>{invMsg.note}</div>}
       {error && <div style={S.err}>{error}</div>}
       {/* Grey blocks in the real column shape, not the word "Loading" on an empty card —
           see SkelRows. Carolyn, 2026-08-26, on watching a list arrive: "so let's do that." */}
@@ -1366,6 +1370,14 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 // planned|out|delivered CHECK on delivery_loads.
 const CRM_LOAD_LABEL = { planned: "Planned", out: "Out for delivery", delivered: "Delivered" };
 
+// The deal a record page is about, when it is a StructureStudio-issued quote: the design record
+// itself, or the deal picked on a contact. A quote number and no CRM estimate is the same test
+// the Pipeline's send-invoice confirm uses for "StructureStudio issues this paperwork".
+function crmSsQuoteDesign(c) {
+  const d = c.kind === "design" ? c.record : (c.designs || []).find((x) => x.short_code === c.selectedCode);
+  return d && d.ss_quote_number && !d.ghl_estimate_number ? d : null;
+}
+
 const CRM_SECTIONS = [
   { key: "summary", title: "Summary", when: () => true },
   { key: "details", title: "Details", when: () => true },
@@ -1379,6 +1391,10 @@ const CRM_SECTIONS = [
   // order is the same one row and would just repeat the stage bar above it.
   { key: "orders", title: "Orders", when: (c) => c.kind === "contact" },
   { key: "person", title: "Person", when: (c) => c.kind === "design" },
+  // SALES TAX (Avalara stage, 2026-09-17). The deal on screen — the record itself, or the one
+  // picked on a contact — and only a StructureStudio-issued quote: a CRM-mode tenant's CRM
+  // figures tax on its own estimate, so there is nothing here for them to see or change.
+  { key: "tax", title: "Sales tax", when: (c) => !!crmSsQuoteDesign(c) },
   // BUILD, DELIVERY, REPAIRS. Carolyn, 2026-08-28 @37:48: "whether you're in a contact or
   // whether you're in a deal, it doesn't matter, you want to be able to see the contact
   // details, the deals, the orders, the build schedule, the delivery schedule ... Repairs
@@ -1811,6 +1827,345 @@ function CrmStageBar({ status }) {
   );
 }
 
+// ─── Sales tax on a StructureStudio quote (Avalara stage, 2026-09-17) ───────────────────────
+// Which link of the rate chain priced a quote, in words: a lookup somebody verified, the quote's
+// sales location, or the company rate. `basis` arrived with the location rates; a stamp from
+// before it has only `source`, and a pre-basis "fallback" was always the company rate.
+// "Verified for …", never "exact": the lookup is Avalara's rate for the delivery address, and
+// it knows nothing about origin sourcing across a state line.
+function ssTaxBasisText(tax) {
+  if (!tax || typeof tax !== "object") return null;
+  const basis = tax.basis || (tax.source === "avalara" ? "avalara" : tax.source === "fallback" ? "company" : null);
+  if (basis === "avalara") {
+    const where = String(tax.jurisdiction || "").trim();
+    const when = tax.verifiedAt || tax.resolvedAt;
+    return `Verified for ${where || "the delivery address"}${when ? ` on ${fmtDate(when)}` : ""}`;
+  }
+  if (basis === "location") return `${String(tax.locationName || "").trim() || "Sales location"} rate`;
+  if (basis === "company") return "Company rate";
+  return null;
+}
+// Cents as dollars, for the tax card. Its own copy on purpose: `money` and `ssUsd` live in
+// 04-orders.jsx, and this file's rule is that part 02 does not lean on a later part's consts
+// (see CRM_LOAD_LABEL above).
+function ssTaxMoney(cents) {
+  if (cents == null || !Number.isFinite(Number(cents))) return "—";
+  return "$" + (Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+// A stored fraction as a percentage for display: 0.0725 -> "7.25%". Rounded to four places so
+// 0.07125 never prints as 7.124999999%.
+function ssTaxPct(rate) {
+  const n = Number(rate);
+  if (rate == null || !Number.isFinite(n)) return "";
+  return `${Math.round(n * 1000000) / 10000}%`;
+}
+
+// send_invoice's tax check, as a sentence — or null when there is nothing to say. INFORMATIONAL
+// ONLY, and the copy says so: the check never changes an invoice (the customer agreed to a total)
+// and never blocks one, so it must not read as a failure of the send it rode along with.
+// "matched" and "skipped" say nothing; an older function sends no taxCheck at all.
+const SS_TAX_FAILURE_TEXT = {
+  credentials_rejected: "the tax service didn't accept our sign-in",
+  subscription: "address lookups aren't part of the tax service plan",
+  rate_limited: "the tax service is busy",
+  timeout: "the tax service didn't answer in time",
+  network: "the tax service couldn't be reached",
+  malformed: "the tax service's answer couldn't be read",
+  bad_address: "the delivery address wasn't recognised",
+  no_address: "there is no delivery address on file",
+  daily_cap: "today's lookup limit has been reached",
+  not_configured: "address lookups aren't set up",
+};
+// Informational, so neither the red of a failure nor the amber of a warning: the Locations tab's
+// blue "what this does" banner.
+const SS_TAX_NOTE_STYLE = { background: "#EFF6FF", border: "1px solid #BFDBFE", color: "#1E3A8A", borderRadius: 8, padding: "9px 13px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.5, marginBottom: 12 };
+function ssTaxCheckNote(taxCheck) {
+  if (!taxCheck || typeof taxCheck !== "object") return null;
+  if (taxCheck.status === "differs") {
+    const where = String(taxCheck.jurisdiction || "").trim();
+    const verified = taxCheck.verifiedRatePct != null ? `${taxCheck.verifiedRatePct}%` : "a different rate";
+    const agreed = taxCheck.agreedRatePct != null ? ` of ${taxCheck.agreedRatePct}%` : "";
+    return `Tax check: Avalara's rate for the delivery address${where ? ` (${where})` : ""} is ${verified}. The invoice keeps the rate the customer agreed to${agreed} — nothing on it was changed.`;
+  }
+  if (taxCheck.status === "failed") {
+    const why = SS_TAX_FAILURE_TEXT[taxCheck.failure];
+    return `Tax check: the rate for the delivery address couldn't be verified${why ? ` — ${why}` : ""}. The invoice keeps the rate the customer agreed to; nothing on it was changed.`;
+  }
+  return null;
+}
+
+// A portal-settings answer reduced to what the tax controls act on: the data on success, or the
+// refusal's code, its sentence and the body's extra fields (quoteNumber, totalCents, …). The
+// invoke wrapper keeps the server's sentence but not those fields, and a 403's message has
+// "ask an owner or admin" appended — wrong advice for "lookups aren't switched on" — so the body
+// is read again here, the way fnError does.
+async function ssTaxOutcome(res) {
+  const data = res && res.data;
+  const error = res && res.error;
+  if (!error && data && !data.error) return { data };
+  let body = data && data.error ? data : null;
+  if (!body && error && error.context && typeof error.context.json === "function") {
+    try { body = await (typeof error.context.clone === "function" ? error.context.clone() : error.context).json(); }
+    catch (_e) { body = null; }
+  }
+  return {
+    reason: (body && body.reason) || (error && error.ssReason) || null,
+    body: body || {},
+    message: (body && body.error) || (error && error.message) || "That didn't work — try again.",
+  };
+}
+
+// THE SALES TAX CARD on a deal. The product owner's ask: "if they don't know, they just click a
+// button in the estimate and it creates the taxes for them." It shows the tax line the quote
+// carries and which rate priced it, lets whoever may edit the design move it to another sales
+// location, and offers the one deliberate, billed lookup — only when the account's lookups are
+// switched on and the reader may edit CRM Connection settings, the area that owns the company
+// rate.
+//
+// ⚠️ IT READS THE DESIGN ITSELF, which the record page above it deliberately never does. The
+// estimate snapshot and `sales_location_id` are not in crm_record's projection, and the API
+// publishes the stored location through the RLS'd `designs` select (migration 243). That read
+// returns NOTHING in operator view-as — designs RLS is current_client_id() — so view-as reads
+// through `orders_designs` instead, where the server resolves the tenant, and the stored location
+// is then only known when the tax stamp names it.
+//
+// ⚠️ NOTHING HERE PRICES ANYTHING. Every figure on screen after a change is the one the server
+// returned, and the lookup's cost is never stated as a number: the price is the server's to say.
+function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, totalCentsHint = null, canEditDesign = false, canVerify = false, canReadTaxSettings = false, onChanged = null }) {
+  const [row, setRow] = useState(null);         // the design | { err } | null while loading
+  const [locKnown, setLocKnown] = useState(true); // is row.sales_location_id the stored value?
+  const [locs, setLocs] = useState(null);       // active sales locations, or null when unreadable
+  const [taxCfg, setTaxCfg] = useState(null);   // tax_settings answer, or null (not asked / unavailable)
+  const [busy, setBusy] = useState(null);       // "location" | "verify" | null
+  const [msg, setMsg] = useState(null);         // { ok } | { err }
+  // Latest load wins: a slower first answer must not paint over a later one.
+  const loadSeq = useRef(0);
+  // Read at load time rather than a dependency: the record reloads after every change made
+  // here, and a new hint is no reason to read the design a second time.
+  const totalHint = useRef(totalCentsHint);
+  totalHint.current = totalCentsHint;
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const cols = "short_code, status, accepted_at, total_cents, estimate_lines, ss_quote_number, ss_quote_sent_at, ghl_estimate_number, contact";
+    const readDesign = async () => {
+      if (!viewingLabel) {
+        const direct = (withLoc) => {
+          let q = sb.from("designs").select(withLoc ? `${cols}, sales_location_id` : cols).eq("short_code", shortCode);
+          if (clientId) q = q.eq("client_id", clientId);
+          return q.maybeSingle();
+        };
+        let r = await direct(true);
+        // Before migration 243 the column does not exist and PostgREST refuses the whole select.
+        // The tax line still has something true to say without it.
+        if (r.error && /sales_location_id/.test(String(r.error.message || ""))) r = await direct(false);
+        if (r.error) return { err: r.error.message || "Couldn't load this quote's tax." };
+        if (!r.data) return { err: "Not shown for your role." };
+        return { row: r.data, known: Object.prototype.hasOwnProperty.call(r.data, "sales_location_id") };
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "orders_designs", shortCodes: [shortCode], detail: true } });
+      if (error || !data || data.error) return { err: (data && data.error) || (error && error.message) || "Couldn't load this quote's tax." };
+      const d = (data.designs || [])[0];
+      if (!d) return { err: "Not shown for your role." };
+      // No total_cents in that projection; crm_record's own read of the same row carries it.
+      return { row: { ...d, total_cents: d.total_cents != null ? d.total_cents : totalHint.current }, known: Object.prototype.hasOwnProperty.call(d, "sales_location_id") };
+    };
+    const [design, locRes, cfgRes] = await Promise.all([
+      readDesign(),
+      sb.functions.invoke("portal-settings", { body: { action: "list_locations" } }),
+      canReadTaxSettings ? sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }) : Promise.resolve(null),
+    ]);
+    if (seq !== loadSeq.current) return;
+    if (design.err) { setRow({ err: design.err }); return; }
+    setRow(design.row);
+    setLocKnown(design.known);
+    const cfg = cfgRes && !cfgRes.error && cfgRes.data && !cfgRes.data.error ? cfgRes.data : null;
+    setTaxCfg(cfg);
+    // list_locations is readable on inventory or branding; tax_settings on settings_crm. Either
+    // list will do for the picker — and a reader who can see neither gets the name as text.
+    if (locRes && !locRes.error && locRes.data && Array.isArray(locRes.data.locations)) {
+      setLocs(locRes.data.locations.map((l) => ({ id: l.id, name: l.name, taxRatePct: l.taxRatePct != null ? l.taxRatePct : null })));
+    } else if (cfg && Array.isArray(cfg.locations)) {
+      setLocs(cfg.locations.filter((l) => l.active !== false).map((l) => ({ id: l.id, name: l.name, taxRatePct: l.taxRatePct != null ? l.taxRatePct : null })));
+    } else setLocs(null);
+  }, [clientId, shortCode, viewingLabel, canReadTaxSettings]);
+  useEffect(() => { load(); }, [load]);
+
+  // The server's answer IS the new state — the tax it stamped and the total it wrote.
+  const applyTax = (data, extra = {}) => {
+    setRow((r) => (!r || r.err) ? r : {
+      ...r, ...extra,
+      estimate_lines: data.tax ? { ...(r.estimate_lines || {}), tax: data.tax } : r.estimate_lines,
+      total_cents: data.totalCents != null ? data.totalCents : r.total_cents,
+    });
+  };
+
+  if (row === null) return <div style={{ fontSize: 12, color: "#94A3B8" }}>Loading…</div>;
+  if (row.err) return <div style={{ fontSize: 12, color: "#94A3B8" }}>{row.err}</div>;
+
+  const snap = row.estimate_lines || null;
+  const tax = snap && snap.tax ? snap.tax : null;
+  const basisText = ssTaxBasisText(tax);
+  const quoteNo = row.ss_quote_number || "this quote";
+  // Signed means the tax is the customer's agreement now. Both server actions refuse
+  // (accepted / ordered); not offering them is the courtesy half.
+  const locked = !!row.accepted_at;
+  const curLocId = locKnown
+    ? (row.sales_location_id || null)
+    : (tax && tax.basis === "location" && tax.locationId ? tax.locationId : null);
+  const locUnknown = !locKnown && !curLocId;
+  const curLoc = curLocId && locs ? locs.find((l) => l.id === curLocId) : null;
+  // A stored id missing from the ACTIVE list is a location someone has since retired — but only
+  // when there is a list to be missing from. Without one this reader simply cannot see the lots.
+  const curLocName = curLoc ? curLoc.name
+    : (curLocId && tax && tax.locationId === curLocId && tax.locationName) ? tax.locationName
+    : curLocId ? (locs ? "A location that is no longer active" : "A sales location") : null;
+  const c = row.contact || {};
+  const deliveryAddr = [c.street, [c.city, c.state].filter(Boolean).join(", ") + (c.zip ? ` ${c.zip}` : "")]
+    .filter((s) => s && String(s).trim()).join(", ");
+  const showVerify = !locked && !!tax && canVerify && !!taxCfg && taxCfg.lookupEnabled === true;
+
+  const changeLocation = async (value) => {
+    if (value === "__current") return;
+    const locationId = value || null;
+    if (!locUnknown && locationId === curLocId) return;
+    setBusy("location"); setMsg(null);
+    let confirmResend = false;
+    // At most two calls: the plain one, and — when the quote has already been emailed and the
+    // total would move — the one the builder confirmed, which re-sends the updated quote.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
+        body: { action: "set_design_sales_location", shortCode, locationId, ...(confirmResend ? { confirmResend: true } : {}) },
+      }));
+      if (out.data) {
+        const d = out.data;
+        applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
+        setLocKnown(true);
+        const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${d.resent ? " The updated quote was re-sent to the customer." : ""}` });
+        if (onChanged) onChanged();
+        break;
+      }
+      if (out.reason === "quote_sent" && !confirmResend) {
+        const b = out.body;
+        const moves = b.totalCents != null && b.newTotalCents != null ? ` Its total moves from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}.` : "";
+        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer.${moves}\n\nChanging the sales location re-sends the updated quote to them. Change it and re-send?`)) break;
+        confirmResend = true;
+        continue;
+      }
+      setMsg({ err: out.message });
+      break;
+    }
+    setBusy(null);
+  };
+
+  const verify = async () => {
+    if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\nAvalara bills each verification. If the verified rate is different, the quote's tax and total change to it.`)) return;
+    setBusy("verify"); setMsg(null);
+    const flags = {};
+    // The server asks for each confirmation in turn — view-as first, then a quote already in the
+    // customer's inbox — so this is at most three calls, and every refusal after a confirmation
+    // is a real one whose sentence is shown.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
+        body: { action: "verify_tax", shortCode, ...flags },
+      }));
+      if (out.data) {
+        const d = out.data;
+        applyTax(d);
+        const t = d.tax || {};
+        const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
+        setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
+          + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
+          + (d.resent ? " The updated quote was re-sent to the customer."
+            : flags.confirmResend ? " The updated quote could NOT be re-sent — send it again from the Pipeline." : "") });
+        if (onChanged) onChanged();
+        break;
+      }
+      if (out.reason === "confirm_operator" && !flags.confirmVerify) {
+        if (!window.confirm(`You are doing this AS ${viewingLabel || "this builder"}.\n\nThis runs a billed Avalara lookup on their customer's quote. Verify anyway?`)) break;
+        flags.confirmVerify = true;
+        continue;
+      }
+      if (out.reason === "quote_sent" && !flags.confirmResend) {
+        const b = out.body;
+        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}.\n\nVerifying re-sends it to them with the verified tax. Verify and re-send?`)) break;
+        flags.confirmResend = true;
+        continue;
+      }
+      // Every other refusal — switched off, no address, today's limit, a failed lookup — is a
+      // sentence the server wrote, and on every one of them the quote is unchanged.
+      setMsg({ err: out.message });
+      break;
+    }
+    setBusy(null);
+  };
+
+  const selStyle = { ...S.input, padding: "5px 8px", fontSize: 12.5 };
+  return (
+    <div data-quote-sales-tax={shortCode}>
+      {tax ? (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#1E293B" }}>
+            <span>{String(tax.label || "").trim() || "Sales tax"}{ssTaxPct(tax.rate) ? ` (${ssTaxPct(tax.rate)})` : ""}</span>
+            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(Math.round(Number(tax.amount) * 100))}</strong>
+          </div>
+          {basisText && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{basisText}</div>}
+          {/* A staff resubmit to a different state or ZIP gives up a verified rate (the carry-over
+              rule). The stamp says so in `reason`; the reader should know a verify would help. */}
+          {tax.basis !== "avalara" && /address changed/i.test(String(tax.reason || "")) && (
+            <div style={{ fontSize: 11.5, color: "#B45309", marginTop: 3 }}>The delivery address changed after the rate was verified, so this quote is back on the default rate.</div>
+          )}
+        </>
+      ) : (
+        <div style={{ fontSize: 12.5, color: "#64748B" }}>No sales tax on this quote.</div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13, color: "#475569", marginTop: 6, paddingTop: 6, borderTop: "1px solid #F1F5F9" }}>
+        <span>Quote total</span><strong style={{ color: "#1E293B", fontVariantNumeric: "tabular-nums" }}>{ssTaxMoney(row.total_cents)}</strong>
+      </div>
+
+      <div style={{ marginTop: 10 }}>
+        <span style={S.lbl}>Sales location</span>
+        {canEditDesign && !locked && locs ? (
+          <select value={locUnknown ? "__current" : (curLocId || "")} disabled={!!busy}
+            onChange={(e) => changeLocation(e.target.value)} style={selStyle}>
+            {locUnknown && <option value="__current">Current location (not shown in this view)</option>}
+            <option value="">None — company rate</option>
+            {curLocId && !curLoc && <option value={curLocId}>{curLocName}</option>}
+            {locs.map((l) => (
+              <option key={l.id} value={l.id}>{l.name}{l.taxRatePct != null ? ` · ${Math.round(Number(l.taxRatePct) * 10000) / 10000}%` : ""}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ fontSize: 13, color: "#1E293B" }}>{locUnknown ? "—" : (curLocName || "None")}</div>
+        )}
+        {busy === "location" && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4 }}>Updating the quote…</div>}
+      </div>
+
+      {locked && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 8, lineHeight: 1.5 }}>
+          Accepted — this quote keeps the tax the customer agreed to.
+        </div>
+      )}
+
+      {showVerify && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "#92400E", lineHeight: 1.5, marginBottom: 8 }}>
+            <strong>Avalara bills each verification.</strong> It checks the rate for the customer's
+            delivery address{deliveryAddr ? ` (${deliveryAddr})` : ""} — make sure the address is right first.
+          </div>
+          <button type="button" disabled={!!busy} onClick={verify}
+            style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FDE68A", padding: "7px 12px", fontSize: 12.5, opacity: busy ? 0.6 : 1 }}>
+            {busy === "verify" ? "Verifying…" : "Verify tax for the delivery address"}
+          </button>
+        </div>
+      )}
+
+      {msg && <div style={{ ...(msg.err ? S.err : S.okMsg), marginTop: 9, marginBottom: 0, padding: "8px 11px", fontSize: 12.5 }}>{msg.err || msg.ok}</div>}
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -1818,7 +2173,10 @@ function CrmStageBar({ status }) {
 // which is precisely why DesignsTable and LeadsTable take a fetchDesigns prop wired to
 // operator-portal. Going through portal-settings means resolveTenant handles
 // targetClientId and app_operators for free, and there is no second code path to keep true.
-function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null }) {
+// (The Sales tax card it renders is the one exception, and carries its own reasons and its own
+// view-as path — see QuoteSalesTaxCard.)
+function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = false, crmUnlocked = true, initialDeal = null, onSeeBilling = null, onBack, onNavigate, onOpenDesign , onOpenOrder = null,
+  clientId = null, viewingLabel = null, canEditDesigns = false, canReadTaxSettings = false, canVerifyTax = false }) {
   // THE SUBSCRIPTION IS AN EDIT GATE, NOT A TAB GATE, and it has to be applied here rather
   // than tab by tab. Every WRITE this page makes is a `crm_*` action — crm_save_note,
   // crm_save_activity, crm_complete_activity, crm_send_email, crm_send_sms, crm_save_contact,
@@ -2692,6 +3050,18 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
             </div>
           )}
         </div>
+      );
+    }
+    if (key === "tax") {
+      const d = crmSsQuoteDesign(ctx);
+      if (!d) return null;
+      // Keyed by the deal, so picking another deal on a contact starts a fresh read rather than
+      // showing the last one's tax under the new one's name.
+      return (
+        <QuoteSalesTaxCard key={d.short_code} clientId={clientId} shortCode={d.short_code}
+          viewingLabel={viewingLabel} totalCentsHint={d.total_cents != null ? d.total_cents : null}
+          canEditDesign={canEditDesigns} canVerify={canVerifyTax} canReadTaxSettings={canReadTaxSettings}
+          onChanged={load} />
       );
     }
     if (key === "overview") {

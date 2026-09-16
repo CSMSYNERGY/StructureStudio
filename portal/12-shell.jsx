@@ -2538,6 +2538,17 @@ function Dashboard({ session }) {
                    the onNavigate comment above documents. */
                 onOpenOrder={ssClampTab("orders", isOperator, canAdmin, myAccess, supportView) === "orders"
                   ? (id) => navigate("orders", "o-" + id) : null}
+                /* THE SALES TAX CARD (Avalara stage). Three separate questions, each the area
+                   its server action gates on: moving a quote to another sales location is
+                   designs:'edit'; the tax settings read and the billed lookup are settings_crm,
+                   the area that owns the company rate, so no sales rep can spend on a lookup.
+                   mirrorAdmin / mirrorAccess because these are "would the owner see this
+                   button?" questions — see their declarations. The server refuses regardless. */
+                clientId={effClientId}
+                viewingLabel={viewing ? (viewing.companyName || viewing.clientId) : null}
+                canEditDesigns={mirrorAdmin || ssCanWrite(mirrorAccess, "designs")}
+                canReadTaxSettings={mirrorAdmin || ssCanRead(mirrorAccess, "settings_crm")}
+                canVerifyTax={mirrorAdmin || ssCanWrite(mirrorAccess, "settings_crm")}
               />
             ) : null}
             {/* The merged era's two sub-views correct themselves; see DesignsLegacySub. */}
