@@ -741,3 +741,99 @@ Deno.test("modelReplyText: junk in, empty shapes out, never a throw", () => {
   assertEquals(many.blockTypes.length, 8);
   assertEquals(many.text.length, 30, "the cap is on the LOG, never on the answer");
 });
+
+// ─── the projecting porch, the plate band and the wood colour (2026-09-17) ─────────────────
+// A porch that STANDS OUT in front of a gable end under its own lower roof, instead of being cut
+// into it. It is a new key, porchOutFt, rather than porchDepthFt with a flag, because the older
+// renderer reads porchDepthFt and would set the end wall back into the building. The sanitizer
+// is a whitelist rebuild, so every one of these keys is dropped in silence unless it is listed,
+// and a silent drop looks to a builder exactly like "the save did not work".
+
+Deno.test("a projecting-porch reply keeps porchOutFt, porchEnd and the wood colour", () => {
+  const r = parseModelSpec(`{
+    "roof": { "type": "gambrel", "kneeU": 0.72, "kneeRise": 0.72, "ridgeRise": 1.0, "overhang": 0.15,
+              "porchOutFt": 6.5, "porchEnd": "front" },
+    "colors": { "body": "#EEEBE0", "trim": "#686C70", "roof": "#5F6266", "wood": "#C4965A" },
+    "wallHeightFt": 9
+  }`);
+  assert(r.ok, "a projecting-porch reply must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.porchOutFt, 6.5, "porchOutFt survives");
+  assertEquals(r.d3.roof.porchEnd, "front", "porchEnd survives beside a projecting porch");
+  assertEquals(r.d3.colors.wood, "#C4965A", "the wood colour survives");
+  assertEquals(r.d3.wallHeightFt, 9);
+  assert(!("porchDepthFt" in r.d3.roof), "no recessed porch appears out of nowhere");
+});
+
+Deno.test("a projecting porch drops the recessed porch's depth and truss; an off one does not", () => {
+  // Storing both would make production, which reads only porchDepthFt, draw a recessed porch
+  // into a building that has a projecting one.
+  const on = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6, porchTruss: true, porchOutFt: 6 } });
+  assert(on.ok, "both kinds at once is resolved, not refused");
+  if (on.ok) assertEquals(on.d3.roof, { type: "gable", pitch: 0.4, porchOutFt: 6 }, "the projecting porch wins");
+
+  // At 0.5 or below the projecting porch is off, so the recessed one is left exactly alone.
+  // porchOutFt is appended AFTER porchDepthFt in the numeric list, so existing key order holds.
+  const low = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6, porchTruss: true, porchOutFt: 0.4 } });
+  assert(low.ok, "an off projecting porch parses");
+  if (low.ok) assertEquals(low.d3.roof, { type: "gable", pitch: 0.4, porchDepthFt: 6, porchOutFt: 0.4, porchTruss: true });
+  const zero = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6, porchTruss: true, porchOutFt: 0 } });
+  assert(zero.ok, "a zero projecting porch parses");
+  if (zero.ok) assertEquals(zero.d3.roof, { type: "gable", pitch: 0.4, porchDepthFt: 6, porchOutFt: 0, porchTruss: true });
+
+  // porchEnd is shared by both kinds, so the exclusion must not take it.
+  const end = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchDepthFt: 6, porchOutFt: 6, porchEnd: "back" } });
+  assert(end.ok && end.d3.roof.porchEnd === "back", "porchEnd survives the exclusion");
+});
+
+Deno.test("porchOutFt clamps to 0..12, reads a numeric string, drops junk and stays absent", () => {
+  const out = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchOutFt: v } });
+    assert(r.ok, "the roof is valid, so the spec is accepted whatever porchOutFt says");
+    return r.ok ? r.d3.roof : {};
+  };
+  assertEquals(out(40).porchOutFt, 12, "clamped to the deepest porch anyone sells");
+  assertEquals(out(-3).porchOutFt, 0, "a negative projection is no porch, not an error");
+  assert(!("porchOutFt" in out("six")), "a word is dropped");
+  assertEquals(out("6").porchOutFt, 6, "a numeric string reads as its number, like every other clamp");
+  const absent = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(absent.ok && !("porchOutFt" in absent.d3.roof), "no porch unless one was reported");
+});
+
+Deno.test("plateBand round-trips as a real boolean only, and absent stays absent", () => {
+  const band = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, plateBand: v } });
+    assert(r.ok, "plateBand never fails the spec");
+    return r.ok ? r.d3.roof : {};
+  };
+  assertEquals(band(true).plateBand, true);
+  assertEquals(band(false).plateBand, false, "false is stored, not dropped");
+  assert(!("plateBand" in band("yes")), "a string is not a boolean");
+  const absent = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 } });
+  assert(absent.ok && !("plateBand" in absent.d3.roof), "no band unless one was asked for");
+});
+
+Deno.test("colors.wood keeps a hex and drops anything else without failing the spec", () => {
+  const wood = (v: unknown) => {
+    const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, colors: { body: "#EEEBE0", wood: v } });
+    assert(r.ok, `a wood colour of ${JSON.stringify(v)} must not fail the spec`);
+    return r.ok ? r.d3.colors : {};
+  };
+  assertEquals(wood("#C4965A").wood, "#C4965A");
+  for (const junk of ["tan", "url(x)", 12]) {
+    const c = wood(junk);
+    assert(!("wood" in c), `${JSON.stringify(junk)} must not persist`);
+    assertEquals(c.body, "#EEEBE0", "the other colours ride along");
+  }
+  // The renderer has its own fallback. Writing it here would pin every tenant's column to it.
+  const absent = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4 }, colors: { body: "#EEEBE0" } });
+  assert(absent.ok && !("wood" in absent.d3.colors), "no wood colour is ever defaulted");
+});
+
+Deno.test("porchRoofPitch is not a key: it is dropped like any other unknown", () => {
+  // Designed, then cut from this change. The renderer asks for 2:12 and lowers it for headroom.
+  // If it is ever added, it is added on purpose and this test changes with it.
+  const r = sanitizeD3Spec({ roof: { type: "gable", pitch: 0.4, porchOutFt: 6, porchRoofPitch: 0.25 } });
+  assert(r.ok, "an unknown key never fails the spec");
+  if (r.ok) assert(!("porchRoofPitch" in r.d3.roof), "porchRoofPitch must not persist");
+});

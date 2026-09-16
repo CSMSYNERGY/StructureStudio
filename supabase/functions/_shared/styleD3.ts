@@ -75,6 +75,13 @@ const CLAMPS: Record<string, [number, number]> = {
   // as the two above. 12 ft is past any shed porch anyone sells; the renderer clamps again
   // against the actual building so a 12 ft porch on a 12 ft shed cannot leave no building.
   porchDepthFt: [0, 12],
+  // A PROJECTING porch (2026-09-17): a deck, posts and its own lower roof standing in front of
+  // a gable end, not a recess cut into it. The end wall stays full height and the building
+  // keeps its length; this is how far the posts stand out past that wall. It is deliberately
+  // NOT porchDepthFt with a flag beside it: an older renderer reads porchDepthFt and would set
+  // the wall 6 ft back INTO the building. Absent means no porch, and 0.5 or less is off, the
+  // same "0 is the off switch" rule as the keys above.
+  porchOutFt: [0, 12],
 };
 
 // Which eave the lean-to hangs off. Not a clamp, so it is checked separately.
@@ -138,7 +145,7 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // which looks to a builder exactly like "the save didn't work". Add to both.
   for (const k of ["pitch", "ridgeOffset", "overhang", "kneeU", "kneeRise", "ridgeRise", "tailSpacingIn",
                    "leanToWidthFt", "leanToDropFt", "dormerWidthFt", "dormerRiseFt", "dormerOffsetU",
-                   "porchDepthFt"]) {
+                   "porchDepthFt", "porchOutFt"]) {
     const v = clamped(k, rawRoof[k]);
     if (v !== null) roof[k] = v;
   }
@@ -184,6 +191,23 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would
   // throw on a key with no entry.
   if (rawRoof.eave === "open" || rawRoof.eave === "fascia") roof.eave = rawRoof.eave;
+  // A trim band across both gable ends at the top of the wall. A BOOLEAN, handled here like
+  // porchTruss rather than in the numeric loop, because clamped() destructures CLAMPS[key] and
+  // throws on a key with no entry. Only a real boolean is stored, and false IS stored.
+  //
+  // ABSENT MEANS NO BAND: the renderer tests the value as truthy, so every row saved before
+  // this key existed keeps its exact render. Never emit a default here.
+  if (typeof rawRoof.plateBand === "boolean") {
+    roof.plateBand = rawRoof.plateBand;
+  }
+  // A porch is ONE kind or the other. With a projecting porch on, the recessed porch's depth
+  // and its truss are dropped, because storing both would make the production renderer, which
+  // knows only porchDepthFt, draw a recessed porch into a building that has a projecting one.
+  // porchEnd is kept: both kinds use it to say which gable end.
+  if (typeof roof.porchOutFt === "number" && roof.porchOutFt > 0.5) {
+    delete roof.porchDepthFt;
+    delete roof.porchTruss;
+  }
 
   // Anything that is not a renderable cladding means "unset", which the renderer
   // draws as panel siding. Matches the AI validator's posture: drop what we cannot
@@ -194,7 +218,9 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
 
   const colors: Record<string, string> = {};
   const rawColors = (src.colors && typeof src.colors === "object") ? src.colors : {};
-  for (const k of ["body", "trim", "roof"]) {
+  // `wood` (2026-09-17) is the natural lumber of a projecting porch: posts, deck, rafters and
+  // ceiling. Absent means the renderer's own fallback, which is never written here.
+  for (const k of ["body", "trim", "roof", "wood"]) {
     const c = hex(rawColors[k]);
     if (c) colors[k] = c;
   }
