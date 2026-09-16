@@ -2593,7 +2593,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
 
     const taxAddr = addressFrom(contact);
-    const resolved = await resolveRate(taxAddr, ssTaxRate);
+    const resolved = await resolveRate(taxAddr, ssTaxRate, { allowLookup: false });
     {
       const pools = subtotalsFromSnapshot(estimateLines)!;
       const amount = taxOn(pools.taxableBase, resolved.rate);

@@ -8594,7 +8594,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (newSnap.tax) {
       const { data: taxCs } = await admin.from("client_settings")
         .select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle();
-      const resolvedCo = await resolveRate(addressFrom(d.contact), Number(taxCs?.ss_tax_rate) || 0);
+      const resolvedCo = await resolveRate(addressFrom(d.contact), Number(taxCs?.ss_tax_rate) || 0, { allowLookup: false });
       const poolsCo = subtotalsFromSnapshot(newSnap);
       if (poolsCo) {
         newSnap.tax = {

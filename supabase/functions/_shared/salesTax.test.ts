@@ -44,7 +44,7 @@ Deno.test("a resolved address gives the Avalara rate and names the county", asyn
       ],
     }),
     async () => {
-      const r = await resolveRate(ADDR, FALLBACK);
+      const r = await resolveRate(ADDR, FALLBACK, { allowLookup: true });
       assertEquals([r.rate, r.jurisdiction, r.source, r.reason], [0.0725, "BIBB, GA", "avalara", null]);
     },
   );
@@ -54,7 +54,7 @@ Deno.test("the request carries the delivery address, not the business address", 
   let seen = "";
   await withFetch(
     (url) => { seen = url; return ok({ totalRate: 0.07, rates: [] }); },
-    async () => { await resolveRate(ADDR, FALLBACK); },
+    async () => { await resolveRate(ADDR, FALLBACK, { allowLookup: true }); },
   );
   const q = new URL(seen).searchParams;
   assertEquals(
@@ -66,11 +66,11 @@ Deno.test("the request carries the delivery address, not the business address", 
 Deno.test("with no county, the jurisdiction falls back to city then state, never a guess", async () => {
   await withFetch(
     () => ok({ totalRate: 0.04, rates: [{ rate: 0.04, name: "MACON", type: "City" }] }),
-    async () => assertEquals((await resolveRate(ADDR, FALLBACK)).jurisdiction, "MACON, GA"),
+    async () => assertEquals((await resolveRate(ADDR, FALLBACK, { allowLookup: true })).jurisdiction, "MACON, GA"),
   );
   await withFetch(
     () => ok({ totalRate: 0.04, rates: [] }),
-    async () => assertEquals((await resolveRate(ADDR, FALLBACK)).jurisdiction, "GA"),
+    async () => assertEquals((await resolveRate(ADDR, FALLBACK, { allowLookup: true })).jurisdiction, "GA"),
   );
 });
 
@@ -80,7 +80,7 @@ Deno.test("a timeout falls back to the tenant's own rate", async () => {
   await withFetch(
     () => Promise.reject(new DOMException("timed out", "TimeoutError")),
     async () => {
-      const r = await resolveRate(ADDR, FALLBACK);
+      const r = await resolveRate(ADDR, FALLBACK, { allowLookup: true });
       assertEquals([r.rate, r.source, r.reason], [FALLBACK, "fallback", "avalara lookup failed"]);
     },
   );
@@ -90,7 +90,7 @@ Deno.test("a 4xx falls back WITHOUT retrying — bad credentials do not improve 
   let calls = 0;
   await withFetch(
     () => { calls++; return Promise.resolve(new Response("nope", { status: 401 })); },
-    async () => assertEquals((await resolveRate(ADDR, FALLBACK)).source, "fallback"),
+    async () => assertEquals((await resolveRate(ADDR, FALLBACK, { allowLookup: true })).source, "fallback"),
   );
   assertEquals(calls, 1, "a 401 must not be retried");
 });
@@ -99,7 +99,7 @@ Deno.test("a 5xx IS retried once, and a second failure falls back", async () => 
   let calls = 0;
   await withFetch(
     () => { calls++; return Promise.resolve(new Response("boom", { status: 503 })); },
-    async () => assertEquals((await resolveRate(ADDR, FALLBACK)).source, "fallback"),
+    async () => assertEquals((await resolveRate(ADDR, FALLBACK, { allowLookup: true })).source, "fallback"),
   );
   assertEquals(calls, 2, "a 503 gets exactly one retry");
 });
@@ -111,7 +111,7 @@ Deno.test("a 5xx that succeeds on the retry uses the real rate", async () => {
       ? Promise.resolve(new Response("boom", { status: 503 }))
       : ok({ totalRate: 0.0725, rates: [] })),
     async () => {
-      const r = await resolveRate(ADDR, FALLBACK);
+      const r = await resolveRate(ADDR, FALLBACK, { allowLookup: true });
       assertEquals([r.rate, r.source], [0.0725, "avalara"]);
     },
   );
@@ -120,7 +120,7 @@ Deno.test("a 5xx that succeeds on the retry uses the real rate", async () => {
 Deno.test("a malformed body falls back rather than charging a garbage rate", async () => {
   for (const body of [{}, { totalRate: null }, { totalRate: "lots" }, { totalRate: -1 }]) {
     await withFetch(() => ok(body), async () => {
-      assertEquals((await resolveRate(ADDR, FALLBACK)).source, "fallback", JSON.stringify(body));
+      assertEquals((await resolveRate(ADDR, FALLBACK, { allowLookup: true })).source, "fallback", JSON.stringify(body));
     });
   }
 });
@@ -132,7 +132,7 @@ Deno.test("a percent-shaped rate is REFUSED, not charged", async () => {
   await withFetch(
     () => ok({ totalRate: 7.25, rates: [] }),
     async () => {
-      const r = await resolveRate(ADDR, FALLBACK);
+      const r = await resolveRate(ADDR, FALLBACK, { allowLookup: true });
       assertEquals([r.rate, r.source], [FALLBACK, "fallback"]);
     },
   );
@@ -148,7 +148,7 @@ Deno.test("an unusable address never reaches the network", async () => {
         { street: null, city: "Macon", state: null, zip: "31201" }, // no region
         { street: null, city: null, state: null, zip: null },
       ]) {
-        const r = await resolveRate(addr, FALLBACK);
+        const r = await resolveRate(addr, FALLBACK, { allowLookup: true });
         assertEquals([r.rate, r.source, r.reason],
           [FALLBACK, "fallback", "no state/postcode on the delivery address"]);
       }
@@ -209,7 +209,27 @@ Deno.test("the request carries the CODE, not the name — the whole point", asyn
   let seen = "";
   await withFetch(
     (url) => { seen = url; return ok({ totalRate: 0.0725, rates: [] }); },
-    async () => { await resolveRate({ street: null, city: "Washington", state: "Missouri", zip: "63090" }, FALLBACK); },
+    async () => { await resolveRate({ street: null, city: "Washington", state: "Missouri", zip: "63090" }, FALLBACK, { allowLookup: true }); },
   );
   assertEquals(new URL(seen).searchParams.get("region"), "MO");
+});
+
+// ── Credentials present is NOT permission to spend (2026-09-16) ─────────────────────────────
+
+Deno.test("with credentials set, a caller that does not opt in makes ZERO calls", async () => {
+  // Every case in this file runs with credentials in env (set at the top), so this is the
+  // exact live situation the day the real key went in: configured, and still no lookup
+  // unless the caller asks. A lookup is a billed call with no sandbox behind it.
+  assertEquals(isConfigured(), true);
+  let calls = 0;
+  await withFetch(
+    () => { calls++; return ok({ totalRate: 0.0725, rates: [] }); },
+    async () => {
+      for (const opts of [undefined, {}, { allowLookup: false }]) {
+        const r = await resolveRate(ADDR, FALLBACK, opts);
+        assertEquals([r.rate, r.source, r.reason], [FALLBACK, "fallback", "not requested"], JSON.stringify(opts));
+      }
+    },
+  );
+  assertEquals(calls, 0, "no opt-in must mean no network call");
 });
