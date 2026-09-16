@@ -624,7 +624,8 @@ function SettingsView({ section }) {
                     : taxInfo.configured === false
                       ? <>on for your account, but the lookup service isn't connected right now — quotes use your company and local rates until it is.</>
                       : <>on for your account. A quote's rate can be verified against its delivery address before your customer signs.
-                          {taxInfo.dailyCap != null && <> {Number(taxInfo.usage24h) || 0} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
+                          {/* usage24h is null when the lookup ledger can't be counted: unknown, not zero. */}
+                          {taxInfo.dailyCap != null && typeof taxInfo.usage24h === "number" && <> {taxInfo.usage24h} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
                 </div>
               </>);
             })()}

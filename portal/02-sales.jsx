@@ -1875,6 +1875,7 @@ const SS_TAX_FAILURE_TEXT = {
   no_address: "there is no delivery address on file",
   daily_cap: "today's lookup limit has been reached",
   not_configured: "address lookups aren't set up",
+  ledger_unavailable: "the lookup couldn't be recorded, so none was made",
 };
 // Informational, so neither the red of a failure nor the amber of a warning: the Locations tab's
 // blue "what this does" banner.
@@ -2008,8 +2009,11 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   const basisText = ssTaxBasisText(tax);
   const quoteNo = row.ss_quote_number || "this quote";
   // Signed means the tax is the customer's agreement now. Both server actions refuse
-  // (accepted / ordered); not offering them is the courtesy half.
-  const locked = !!row.accepted_at;
+  // (accepted / ordered); not offering them is the courtesy half. The status arm is the server's
+  // own agreed test (sync-design-status can re-project a status with accepted_at still null). An
+  // acceptance row or an order the designs read cannot see is caught by the refusal instead, which
+  // reloads the card.
+  const locked = !!row.accepted_at || ["accepted", "invoiced", "delivered"].includes(String(row.status || ""));
   const curLocId = locKnown
     ? (row.sales_location_id || null)
     : (tax && tax.basis === "location" && tax.locationId ? tax.locationId : null);
@@ -2023,7 +2027,15 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   const c = row.contact || {};
   const deliveryAddr = [c.street, [c.city, c.state].filter(Boolean).join(", ") + (c.zip ? ` ${c.zip}` : "")]
     .filter((s) => s && String(s).trim()).join(", ");
-  const showVerify = !locked && !!tax && canVerify && !!taxCfg && taxCfg.lookupEnabled === true;
+  // configured === false (no platform credentials) refuses every lookup, so a billed button there
+  // could only fail.
+  const showVerify = !locked && !!tax && canVerify && !!taxCfg && taxCfg.lookupEnabled === true && taxCfg.configured !== false;
+  // The row this card shows is out of date: the customer agreed, an order exists, or something
+  // else wrote the quote first. The server's sentence says which; the card re-reads the design.
+  const staleRefusal = (reason) => reason === "accepted" || reason === "ordered" || reason === "changed";
+  // The server re-sends only when an emailed quote's total moved, so no reason means nothing
+  // needed sending. A reason means one was due and didn't go.
+  const notResentText = (d) => d.resendReason ? ` The updated quote was NOT re-sent (${d.resendReason}) — send it again from the Pipeline.` : "";
 
   const changeLocation = async (value) => {
     if (value === "__current") return;
@@ -2042,7 +2054,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
         setLocKnown(true);
         const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
-        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${d.resent ? " The updated quote was re-sent to the customer." : ""}` });
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${d.resent ? " The updated quote was re-sent to the customer." : notResentText(d)}` });
         if (onChanged) onChanged();
         break;
       }
@@ -2054,6 +2066,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         continue;
       }
       setMsg({ err: out.message });
+      if (staleRefusal(out.reason)) load();
       break;
     }
     setBusy(null);
@@ -2077,8 +2090,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
         setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
           + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
-          + (d.resent ? " The updated quote was re-sent to the customer."
-            : flags.confirmResend ? " The updated quote could NOT be re-sent — send it again from the Pipeline." : "") });
+          + (d.resent ? " The updated quote was re-sent to the customer." : notResentText(d)) });
         if (onChanged) onChanged();
         break;
       }
@@ -2089,13 +2101,14 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
       }
       if (out.reason === "quote_sent" && !flags.confirmResend) {
         const b = out.body;
-        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}.\n\nVerifying re-sends it to them with the verified tax. Verify and re-send?`)) break;
+        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}.\n\nIf the verified tax changes the total, the updated quote is re-sent to them. Verify anyway?`)) break;
         flags.confirmResend = true;
         continue;
       }
       // Every other refusal — switched off, no address, today's limit, a failed lookup — is a
       // sentence the server wrote, and on every one of them the quote is unchanged.
       setMsg({ err: out.message });
+      if (staleRefusal(out.reason)) load();
       break;
     }
     setBusy(null);

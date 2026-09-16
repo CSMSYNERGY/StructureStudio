@@ -19,12 +19,15 @@
 //   F. an unsaved switch to CRM invoicing hides the box
 //   G. a real 500: shown on CRM Connection (saved row is SS); silent on a first Locations read
 //   H. a failed Locations RE-read after an SS answer shows its sentence
+//   I. lookups on: the 24-hour usage line shows a counted number, and is left out when the ledger
+//      could not be counted (usage24h null means unknown, not zero)
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/salesTaxModeGate.mjs         (exit 0 = every check held)
 //
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is
-// how to prove a check still fires: against c5b2ec4's artifact, B, C, D, E and G fail.
+// how to prove a check still fires: against c5b2ec4's artifact, B, C, D, E and G fail; against
+// 366b93b's, I's unreadable-ledger check fails.
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 
@@ -39,7 +42,7 @@ const SESSION = {
 
 // invoiceInGhl is the SAVED row, and tax_settings answers ssMode = !invoiceInGhl, as the server does.
 // taxMode: "ok" | "old" (no GATES line: resolveTenant's 403) | "fail" (500).
-const S = { invoiceInGhl: false, allowed: false, taxMode: "ok", taxDelayMs: 0, failAfterFirst: false };
+const S = { invoiceInGhl: false, allowed: false, taxMode: "ok", taxDelayMs: 0, failAfterFirst: false, lookupEnabled: false, usage24h: 0 };
 let taxCallsThisBoot = 0;
 const calls = [];
 const LOCS = [
@@ -95,8 +98,8 @@ const handler = async (route) => {
     if (mode === "old") return json(route, { error: `Unrecognised action "tax_settings".` }, 403);
     if (mode === "fail") return json(route, { error: "We couldn't read your sales tax settings." }, 500);
     return json(route, {
-      ok: true, ssMode: !S.invoiceInGhl, lookupEnabled: false, configured: true,
-      companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: 0,
+      ok: true, ssMode: !S.invoiceInGhl, lookupEnabled: S.lookupEnabled, configured: true,
+      companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: S.usage24h,
       locations: LOCS.map((l) => ({ id: l.id, name: l.name, city: l.city, state: l.state, zip: l.zip, active: true, ...TAX[l.id] })),
     });
   }
@@ -114,7 +117,7 @@ const waitText = (s, timeout = 20000) => page.waitForFunction((x) => document.bo
 const taxCalls = () => calls.filter((c) => c === "tax_settings").length;
 const hit = (t) => (t.match(TAX_TEXT) || [""])[0];
 const boot = async (shape) => {
-  Object.assign(S, { taxDelayMs: 0, failAfterFirst: false }, shape);
+  Object.assign(S, { taxDelayMs: 0, failAfterFirst: false, lookupEnabled: false, usage24h: 0 }, shape);
   taxCallsThisBoot = 0;
   await page.goto(`${BASE}/portal.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__ssAppBooted === true && !document.body.innerText.includes("Loading your business"), null, { timeout: 60000 });
@@ -214,6 +217,16 @@ try {
   await page.getByRole("button", { name: "Edit", exact: true }).first().click();
   await page.getByRole("button", { name: "Save location" }).click();
   ok("H: a failed re-read after an SS answer shows its sentence", await waitText("Sales tax rates couldn't load", 8000));
+
+  // I
+  await boot({ invoiceInGhl: false, allowed: false, taxMode: "ok", lookupEnabled: true, usage24h: 3 });
+  await openCrm();
+  ok("I: lookups on: a counted usage is shown", await waitText("3 of 100 used in the last 24 hours."));
+  await boot({ invoiceInGhl: false, allowed: false, taxMode: "ok", lookupEnabled: true, usage24h: null });
+  await openCrm();
+  ok("I: lookups on, ledger unreadable: box renders", await waitText("Verified lookups:"));
+  t = await text();
+  ok("I: ledger unreadable: no usage line (not \"0 of 100\")", !/used in the last 24 hours/.test(t), (t.match(/Verified lookups:[^\n]*/) || [""])[0]);
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {

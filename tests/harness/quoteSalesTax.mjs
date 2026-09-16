@@ -17,9 +17,16 @@
 //   I. an accepted quote is read-only
 //   J. the order document: the basis line under the tax row, the tax frozen on the acceptance, and
 //      send_invoice's tax check shown as a note beside the success message
-//   K. the Pipeline's Send invoice shows a failed tax check as a note, not an error
+//   K. the Pipeline's Send invoice shows a failed tax check as a note, not an error, with a reason
+//      for every failure code the server sends (ledger_unavailable included)
 //   L. my-quotes: Accept sends the total it showed; a "repriced" 409 shows the sentence and a Reload
 //      button, keeps the customer signed in, and Reload lists the quotes again
+//   M. the re-send outcome comes from resendReason, not from the confirm: an emailed quote whose
+//      verified total did not move says nothing about re-sending; a reason (verify or location
+//      change) names why it did not go
+//   N. a stale-row refusal (accepted / ordered / changed) shows the sentence and re-reads the design;
+//      a status the server counts as agreed (invoiced, accepted_at still null) locks the card
+//   O. lookups on but no platform credentials (configured:false): no warning, no button
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/quoteSalesTax.mjs            (exit 0 = every check held)
@@ -27,7 +34,8 @@
 // SS_PORTAL_ARTIFACT=<path to an older portal.app.compiled.js> serves that file instead, which is how
 // to prove the checks can fire: against 57ae592's artifact every A check that looks for the card
 // fails, and the run then stops at B with nothing to press. (L drives my-quotes.html, which that
-// variable does not swap.)
+// variable does not swap.) Against 366b93b's artifact the contract checks fail (9): C's re-send confirm,
+// K's ledger_unavailable wording, all three M, the three N reloads and O.
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 
@@ -58,7 +66,7 @@ const design = (code, over = {}) => ({
 });
 
 // Mutable per scenario.
-const S = { lookupEnabled: true, designs: {}, verifyReplies: [], locationReplies: [], sendInvoiceReply: null, acceptReplies: [] };
+const S = { lookupEnabled: true, configured: true, designs: {}, verifyReplies: [], locationReplies: [], sendInvoiceReply: null, acceptReplies: [] };
 const calls = [];     // { fn, body } for every portal-settings / customer-* call
 const restReads = []; // every REST GET url
 const dialogs = [];   // { message, accepted }
@@ -143,7 +151,7 @@ const handler = async (route) => {
     }
     case "list_locations": return json(route, { ok: true, nextSerial: 100, locations: LOCS });
     case "tax_settings":
-      return json(route, { ok: true, ssMode: true, lookupEnabled: S.lookupEnabled, configured: true, companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: 3, locations: LOCS });
+      return json(route, { ok: true, ssMode: true, lookupEnabled: S.lookupEnabled, configured: S.configured, companyRatePct: 6.5, companyLabel: "Sales tax", dailyCap: 100, usage24h: 3, locations: LOCS });
     case "verify_tax": return nextOf(S.verifyReplies, { status: 500, body: { error: "unexpected verify_tax call" } });
     case "set_design_sales_location": return nextOf(S.locationReplies, { status: 500, body: { error: "unexpected set_design_sales_location call" } });
     case "orders_designs": {
@@ -178,6 +186,11 @@ const go = async (path) => {
 const openRecord = async (code) => {
   await go(`/portal/designs/d-${code}`);
   await page.waitForFunction(() => document.body.innerText.includes("SUMMARY"), null, { timeout: 20000 }).catch(() => {});
+};
+// Polls a Node-side condition (the call logs live here, not in the page).
+const until = async (fn, timeout = 6000) => {
+  for (const end = Date.now() + timeout; Date.now() < end; await page.waitForTimeout(200)) if (fn()) return true;
+  return !!fn();
 };
 const resetCalls = () => { calls.length = 0; restReads.length = 0; dialogs.length = 0; dialogAnswers = []; };
 
@@ -215,7 +228,7 @@ try {
   ok("C: success message with the totals from the response", await waitText("The quote total changed from $9,652.50 to $9,729.00. The updated quote was re-sent to the customer."));
   const vc = actionCalls("verify_tax");
   ok("C: two calls, the second with confirmResend", vc.length === 2 && !vc[0].confirmResend && vc[1].confirmResend === true && vc[1].shortCode === SS, JSON.stringify(vc));
-  ok("C: second confirm names the quote and the re-send", dialogs.length === 2 && dialogs[1].message.includes("SST-1041") && /re-sends it to them/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
+  ok("C: second confirm names the quote and the re-send", dialogs.length === 2 && dialogs[1].message.includes("SST-1041") && /If the verified tax changes the total, the updated quote is re-sent to them/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
   t = await cardText();
   ok("C: tax line now the verified one", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t), t.slice(0, 120));
   ok("C: basis says verified, with jurisdiction and date", t.includes("Verified for Bibb County, GA on Sep 17, 2026"));
@@ -241,6 +254,7 @@ try {
   const ec = actionCalls("verify_tax");
   ok("E: second call carries confirmVerify", ec.length === 2 && !ec[0].confirmVerify && ec[1].confirmVerify === true, JSON.stringify(ec));
   ok("E: the operator confirm says AS", dialogs.length === 2 && /You are doing this AS/.test(dialogs[1].message));
+  ok("E: nothing said about re-sending", !/re-sent/.test(await cardText()));
 
   // F
   resetCalls();
@@ -257,6 +271,55 @@ try {
   ok("F: basis and total from the response", t.includes("Company rate") && /Quote total\s*\$9,585\.00/.test(t));
   ok("F: picker now on North Lot", (await card().locator("select").inputValue()) === "L2");
 
+  // M
+  resetCalls();
+  S.verifyReplies = [
+    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 958500, previousTotalCents: 958500, resent: false, resendReason: null, charged: false } },
+  ];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  ok("M: confirmed re-send, total unchanged: success", await waitText("Verified: 8.1% for Bibb County, GA. The quote total didn't change."));
+  t = await cardText();
+  ok("M: confirmed re-send, total unchanged: no re-send failure claimed", !/re-sent/i.test(t), t);
+  ok("M: that run confirmed the re-send", actionCalls("verify_tax").length === 2 && actionCalls("verify_tax")[1].confirmResend === true);
+
+  resetCalls();
+  S.verifyReplies = [
+    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 958500, resent: false, resendReason: "the quote PDF couldn't be rebuilt, so it wasn't emailed again", charged: false } },
+  ];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  ok("M: verify with a resendReason names it", await waitText("The quote total changed from $9,585.00 to $9,729.00. The updated quote was NOT re-sent (the quote PDF couldn't be rebuilt, so it wasn't emailed again) — send it again from the Pipeline."));
+
+  resetCalls();
+  S.locationReplies = [
+    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 972900, newTotalCents: 965250 } },
+    { status: 200, body: { ok: true, salesLocationId: "L1", tax: TAX_LOCATION, totalCents: 965250, previousTotalCents: 972900, resent: false, resendReason: "no email address on this design" } },
+  ];
+  await card().locator("select").selectOption("L1");
+  ok("M: location change with a resendReason names it", await waitText("Sales location set to Hwy 65 Display — quote total $9,652.50. The updated quote was NOT re-sent (no email address on this design) — send it again from the Pipeline."));
+
+  // N
+  for (const reason of ["changed", "ordered"]) {
+    resetCalls();
+    S.verifyReplies = [{ status: 409, body: { error: `Refused as ${reason}.`, reason } }];
+    await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+    ok(`N: ${reason}: the server's sentence is shown`, await waitText(`Refused as ${reason}.`));
+    ok(`N: ${reason}: the design is read again`, await until(() => restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`))), restReads.join(" | "));
+  }
+  resetCalls();
+  // Invoiced by the status re-projection, accepted_at not yet set: the reload must lock the card.
+  S.designs[SS] = design(SS, { status: "invoiced", accepted_at: null });
+  S.locationReplies = [{ status: 409, body: { error: "The customer has already accepted this quote, so its tax can't be changed here.", reason: "accepted" } }];
+  await card().locator("select").selectOption("L2");
+  ok("N: accepted: the server's sentence is shown", await waitText("The customer has already accepted this quote, so its tax can't be changed here."));
+  ok("N: accepted: the reload locks the card", await page.waitForFunction(() => {
+    const el = document.querySelector("[data-quote-sales-tax]");
+    return !!el && el.innerText.includes("Accepted — this quote keeps the tax the customer agreed to.") && !el.querySelector("select") && !el.innerText.includes("Verify tax");
+  }, null, { timeout: 10000 }).then(() => true, () => false), await cardText());
+  ok("N: accepted: one location call, no retry", actionCalls("set_design_sales_location").length === 1);
+  S.designs[SS] = design(SS);
+
   // G
   S.lookupEnabled = false;
   await go("/portal/designs");
@@ -268,6 +331,18 @@ try {
   ok("G: card still renders", t.includes("Quote total"));
   ok("G: lookups off: no warning, no button", !t.includes("Avalara bills") && !t.includes("Verify tax"), t);
   S.lookupEnabled = true;
+
+  // O
+  S.configured = false;
+  await go("/portal/designs");
+  await page.waitForTimeout(500);
+  await openRecord(SS);
+  await page.waitForSelector("[data-quote-sales-tax]", { timeout: 20000 }).catch(() => {});
+  await page.waitForTimeout(1200);
+  t = await cardText();
+  ok("O: card still renders, picker still offered", t.includes("Quote total") && (await card().locator("select").count()) === 1);
+  ok("O: no credentials: no warning, no button", !t.includes("Avalara bills") && !t.includes("Verify tax"), t);
+  S.configured = true;
 
   // H
   resetCalls();
@@ -321,6 +396,11 @@ try {
   await page.getByText("Send invoice", { exact: true }).click();
   ok("K: Pipeline invoice success message", await waitText("Invoice SSI-2002 sent — SST-1040 is awaiting the customer's signature."));
   ok("K: failed tax check is a note", await waitText("Tax check: the rate for the delivery address couldn't be verified — the tax service didn't answer in time. The invoice keeps the rate the customer agreed to; nothing on it was changed."));
+  // ledger_unavailable: the count or the ledger row failed, so no request was made.
+  S.sendInvoiceReply = { ok: true, sent: true, invoiceNumber: "SSI-2003", issuedBy: "structurestudio", taxCheck: { status: "failed", failure: "ledger_unavailable" } };
+  await accRow.getByRole("button", { name: "More actions" }).click();
+  await page.getByText("Send invoice", { exact: true }).click();
+  ok("K: ledger_unavailable has its own wording", await waitText("Tax check: the rate for the delivery address couldn't be verified — the lookup couldn't be recorded, so none was made. The invoice keeps the rate the customer agreed to; nothing on it was changed."));
 
   // L
   resetCalls();
