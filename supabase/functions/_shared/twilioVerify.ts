@@ -149,8 +149,11 @@ export class TwilioApiError extends Error {
  *   60202  max check attempts reached — same lock, on the check side
  *   60204  premium feature not enabled on the Verify service (e.g. Custom Company Name);
  *          only Twilio can switch it on, so an identical retry fails identically
+ *   21608  (HTTP 403) the account's messaging compliance profile is missing, so Twilio
+ *          refuses sends to every number until an operator completes it (seen 22 times
+ *          2026-08-12..08-19, each answered "try again")
  */
-const PERMANENT_CODES = new Set([60200, 20404, 60205, 60203, 60202, 60204]);
+const PERMANENT_CODES = new Set([60200, 20404, 60205, 60203, 60202, 60204, 21608]);
 
 /** Pull ONLY the enum-ish `code` out of a Twilio error body. `message` is never read —
  *  see the header: it echoes the phone number. */
@@ -324,15 +327,15 @@ export type TwStartFailure = "locked" | "number" | "config" | "transient";
  * branches on meaning instead of keeping its own copy of the code list in step with this file.
  *   transient  anything not permanent (429, 5xx, network, unknown codes): retrying may work
  *   locked     60203/60202: Twilio's own attempt lock, lifted when the verification expires
- *   config     60204/20404: the Verify service or account refuses the send for EVERY number
- *              (a feature not enabled, a service SID that points at nothing). The customer
- *              cannot fix it; an operator has to
+ *   config     60204/20404/21608: the Verify service or account refuses the send for EVERY
+ *              number (a feature not enabled, a service SID that points at nothing, a missing
+ *              messaging compliance profile). The customer cannot fix it; an operator has to
  *   number     60200/60205, and any other permanent code: this number cannot get a text
  */
 export function twStartFailureKind(e: TwilioApiError): TwStartFailure {
   if (!e.permanent) return "transient";
   if (e.code === 60203 || e.code === 60202) return "locked";
-  if (e.code === 60204 || e.code === 20404) return "config";
+  if (e.code === 60204 || e.code === 20404 || e.code === 21608) return "config";
   return "number";
 }
 

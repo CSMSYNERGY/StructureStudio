@@ -126,10 +126,11 @@ const MSG_EMAIL_NOT_CONFIGURED = "Sign-in by email isn't available yet.";
 const MSG_EMAIL_CODE_BAD = "That code didn't match or has expired — request a new one.";
 
 // Twilio codes already written up as a `twilio_config` error row by THIS isolate. A service or
-// account refusal (60204, 20404) fails every send identically, and the refused send gives its
-// slots back (Twilio sent nothing), so no cap stops the requests. One error row per isolate per
-// code is enough to put the fault in front of someone. withErrorLog still files every 503 as an
-// info row, so the repetition stays visible.
+// account refusal (60204, 20404, 21608) fails every send identically, so the same fault would
+// otherwise be filed once per request until the send caps trip (a config refusal keeps its
+// slots, see the send site). One error row per isolate per code is enough to put the fault in
+// front of someone. withErrorLog still files every 503 as an info row, so the repetition stays
+// visible.
 const configFaultLogged = new Set<number>();
 
 const cors = {
@@ -573,12 +574,19 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
         return refusal({ error: MSG_NOT_CONFIGURED });
       }
       if (e instanceof TwilioApiError) {
-        // A permanent refusal means the provider sent NOTHING — give the slots back rather
-        // than letting cheap, guaranteed-to-fail requests exhaust a real tenant's budget.
-        // A transient failure keeps them: a send may well have gone out, and over-counting
-        // is the safe direction for a cap.
-        if (e.permanent) await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
         const kind = twStartFailureKind(e);
+        // A permanent refusal about THIS number (bad number, landline, Twilio's attempt lock)
+        // sent nothing, so its slots go back: a cheap, guaranteed-to-fail request must not
+        // spend a real tenant's budget. A CONFIG refusal keeps them: the service or account
+        // refuses every send for the tenant until an operator fixes it, and giving the slots
+        // back left nothing capping what an anonymous caller could drive (a refused Twilio
+        // call, an invocation and a 503 log row per request). What that costs: the IP and
+        // tenant buckets are shared with the email route, so during a config fault each text
+        // attempt also spends one of email's slots. A transient failure keeps them too: a send
+        // may well have gone out, and over-counting is the safe direction for a cap.
+        if (e.permanent && kind !== "config") {
+          await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
+        }
         if (kind === "locked") {
           // Twilio's own max-attempts lock — the verification is frozen until its TTL, so
           // surface the same "wait it out" message as our lockout.
@@ -590,7 +598,8 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
         }
         if (kind === "config") {
           // The Verify service or account refuses EVERY send (60204 with no brand left to
-          // drop, or 20404: the service SID points at nothing). Blaming the customer's number
+          // drop, 20404: the service SID points at nothing, or 21608: the account's messaging
+          // compliance profile is missing). Blaming the customer's number
           // or offering "try again" are both wrong, so this is the not-available answer; the
           // designer's login sheet turns a 503 into "keep designing" and the email route.
           // The error row is written once per isolate per code (see configFaultLogged).

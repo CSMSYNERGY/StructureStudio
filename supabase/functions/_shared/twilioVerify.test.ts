@@ -304,6 +304,20 @@ Deno.test("code 60205 (landline) is PERMANENT", async () => {
   }
 });
 
+Deno.test("403/21608 (messaging compliance profile missing) is a PERMANENT config fault, not 'try again'", async () => {
+  setup();
+  try {
+    stub(() => twilioError(21608, "Messaging compliance profile is missing", 403));
+    const err = await expectApiError(() => twStartVerification(PHONE_E164), "403/21608");
+    assertEquals(err.status, 403);
+    assertEquals(err.code, 21608);
+    assertEquals(err.permanent, true, "every send fails until an operator completes the profile");
+    assertEquals(twStartFailureKind(err), "config");
+  } finally {
+    teardown();
+  }
+});
+
 Deno.test("60203/60202 (max attempts) are PERMANENT but keep the code for 'try later' messaging", async () => {
   setup();
   try {
@@ -468,7 +482,8 @@ Deno.test("60204 on the resend too: two requests, a permanent refusal, and the b
     assertEquals(calls.length, 2, "one resend, never a loop");
     assertEquals(friendlyName(calls[1]), null);
     assertEquals(err.code, 60204);
-    // permanent is what makes customer-auth hand the three send slots back: nothing was sent.
+    // Permanent AND config: customer-auth answers "not available" and KEEPS the three send
+    // slots, so its caps bound a tenant whose every send is refused.
     assertEquals(err.permanent, true);
     assertEquals(twStartFailureKind(err), "config");
 
@@ -554,6 +569,7 @@ Deno.test("twStartFailureKind: every permanent start code has a meaning, everyth
       [60202, 429, "locked"],
       [60204, 403, "config"],
       [20404, 404, "config"],
+      [21608, 403, "config"],
       [60200, 400, "number"],
       [60205, 403, "number"],
       [20429, 429, "transient"],
