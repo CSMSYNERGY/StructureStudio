@@ -14,7 +14,7 @@
 
 const {
   isAgreedDesign, isVerifiedTax, locationTaxReady, locationTaxView, parseSaveLocationTax, parseSetSalesLocation,
-  parseTaxLabel, parseTaxRatePct, ratePct, restampPlan, TAX_LABEL_MAX,
+  parseTaxLabel, parseTaxRatePct, ratePct, restampPlan, restampResend, TAX_LABEL_MAX,
 } = await import("./locationTax.ts");
 const { designTotalCents } = await import("./estimateLines.ts");
 
@@ -218,4 +218,33 @@ Deno.test("restampPlan: no issued quote means nothing to re-price", () => {
     assertEquals(restampPlan({ snap, tax: taxAt(0.08), sent: false, confirmResend: true }), { ok: false, reason: "no_quote" },
       JSON.stringify(snap));
   }
+});
+
+// ── restampResend ────────────────────────────────────────────────────────────────────────────
+
+const PDF = "https://storage.example.com/storage/v1/object/public/floor-plans/t/SS-ABC123-quote.pdf";
+
+Deno.test("restampResend: a re-priced emailed quote goes out again once its PDF is rebuilt", () => {
+  assertEquals(restampResend({ resend: true, quoteNumber: "Q-1001", quotePdfUrl: PDF }), { send: true });
+});
+
+Deno.test("restampResend: a PDF that failed to rebuild holds the email back, and says why", () => {
+  // The email links the PDF's fixed path. Sent now, its body would carry the new total and its
+  // PDF the old one.
+  const out = restampResend({ resend: true, quoteNumber: "Q-1001", quotePdfUrl: null });
+  assert(!out.send, "no email beside a stale PDF");
+  if (out.send) return;
+  assert(typeof out.reason === "string" && /PDF/.test(out.reason), `the rep is told it was the PDF: ${out.reason}`);
+});
+
+Deno.test("restampResend: nothing to send is not a failure", () => {
+  // An unsent quote, or a total that did not move: no email, and no reason to show the rep.
+  assertEquals(restampResend({ resend: false, quoteNumber: "Q-1001", quotePdfUrl: PDF }), { send: false, reason: null });
+  assertEquals(restampResend({ resend: false, quoteNumber: "Q-1001", quotePdfUrl: null }), { send: false, reason: null },
+    "a failed rebuild on a quote nobody was emailed asks nothing of the rep here");
+});
+
+Deno.test("restampResend: a quote with no number is never blamed on the PDF", () => {
+  const out = restampResend({ resend: true, quoteNumber: null, quotePdfUrl: null });
+  assert(!out.send && typeof out.reason === "string" && !/PDF/.test(out.reason), JSON.stringify(out));
 });

@@ -38,7 +38,7 @@ import {
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
 import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
-  parseSetSalesLocation, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan,
+  parseSetSalesLocation, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
 } from "../_shared/locationTax.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
@@ -7761,10 +7761,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *      no row means somebody else wrote first → 409 `changed`;
    *   6. regenerate the quote PDF, best-effort (regenerateQuotePdf's own contract);
    *   7. when the quote had been emailed and its total moved, send it again through
-   *      sendQuoteEmail. A failed send does not undo the re-price — the rep is told
-   *      (`resent: false`, `resendReason`) and can reach for Print or Copy-link, as with
-   *      resend_quote_email itself.
+   *      sendQuoteEmail, but only when step 6 rebuilt the PDF (restampResend). The email
+   *      links the PDF's fixed path, so a failed rebuild would send the new total next to a
+   *      PDF that still prints the old one. A skipped or failed send does not undo the
+   *      re-price. The rep is told (`resent: false`, `resendReason`) and can reach for
+   *      Print or Copy-link, as with resend_quote_email itself.
    * It never looks anything up and never charges: pricing is the caller's business.
+   *
+   * KNOWN WINDOW, NOT CLOSED HERE: submit-estimate reads sales_location_id, spends seconds
+   * on the PDF and the email, then persists estimate_lines + total_cents with no guard. A
+   * re-stamp that lands inside that window is overwritten by the older submit's tax, while
+   * sales_location_id keeps the new lot. The compare-and-swap below only catches a submit
+   * that writes FIRST. The next submit re-prices from the recorded lot. A persist-time guard
+   * belongs in submit-estimate, and it has to act before the email goes out, not after.
    */
   const restampQuoteTax = async (
     // deno-lint-ignore no-explicit-any
@@ -7838,8 +7847,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       : null;
 
     let resent = false;
-    let resendReason: string | null = null;
-    if (plan.resend) {
+    const gate = restampResend({ resend: plan.resend, quoteNumber: fresh.ss_quote_number, quotePdfUrl });
+    let resendReason: string | null = gate.send ? null : gate.reason;
+    if (gate.send) {
       const sent = await sendQuoteEmail(shortCode);
       if ("refused" in sent) resendReason = "the quote couldn't be emailed from here";
       else {

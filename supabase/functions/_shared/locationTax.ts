@@ -205,3 +205,25 @@ export function restampPlan(input: {
   }
   return { ok: true, snap, previousTotalCents, totalCents, changed, resend: input.sent && changed };
 }
+
+/**
+ * After a re-stamp is written: does the quote go back out to the customer, and if not, what is
+ * the rep told? Only a plan that says `resend` sends anything. It sends only when the quote PDF
+ * was rebuilt. That PDF sits at a fixed path the email links to. When the rebuild failed
+ * (upload error, render error), the file still prints the OLD total. An email sent anyway puts
+ * the new total in its body and links a document with the old one, so the customer gets two
+ * totals in one message. Holding the send back leaves the old email and the old PDF agreeing
+ * with each other. The rep gets `resent: false` and a reason, and can resend once the PDF
+ * rebuilds. A quote with no number cannot be emailed at all (resend_quote_email refuses it), so
+ * that case is named on its own rather than blamed on the PDF.
+ */
+export function restampResend(input: {
+  resend: boolean;
+  quoteNumber: unknown;
+  quotePdfUrl: string | null;
+}): { send: true } | { send: false; reason: string | null } {
+  if (!input.resend) return { send: false, reason: null };
+  if (!input.quoteNumber) return { send: false, reason: "the quote couldn't be emailed from here" };
+  if (!input.quotePdfUrl) return { send: false, reason: "the quote PDF couldn't be rebuilt, so it wasn't emailed again" };
+  return { send: true };
+}
