@@ -221,6 +221,34 @@ function SettingsView({ section }) {
   // which is exactly when they need the numbering fields in front of them.
   const ssMode = !mayGhlInvoice || !form.invoiceInGhl;
 
+  // SALES TAX SUMMARY — read-only, under the company rate (Avalara plan, 2026-09-17). Which rate
+  // a quote charges is no longer just the box on this card: a sales location's own rate beats
+  // it, and a rate verified for the delivery address beats both. Whether verified lookups are
+  // on is an operator switch (`client_settings.tax_lookup_enabled`), so a builder can only see
+  // it here, never flip it. No price is shown — the meters are off, and a price read follows
+  // the catalog redaction precedent when it is needed.
+  //
+  // Asked only on the CRM Connection screen, only once `status` has landed, and only in SS
+  // mode: a CRM-mode tenant never reaches the tax block, so the call would be for nothing.
+  // Re-asked when `status` is re-read after a save, so the location count stays current.
+  // ⚠️ These hooks sit ABOVE the skeleton's early return below — a hook added under it
+  // white-screens the page with React #310 the first time status lands.
+  const [taxInfo, setTaxInfo] = useState(null);   // tax_settings answer | { err } | null
+  const wantTaxInfo = Boolean(status) && ssMode && show("connection");
+  useEffect(() => {
+    if (!wantTaxInfo) return;
+    let alive = true;
+    sb.functions.invoke("portal-settings", { body: { action: "tax_settings" } }).then(({ data, error: err }) => {
+      if (!alive) return;
+      if (err || !data || data.error) {
+        setTaxInfo({ err: (data && data.error) || (err && err.message) || "Couldn't check your sales tax settings." });
+        return;
+      }
+      setTaxInfo(data);
+    });
+    return () => { alive = false; };
+  }, [wantTaxInfo, status]);
+
   // Who issues quotes and invoices (migration 121). Its own save, not the page-wide one:
   // the three fields are presence-based on the server, so sending only these leaves every
   // other setting untouched — and this card lives in the CRM section while the page Save
@@ -511,15 +539,23 @@ function SettingsView({ section }) {
           </div>
         )}
         {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
-            own documents. The rate here is the FALLBACK — each quote's tax is looked up
-            from its delivery address (Avalara), and this is what gets charged when that
-            lookup can't resolve, which is why the server refuses to flip SS mode on
-            while it is blank: 0 is a real answer, "unanswered" is not. */}
+            own documents. The rate here is the COMPANY rate, and it is the last rung a quote
+            can land on: a rate verified for the delivery address wins, then the quote's
+            sales location's own rate (migration 243), then this. Nothing looks an address up
+            on its own — a verified rate only exists where someone asked for one. That is why
+            the server refuses to flip SS mode on while this is blank: with no location rate
+            either, a quote would have nothing to charge. 0 is a real answer, "unanswered" is
+            not.
+
+            The help text used to say tax was "figured from each quote's delivery address" and
+            this rate charged "when that lookup can't resolve". Neither was true once lookups
+            stopped running on every submit, and a builder reading it would believe every
+            quote was being checked. */}
         {ssMode && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 12, maxWidth: 460 }}>
             <div><span style={S.lbl}>Sales tax rate (%)</span>
               <input style={S.input} value={form.ssTaxRate} onChange={set("ssTaxRate")} placeholder="e.g. 7.25" inputMode="decimal" />
-              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Tax is figured from each quote's delivery address — this rate is charged when that lookup can't resolve. Enter 0 if you don't collect sales tax.</div></div>
+              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>Used on every quote unless the quote's sales location has its own rate, or someone verifies the rate for its delivery address. Enter 0 if you don't collect sales tax.</div></div>
             <div><span style={S.lbl}>Tax label on documents</span>
               <input style={S.input} value={form.ssTaxLabel} onChange={set("ssTaxLabel")} placeholder="Sales tax" maxLength={40} />
               <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 4 }}>How the tax line reads on quotes and invoices.</div>
@@ -527,6 +563,37 @@ function SettingsView({ section }) {
                 <input type="checkbox" checked={form.ssTaxDelivery} onChange={set("ssTaxDelivery")} />
                 Charge tax on delivery
               </label></div>
+          </div>
+        )}
+        {/* Read-only: where else a quote's rate can come from, and whether verified lookups
+            are on for this account. See the note on `taxInfo` above. "Verified against the
+            delivery address", never "exact" — the lookup is an approximate rate for general
+            goods, and the copy must not promise more than that. */}
+        {ssMode && (
+          <div style={{ marginTop: 12, maxWidth: 620, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px", fontSize: 12.5, color: "#475569", lineHeight: 1.55 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#64748B", marginBottom: 4 }}>Sales tax</div>
+            {taxInfo === null && <div style={{ color: "#94A3B8" }}>Checking your sales tax settings…</div>}
+            {taxInfo && taxInfo.err && <div style={{ color: "#B45309", fontWeight: 600 }}>{taxInfo.err}</div>}
+            {taxInfo && !taxInfo.err && (() => {
+              const withRate = (taxInfo.locations || []).filter((l) => l.active !== false && l.taxRatePct != null).length;
+              return (<>
+                <div>
+                  <b>Local rates:</b>{" "}
+                  {withRate > 0
+                    ? <>{withRate} of your sales locations {withRate === 1 ? "has its" : "have their"} own rate, used on quotes for {withRate === 1 ? "that location" : "those locations"}. Set them in Company → Locations.</>
+                    : <>none yet. A sales location can carry your local rate — set one in Company → Locations.</>}
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  <b>Verified lookups:</b>{" "}
+                  {!taxInfo.lookupEnabled
+                    ? <>off for your account. CSM Synergy switches these on; until then your quotes use your company and local rates.</>
+                    : taxInfo.configured === false
+                      ? <>on for your account, but the lookup service isn't connected right now — quotes use your company and local rates until it is.</>
+                      : <>on for your account. A quote's rate can be verified against its delivery address before your customer signs.
+                          {taxInfo.dailyCap != null && <> {Number(taxInfo.usage24h) || 0} of {taxInfo.dailyCap} used in the last 24 hours.</>}</>}
+                </div>
+              </>);
+            })()}
           </div>
         )}
         {ssMode && (!String(form.ssQuoteNext).trim() || !String(form.ssInvoiceNext).trim() || !String(form.ssTaxRate).trim()) && (
@@ -537,7 +604,7 @@ function SettingsView({ section }) {
               !String(form.ssInvoiceNext).trim() && "a starting invoice number",
               !String(form.ssTaxRate).trim() && "your sales tax rate (0 counts)",
             ].filter(Boolean).join(", ").replace(/, ([^,]*)$/, " and $1")}.
-            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a tax rate there is nothing to charge when an address lookup fails.
+            Numbering that restarted at 1 would clash with the paperwork you already have out, and without a company tax rate a quote whose sales location has no rate of its own has nothing to charge.
           </div>
         )}
         {ssMode && status && status.emailReady === false && (
@@ -1490,19 +1557,33 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {data && data.wallet && (() => {
         const w = data.wallet;
         const avail = (w.balanceCents || 0) - (w.heldCents || 0);
-        const video = (w.meters || []).find((m) => m.kind === "video_3d_generation") || null;
-        const price = video && video.priceCents ? video.priceCents : 0;
-        const left = price > 0 ? Math.floor(Math.max(0, avail) / price) : null;
-        // Green at a generation or more in hand, amber below one, red at nothing. The same
-        // three-state read as SUB_BADGE, so the tab has one visual language.
+        // EVERY meter the server sends, in its own sort order. This used to look up
+        // video_3d_generation by name and ignore the rest, so the texting meters — live and
+        // priced — never appeared, and the card said "nothing is metered" while they were
+        // drawing on this balance. The server already sends only ACTIVE meters and authors
+        // their labels, so the card renders the list and maps no `kind` to English itself.
+        // A meter whose price is redacted (`visible` off) arrives with priceCents null: it is
+        // listed by name and no figure is invented for it.
+        const meters = (w.meters || []).filter((m) => m && m.kind);
+        const priced = meters.filter((m) => typeof m.priceCents === "number" && m.priceCents > 0);
+        const cheapest = priced.length ? Math.min(...priced.map((m) => m.priceCents)) : 0;
+        // A balance CAN go below zero: some usage posts after the fact rather than holding its
+        // price first, because refusing it would block a document a customer is waiting on.
+        // This card used to clamp that to $0.00, which told a builder whose next text or 3D
+        // generation was about to be refused that they simply had nothing in the wallet.
+        const signed$ = (c) => (c < 0 ? "−" + fmt$(-c) : fmt$(c));
+        // Green when the cheapest priced use is covered, amber below it, red at nothing, and
+        // red with its own word below zero. The same read as SUB_BADGE, so the tab has one
+        // visual language. No priced meter at all reads as Ready, as it always did.
         const tone = w.exempt ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Non-billable" }
-          : left === null || left >= 1 ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
+          : avail < 0 ? { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Below zero" }
+          : cheapest === 0 || avail >= cheapest ? { bg: "#ECFDF5", bd: "#A7F3D0", fg: "#065F46", t: "Ready" }
           : avail > 0 ? { bg: "#FFFBEB", bd: "#FDE68A", fg: "#92400E", t: "Low balance" }
           : { bg: "#FEF2F2", bd: "#FECACA", fg: "#991B1B", t: "Empty" };
-        const stat = (label, value) => (
+        const stat = (label, value, color = "#1E293B") => (
           <div style={{ minWidth: 120 }}>
             <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" }}>{label}</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#1E293B", marginTop: 3 }}>{value}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color, marginTop: 3 }}>{value}</div>
           </div>
         );
         return (
@@ -1512,18 +1593,40 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
               <span style={{ background: tone.bg, border: `1px solid ${tone.bd}`, color: tone.fg, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>{tone.t}</span>
             </div>
             <div style={{ display: "flex", gap: 26, flexWrap: "wrap", marginBottom: 14 }}>
-              {stat("Balance", fmt$(Math.max(0, avail)))}
-              {left !== null && stat("3D generations left", left)}
+              {stat("Balance", signed$(avail), avail < 0 ? "#991B1B" : "#1E293B")}
               {(w.heldCents || 0) > 0 && stat("Reserved", fmt$(w.heldCents))}
             </div>
-            {video && video.priceCents ? (
-              <p style={{ fontSize: 13, color: "#475569", marginTop: 0 }}>
-                <strong>{fmt$(video.priceCents)}</strong> per {video.unitLabel} — {video.label}.
-                Text messages and email will draw on the same wallet as they arrive.
-              </p>
+            {!w.exempt && avail < 0 && (
+              <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 8, padding: "9px 13px", color: "#991B1B", fontSize: 12.5, fontWeight: 600, marginBottom: 12, lineHeight: 1.5 }}>
+                Your wallet is {fmt$(-avail)} below zero. Add funds to bring it back up — anything that takes its
+                price from the wallet up front is declined until your balance covers it.
+              </div>
+            )}
+            {meters.length > 0 ? (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8", marginBottom: 6 }}>What draws on it</div>
+                {meters.map((m) => {
+                  const hasPrice = typeof m.priceCents === "number";
+                  // How many the balance pays for — the "what's left" half of the Framed-UP shape,
+                  // for every priced meter rather than only 3D. Not shown on a non-billable
+                  // wallet, where nothing is charged and the count would mean nothing.
+                  const covers = !w.exempt && hasPrice && m.priceCents > 0 ? Math.floor(Math.max(0, avail) / m.priceCents) : null;
+                  return (
+                    <div key={m.kind} style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "5px 0", borderTop: "1px solid #F1F5F9", fontSize: 13 }}>
+                      <span style={{ color: "#334155", fontWeight: 600 }}>{m.label || m.kind}</span>
+                      {hasPrice && (
+                        <span style={{ color: "#475569", whiteSpace: "nowrap" }}>
+                          {m.priceCents === 0 ? "No charge" : <><strong>{fmt$(m.priceCents)}</strong>{m.unitLabel ? ` / ${m.unitLabel}` : ""}</>}
+                          {covers !== null && <span style={{ color: "#94A3B8" }}> · balance covers {covers}</span>}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <p style={{ fontSize: 13, color: "#64748B", marginTop: 0 }}>
-                Nothing is metered on your account yet. When 3D generation and texting switch on, they draw from here.
+                Nothing is metered on your account yet. Anything that switches on later draws from here.
               </p>
             )}
             {/* ADD FUNDS — real since migration 164. The note that used to sit here read

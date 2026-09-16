@@ -2932,7 +2932,7 @@ function BillingShell({ sub: rawSub, onSub, tabs, viewingLabel = null }) {
   );
 }
 
-function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null }) {
+function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null, canReadTax = false, canEditTax = false }) {
   // Same clamp SettingsShell runs, for the same reason and one more. A person granted only
   // settings_team has no Business Details tab, so the rail's Company link cannot be the
   // `company` slug for them — it points at their first visible tab instead (see 12-shell).
@@ -2951,7 +2951,8 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null 
       {sub === "branding" && (<><ShareLinkCard clientId={clientId} /><SettingsView section="branding" /></>)}
       {sub === "team" && <CommissionTeam viewingLabel={viewingLabel} />}
       {sub === "commissions" && <CommissionStructure clientId={clientId} />}
-      {sub === "locations" && <LocationsCard />}
+      {/* The tab and its lots ride on the team/branding areas; the tax rates on it are settings_crm. See LocationsCard. */}
+      {sub === "locations" && <LocationsCard canReadTax={canReadTax} canEditTax={canEditTax} />}
       {/* Crews and Drivers are two sections of one component — it holds them together because
           they arrive in one call and reference each other. The tabs only exist when the
           scheduling entitlement is on (ssCompanyTabs), which is the gate they had in Team. */}
@@ -3017,7 +3018,14 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
           Client Setup links that point at branding and team are untouched. */}
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
-          viewingLabel={viewingLabel} />
+          viewingLabel={viewingLabel}
+          /* Location tax rates are settings_crm — the area that owns the company rate — not
+             the team/branding areas this tab rides on. Same unclamped reading as ssCompanyTabs: an
+             owner/admin, or a null map (a platform operator in view-as, whose rights come
+             from app_operators), sees and edits; everyone else by their own map. The server
+             refuses regardless, and a refusal shows its own sentence. */
+          canReadTax={isAdmin || !access || ssCanRead(access, "settings_crm")}
+          canEditTax={isAdmin || !access || ssCanWrite(access, "settings_crm")} />
       )}
       {sub === "connection" && <SettingsView section="connection" />}
       {/* The SECOND mount of QuickBooks. Gating only the top-level tab would leave this one
