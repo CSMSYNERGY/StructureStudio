@@ -135,11 +135,18 @@ async function clientIdFrom(req: Request | null): Promise<string | null> {
  * `minStatus` defaults to 500. Pass 400 for webhooks, where a 4xx we return means WE
  * failed to process the event rather than "the caller sent something silly" — e.g.
  * billing-webhook answers 422 on its own internal failures.
+ *
+ * `alreadyFiled` is opt-in and only customer-auth passes it. It names returned responses
+ * whose app_errors row the return site has ALREADY decided — written once, or deliberately
+ * not again — so this wrapper writes nothing for them. It exists for a refusal that repeats
+ * identically on every request with nothing capping how often it can be asked for, where a
+ * row per request would flood the table with copies of one fact. It never hides a throw,
+ * and a function that does not pass it gets exactly the behaviour described above.
  */
 export function withErrorLog(
   fn: string,
   handler: (req: Request) => Promise<Response>,
-  opts: { minStatus?: number } = {},
+  opts: { minStatus?: number; alreadyFiled?: (res: Response) => boolean } = {},
 ): (req: Request) => Promise<Response> {
   const minStatus = opts.minStatus ?? 500;
 
@@ -156,7 +163,7 @@ export function withErrorLog(
     try {
       const res = await handler(req);
 
-      if (res.status >= minStatus) {
+      if (res.status >= minStatus && !opts.alreadyFiled?.(res)) {
         const body = await res.clone().text().catch(() => "");
         // A handful of DELIBERATE refusals answer with a 5xx because no other status fits
         // — "sign-in by text isn't available yet" and "email sending isn't switched on for
