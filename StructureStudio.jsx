@@ -11156,20 +11156,63 @@ function ssdHoldStep(key) { SSD_STEP_HOLD = { key, t: Date.now(), lastPos: null,
 // builder frames the designer on their website that includes THEIR page: it jumps, and the sticky bar the
 // customer just tapped is pushed off the top of the screen. The scroller must actually overflow: a wrapper
 // with overflow-x:hidden reports overflow-y "auto" without being able to scroll.
-function ssdScrollToSection(el) {
-  let scroller = null;
+function ssdScrollerOf(el) {
   for (let p = el.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
     const oy = getComputedStyle(p).overflowY;
-    if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight + 1) { scroller = p; break; }
+    if ((oy === "auto" || oy === "scroll") && p.scrollHeight > p.clientHeight + 1) return p;
   }
+  return null;
+}
+function ssdScrollToSection(el, behavior) {
+  const scroller = ssdScrollerOf(el);
   const frameEl = el.closest(".ssd-frame");
   const sticky = frameEl ? (parseFloat(getComputedStyle(frameEl).getPropertyValue("--ssd-sticky-top")) || 0) : 0;
   const r = el.getBoundingClientRect();
   const top = Math.max(0, Math.round(scroller
     ? scroller.scrollTop + r.top - scroller.getBoundingClientRect().top - scroller.clientTop - sticky
     : window.scrollY + r.top - sticky));
-  try { (scroller || window).scrollTo({ top, behavior: "smooth" }); }
+  try { (scroller || window).scrollTo({ top, behavior: behavior || "smooth" }); }
   catch (_e) { if (scroller) scroller.scrollTop = top; else window.scrollTo(0, top); }
+}
+
+// Brings the floorplan where the customer can see it. The target is the plan CARD, not the svg
+// inside it: with the svg as the target the card's "Floorplan" head and its top padding land above
+// the screen edge, and the landing misses the top of the thing it was asked to land on.
+// `force` false moves the page ONLY when the drawing is not already usably in view, so arming a
+// tool leaves a customer who is already looking at the plan exactly where they were.
+// ⚠️ ssdScrollToSection, never scrollIntoView — the embedding-page note above applies here too.
+function ssdRevealPlan(svgEl, force) {
+  if (!svgEl || typeof svgEl.getBoundingClientRect !== "function") return;
+  const card = (svgEl.closest && svgEl.closest(".ssd-plan")) || svgEl;
+  if (!force) {
+    const scroller = ssdScrollerOf(card);
+    const sr = scroller ? scroller.getBoundingClientRect() : null;
+    const vTop = sr ? sr.top : 0;
+    const vBot = sr ? sr.bottom : window.innerHeight;
+    const r = svgEl.getBoundingClientRect();
+    const seen = Math.min(r.bottom, vBot) - Math.max(r.top, vTop);
+    // Enough of the drawing to aim at: all of it, or 60% of the screen when it is taller than that.
+    if (seen >= Math.min(r.height, (vBot - vTop) * 0.6)) return;
+  }
+  // Arming brings the TOOLBAR above the card along, because the armed tool's own instruction
+  // ("← Click a wall") lives in it: landing on the card alone scrolls the sentence the customer
+  // is meant to follow off the top of the screen. Only when it really is the strip directly above
+  // the plan — a locked plan hides it. Open (force) lands on the card itself; there the drawing
+  // is the answer, and the extra 60px would push the plan's own head down for nothing.
+  let target = card;
+  if (!force) {
+    const main = card.closest(".ssd-main");
+    const tb = main && main.querySelector(".ssd-tb");
+    const tr = tb && tb.getBoundingClientRect();
+    const gap = tr ? card.getBoundingClientRect().top - tr.bottom : -1;
+    if (tr && tr.height > 0 && gap >= 0 && gap < 40) target = tb;
+  }
+  // INSTANT when a tool was just armed, and that is not a taste question: the very next thing the
+  // customer does is aim at a wall, and a tap that starts while the page is still gliding lands
+  // where the wall WAS. Proven, not guessed — with a smooth move here, one placement in a 35-test
+  // run missed its wall and hung; instant, the same suite is green. Open (force) keeps the glide:
+  // nothing is being aimed at there, and the movement shows the plan being replaced.
+  ssdScrollToSection(target, force ? "smooth" : "auto");
 }
 
 function SSStepWatcher({ ids, onChange }) {
@@ -14092,6 +14135,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const movedRef = useRef(false);
   const gestureStartRef = useRef(null); // {x,y} in client px at pointer-down
 
+  // A tool that has just been armed asks for a click ON THE PLAN, so the plan has to be on screen.
+  // The redesigned page carries about 160px more above it than beta did (the numbered section
+  // headings and the size/option cards), which on a 1440x900 laptop was the difference between
+  // seeing the building and seeing none of it at the moment it had to be clicked. Only when it is
+  // out of view, and through ssdScrollToSection, which moves the designer's own scroller and never
+  // the builder's embedding page.
+  useEffect(() => { if (activeTool) ssdRevealPlan(svgRef.current, false); }, [activeTool]);
+
   // PostMessage listener
   useEffect(() => {
     const handler = (e) => {
@@ -14673,9 +14724,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // The list sits BELOW the plan (and on the success screen, below a page of text), so
     // without this the plan changed off-screen and Open appeared to do nothing. setTimeout,
     // not requestAnimationFrame: rAF never fires in a hidden tab, and this must run after the
-    // new size has committed so the scroll lands on the plan at its new height.
+    // new size has committed so the scroll lands on the plan at its new height. The target is
+    // the plan CARD (ssdRevealPlan), not the svg inside it: scrolling the svg to the top left
+    // the card's "Floorplan" head off the screen, and the smooth scrollIntoView it replaces
+    // also stopped 19px short of its own target about half the time.
     say({ tone: "info", title: "Now viewing", text: `v${version} · ${[capWords(vsel.style), vsel.size].filter(Boolean).join(" ") || "Design"}` });
-    setTimeout(() => { try { svgRef.current && svgRef.current.scrollIntoView({ block: "start", behavior: "smooth" }); } catch (_e) { /* old browsers: no options arg */ } }, 0);
+    // TWO passes. The first moves straight away; the second corrects the landing after the
+    // scroll has come to rest. The first one aims at where the card is BEFORE this version's
+    // own size commits, and the page then settles ~19px away from that — which is exactly how
+    // far short of the card Open used to stop. 700ms because a correction aimed mid-flight
+    // inherits the same error; by then the page is still, so when the first pass already
+    // landed right the second scrolls to where the page is and nothing moves.
+    setTimeout(() => { try { ssdRevealPlan(svgRef.current, true); } catch (_e) { /* old browsers: no scroll options */ } }, 0);
+    setTimeout(() => { try { ssdRevealPlan(svgRef.current, true); } catch (_e) { /* as above */ } }, 700);
     return true;
   }, [supabase, designCode, embedded]);
 
