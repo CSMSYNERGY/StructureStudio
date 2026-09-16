@@ -7,6 +7,7 @@ import {
   TwilioNotConfigured,
   twCheckVerification,
   twilioConfigured,
+  twStartFailureKind,
   twStartVerification,
 } from "../_shared/twilioVerify.ts";
 import {
@@ -123,6 +124,24 @@ const MSG_EMAIL_NOT_CONFIGURED = "Sign-in by email isn't available yet.";
 // distinctions are real but telling them apart is a probing oracle, and none of them change
 // what the customer should do next: ask for another code.
 const MSG_EMAIL_CODE_BAD = "That code didn't match or has expired — request a new one.";
+
+// Twilio codes already written up as a `twilio_config` error row by THIS isolate. A service or
+// account refusal (60204, 20404, 21608) fails every send identically, and only the per-number
+// cap bounds those requests (a config refusal keeps just its phone slot, see the send site), so
+// a caller who changes numbers can repeat it indefinitely. One error row per isolate per code is
+// enough to put the fault in front of someone, and it is the ONLY row this refusal writes: its
+// 503 goes into filedAtReturnSite, so withErrorLog does not add an info row per request either.
+const configFaultLogged = new Set<number>();
+
+/** Tests only: forget which config faults this isolate has already logged. */
+export function _resetConfigFaultLoggedForTests(): void {
+  configFaultLogged.clear();
+}
+
+// Responses whose app_errors row was decided where they were returned (withErrorLog's
+// `alreadyFiled` option skips them). Only the Twilio config refusal uses it, for the reason
+// above. A WeakSet, so a response that has been answered is not held onto.
+const filedAtReturnSite = new WeakSet<Response>();
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -413,6 +432,9 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   // else 'email', else null (neither: the sheet says codes are unavailable and the shopper keeps
   // designing, expo plan decision 2). A preference never adds a channel: a builder who picked
   // email on a deployment that cannot send email still gets text.
+  // consentBox is the builder's switch for the texting-consent box on the designer's lead gate
+  // (client_settings.lead_sms_consent_box, migration 242). The sheet keeps the box hidden until
+  // this answers, so it is answered on every call, not only when there is a channel choice.
   if (action === "login_options") {
     const channels: string[] = [];
     if (twilioConfigured()) channels.push("sms");
@@ -427,7 +449,13 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       const preferred = prefErr ? null : String(pref?.customer_login_default ?? "");
       if (preferred && channels.includes(preferred)) defaultChannel = preferred;
     }
-    return json({ ok: true, channels, defaultChannel });
+    // Its own read, so a missing 242 column (deployed early, or after a rollback) can never cost a
+    // builder their channel default. A failed read shows the box, today's behaviour. Not logged,
+    // for the same one-row-per-sheet-open reason.
+    const { data: boxRow, error: boxErr } = await sb.from("client_settings")
+      .select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle();
+    const consentBox = boxErr ? true : boxRow?.lead_sms_consent_box !== false;
+    return json({ ok: true, channels, defaultChannel, consentBox });
   }
 
   // ── EMAIL CHANNEL: re-opened 2026-09-15 (migration 230) ─────────────────────────────────
@@ -544,27 +572,79 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     const claimed = [phoneBucketKey, ipBucketKey, tenantBucketKey]
       .filter((_b, i) => slots[i] === "ok");
 
+    // ONE claim covers the whole send, including the transport's single unbranded resend
+    // after a 60204 brand refusal: that refusal sent nothing, so the resend is still one
+    // text and is charged once.
+    let sent: Awaited<ReturnType<typeof twStartVerification>>;
     try {
-      await twStartVerification(e164, brand);
+      sent = await twStartVerification(e164, brand);
     } catch (e) {
       if (e instanceof TwilioNotConfigured) {
         await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
         return refusal({ error: MSG_NOT_CONFIGURED });
       }
       if (e instanceof TwilioApiError) {
-        // A permanent refusal means the provider sent NOTHING — give the slots back rather
-        // than letting cheap, guaranteed-to-fail requests exhaust a real tenant's budget.
-        // A transient failure keeps them: a send may well have gone out, and over-counting
-        // is the safe direction for a cap.
-        if (e.permanent) await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
-        if (e.code === 60203) {
-          // Twilio's own max-send lock — the verification is frozen until its TTL, so
+        const kind = twStartFailureKind(e);
+        // What a refusal does with the three slots it claimed (phone, IP, tenant):
+        //
+        //   number  60200, 60205 and any other permanent code, and
+        //   locked  60203, 60202: ALL THREE go back. Twilio sent nothing, and a cheap,
+        //           guaranteed-to-fail request must not spend a real tenant's budget.
+        //
+        //   config  60204 (still refused after the unbranded resend), 20404, 21608: ONLY THE
+        //           PHONE SLOT is kept; the IP and tenant slots go back. The service or account
+        //           refuses every text for the tenant until an operator fixes it, so something
+        //           has to cap repeat taps, and the phone slot does it: three refused texts per
+        //           number per window, then that number waits. The IP and tenant slots cannot
+        //           be the cap, because those two buckets are SHARED with the email route:
+        //           handleEmailChannel refuses when either is full and locks the IP bucket for
+        //           15 minutes. Keeping them meant twenty shoppers on one venue Wi-Fi tapping
+        //           "Text me a code" locked EMAIL login for that IP, and sixty refused texts
+        //           closed email for the whole tenant, while the 503 below sends those same
+        //           people to email. What releasing them costs: a caller who keeps changing
+        //           numbers is capped by nothing here, and each of their requests is a refused
+        //           Twilio call and an invocation. It is NOT a log row: the config branch writes
+        //           one row per isolate per code and marks its 503 as already filed (see
+        //           configFaultLogged).
+        //
+        //   transient  429, 5xx, network: ALL THREE are kept. A text may well have gone out,
+        //           and over-counting is the safe direction for a cap.
+        //
+        // (TwilioNotConfigured, above, gives all three back.)
+        if (kind === "config") {
+          await Promise.all(claimed.filter((b) => b !== phoneBucketKey).map((b) => releaseSendSlot(sb, b)));
+        } else if (e.permanent) {
+          await Promise.all(claimed.map((b) => releaseSendSlot(sb, b)));
+        }
+        if (kind === "locked") {
+          // Twilio's own max-attempts lock — the verification is frozen until its TTL, so
           // surface the same "wait it out" message as our lockout.
           return json({ error: MSG_TOO_MANY_CODES }, 429);
         }
-        if (e.permanent) {
+        if (kind === "number") {
           // Malformed/unreachable/landline — an identical retry fails identically.
           return json({ error: "We couldn't text that number." }, 400);
+        }
+        if (kind === "config") {
+          // The Verify service or account refuses EVERY send (60204 with no brand left to
+          // drop, 20404: the service SID points at nothing, or 21608: the account's messaging
+          // compliance profile is missing). Blaming the customer's number
+          // or offering "try again" are both wrong, so this is the not-available answer; the
+          // designer's login sheet turns a 503 into "keep designing" and the email route.
+          // The error row is written once per isolate per code (see configFaultLogged), and it
+          // is the only row: the 503 is marked as filed here, so withErrorLog does not write an
+          // info row for every request that a caller changing numbers can make.
+          if (!configFaultLogged.has(e.code)) {
+            configFaultLogged.add(e.code);
+            await logEdgeError({
+              fn: "customer-auth", req, clientId, code: "twilio_config",
+              message: `Twilio Verify refused the send as a service/account configuration fault: ${e.message}`,
+              context: { twilioStatus: e.status, twilioCode: e.code },
+            });
+          }
+          const notAvailable = refusal({ error: MSG_NOT_CONFIGURED });
+          filedAtReturnSite.add(notAvailable);
+          return notAvailable;
         }
         // Transient (Twilio 429/5xx/network). withErrorLog also records the 502 below,
         // but only this row carries the Twilio verdict. e.message is safe by the
@@ -580,6 +660,19 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
     }
 
     // Sent — and already counted in all three buckets by the claim above.
+
+    // Sent, but under the service's own name: Twilio refused the builder's name (60204,
+    // Custom Company Name not enabled) and the transport resent without it. A warning, not
+    // an error — the customer got their code. The transport reports this only on the call
+    // that discovered it, so it is one row per isolate. No phone in the row.
+    if (sent.brandRefused) {
+      await logEdgeError({
+        fn: "customer-auth", req, clientId, code: "twilio_brand_refused", severity: "warn",
+        message: "Twilio refused the builder name on the login text (60204, Custom Company Name "
+          + "not enabled on the Verify service). The code was sent under the service name instead.",
+        context: { twilioCode: 60204 },
+      });
+    }
 
     // Housekeeping (adminGate.ts's pattern, audit 2026-08-20): an XFF-rotating caller
     // writes one junk 'ip:<forged>' row per request that is never read again — without a
@@ -660,7 +753,7 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   // `identity` (2026-09-15): {phone?, email?} — what this session has proven, for the designer's
   // "Signed in as". Its own verified keys only.
   return json({ ok: true, token: s.token, name: s.identity.name ?? name, identity: identityForClient(s.identity) });
-}));
+}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));
 
 /**
  * The email sign-in channel.

@@ -306,7 +306,26 @@ Deno.serve(withErrorLog("capture-lead", async (req: Request) => {
   // ⚠️ REFUSED WITHOUT THE SENTENCE. A consent record that cannot say what was shown is not
   // evidence, so a `true` flag with no text is dropped rather than stored as a half-record
   // that looks like proof until someone reads it.
-  if (smsConsent && consentTextOk && phoneDigits.length >= 10) {
+  //
+  // ⚠️ A BUILDER CAN SWITCH THE BOX OFF (client_settings.lead_sms_consent_box, migration 242), and
+  // then a tick is not recorded even if one arrives. The designer stops showing the box once
+  // customer-auth tells it, but a cached bundle, a page opened before the switch, or a direct call
+  // can still send smsConsent: true, and a tick on a box the builder does not show is not a
+  // permission they asked for or can stand behind. Dropping it is the safe direction: nobody is
+  // ever texted because a grant is missing. A failed read (including the column not existing yet)
+  // keeps the old behaviour.
+  let consentBoxOff = false;
+  if (smsConsent) {
+    const { data: boxRow, error: boxErr } = await sb.from("client_settings")
+      .select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle();
+    consentBoxOff = !boxErr && boxRow?.lead_sms_consent_box === false;
+  }
+  if (smsConsent && consentBoxOff) {
+    // Info, not a fault: the builder chose this. Durable so a "why was this consent not recorded"
+    // question has an answer. Bounded by Guard 1 above, which has already run.
+    await logEdgeError({ fn: "capture-lead", req, clientId, code: "consent_box_off", severity: "info",
+      message: "sms consent not recorded - this builder has the designer consent box switched off" });
+  } else if (smsConsent && consentTextOk && phoneDigits.length >= 10) {
     const tenDigits = phoneKey10;
     // ⚠️ ONE GRANT PER (TENANT, PHONE). Append-only is about HISTORY, not about repetition:
     // re-ticking the same box adds no fact, and this is a public endpoint, so an insert on

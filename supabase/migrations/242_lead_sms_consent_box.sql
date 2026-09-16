@@ -1,0 +1,62 @@
+-- 242_lead_sms_consent_box.sql — a per-builder switch for the texting-consent box on the
+-- designer's lead gate.
+--
+-- ── WHY ──────────────────────────────────────────────────────────────────────────────────
+-- The designer's lead gate (LoginSheet, mode "gate") has always shown one optional box: "By
+-- checking this box, you agree that <company> may send you text messages about your quote and
+-- your building…". That is right for a builder whose customers design buildings. It is wrong for
+-- an account whose A2P campaign declares a DIFFERENT opt-in: a carrier reviewer who follows a
+-- "try the designer" link then finds a second phone-collecting page with a texting box the
+-- campaign never mentions, in wording about a quote and a building, which is an unlisted opt-in
+-- (Twilio 30909 / 30917 causes). Found 2026-09-16 by an adversarial review of a resubmitted
+-- campaign; the fix was a switch rather than a code change per account.
+--
+--   public.client_settings.lead_sms_consent_box   boolean, NOT NULL, default TRUE.
+--       true  → the gate shows the box, capture-lead records a tick, and the public disclosure
+--               page (sms-optin-disclosure) shows the box. Exactly the behaviour before 242.
+--       false → the gate never shows the box (it stays hidden until customer-auth login_options
+--               answers, so it cannot flash up during a cold start), capture-lead refuses to record
+--               a tick that still arrives from a cached bundle or a direct call (logged as info,
+--               code consent_box_off), and the disclosure page prints the builder's registered
+--               opt-in description (sms_registrations.campaign_message_flow) instead of a box.
+--
+-- The default keeps every existing builder exactly as they were. There is no portal control yet;
+-- an operator flips it with SQL. client_settings is service-role only (RLS on, no policies) and the
+-- new column inherits that.
+--
+-- ── SAFE WITH WHAT IS LIVE ───────────────────────────────────────────────────────────────
+-- Nothing live reads the column before the functions in the same change deploy, and all three
+-- (customer-auth, capture-lead, sms-optin-disclosure) treat a failed read, including the column not
+-- existing, as "on". A designer bundle that predates the change ignores login_options' consentBox and
+-- keeps showing the box; capture-lead still refuses to record the tick when the switch is off.
+--
+-- ── ORDER OF APPLY AND DEPLOY ────────────────────────────────────────────────────────────
+-- THIS MIGRATION FIRST, then customer-auth, capture-lead and sms-optin-disclosure (any order), then
+-- the designer twins reach beta on push. Production needs a beta-to-main promotion, and while the
+-- weekly workflow is disabled that promotion is manual. The opt-in fix is NOT live for a carrier
+-- reviewer until the PRODUCTION designer bundle contains consentBox: grep the live compiled bundle,
+-- not the repo, before answering or resubmitting a campaign. Until then an old bundle still shows
+-- the box and capture-lead drops its ticks (info, consent_box_off). The disclosure page caches for
+-- 300s after a flip.
+--
+-- APPLIED 2026-09-17 from Git Bash as ONE inline transaction that starts at SQL, not at a comment:
+--   supabase db query --linked "begin; alter table …; comment on column …;
+--     insert into supabase_migrations.schema_migrations (version, name)
+--     values ('242', '242_lead_sms_consent_box') returning version, name; commit;"
+-- ⚠️ Passing this whole FILE inline does not work: "<newline>$(cat 242_lead_sms_consent_box.sql)" was
+-- refused as an EMPTY query ("expected string to have >=1 characters") and ran nothing, and a leading
+-- "--" line is read as a CLI flag. Never from PowerShell 5.1 (it joins the lines into one comment and
+-- exits 0). Exit codes prove nothing, so it was read back afterwards:
+--   select is_nullable, column_default from information_schema.columns
+--    where table_schema='public' and table_name='client_settings' and column_name='lead_sms_consent_box';
+--   → NO | true, 8 of 8 rows on, ledger row 242 present.   NEVER `supabase db push`.
+--
+-- Rollback (capture-lead, sms-optin-disclosure, customer-auth and the designer all treat a missing
+-- column as "on"):
+--   alter table public.client_settings drop column if exists lead_sms_consent_box;
+
+alter table public.client_settings
+  add column if not exists lead_sms_consent_box boolean not null default true;
+
+comment on column public.client_settings.lead_sms_consent_box is
+  'Show the optional texting-consent box on the designer lead gate (migration 242). false = hidden, ticks not recorded, disclosure page prints campaign_message_flow instead.';

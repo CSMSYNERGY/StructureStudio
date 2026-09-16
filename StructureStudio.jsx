@@ -11946,6 +11946,12 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   // ⚠️ UNCHECKED BY DEFAULT, AND IT MUST STAY THAT WAY. A pre-ticked box is not consent under
   // the TCPA — the customer has to act. Do not "help conversion" by defaulting it on.
   const [smsConsent, setSmsConsent] = useState(false);
+  // Whether this builder shows the texting-consent box at all (client_settings.lead_sms_consent_box,
+  // migration 242, answered by customer-auth login_options). null = still asking, and the box stays
+  // HIDDEN until the answer arrives: a builder who switched it off must never have a visitor tick a
+  // box that flashed up during a cold start. Any unclean answer (an older function, offline) counts
+  // as on, which is how the gate behaved before the switch existed.
+  const [consentBox, setConsentBox] = useState(null);
   // Which routes customer-auth can send a code by for this builder. null = still asking;
   // anything but a clean answer (the live function predating login_options says "Unknown
   // action", a cold start, offline) falls back to TEXT ONLY — the one route that has always
@@ -11966,18 +11972,24 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
   const lastLeadRef = useRef(null);
   useEffect(() => {
     let live = true;
+    // A login_options call that never answers (callCustomerFn has no timeout) must not hide the
+    // consent box for the whole visit: after 6s it counts as "on", like any other unclean answer.
+    // A real answer that arrives later still wins.
+    const boxFallback = setTimeout(() => { if (live) setConsentBox((v) => (v === null ? true : v)); }, 6000);
     (async () => {
       const r = await callCustomerFn(supabase, "customer-auth", { action: "login_options", clientId: config.clientId });
+      clearTimeout(boxFallback);
       if (!live) return;
       const list = r.ok && r.data && Array.isArray(r.data.channels)
         ? r.data.channels.filter((c) => c === "sms" || c === "email")
         : null;
-      if (!list) { setChannels(["sms"]); return; }
+      if (!list) { setChannels(["sms"]); setConsentBox(true); return; }
       setChannels(list);
+      setConsentBox(r.data.consentBox !== false);
       if (mode === "code" && pending) return; // the code already out decides the route
       setChannel(r.data.defaultChannel === "email" && list.includes("email") ? "email" : (list.includes("sms") ? "sms" : (list[0] || "sms")));
     })();
-    return () => { live = false; };
+    return () => { live = false; clearTimeout(boxFallback); };
   }, [supabase, config.clientId]);
   // The resend countdown ticks only while there is something to count.
   useEffect(() => {
@@ -12058,14 +12070,16 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
     // EXACTLY what the gate always sent. smsConsent + the verbatim sentence ride along:
     // capture-lead writes the consent record, and it is the only moment this page can prove
     // WHAT was shown and WHERE.
-    const leadKey = JSON.stringify([name.trim(), digits, smsConsent]);
+    // A box this builder does not show cannot have been ticked, whatever the state says.
+    const consented = smsConsent && consentBox === true;
+    const leadKey = JSON.stringify([name.trim(), digits, consented]);
     if (needPhone && isLead && lastLeadRef.current !== leadKey) {
       lastLeadRef.current = leadKey;
       try {
         supabase.functions.invoke("capture-lead", { body: {
           clientId: config.clientId, name: name.trim(), phone,
-          smsConsent: smsConsent,
-          consentText: smsConsent ? consentText : null,
+          smsConsent: consented,
+          consentText: consented ? consentText : null,
           consentUrl: typeof location !== "undefined" ? String(location.href).slice(0, 500) : null,
         } });
       } catch (_e) {}
@@ -12189,10 +12203,14 @@ function LoginSheet({ config, supabase, accent, mode, notice, pending, initialNa
               </>
             )}
             {/* The texting-consent box belongs to the LEAD form, where capture-lead records it. An
-                account link files no lead, so a box there would record nothing it claims to. */}
-            {needPhone && isLead && (
-              <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer" }}>
-                <input type="checkbox" checked={smsConsent} onChange={(e) => setSmsConsent(e.target.checked)}
+                account link files no lead, so a box there would record nothing it claims to. And
+                only for a builder who shows it: consentBox is null until login_options answers.
+                ⚠️ While it is null the slot keeps its full height but is INVISIBLE AND INERT, so the box
+                appearing never pushes Log in down under a finger aimed at it (a tap that lands on the
+                label ticks consent). An answer of false removes the slot, which only moves the button up. */}
+            {needPhone && isLead && consentBox !== false && (
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 9, margin: "0 0 14px", cursor: "pointer", visibility: consentBox === true ? "visible" : "hidden" }}>
+                <input type="checkbox" checked={smsConsent} disabled={consentBox !== true} onChange={(e) => setSmsConsent(e.target.checked)}
                   style={{ marginTop: 2, width: 16, height: 16, flex: "0 0 auto", accentColor: acc, cursor: "pointer" }} />
                 <span style={{ fontSize: 11.5, color: "#64748B", lineHeight: 1.45 }}>{consentText}</span>
               </label>

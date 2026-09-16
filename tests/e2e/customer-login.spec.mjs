@@ -219,6 +219,77 @@ test("the gate is the login: design unlocks before the code, and the code can wa
 // Decision 2 with the builder's Settings default on Email (review 2026-09-15): the email is only
 // where the code goes. Name + phone unlock the design and file the lead; the sheet then asks for
 // the address, and pressing again files nothing twice.
+// Migration 242: a builder can switch the texting-consent box off (client_settings.lead_sms_consent_box,
+// reported by login_options as consentBox:false). The box never appears, and the lead claims no consent.
+test("a builder with the consent box switched off: no box, and the lead carries no consent", async ({ page }) => {
+  const errors = watchConsole(page);
+  const calls = await stubBackend(page, {
+    loginOptions: { status: 200, body: { ok: true, channels: ["sms"], defaultChannel: "sms", consentBox: false } },
+  });
+  await boot(page);
+  await armATool(page);
+  const sheet = page.getByRole("dialog");
+  await expect(sheet.getByText("Log in to design your building")).toBeVisible();
+  await expect.poll(() => Boolean(authCall(calls, "login_options"))).toBe(true);
+  // Not merely hidden: once the answer lands the slot is gone from the DOM.
+  await expect(sheet.locator('input[type="checkbox"]')).toHaveCount(0);
+  await expect(sheet.getByText(CONSENT_RE)).toHaveCount(0);
+  await fillGateDetails(sheet);
+  await sheet.getByRole("button", { name: "Log in →" }).click();
+  await expect.poll(() => Boolean(calls.find((c) => c.fn === "capture-lead"))).toBe(true);
+  expect(calls.find((c) => c.fn === "capture-lead").body).toMatchObject({ smsConsent: false, consentText: null });
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+// While login_options is pending the box holds its space, invisible and disabled, so its arrival
+// cannot push Log in down under a finger aimed at it (review 2026-09-17: a tap on the label ticks it).
+test("the consent box arrives without moving Log in, and cannot be ticked before it shows", async ({ page }) => {
+  const errors = watchConsole(page);
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const calls = await stubBackend(page, {
+    loginOptions: async () => { await held; return { status: 200, body: { ok: true, channels: ["sms"], defaultChannel: "sms", consentBox: true } }; },
+  });
+  await boot(page);
+  await armATool(page);
+  const sheet = page.getByRole("dialog");
+  const logIn = sheet.getByRole("button", { name: "Log in →" });
+  await expect(logIn).toBeVisible();
+  await expect.poll(() => Boolean(authCall(calls, "login_options"))).toBe(true);
+  const box = sheet.locator('input[type="checkbox"]');
+  await expect(box).toHaveCount(1);
+  await expect(box).toBeHidden();
+  await expect(box).toBeDisabled();
+  const before = await logIn.boundingBox();
+  release();
+  await expect(box).toBeVisible();
+  await expect(box).toBeEnabled();
+  await expect(box).not.toBeChecked();   // TCPA: never pre-ticked
+  await expect(sheet.getByText(CONSENT_RE)).toBeVisible();
+  const after = await logIn.boundingBox();
+  expect(Math.round(after.y), "Log in did not move").toBe(Math.round(before.y));
+  expect(pageErrors(errors), "console errors").toEqual([]);
+});
+
+// callCustomerFn has no timeout: a login_options that never answers must not hide the box for the
+// whole visit. After 6s it counts as "on", like any other unclean answer.
+test("a login_options that never answers still shows the consent box after 6 seconds", async ({ page }) => {
+  let release;
+  const held = new Promise((r) => { release = r; });
+  const calls = await stubBackend(page, {
+    loginOptions: async () => { await held; return { status: 400, body: { error: "Unknown action" } }; },
+  });
+  await boot(page);
+  await armATool(page);
+  const sheet = page.getByRole("dialog");
+  await expect.poll(() => Boolean(authCall(calls, "login_options"))).toBe(true);
+  const box = sheet.locator('input[type="checkbox"]');
+  await expect(box).toBeHidden();
+  await expect(box).toBeVisible({ timeout: 10_000 });
+  await expect(box).toBeEnabled();
+  release();
+});
+
 test("an Email default never holds the gate: name and phone unlock and file the lead once, the email only routes the code", async ({ page }) => {
   const errors = watchConsole(page);
   const calls = await stubBackend(page, {
@@ -773,7 +844,11 @@ test("the rep's account link, opened signed out on a new phone: a phone-only log
   await expect(sheet.getByText("Log in to see your quotes and invoices")).toBeVisible();
   await expect(sheet.getByText("Log in to design your building")).toHaveCount(0);
   await expect(sheet.getByText("We'll text you a code to open your quotes and invoices.")).toBeVisible();
-  await expect(sheet.getByRole("checkbox")).toHaveCount(0);
+  // Wait for the answer first: while login_options is pending the box is hidden in EVERY mode
+  // (migration 242), so a count taken before it would pass without testing the account link.
+  await expect.poll(() => Boolean(authCall(calls, "login_options"))).toBe(true);
+  await page.waitForTimeout(300);
+  await expect(sheet.locator('input[type="checkbox"]')).toHaveCount(0);
   await expect(sheet.getByText("Name (optional)")).toBeVisible();
   await sheet.getByPlaceholder("(555) 555-5555").fill(PHONE10);
   await shot(page, "18-account-link-signed-out");
