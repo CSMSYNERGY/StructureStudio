@@ -837,3 +837,34 @@ Deno.test("porchRoofPitch is not a key: it is dropped like any other unknown", (
   assert(r.ok, "an unknown key never fails the spec");
   if (r.ok) assert(!("porchRoofPitch" in r.d3.roof), "porchRoofPitch must not persist");
 });
+
+Deno.test("the shape-first prompt tells a projecting porch from a recessed one", () => {
+  // Before this, a porch standing in front of a gable end under its own roof had nowhere to go but
+  // porchDepthFt, which draws the end wall set back INTO the building under the main roof.
+  for (const [name, p] of [["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT], ["combinedShapePrompt", combinedShapePrompt(8, 4)]] as const) {
+    assert(p.includes('"porchOutFt"'), `${name} must ask for porchOutFt`);
+    assert(/PROJECTING PORCH:/.test(p), `${name} must explain what a projecting porch is`);
+    assert(p.includes("its own separate roof"), `${name} must name the separate roof that tells the two kinds apart`);
+    assert(p.includes("leave porchDepthFt and porchTruss out"), `${name} must say a porch is one kind or the other`);
+    // The recessed porch is still asked for, word for word where other tests and drafts rely on it.
+    assert(p.includes('"porchDepthFt"'), `${name} must still ask for porchDepthFt`);
+    assert(p.includes('"porchEnd"'), `${name} must still ask for porchEnd`);
+    assert(/PORCH:/.test(p), `${name} must still explain the recessed porch`);
+    assert(/GABLE END/.test(p), `${name} must still place a porch at the gable end`);
+    assert(p.includes("that is not a lean-to"), `${name} must still rule out calling a gable-end porch a lean-to`);
+    // Cut from this change: the renderer picks the porch pitch, so the model is not asked for one.
+    assert(!p.includes("porchRoofPitch"), `${name} must not ask for porchRoofPitch`);
+  }
+});
+
+Deno.test("only the walk-around prompt learned about the projecting porch", () => {
+  // SPEC_PROMPT is the photo path and asks for no appendages at all; the band and the wood colour
+  // are the builder's settings, not something to read off a video.
+  assert(!SPEC_PROMPT.includes("porchOutFt"), "SPEC_PROMPT is unchanged");
+  for (const [name, p] of [["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT], ["combinedShapePrompt", combinedShapePrompt(8, 4)]] as const) {
+    assert(!p.includes("plateBand"), `${name} must not ask for plateBand`);
+    assert(!p.includes('"wood"'), `${name} must not ask for a wood colour`);
+  }
+  // The JSON shape is still valid JSON-with-placeholders: the line before porchOutFt gained its comma.
+  assert(VIDEO_SHAPE_PROMPT.includes("porch opening>,\n"), "porchTruss is no longer the last roof key");
+});
