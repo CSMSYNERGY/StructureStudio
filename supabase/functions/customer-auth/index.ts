@@ -413,6 +413,9 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
   // else 'email', else null (neither: the sheet says codes are unavailable and the shopper keeps
   // designing, expo plan decision 2). A preference never adds a channel: a builder who picked
   // email on a deployment that cannot send email still gets text.
+  // consentBox is the builder's switch for the texting-consent box on the designer's lead gate
+  // (client_settings.lead_sms_consent_box, migration 242). The sheet keeps the box hidden until
+  // this answers, so it is answered on every call, not only when there is a channel choice.
   if (action === "login_options") {
     const channels: string[] = [];
     if (twilioConfigured()) channels.push("sms");
@@ -427,7 +430,13 @@ Deno.serve(withErrorLog("customer-auth", async (req: Request) => {
       const preferred = prefErr ? null : String(pref?.customer_login_default ?? "");
       if (preferred && channels.includes(preferred)) defaultChannel = preferred;
     }
-    return json({ ok: true, channels, defaultChannel });
+    // Its own read, so a missing 242 column (deployed early, or after a rollback) can never cost a
+    // builder their channel default. A failed read shows the box, today's behaviour. Not logged,
+    // for the same one-row-per-sheet-open reason.
+    const { data: boxRow, error: boxErr } = await sb.from("client_settings")
+      .select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle();
+    const consentBox = boxErr ? true : boxRow?.lead_sms_consent_box !== false;
+    return json({ ok: true, channels, defaultChannel, consentBox });
   }
 
   // ── EMAIL CHANNEL: re-opened 2026-09-15 (migration 230) ─────────────────────────────────

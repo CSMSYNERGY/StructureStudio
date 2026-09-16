@@ -34,8 +34,15 @@ import { smsConsentSentence } from "../_shared/smsConsentText.ts";
  *  2. **Public-safe fields ONLY.** The registered business name, the tenant's own campaign
  *     wording, their policy links. Never the EIN, the representative's name, phone or email,
  *     any Twilio SID, or anything out of `client_settings`. This page belongs to the internet.
+ *     (One boolean from `client_settings` decides which section to render — rule 4 — and is
+ *     never printed.)
  *  3. **The consent sentence comes from `_shared/smsConsentText.ts`**, the same generator the
  *     designer mirrors, so the page cannot claim wording the customer never saw.
+ *  4. **Never show a box the builder does not show.** With `lead_sms_consent_box` off
+ *     (migration 242) the designer has no consent box, so printing one here would describe an
+ *     opt-in that does not exist, which is exactly the claim a reviewer refuses (30909). The
+ *     page then prints the builder's own registered opt-in description (`campaign_message_flow`)
+ *     instead, because that is what they told the carriers.
  */
 
 const admin = createClient(
@@ -88,13 +95,16 @@ Deno.serve(withErrorLog("sms-optin-disclosure", async (req: Request): Promise<Re
   // ⚠️ THE REGISTRATION ROW MAY NOT EXIST YET, AND THAT IS A SUPPORTED CASE. A builder needs
   // this URL BEFORE they submit — it is what their opt-in description points at — so the page
   // renders from whatever is there and names what is still missing rather than 404ing.
-  const [{ data: cfg }, { data: reg }] = await Promise.all([
+  const [{ data: cfg }, { data: reg }, { data: box, error: boxErr }] = await Promise.all([
     admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
     admin.from("sms_registrations")
-      .select("legal_business_name, campaign_description, privacy_policy_url, terms_url, campaign_message_samples")
+      .select("legal_business_name, campaign_description, campaign_message_flow, privacy_policy_url, terms_url, campaign_message_samples")
       .eq("client_id", clientId).maybeSingle(),
+    admin.from("client_settings").select("lead_sms_consent_box").eq("client_id", clientId).maybeSingle(),
   ]);
   if (!cfg) return page("Not found.\n\nWe could not find that business.\n", 404);
+  // Rule 4. A failed read (including the column not existing yet) keeps the page as it was.
+  const designerBox = boxErr ? true : box?.lead_sms_consent_box !== false;
 
   const brandName = String(cfg.company_name || "").trim();
   const legalName = String(reg?.legal_business_name || "").trim();
@@ -129,13 +139,18 @@ Deno.serve(withErrorLog("sms-optin-disclosure", async (req: Request): Promise<Re
   )));
 
   out.push(heading("How customers agree to be texted"));
-  out.push(wrap(
-    `Customers give permission on our online quote form, before they send us their details. ` +
-    `The box below appears on that form. It is not ticked for them, and they can use the ` +
-    `form without ticking it.`,
-  ));
-  out.push("");
-  out.push("    [ ] " + wrap(consent, 72).split("\n").join("\n        "));
+  if (designerBox) {
+    out.push(wrap(
+      `Customers give permission on our online quote form, before they send us their details. ` +
+      `The box below appears on that form. It is not ticked for them, and they can use the ` +
+      `form without ticking it.`,
+    ));
+    out.push("");
+    out.push("    [ ] " + wrap(consent, 72).split("\n").join("\n        "));
+  } else {
+    const flow = String(reg?.campaign_message_flow || "").trim();
+    out.push(wrap(flow || `${name} has not published how customers agree to be texted yet.`));
+  }
 
   out.push(heading("The terms of these messages"));
   out.push("  * Message frequency varies.");
@@ -159,8 +174,11 @@ Deno.serve(withErrorLog("sms-optin-disclosure", async (req: Request): Promise<Re
   out.push("");
   out.push(RULE);
   out.push(wrap(
-    `Published by ${legalName || name} for its own customers. Messages are sent only to ` +
-    `people who asked ${name} for a quote and agreed to be texted.`,
+    designerBox
+      ? `Published by ${legalName || name} for its own customers. Messages are sent only to ` +
+        `people who asked ${name} for a quote and agreed to be texted.`
+      : `Published by ${legalName || name} for its own customers. Messages are sent only to ` +
+        `people who agreed to be texted.`,
   ));
   out.push("");
 
