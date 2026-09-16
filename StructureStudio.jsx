@@ -857,6 +857,43 @@ function ssOptTabOf(key, cfg) {
   return "interior";
 }
 
+// "Vent" is ONE palette button (Carolyn 2026-09-16: "it just needs to say vent. And then if they add
+// more vents, just like when you click on a window… it pops up"). With one vent offered the button
+// arms it straight away; with more it opens this popup. Like ShelfPicker, a card only ARMS the ordinary
+// vnt: tool and closes, so every vent is still placed by the one included-fixture branch in 2D and 3D,
+// and the placed item still carries the catalog name its quote line is keyed on.
+const VENT_PICKER_CFG = { label: "Vent", color: FIXTURE_VENT_COLOR, icon: "🌬️", wallOnly: true, width: 1, height: 0.5, shortLabel: "VENT", isVentPicker: true, group: "windows" };
+function VentPicker({ vents, onPick, onCancel }) {
+  const inches = (v) => (v == null || v === "" || !isFinite(Number(v)) ? null : `${Math.round(Number(v))}″`);
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#FFF", borderRadius: 14, width: "min(560px, 96vw)", maxHeight: "88vh", overflow: "auto", padding: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", fontFamily: "system-ui, -apple-system, sans-serif" }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "#1E293B", marginBottom: 4 }}>Choose a vent</div>
+        <div style={{ fontSize: 13, color: "#64748B", marginBottom: 14 }}>Pick one, then click a wall to place it.</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {vents.map((fx) => {
+            const w = inches(fx.widthIn), h = inches(fx.heightIn);
+            // No price on the card, for the reason ShelfPicker gives: prices live on the quote breakdown.
+            return (
+              <div key={fx.id} data-ss-vent-card={fx.id} onClick={() => onPick(fx.id)} style={{ border: "2px solid #E2E8F0", borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+                {fx.imageUrl ? <img src={fx.imageUrl} alt="" style={{ width: "100%", height: 90, objectFit: "cover", display: "block" }} />
+                  : <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26 }}>🌬️</div>}
+                <div style={{ padding: "8px 10px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>{fx.name || "Vent"}</div>
+                  <div style={{ fontSize: 11.5, color: "#64748B" }}>{w && h ? `${w} × ${h}` : (w || " ")}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+          <button onClick={onCancel} style={{ background: "#FFF", border: "1px solid #E2E8F0", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Which price applies is decided by ONE thing: whether the customer has the package. Carolyn:
 // "One is for this additional item to be added TO the existing package and the other is that
 // there is no package and they are selling this item individually." A builder charges less
@@ -8924,7 +8961,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         //
         // Refusing here closes the class. The tools themselves are re-admitted to the 3D palette
         // (see paletteKeys), so shelving is placed from 3D by its real buttons.
-        if (cfg.isShelfPicker || cfg.isElecItemPicker) {
+        if (cfg.isShelfPicker || cfg.isElecItemPicker || cfg.isVentPicker) {
           flash3("Pick which one from the palette beside the plan, then place it here.");
           setTool3(null);
           return;
@@ -13411,7 +13448,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         label: fx.name || "Vent", color: FIXTURE_VENT_COLOR, icon: "🌬️",
         wallOnly: true, width: (Number(fx.widthIn) || 12) / 12, height: 0.5,
         shortLabel: (fx.planLabel && String(fx.planLabel).trim()) || (fx.name || "VENT").toUpperCase().slice(0, 6),
-        group: "windows", includedFixture: { ...fx },
+        // Reached through the one "Vent" button (VENT_PICKER_CFG), never a palette button of its own.
+        // The 3D Add row re-admits these keys, as it does the slabs behind Shelving.
+        group: "windows", includedFixture: { ...fx }, noPalette: true,
       };
     });
     return out;
@@ -13428,6 +13467,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
     ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     ...ventTools,
+    ...(Object.keys(ventTools).length ? { ventPicker: VENT_PICKER_CFG } : {}),
     // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
     // make. With a single one offered the popup would present one card, so the item keeps its
     // own button under its own name (Carolyn's call, and the same thing the door picker does
@@ -13442,6 +13482,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [rampPick, setRampPick] = useState(null);   // { door } while the ramp picker modal is open
   const [windowPick, setWindowPick] = useState(null);   // { wall, ptx, pty } while the window picker modal is open
   const [shelfPick, setShelfPick] = useState(false);    // true while the shelving picker modal is open
+  const [ventPick, setVentPick] = useState(false);      // true while the vent picker modal is open
   const [elecItemPick, setElecItemPick] = useState(false);  // true while the electrical-item picker is open
   // A PLACED item is "archived" (option retired) if: a catalog fixture whose fixture is no longer
   // in the active list (get_fixtures drops archived), or a built-in whose layoutItems cfg is flagged
@@ -15190,6 +15231,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setSelectedId(hit ? hit.id : null); return;
     }
     const cfg = ITEMS[activeTool]; if (!cfg) return;
+    // The Vent button only ever arms a vnt: tool (ssToolBtn); the stand-in itself is never placed.
+    if (cfg.isVentPicker) { setActiveTool(null); return; }
     // The single "Door" tool: don't place yet — remember the wall + click point and open the
     // door picker, which chooses the door + swing/operation and then places it (placePickedDoor).
     if (cfg.isDoorPicker) {
@@ -19339,7 +19382,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1) && (embedded || !ITEMS[k].internalOnly))}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
@@ -19428,7 +19471,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // back to looking untouched. Same for the electrical-item picker.
   const armedShelf = (cfg) => cfg.isShelfPicker && shelvingKeys.indexOf(activeTool) !== -1 ? activeTool : null;
   const armedElecItem = (cfg) => (cfg.isElecItemPicker && ITEMS[activeTool] && ITEMS[activeTool].electricalItemId) ? activeTool : null;
-  const ssToolArmed = (key, cfg) => !!(activeTool === key || armedShelf(cfg) || armedElecItem(cfg));
+  const armedVent = (cfg) => (cfg.isVentPicker && ventTools[activeTool]) ? activeTool : null;
+  const ssToolArmed = (key, cfg) => !!(activeTool === key || armedShelf(cfg) || armedElecItem(cfg) || armedVent(cfg));
   // Redesign S3: the look is the option chip in SSD_CSS (.ssd-tool), so hover and the armed state are
   // classes, not inline colours. `variant` "incl" is the borderless button inside an Included chip;
   // `list.map(btn)` passes an index in that slot, which is never "incl". The accessible name is
@@ -19442,6 +19486,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         if (cfg.isShelfPicker) {
           if (armedShelf(cfg)) { setActiveTool(null); setSelectedId(null); return; }
           setShelfPick(true); setSelectedId(null); return;
+        }
+        // Vent: one offered arms it at once; more open the popup. Clicking again while one is armed disarms.
+        if (cfg.isVentPicker) {
+          const vk = Object.keys(ventTools);
+          if (armedVent(cfg)) { setActiveTool(null); setSelectedId(null); return; }
+          if (vk.length === 1) { setActiveTool(vk[0]); setSelectedId(null); return; }
+          setVentPick(true); setSelectedId(null); return;
         }
         setActiveTool(activeTool === key ? null : key); setSelectedId(null);
       }}
@@ -19541,6 +19592,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       {shelfPick && createPortal(<ShelfPicker items={shelvingKeys} itemTypes={ITEMS} rates={shelvingRates} showPricing={!!C.showPricing}
         onCancel={() => setShelfPick(false)}
         onPick={(k) => { setShelfPick(false); setActiveTool(k); setSelectedId(null); }} />, document.body)}
+      {ventPick && createPortal(<VentPicker vents={placeableVents}
+        onCancel={() => setVentPick(false)}
+        onPick={(id) => { setVentPick(false); setActiveTool(`vnt:${id}`); setSelectedId(null); }} />, document.body)}
       {/* Size change refused: something on the plan has nowhere to go in the smaller
           building. The size is ALREADY back to what it was (the reflow is computed before
           anything is committed), so this only has to explain and get out of the way. */}
@@ -21980,7 +22034,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1) && (embedded || !ITEMS[k].internalOnly))}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {

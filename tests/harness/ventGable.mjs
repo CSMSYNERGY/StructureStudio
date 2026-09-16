@@ -20,7 +20,7 @@
 //   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/ventGable.mjs                    (SS_SHOTS=<dir> for the screenshots)
 import { pathToFileURL } from "node:url";
-import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool } from "./lib.mjs";
+import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, armVent } from "./lib.mjs";
 import { CONFIG as GABLE_CONFIG, FIXTURES as GABLE_FIXTURES, pickStyle, chooseCladding, openEditor, sceneMeshes, classifyEnd, shot } from "./gableProbe.mjs";
 
 const W = 12, L = 32, H = 7.5;
@@ -69,7 +69,7 @@ async function alongOf(page, it, w, l) {
 // Arm a vent tool on the plan and click a wall; returns the new item (or null) and any "too small" toast.
 async function placeOnPlan(page, toolName, wall, alongFt, w, l) {
   const before = new Set(((await readItems(page)) || []).map((i) => i.id));
-  await (await revealTool(page, new RegExp(toolName))).click();
+  await armVent(page, toolName);
   await settle(page, 250);
   const p = await wallPoint(page, wall, alongFt, w, l);
   await page.mouse.click(p.x, p.y);

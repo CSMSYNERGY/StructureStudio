@@ -21,6 +21,14 @@ import { join } from "node:path";
 import { bypassGate, showOptTab, revealTool } from "../e2e/helpers.mjs";
 
 export { bypassGate, showOptTab, revealTool };
+// Vents are ONE "Vent" button since 2026-09-16: it arms the only vent at once, or opens "Choose a vent",
+// where the card named `name` arms that one.
+export async function armVent(page, name) {
+  await (await revealTool(page, /^\W*Vent wall$/u)).click();
+  await page.waitForTimeout(250);
+  const card = page.locator("[data-ss-vent-card]").filter({ hasText: name }).first();
+  if (await card.count()) { await card.click(); await page.waitForTimeout(250); }
+}
 export const REF = "jzeamjbhdrsbygdnphbm";
 export const BASE = process.env.SS_BASE || "http://127.0.0.1:8125";
 

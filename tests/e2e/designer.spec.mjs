@@ -419,6 +419,51 @@ test("a builder with a single palette group still gets Insulation, Foundation an
   expect(errors, "page errors").toEqual([]);
 });
 
+// Vents are ONE "Vent" button since 2026-09-16 (Carolyn: "it just needs to say vent. And then if they
+// add more vents, just like when you click on a window… it pops up"). One vent arms at once; two open
+// "Choose a vent", where a card arms that vent. Either way the placed item is the catalog vent itself
+// (its fixtureItemId), which is what keeps its quote line's name unchanged, and the stand-in button's
+// own key is never placed.
+const pwVent = (id, name, widthIn, planLabel) => ({ id, name, price: 25, widthIn, heightIn: 8, category: "vent", colorMode: "fixed", planLabel,
+  sortOrder: 0, imageUrl: null, opLeft: false, opRight: false, opDouble: false, opSlideUp: false, swingIn: false, swingOut: false,
+  opDefault: null, swingDefault: null, hasTrimColor: false });
+for (const n of [1, 2]) {
+  test(`Vent is one button: ${n === 1 ? "a single vent arms at once" : "two vents open Choose a vent"}, and the catalog vent is placed`, async ({ page }) => {
+    const errors = watchConsole(page);
+    await routeLayout(page);
+    const vents = [pwVent("pw-vent-std", "Standard Vent", 12, "SVNT"), pwVent("pw-vent-big", "Big Vent", 18, "BVNT")].slice(0, n);
+    // Registered after routeLayout, so it answers first: the tenant's catalog plus these vents.
+    await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, async (route) => {
+      const resp = await route.fetch();
+      const j = await resp.json();
+      j.items = (Array.isArray(j.items) ? j.items : []).concat(vents);
+      return route.fulfill({ response: resp, json: j });
+    });
+    await bypassGate(page, CLIENT);
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+    await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
+    const vent = await revealTool(page, /^\W*Vent wall$/u);
+    await expect(vent).toBeVisible();
+    await expect(page.getByRole("button", { name: /Standard Vent|Big Vent/ }), "no per-vent palette buttons").toHaveCount(0);
+    await vent.click();
+    await page.waitForTimeout(250);
+    const want = vents[vents.length - 1];
+    if (n === 1) {
+      await expect(page.getByText("Choose a vent")).toHaveCount(0);
+    } else {
+      await expect(page.getByText("Choose a vent")).toBeVisible();
+      await page.locator(`[data-ss-vent-card="${want.id}"]`).click();
+      await expect(page.getByText("Choose a vent")).toHaveCount(0);
+    }
+    await expect(vent, "the Vent button reads armed").toHaveClass(/is-armed/);
+    await clickPlan(page, 8, 0);
+    await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "window", fixtureItemId: want.id })]));
+    expect((await designerItems(page)).some((i) => i.type === "ventPicker"), "the stand-in is never placed").toBe(false);
+    expect(errors, "console errors").toEqual([]);
+  });
+}
+
 // "All designs on this estimate" was a "▾ N versions" toggle nobody opened (Carolyn 2026-09-14).
 // It is always open now: newest first, the one on the plan marked Viewing, the newest marked
 // Latest, and Open loads that version, moves Viewing, puts v= in the URL and scrolls to the plan.
