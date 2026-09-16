@@ -343,7 +343,7 @@ function SmsCopyForm({ copy, setCopy, readOnly, optInUrl }) {
         or number in an example — write <code>[Name]</code> instead.
       </p>
       <SmsField label="In a sentence, what will you text customers about?">
-        <input style={SMS_INPUT} value={copy.description} disabled={readOnly}
+        <textarea style={SMS_TEXTAREA} rows={4} value={copy.description} disabled={readOnly}
           placeholder="Quote follow-ups, delivery times and build updates for customers who asked us for a quote."
           onChange={(e) => setCopy({ ...copy, description: e.target.value })} />
       </SmsField>
@@ -463,7 +463,10 @@ const SMS_INPUT = {
  *  texting, what about, that frequency varies, that rates may apply, how to stop, and (since
  *  30924) carry the public opt-in page address, which the “Add this link” button appends to
  *  the end. In a one-line input every one of those sentences scrolls out of sight as it is
- *  typed, and the appended link lands where the builder cannot see it. */
+ *  typed, and the appended link lands where the builder cannot see it.
+ *  The description answer uses it too (2026-09-16): its label says "in a sentence", but what
+ *  the carriers accept names the sender, who is texted, what about and how they agreed, which
+ *  is three or four sentences that a one-line input cut off mid-word. */
 const SMS_TEXTAREA = {
   ...SMS_INPUT, minHeight: 92, lineHeight: 1.5, resize: "vertical", display: "block",
 };
