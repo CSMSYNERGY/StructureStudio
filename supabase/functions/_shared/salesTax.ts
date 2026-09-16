@@ -127,8 +127,12 @@ const SUBSCRIPTION_CODES = new Set(["SubscriptionRequired", "AuthorizationExcept
  *
  *  null/undefined/"" are rejected BEFORE Number(), which turns all three into 0 — and a
  *  missing rate is not a 0% rate. A genuine numeric 0 is still accepted: Oregon and Delaware
- *  are real answers, and the whole point of the mandatory setting is that 0 be sayable. */
-function sane(rate: unknown): number | null {
+ *  are real answers, and the whole point of the mandatory setting is that 0 be sayable.
+ *
+ *  Exported for taxChain.ts, which applies the same test to a location's rate and a stored
+ *  verified one — imported rather than copied, because this arithmetic already exists in four
+ *  hand-copies that nothing compares. */
+export function sane(rate: unknown): number | null {
   if (rate == null || rate === "") return null;
   const n = Number(rate);
   if (!Number.isFinite(n) || n < 0 || n > 0.25) return null;
@@ -310,7 +314,8 @@ async function avalaraRate(addr: TaxAddress): Promise<AvalaraResult> {
 /**
  * The rate for one quote's delivery address.
  *
- * `fallbackRate` is client_settings.ss_tax_rate, which portal-settings guarantees is set
+ * `fallbackRate` is the free default the caller already chose through taxChain.ts — the quote's
+ * sales location rate, or client_settings.ss_tax_rate, which portal-settings guarantees is set
  * before a tenant can issue their own paperwork. A caller that cannot supply one has a
  * misconfigured tenant and should refuse the quote rather than ask this function to invent a
  * number — hence the explicit 0 rather than an optional parameter.

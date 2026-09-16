@@ -27,7 +27,16 @@ import {
   taxFromSnapshot,
   totalFromSnapshot,
 } from "../estimateLines.ts";
-import { taxOn } from "../salesTax.ts";
+import { resolveRate, taxOn } from "../salesTax.ts";
+import {
+  ADDRESS_CHANGED,
+  carriedTax,
+  carryDecision,
+  chooseDefaultRate,
+  stampTax,
+  taxLocationFrom,
+} from "../taxChain.ts";
+import { changeOrderDescription } from "../changeOrderDiff.ts";
 
 const BUSINESS = {
   name: "Example Barn Co.",
@@ -47,8 +56,8 @@ const fmtMoney = (n: number): string => {
 /**
  * Exactly what submit-estimate's 9-ALT branch does: build the snapshot, compute the pools,
  * apply the rate, stamp `tax` onto the object that is BOTH persisted and handed to the PDF.
- * Kept in this shape so a change to that branch which is not mirrored here shows up as a
- * failure rather than as drift.
+ * The stamp goes through taxChain's stampTax, the function that branch calls (2026-09-17), so
+ * the object under test is the object the handler writes rather than a hand-kept copy of it.
  */
 function stampedSnapshot(opts: {
   lines: Record<string, unknown>[];
@@ -75,21 +84,20 @@ function stampedSnapshot(opts: {
     lines: opts.lines,
   };
   const pools = subtotalsFromSnapshot(snap)!;
-  snap.tax = {
-    rate: opts.rate,
-    amount: taxOn(pools.taxableBase, opts.rate),
-    label: opts.label ?? "Sales tax",
-    taxableSubtotal: pools.taxable,
-    nonTaxableSubtotal: pools.nonTaxable,
-    taxableBase: pools.taxableBase,
-    nonTaxableNet: pools.nonTaxableNet,
-    source: opts.source ?? "avalara",
-    // `??` would swallow an explicitly-passed null, which is exactly the no-jurisdiction case
-    // the fallback test needs to exercise.
-    jurisdiction: opts.jurisdiction === undefined ? "BIBB, GA" : opts.jurisdiction,
+  snap.tax = stampTax({
+    pools,
+    resolved: {
+      rate: opts.rate,
+      source: opts.source ?? "avalara",
+      // `??` would swallow an explicitly-passed null, which is exactly the no-jurisdiction case
+      // the fallback test needs to exercise.
+      jurisdiction: opts.jurisdiction === undefined ? "BIBB, GA" : opts.jurisdiction,
+      reason: null,
+    },
+    choice: { basis: "company", label: opts.label ?? "Sales tax", locationId: null, locationName: null },
     address: { state: "GA", zip: "31201" },
-    resolvedAt: "2026-08-28T12:00:00Z",
-  };
+    now: "2026-08-28T12:00:00Z",
+  });
   return snap;
 }
 
@@ -232,4 +240,123 @@ Deno.test("E2E: a pre-tax snapshot is untouched — the CRM path, and every lega
   assert(!printed.includes("Sales tax"), "no tax row");
   assert(!printed.includes("* Not subject"), "no footnote");
   assert(!printed.includes("Delivery *"), "no marker, even though a line is flagged nonTaxable");
+});
+
+// ── The rate chain on a resubmit (2026-09-17) ─────────────────────────────────────────────
+//
+// What a resubmit does to a quote's tax, end to end: the decision taxChain makes, the stamp
+// submit-estimate writes, then the three figures (document, consent sentence, ledger) and the
+// change-order sentence a customer is shown. The regressions here cost money quietly: a
+// verified rate a shopper sheds by editing their ZIP, a carried rate whose pools still describe
+// the old lines, and a re-stamp that raises a change order about nothing.
+
+const VERIFIED_QUOTE = () =>
+  stampedSnapshot({ lines: LINES, rate: 0.0825, source: "avalara", jurisdiction: "Bibb County, GA" });
+const WORKBENCH = { kind: "layout_item", itemKey: "wb", name: "Workbench", desc: "8 ft", qty: 1, amount: 600, nonTaxable: false };
+
+/** submit-estimate's tax block for one resubmit: the lines were rebuilt, then the chain runs.
+ *  fetch is replaced for the duration, and every call to it counted. */
+async function resubmit(opts: {
+  prior: Record<string, unknown>;
+  lines: Record<string, unknown>[];
+  staffCaller: boolean;
+  address: { state: string | null; zip: string | null };
+  location?: Record<string, unknown> | null;
+}) {
+  const snap: Record<string, unknown> = { version: 1, styleId: "style-1", discount: 0, lines: opts.lines };
+  const pools = subtotalsFromSnapshot(snap)!;
+  const storedTax = (opts.prior as { tax?: Record<string, unknown> }).tax ?? null;
+  const carry = carryDecision({ staffCaller: opts.staffCaller, storedTax, address: opts.address });
+  let fetches = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (() => {
+    fetches++;
+    return Promise.reject(new Error("no network in this test"));
+  }) as typeof fetch;
+  try {
+    if (carry.carry) {
+      snap.tax = carriedTax(storedTax!, pools);
+    } else {
+      const location = taxLocationFrom(opts.location ?? null, "example-barns");
+      const choice = chooseDefaultRate({
+        salesLocationId: location?.id ?? null, location, homeLot: null, companyRate: 0.0725, companyLabel: "Sales tax",
+      })!;
+      const resolved = await resolveRate(
+        { street: "1 Main St", city: "Macon", ...opts.address },
+        choice.rate,
+        { allowLookup: false },
+      );
+      snap.tax = stampTax({ pools, resolved, choice, address: opts.address, reason: carry.reason, now: "2026-09-17T08:00:00Z" });
+    }
+  } finally {
+    globalThis.fetch = original;
+  }
+  return { snap, fetches };
+}
+
+Deno.test("E2E carry-over: a shopper's resubmit keeps the verified rate, re-priced to the new lines", async () => {
+  const quote = VERIFIED_QUOTE();
+  // The shopper added a workbench AND moved the delivery to another state. They send that
+  // address, so it must not be what decides the rate the builder paid to verify.
+  const { snap, fetches } = await resubmit({
+    prior: quote, lines: [...LINES, WORKBENCH], staffCaller: false, address: { state: "AL", zip: "35203" },
+  });
+  const tax = snap.tax as Record<string, unknown>;
+  assertEquals(fetches, 0, "a resubmit never calls Avalara");
+  assertEquals([tax.source, tax.basis, tax.rate, tax.jurisdiction], ["avalara", "avalara", 0.0825, "Bibb County, GA"]);
+  assertEquals(tax.address, { state: "GA", zip: "31201" }, "the verified address is carried, not the shopper's edit");
+  assertEquals(tax.amount, 1076.63, "8.25% of the NEW taxable base, 13,050");
+
+  const { printed, consentFigure, ledger } = await threeWay(snap, "estimate");
+  assert(printed.includes("Bibb County, GA"), "the document still names the verified jurisdiction");
+  assert(printed.includes("$13,050.00"), "the pools followed the new lines");
+  assertEquals(consentFigure, "$14,726.63", "13,050 + 600 + 1,076.63");
+  assertEquals(ledger.totalCents, 1472663);
+  assert(printed.includes(consentFigure), "the document's Total is the figure the customer signs");
+
+  const co = changeOrderDescription(quote, snap);
+  assert(co !== null && co.includes("Added: Workbench"), `the line is named: ${co}`);
+  assert(co!.includes("Sales tax: $1,027.13 → $1,076.63"), `the tax move is named as a line effect: ${co}`);
+  assert(!co!.includes("rate:"), `the rate did not move and must not be reported as moving: ${co}`);
+});
+
+Deno.test("E2E carry-over: staff moving the delivery ZIP gives the verified rate up, visibly", async () => {
+  const quote = VERIFIED_QUOTE();
+  const { snap, fetches } = await resubmit({
+    prior: quote,
+    lines: LINES,
+    staffCaller: true,
+    address: { state: "GA", zip: "31204" },
+    location: {
+      id: "3f0c2b1e-8a4d-4c2e-9b7a-1d2e3f4a5b6c", client_id: "example-barns", name: "Macon lot",
+      active: true, tax_rate: 0.08, tax_label: null,
+    },
+  });
+  const tax = snap.tax as Record<string, unknown>;
+  assertEquals(fetches, 0, "invalidating a verified rate must not buy a new one");
+  assertEquals(
+    [tax.source, tax.basis, tax.rate, tax.jurisdiction, tax.reason, tax.locationName],
+    ["fallback", "location", 0.08, null, ADDRESS_CHANGED, "Macon lot"],
+  );
+
+  const { printed, consentFigure, ledger } = await threeWay(snap, "estimate");
+  assert(printed.includes("Sales tax (8%)"), "the document names the location rate");
+  assert(!printed.includes("Bibb County"), "the old jurisdiction is not left on the document");
+  assertEquals(ledger.totalCents, Math.round((12450 + 600 + taxOn(12450, 0.08)) * 100));
+  assert(printed.includes(consentFigure));
+
+  const co = changeOrderDescription(quote, snap);
+  assert(co !== null && co.includes("Sales tax rate: 8.25% → 8%"), `a signed order would be told why its total moved: ${co}`);
+});
+
+Deno.test("E2E: the first re-stamp of a snapshot written before the chain raises no change order", async () => {
+  // Every signed SS order holds a tax object with no basis/location/verifiedAt keys. Re-stamped
+  // at the same rate for the same lines, the only differences are those keys — which must not
+  // put a change in front of a customer to approve.
+  const legacy = stampedSnapshot({ lines: LINES, rate: 0.0725, source: "fallback", jurisdiction: null });
+  for (const k of ["basis", "locationId", "locationName", "verifiedAt"]) delete (legacy.tax as Record<string, unknown>)[k];
+  const { snap } = await resubmit({ prior: legacy, lines: LINES, staffCaller: true, address: { state: "GA", zip: "31201" } });
+  assertEquals((snap.tax as Record<string, unknown>).basis, "company");
+  assertEquals(changeOrderDescription(legacy, snap), null, "new bookkeeping keys alone are not a change");
+  assertEquals(totalFromSnapshot(snap), totalFromSnapshot(legacy));
 });

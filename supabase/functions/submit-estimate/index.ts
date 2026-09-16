@@ -21,7 +21,11 @@ import { hasSubject } from "../_shared/jwtSubject.ts";
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { cladLineName } from "../_shared/claddingLineName.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
-import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { resolveRate } from "../_shared/salesTax.ts";
+import {
+  carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
+  type DefaultRate, type TaxLocation,
+} from "../_shared/taxChain.ts";
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 // draft → sent is this function's job since migration 241; save_design no longer promotes.
 import { promoteIssuedDesign } from "../_shared/designPromotion.ts";
@@ -2551,24 +2555,89 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }, 400);
     }
 
-    // ── Sales tax (migration 148) ───────────────────────────────────────────────────────
+    // ── Sales tax (migration 148; the rate chain, 2026-09-17) ───────────────────────────
     //
-    // Resolved HERE, before the document is built and before the change-order delta below, so
-    // both the PDF and `totalBefore`/`totalAfter` see the same tax-inclusive figures.
+    // Decided HERE, before the document is built and before the change-order delta below, so
+    // both the PDF and `totalBefore`/`totalAfter` see the same tax-inclusive figures. Stamped
+    // further down, after the amendment gate; everything between here and there only reads.
     //
-    // A RESUBMIT RE-RESOLVES. That is the live-until-signed rule (Carolyn 2026-08-27): a quote
-    // is a live offer, so each time it is issued it is priced at today's rate for today's
-    // address. What freezes is the acceptance — customer-accept writes the rate it signed
-    // under into design_acceptances, because a later resubmit overwrites this snapshot.
+    // NOTHING ON THIS PATH CALLS AVALARA (2026-09-16). A lookup is billed per request and this
+    // endpoint runs on every submit and resubmit, from anyone holding the designer link. A
+    // verified rate is bought only deliberately, by staff, through portal-settings' verify
+    // action. A submit stamps the chain in _shared/taxChain.ts instead:
+    //   1. a verified rate already on this quote, carried over. A shopper's resubmit always
+    //      carries it: they send the delivery address, so an address change they control must
+    //      not discard a rate the builder paid for. A staff resubmit carries it while the
+    //      delivery state and ZIP are unchanged, and otherwise falls through to 2-4 with
+    //      "address changed — re-verify";
+    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 243);
+    //   3. a staff member issuing a quote that has no location and is not signed: their home
+    //      lot's rate (migration 234), and that lot is recorded as the quote's location after
+    //      the persist below;
+    //   4. the company rate (client_settings.ss_tax_rate);
+    //   5. refuse.
+    // A RESUBMIT RE-STAMPS through that chain — still the live-until-signed rule: a quote is a
+    // live offer, priced at today's default for its location. What freezes is the acceptance:
+    // customer-accept writes the rate it signed under into design_acceptances, because a later
+    // resubmit overwrites this snapshot.
     //
-    // The tenant has a rate because portal-settings refuses to turn invoice_in_ghl off without
-    // one. Reaching here with NULL means the row was edited around the portal, and quoting an
-    // untaxed bill is the one outcome worth refusing over — the same posture the missing quote
-    // number takes immediately above.
-    if (ssTaxRate == null) {
-      return json({
-        error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
-      }, 400);
+    // The home lot is never consulted on a signed order. Whoever amends it did not necessarily
+    // sell it, and their lot's rate would re-price the customer's tax in the change order.
+    const taxAddr = addressFrom(contact);
+    const taxPools = subtotalsFromSnapshot(estimateLines)!;
+    // deno-lint-ignore no-explicit-any
+    const storedTax: Record<string, any> | null = (existingDesign.estimate_lines as any)?.tax ?? null;
+    const taxCarry = carryDecision({ staffCaller, storedTax, address: taxAddr });
+    let taxDefault: DefaultRate | null = null;
+    if (!taxCarry.carry) {
+      let salesLocationId: string | null = null;
+      let location: TaxLocation | null = null;
+      let homeLot: TaxLocation | null = null;
+      try {
+        const { data: dRow, error: dErr } = await supabase.from("designs")
+          .select("sales_location_id").eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        if (dErr) throw dErr;
+        salesLocationId = dRow?.sales_location_id ? String(dRow.sales_location_id) : null;
+        let lotId = salesLocationId;
+        const fromHome = !lotId && staffCaller && !!callerUserId && !existingDesign.accepted_at;
+        if (fromHome) {
+          // limit(1), not maybeSingle(): the same duplicate-row tolerance as the staff check above.
+          const { data: cu, error: cuErr } = await supabase.from("client_users")
+            .select("location_id").eq("client_id", clientId).eq("user_id", callerUserId).limit(1);
+          if (cuErr) throw cuErr;
+          lotId = cu?.[0]?.location_id ? String(cu[0].location_id) : null;
+        }
+        if (lotId) {
+          const { data: lot, error: lotErr } = await supabase.from("builder_locations")
+            .select(TAX_LOCATION_COLUMNS).eq("client_id", clientId).eq("id", lotId).maybeSingle();
+          if (lotErr) throw lotErr;
+          if (fromHome) homeLot = taxLocationFrom(lot, clientId);
+          else location = taxLocationFrom(lot, clientId);
+        }
+      } catch (e) {
+        // REFUSE, do not fall to the company rate. A quote that names a location with its own
+        // rate would be emailed at a total the builder did not set, and the next resubmit
+        // would quietly change it. Nothing about the quote has been written yet; a first issue
+        // loses its allocated number, as it does on every refusal after the allocation above.
+        // This is also what a deploy ahead of migration 243 looks like.
+        await logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
+          message: `sales location read failed: ${(e as { message?: string })?.message ?? String(e)}`,
+          context: { designId: String(designId) },
+        });
+        return json({ error: "We couldn't work out the sales tax for this quote just now. Please try again in a moment." }, 502);
+      }
+      taxDefault = chooseDefaultRate({ salesLocationId, location, homeLot, companyRate: ssTaxRate, companyLabel: ssTaxLabel });
+      // No link has a rate. portal-settings refuses to turn invoice_in_ghl off without a company
+      // rate, so reaching here means the row was edited around the portal, and quoting an
+      // untaxed bill is the one outcome worth refusing over — the same posture the missing
+      // quote number takes immediately above. The company rate still lives on that card.
+      if (!taxDefault) {
+        return json({
+          error: "This account issues its own paperwork but has no sales tax rate set. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+          reason: "no_tax_rate",
+        }, 400);
+      }
     }
     // ── MAY THIS ORDER BE AMENDED, AND BY THIS PERSON? (2026-09-07; moved up 2026-09-15) ────
     // Only a design the customer already signed can be an amendment. BEFORE the first write,
@@ -2607,28 +2676,21 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       }
     }
 
-    const taxAddr = addressFrom(contact);
-    const resolved = await resolveRate(taxAddr, ssTaxRate, { allowLookup: false });
-    {
-      const pools = subtotalsFromSnapshot(estimateLines)!;
-      const amount = taxOn(pools.taxableBase, resolved.rate);
-      // Stamped onto the object that is about to be persisted AND handed to the PDF builder, so
-      // the stored figure and the printed one are the same object, not two computations.
-      (estimateLines as Record<string, unknown>).tax = {
-        rate: resolved.rate,
-        amount,
-        label: ssTaxLabel,
-        taxableSubtotal: pools.taxable,
-        nonTaxableSubtotal: pools.nonTaxable,
-        taxableBase: pools.taxableBase,
-        nonTaxableNet: pools.nonTaxableNet,
-        source: resolved.source,
-        jurisdiction: resolved.jurisdiction,
-        address: { state: taxAddr.state, zip: taxAddr.zip },
-        resolvedAt: new Date().toISOString(),
-        ...(resolved.reason ? { reason: resolved.reason } : {}),
-      };
-    }
+    // allowLookup stays FALSE: this call can only hand back the default chosen above, with
+    // source "fallback" and reason "not requested". Do not flip it — see the meter below. A
+    // carried rate makes no call at all (resolved is null).
+    const resolved = taxCarry.carry
+      ? null
+      : await resolveRate(taxAddr, taxDefault!.rate, { allowLookup: false });
+    // THE STAMP IS UNCONDITIONAL — one assignment, both arms produce a tax object. Every SS
+    // snapshot must carry `tax`: without it totalFromSnapshot falls into its pre-tax legacy
+    // branch, and changeOrderDiff reads the missing object as tax dropping to $0.00, raising a
+    // spurious change order the customer would be asked to approve.
+    // Stamped onto the object that is about to be persisted AND handed to the PDF builder, so
+    // the stored figure and the printed one are the same object, not two computations.
+    (estimateLines as Record<string, unknown>).tax = resolved
+      ? stampTax({ pools: taxPools, resolved, choice: taxDefault!, address: taxAddr, reason: taxCarry.carry ? null : taxCarry.reason })
+      : carriedTax(storedTax!, taxPools);
 
     // WHAT THE CUSTOMER OWES, TAX INCLUDED (audit 2026-09-06). `oppValue` is the pre-tax
     // subtotal — it is computed back in step 7b for the CRM opportunity, before the tax stamp
@@ -2642,15 +2704,18 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // over-discount differently from the pooled one, so `oppValue` stays correct there.
     const ssTotal = totalFromSnapshot(estimateLines) ?? oppValue;
 
-    // METERED (migration 179) — and ONLY a real Avalara answer costs anything. A `fallback`
-    // resolve never left the building: it means Avalara is unconfigured, the address had no
-    // state/postcode, or the lookup failed, and billing a tenant for our own outage is the
-    // one outcome worth being careful about. Inert until `tax_lookup` is armed.
+    // METERED (migration 179) — WIRED, AND UNREACHABLE ON THIS PATH (2026-09-17). Only a real
+    // Avalara answer may cost anything, and resolveRate above is called with allowLookup false,
+    // so `resolved.source` is never "avalara" here. A rate CARRIED from an earlier verification
+    // leaves `resolved` null: the builder was charged when it was verified, and a resubmit
+    // makes no call to charge for. NO AUTOMATIC PATH MAY SPEND — do not flip allowLookup to
+    // make this block live; the deliberate lookup (verify_tax) keys its own charge on its
+    // ledger row. Inert anyway until `tax_lookup` is armed.
     //
     // Deliberately AFTER the stamp and deliberately unable to fail the submit: the tax is
     // already on the snapshot and the customer is waiting on their quote. Losing a charge
     // costs cents; losing the quote costs the builder a sale.
-    if (resolved.source === "avalara") {
+    if (resolved?.source === "avalara") {
       const meter = await chargeTaxCalculation(supabase, {
         clientId,
         kind: "tax_lookup",
@@ -3025,6 +3090,26 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         message: `SS quote persist failed after issue/email: ${persistErr.message}`,
         context: { designId: String(designId), ssQuoteNumber, emailed },
       }).catch(() => {});
+    }
+
+    // ── THE HOME LOT BECOMES THE QUOTE'S LOCATION (tax chain link 3, 2026-09-17) ───────────
+    // Set only when this quote was just priced at the issuing staff member's home lot. Recorded
+    // so every later resubmit — a shopper's included, who has no home lot — lands on the same
+    // rate instead of dropping to the company rate. Guarded on the column still being empty: a
+    // location staff chose in the meantime is theirs and is not overwritten. A separate write,
+    // after everything else, so a refused or failed submit records nothing. A failure is
+    // logged, not fatal: the quote is issued and stamped either way.
+    if (taxDefault?.recordLocationId) {
+      const { error: locErr } = await supabase.from("designs")
+        .update({ sales_location_id: taxDefault.recordLocationId })
+        .eq("client_id", clientId).eq("short_code", designId).is("sales_location_id", null);
+      if (locErr) {
+        logEdgeError({
+          fn: "submit-estimate", req, clientId, code: "sales_location_record_failed",
+          message: `recording the home lot as the sales location failed: ${locErr.message}`,
+          context: { designId: String(designId) },
+        }).catch(() => {});
+      }
     }
 
     // ── THE QUOTE-CREATED TEXT (expo plan 3.7; Ahsan 2026-09-15, decision 4) ────────────────

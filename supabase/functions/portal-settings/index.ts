@@ -30,7 +30,11 @@ import { phoneKey } from "../_shared/phoneKey.ts";
 // this module — deploy both.
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
-import { resolveRate, taxOn } from "../_shared/salesTax.ts";
+import { resolveRate, type ResolvedRate } from "../_shared/salesTax.ts";
+import {
+  carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
+  type TaxLocation,
+} from "../_shared/taxChain.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
@@ -8694,50 +8698,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // the number the customer is asked to approve. A change order that adds a taxable roof
     // upcharge would be presented at the OLD tax, understating what they will owe.
     //
-    // FRESH LOOKUP, per Carolyn 2026-08-27: the rate is re-resolved here rather than carried
-    // over, so a change order is priced at today's rate for the delivery address. Only when
-    // the snapshot already carried tax — a pre-tax design stays pre-tax, and no CRM-mode
-    // design ever enters this branch.
+    // NO LOOKUP HERE (2026-09-16/17). This used to re-ask Avalara on every change, so a rep
+    // recolouring a roof on a signed order made a billed call nobody chose to make. It now
+    // re-stamps through the same chain submit-estimate uses (_shared/taxChain.ts):
+    //   1. a verified rate on the order is CARRIED, while the delivery state and ZIP still match
+    //      the ones it was verified for — the caller here is always staff, so an address that
+    //      moved falls through with "address changed — re-verify";
+    //   2. the order's sales location rate;
+    //   3. the company rate;
+    //   4. refuse — never the silent 0% this path used to price a signed order's tax at.
+    // No home lot: the person staging a change on a signed order did not necessarily sell it.
+    // Only when the snapshot already carried tax — a pre-tax design stays pre-tax, and no
+    // CRM-mode design ever enters this branch. Reads and pure work only up to the dry-run
+    // return below, so a preview writes nothing and spends nothing.
+    let resolvedCo: ResolvedRate | null = null;
     if (newSnap.tax) {
-      const { data: taxCs } = await admin.from("client_settings")
-        .select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle();
-      const resolvedCo = await resolveRate(addressFrom(d.contact), Number(taxCs?.ss_tax_rate) || 0, { allowLookup: false });
-      const poolsCo = subtotalsFromSnapshot(newSnap);
-      if (poolsCo) {
-        newSnap.tax = {
-          rate: resolvedCo.rate,
-          amount: taxOn(poolsCo.taxableBase, resolvedCo.rate),
-          label: String(taxCs?.ss_tax_label || "Sales tax"),
-          taxableSubtotal: poolsCo.taxable,
-          nonTaxableSubtotal: poolsCo.nonTaxable,
-          taxableBase: poolsCo.taxableBase,
-          nonTaxableNet: poolsCo.nonTaxableNet,
-          source: resolvedCo.source,
-          jurisdiction: resolvedCo.jurisdiction,
-          address: { state: addressFrom(d.contact).state, zip: addressFrom(d.contact).zip },
-          resolvedAt: new Date().toISOString(),
-          ...(resolvedCo.reason ? { reason: resolvedCo.reason } : {}),
-        };
-      }
-      // METERED (179) — the third and last place a rate is resolved. A change order re-asks
-      // Avalara (Carolyn's rule: a change order is a fresh lookup), so under per-lookup
-      // pricing it is a real billable call and leaving it out would meter two of three.
-      if (resolvedCo.source === "avalara") {
-        const meterCo = await chargeTaxCalculation(admin, {
-          clientId,
-          kind: "tax_lookup",
-          idem: taxLookupIdem(clientId, String(shortCode), resolvedCo.rate, resolvedCo.jurisdiction),
-          refType: "change_order",
-          refId: String(shortCode),
-          memo: `Sales tax lookup${resolvedCo.jurisdiction ? ` — ${resolvedCo.jurisdiction}` : ""}`,
-          actorUserId: userId ?? null,
-        });
-        if (!meterCo.charged && meterCo.reason === "error") {
-          logEdgeError({
-            fn: "portal-settings", req, clientId, code: "tax_meter",
-            message: `tax_lookup charge failed for change order on ${shortCode}`,
-          }).catch(() => {});
+      const addrCo = addressFrom(d.contact);
+      const poolsCo = subtotalsFromSnapshot(newSnap)!; // non-null: snap.lines was checked above
+      const carryCo = carryDecision({ staffCaller: true, storedTax: snap.tax, address: addrCo });
+      if (carryCo.carry) {
+        newSnap.tax = carriedTax(snap.tax, poolsCo);
+      } else {
+        const [csRes, locRes] = await Promise.all([
+          admin.from("client_settings").select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle(),
+          admin.from("designs").select("sales_location_id").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle(),
+        ]);
+        // Unread is not unset: an unreadable rate must refuse as a fault, not price at 0%.
+        if (csRes.error) return dbFail(req, clientId, "read your sales tax rate", csRes.error);
+        if (locRes.error) return dbFail(req, clientId, "read this order's sales location", locRes.error);
+        const salesLocationId = locRes.data?.sales_location_id ? String(locRes.data.sales_location_id) : null;
+        let locationCo: TaxLocation | null = null;
+        if (salesLocationId) {
+          const lotRes = await admin.from("builder_locations").select(TAX_LOCATION_COLUMNS)
+            .eq("client_id", clientId).eq("id", salesLocationId).maybeSingle();
+          if (lotRes.error) return dbFail(req, clientId, "read this order's sales location", lotRes.error);
+          locationCo = taxLocationFrom(lotRes.data, clientId);
         }
+        const choiceCo = chooseDefaultRate({
+          salesLocationId, location: locationCo, homeLot: null,
+          companyRate: csRes.data?.ss_tax_rate, companyLabel: csRes.data?.ss_tax_label ?? null,
+        });
+        if (!choiceCo) {
+          return json({
+            error: "This account has no sales tax rate set, so this change can't be priced. Add one in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+            reason: "no_tax_rate",
+          }, 400);
+        }
+        // allowLookup stays FALSE: only the chosen default comes back, as source "fallback".
+        resolvedCo = await resolveRate(addrCo, choiceCo.rate, { allowLookup: false });
+        newSnap.tax = stampTax({ pools: poolsCo, resolved: resolvedCo, choice: choiceCo, address: addrCo, reason: carryCo.reason });
       }
     }
 
@@ -8848,6 +8857,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .update({ selections: newSelections, paint_colors: newPaintColors, estimate_lines: newSnap, total_cents: designTotalCents(newSnap), updated_at: nowIso })
       .eq("client_id", clientId).eq("short_code", shortCode);
     if (updErr) return dbFail(req, clientId, "apply the change", updErr);
+
+    // METERED (179) — WIRED, AND UNREACHABLE ON THIS PATH (2026-09-17). Only a real Avalara
+    // answer may be charged, and the resolve above passes allowLookup false, so
+    // `resolvedCo.source` is never "avalara"; a CARRIED verified rate leaves resolvedCo null
+    // because no call was made. Moved below the dry-run return and the design write on the
+    // same day: a preview must never be able to charge, and a charge must never land for a
+    // document that was not written. NO AUTOMATIC PATH MAY SPEND — do not flip allowLookup.
+    if (resolvedCo?.source === "avalara") {
+      const meterCo = await chargeTaxCalculation(admin, {
+        clientId,
+        kind: "tax_lookup",
+        idem: taxLookupIdem(clientId, String(shortCode), resolvedCo.rate, resolvedCo.jurisdiction),
+        refType: "change_order",
+        refId: String(shortCode),
+        memo: `Sales tax lookup${resolvedCo.jurisdiction ? ` — ${resolvedCo.jurisdiction}` : ""}`,
+        actorUserId: userId ?? null,
+      });
+      if (!meterCo.charged && meterCo.reason === "error") {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: "tax_meter",
+          message: `tax_lookup charge failed for change order on ${shortCode}`,
+        }).catch(() => {});
+      }
+    }
 
     // A real design_versions row, so the CO's version_after points at something (031 shape).
     let versionAfter: number | null = null;
