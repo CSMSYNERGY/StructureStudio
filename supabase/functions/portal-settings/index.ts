@@ -30,11 +30,16 @@ import { phoneKey } from "../_shared/phoneKey.ts";
 // this module — deploy both.
 import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDiff.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
-import { resolveRate, type ResolvedRate } from "../_shared/salesTax.ts";
+import { isConfigured as avalaraConfigured, resolveRate, type ResolvedRate } from "../_shared/salesTax.ts";
 import {
   carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
   type TaxLocation,
 } from "../_shared/taxChain.ts";
+import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
+import {
+  isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
+  parseSetSalesLocation, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan,
+} from "../_shared/locationTax.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
@@ -180,6 +185,18 @@ const GATES: GateTable = {
   // ── CRM ──────────────────────────────────────────────────────────────────
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
+
+  // ── Sales tax (migrations 242-243) ───────────────────────────────────────
+  // The SAME area as the company rate (ss_tax_rate is saved through `save`, on this card's
+  // area), so whoever may set the company rate sets the per-location ones — and nobody else:
+  // not settings_branding, which owns the lot list and is granted so somebody can change a
+  // logo. No new area: a new one needs the SQL mirror (area_level_for) re-issued with it.
+  tax_settings:      { area: "settings_crm", level: "view" },
+  save_location_tax: { area: "settings_crm", level: "edit" },
+  // Which lot a quote was sold from. designs:edit — the rep who issues the quote picks where it
+  // was sold, the way set_expected_close works — plus the row scope in the branch. It re-prices
+  // with FREE rates only (the location's, else the company's); it can never make a paid lookup.
+  set_design_sales_location: { area: "designs", level: "edit" },
 
   // ── QuickBooks ───────────────────────────────────────────────────────────
   // Same two-question split as Real-Time Pricing above: these gates answer "may this person
@@ -4966,7 +4983,30 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (locs.error) return dbFail(req, clientId, "load your locations", locs.error);
     const counts: Record<string, number> = {};
     for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
-    const locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
+    let locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
+    // TAX FIELDS (migration 243), ADDITIVE, and only for a caller who can read settings_crm —
+    // the area that owns the rates. This action is also the Inventory tab's lot picker, reached
+    // on inventory:view alone, and a person holding only that has no business with the rates.
+    // Its own read, and TOLERANT: this list is the Settings card and the Inventory picker, so a
+    // deploy ahead of 243 must lose the tax fields, not the lots (the `status` fallback-select
+    // precedent). A failure is logged and the fields are simply left off.
+    if (canRead("settings_crm") && locations.length) {
+      const taxRes = await admin.from("builder_locations").select("id, state, zip, tax_rate, tax_label")
+        .eq("client_id", clientId).eq("active", true);
+      if (taxRes.error) {
+        logEdgeError({
+          fn: "portal-settings", req, clientId, code: taxRes.error.code ?? "location_tax_read_failed",
+          message: `list_locations tax read failed: ${taxRes.error.message ?? "unknown"}`,
+        }).catch(() => {});
+      } else {
+        const byId = new Map((taxRes.data ?? []).map((t: any) => [String(t.id), t]));
+        locations = locations.map((l: any) => {
+          const t = byId.get(String(l.id));
+          const view = t ? locationTaxView(t) : null;
+          return { ...l, taxRatePct: view?.taxRatePct ?? null, taxLabel: view?.taxLabel ?? null, taxReady: locationTaxReady(l) };
+        });
+      }
+    }
     // nextSerial rides along so the Settings card renders both blocks from one call.
     const { data: cs } = await admin.from("client_settings").select("next_serial").eq("client_id", clientId).maybeSingle();
     return json({ ok: true, locations, nextSerial: cs?.next_serial ?? null });
@@ -5009,6 +5049,72 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (error) return dbFail(req, clientId, "delete that location", error);
     if (!count) return json({ error: "Location not found." }, 404);
     return json({ ok: true });
+  }
+
+  // ── Sales tax settings (migrations 242-243) ─────────────────────────────────
+  // One read for the tax card: who issues the paperwork, the company rate, each location's
+  // local rate, and whether verified lookups are switched on for this tenant. `configured` says
+  // only whether the platform holds Avalara credentials — a boolean, never the credentials or
+  // the account behind them. No prices: both tax meters are disarmed, and a price read, when one
+  // is needed, follows the catalog action's redaction rather than riding a settings payload.
+  //
+  // Every location is listed, inactive ones too, with `active` on each: an inactive lot never
+  // prices a quote (taxChain), and the card should be able to say why a rate is not applying.
+  // `usage24h` is null when the ledger cannot be counted — unknown, not zero.
+  if (action === "tax_settings") {
+    const [csRes, locRes, usage24h] = await Promise.all([
+      admin.from("client_settings").select("invoice_in_ghl, ss_tax_rate, ss_tax_label, tax_lookup_enabled")
+        .eq("client_id", clientId).maybeSingle(),
+      admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
+        .eq("client_id", clientId).order("sort_order").order("created_at"),
+      countLookups24h(admin, clientId),
+    ]);
+    if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
+    if (locRes.error) return dbFail(req, clientId, "load your locations' tax rates", locRes.error);
+    const cs = csRes.data;
+    return json({
+      ok: true,
+      // Same reading as status's invoiceInGhl: a row predating the column is CRM mode.
+      ssMode: cs?.invoice_in_ghl === false,
+      lookupEnabled: cs?.tax_lookup_enabled === true,
+      configured: avalaraConfigured(),
+      companyRatePct: ratePct(cs?.ss_tax_rate),
+      companyLabel: cs?.ss_tax_label ?? "Sales tax",
+      dailyCap: DAILY_TAX_LOOKUP_CAP,
+      usage24h,
+      locations: (locRes.data ?? []).map(locationTaxView),
+    });
+  }
+
+  // A location's local rate. Its own action rather than a field on save_location, which is
+  // gated settings_branding: a rate printed on every quote from that lot is a money setting, and
+  // belongs with the company rate's area. Blank clears it (the lot then uses the company rate);
+  // an explicit 0 is kept. A rate is refused on a lot with no usable state + ZIP (see
+  // _shared/locationTax.ts) — clearing one never is. Changing a rate re-prices no issued quote:
+  // quotes pick it up when they are next submitted, or when staff re-pick the location.
+  if (action === "save_location_tax") {
+    const parsed = parseSaveLocationTax(payload);
+    if (!parsed.ok) return json({ error: parsed.error, reason: parsed.reason }, parsed.status);
+    const { locationId, rate, label } = parsed.value;
+    const { data: cur, error: curErr } = await admin.from("builder_locations").select(LOCATION_TAX_COLUMNS)
+      .eq("client_id", clientId).eq("id", locationId).maybeSingle();
+    if (curErr) return dbFail(req, clientId, "load that location", curErr);
+    if (!cur) return json({ error: "Location not found.", reason: "location_not_found" }, 404);
+    if (rate != null && !locationTaxReady(cur)) {
+      return json({
+        error: "Add this location's state and ZIP code before giving it a tax rate — a local rate has to belong to a place.",
+        reason: "location_address",
+      }, 400);
+    }
+    const updates: Record<string, unknown> = { tax_rate: rate, updated_at: new Date().toISOString() };
+    if (label !== undefined) updates.tax_label = label;
+    // Scoped by BOTH id and client_id, like save_location: another tenant's id matches nothing.
+    const { data: saved, error: saveErr } = await admin.from("builder_locations").update(updates)
+      .eq("client_id", clientId).eq("id", locationId).select(LOCATION_TAX_COLUMNS).maybeSingle();
+    if (saveErr) return dbFail(req, clientId, "save that location's tax rate", saveErr);
+    if (!saved) return json({ error: "Location not found.", reason: "location_not_found" }, 404);
+    await audit("portal_save_location_tax", 1, `location=${locationId} rate=${rate ?? "none"}${label !== undefined ? " label" : ""}`);
+    return json({ ok: true, location: locationTaxView(saved) });
   }
 
   // ── Serial sequence starting number ──────────────────────────────────────────
@@ -7528,34 +7634,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // worst a retry can do is email the design's own customer twice. Success re-stamps
   // ss_quote_sent_at; a failure reports {sent:false, reason} so the rep reaches for Print
   // or Copy-link instead (Carolyn 2026-08-23: email absence never blocks the quote).
-  if (action === "resend_quote_email") {
-    const shortCode = String(payload?.shortCode ?? "").trim();
-    if (!shortCode) return json({ error: "shortCode is required." }, 400);
-    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
-    // still not be allowed near THIS customer's building. The gate above decides what
-    // KIND of thing they may do; this decides which rows. Placed before the design is
-    // even read, so a refusal costs nothing and cannot leak timing.
-    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
-
+  //
+  // THE SEND ITSELF IS sendQuoteEmail, shared with restampQuoteTax below (2026-09-17): a quote
+  // re-priced after it was emailed is re-sent through exactly this code, so the two can never
+  // disagree about what a quote email says. It reads the design fresh, so a caller that has
+  // just re-priced it sends the new total. It checks no row scope — every caller does that
+  // first. `refused` carries this action's own refusals, unchanged.
+  const sendQuoteEmail = async (
+    shortCode: string,
+  ): Promise<{ refused: Response } | { sent: boolean; reason: string | null }> => {
     const { data: d, error: dErr } = await admin
       .from("designs")
       .select("short_code, contact, selections, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines")
       .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
-    if (dErr) return dbFail(req, clientId, "find that design", dErr);
-    if (!d) return json({ error: "Design not found." }, 404);
-    if (!d.ss_quote_number) return json({ error: "This design has no StructureStudio quote yet — submit it from the designer first." }, 400);
+    if (dErr) return { refused: dbFail(req, clientId, "find that design", dErr) };
+    if (!d) return { refused: json({ error: "Design not found." }, 404) };
+    if (!d.ss_quote_number) return { refused: json({ error: "This design has no StructureStudio quote yet — submit it from the designer first." }, 400) };
 
     const { data: cs, error: csErr } = await admin
       .from("client_settings")
       .select("invoice_in_ghl, business_name, business_phone, business_website, business_logo_url, quote_terms")
       .eq("client_id", clientId).maybeSingle();
-    if (csErr) return dbFail(req, clientId, "read your settings", csErr);
+    if (csErr) return { refused: dbFail(req, clientId, "read your settings", csErr) };
     if (!cs || cs.invoice_in_ghl !== false) {
-      return json({ error: "This account quotes through the CRM — re-send it from there." }, 400);
+      return { refused: json({ error: "This account quotes through the CRM — re-send it from there." }, 400) };
     }
 
     const to = String(d?.contact?.email || "").trim();
-    if (!to) return json({ ok: true, sent: false, reason: "no email address on this design" });
+    if (!to) return { sent: false, reason: "no email address on this design" };
 
     const total = totalFromSnapshot(d.estimate_lines);
     const sel = d.selections || {};
@@ -7587,7 +7693,258 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         .update({ ss_quote_sent_at: new Date().toISOString() })
         .eq("client_id", clientId).eq("short_code", shortCode);
     }
-    return json({ ok: true, sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") });
+    return { sent: outcome.sent, reason: outcome.sent ? null : (outcome.reason || "failed") };
+  };
+
+  if (action === "resend_quote_email") {
+    const shortCode = String(payload?.shortCode ?? "").trim();
+    if (!shortCode) return json({ error: "shortCode is required." }, 400);
+    // ROW SCOPE (207). A rep on contacts:'own' may hold designs:edit / orders:edit and
+    // still not be allowed near THIS customer's building. The gate above decides what
+    // KIND of thing they may do; this decides which rows. Placed before the design is
+    // even read, so a refusal costs nothing and cannot leak timing.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+
+    const out = await sendQuoteEmail(shortCode);
+    if ("refused" in out) return out.refused;
+    return json({ ok: true, sent: out.sent, reason: out.reason });
+  }
+
+  // ── Re-pricing an issued quote's tax (2026-09-17) ───────────────────────────────────
+  //
+  // Refuse a quote the customer has agreed to, or that has an order. Past acceptance a new
+  // total is an amendment — a change order the customer signs — never a silent re-stamp; the
+  // order's money columns are written once, guarded `.is("total_cents", null)`, so a later
+  // re-price would never reach them and the PDF, the order and the commission base would
+  // disagree. The agreement test is migration 197's (accepted_at, or the status ladder), and
+  // the order read fails CLOSED: an unreadable orders table is not "no order".
+  // deno-lint-ignore no-explicit-any
+  const refuseIfAgreed = async (d: any): Promise<Response | null> => {
+    if (isAgreedDesign(d)) {
+      return json({
+        error: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
+        reason: "accepted",
+      }, 409);
+    }
+    const { data: ord, error: ordErr } = await admin.from("orders").select("id")
+      .eq("client_id", clientId).eq("short_code", String(d.short_code)).limit(1);
+    if (ordErr) return dbFail(req, clientId, "check whether this quote has an order", ordErr);
+    if ((ord ?? []).length) {
+      return json({
+        error: "This quote already has an order, so its tax can't be changed here.",
+        reason: "ordered",
+      }, 409);
+    }
+    return null;
+  };
+
+  /**
+   * ── restampQuoteTax ── put a new `tax` object onto an ISSUED quote, and everything that has
+   * to follow from it. ONE helper for every caller that re-prices a quote's tax outside a
+   * submit (the sales-location change here; the verify button next), so the guards cannot be
+   * copied into one caller and forgotten in the other.
+   *
+   * `d` is the design as the caller read it (RESTAMP_DESIGN_COLUMNS) — the snapshot `tax` was
+   * priced against. `tax` is the complete object (taxChain's stampTax). `alsoSet` rides in the
+   * SAME update, so a column that belongs with the new tax (sales_location_id) is never written
+   * without it.
+   *
+   * In order — every refusal comes before the first write, so a refused call changes nothing:
+   *   1. re-read the row: the caller's read may be seconds old (a lookup sits between them);
+   *   2. refuse an agreed or ordered quote (refuseIfAgreed);
+   *   3. refuse when the lines moved since the caller priced them (a resubmit landed): the new
+   *      tax was computed for lines the quote no longer has — 409 `changed`;
+   *   4. restampPlan: no issued quote → 409 `no_quote`; an emailed quote whose total would move,
+   *      without confirmResend → 409 `quote_sent` naming both totals;
+   *   5. write estimate_lines + total_cents (+ alsoSet) as a compare-and-swap on updated_at
+   *      (designs_set_updated_at bumps it on every update) and accepted_at still null, checked:
+   *      no row means somebody else wrote first → 409 `changed`;
+   *   6. regenerate the quote PDF, best-effort (regenerateQuotePdf's own contract);
+   *   7. when the quote had been emailed and its total moved, send it again through
+   *      sendQuoteEmail. A failed send does not undo the re-price — the rep is told
+   *      (`resent: false`, `resendReason`) and can reach for Print or Copy-link, as with
+   *      resend_quote_email itself.
+   * It never looks anything up and never charges: pricing is the caller's business.
+   */
+  const restampQuoteTax = async (
+    // deno-lint-ignore no-explicit-any
+    d: any,
+    tax: Record<string, unknown>,
+    opts: { confirmResend: boolean; alsoSet?: Record<string, unknown>; where: string },
+  ): Promise<
+    | { ok: false; response: Response }
+    | {
+      ok: true;
+      tax: Record<string, unknown>;
+      totalCents: number;
+      previousTotalCents: number;
+      resent: boolean;
+      resendReason: string | null;
+      quotePdfUrl: string | null;
+    }
+  > => {
+    const shortCode = String(d?.short_code ?? "");
+    const { data: fresh, error: freshErr } = await admin.from("designs").select(RESTAMP_DESIGN_COLUMNS)
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (freshErr) return { ok: false, response: dbFail(req, clientId, opts.where, freshErr) };
+    if (!fresh) return { ok: false, response: json({ error: "Design not found.", reason: "not_found" }, 404) };
+
+    const agreed = await refuseIfAgreed(fresh);
+    if (agreed) return { ok: false, response: agreed };
+
+    const changedUnderneath = () => json({
+      error: "This quote changed while you were working on it. Reload it and try again.",
+      reason: "changed",
+    }, 409);
+    // jsonb comes back key-normalised, so two reads of the same stored value stringify alike.
+    if (JSON.stringify(fresh.estimate_lines ?? null) !== JSON.stringify(d?.estimate_lines ?? null)) {
+      return { ok: false, response: changedUnderneath() };
+    }
+
+    const plan = restampPlan({
+      snap: fresh.estimate_lines, tax, sent: !!fresh.ss_quote_sent_at, confirmResend: opts.confirmResend,
+    });
+    if (!plan.ok) {
+      if (plan.reason === "no_quote") {
+        return {
+          ok: false,
+          response: json({ error: "This design has no quote yet — issue the quote first.", reason: "no_quote" }, 409),
+        };
+      }
+      return {
+        ok: false,
+        response: json({
+          error: "This quote has already been emailed to the customer and its total would change. Confirm to update it and email the customer the new total.",
+          reason: "quote_sent",
+          quoteNumber: fresh.ss_quote_number ?? null,
+          totalCents: plan.previousTotalCents,
+          newTotalCents: plan.totalCents,
+        }, 409),
+      };
+    }
+
+    let write = admin.from("designs")
+      .update({ ...(opts.alsoSet ?? {}), estimate_lines: plan.snap, total_cents: plan.totalCents, updated_at: new Date().toISOString() })
+      .eq("client_id", clientId).eq("short_code", shortCode).is("accepted_at", null);
+    write = fresh.updated_at ? write.eq("updated_at", fresh.updated_at) : write.is("updated_at", null);
+    const { data: wrote, error: writeErr } = await write.select("short_code");
+    if (writeErr) return { ok: false, response: dbFail(req, clientId, opts.where, writeErr) };
+    if (!Array.isArray(wrote) || wrote.length !== 1) return { ok: false, response: changedUnderneath() };
+
+    const quotePdfUrl = fresh.ss_quote_number
+      ? await regenerateQuotePdf(admin, req, clientId, shortCode, {
+        quoteNumber: String(fresh.ss_quote_number), snap: plan.snap, planUrl: fresh.image_url,
+      })
+      : null;
+
+    let resent = false;
+    let resendReason: string | null = null;
+    if (plan.resend) {
+      const sent = await sendQuoteEmail(shortCode);
+      if ("refused" in sent) resendReason = "the quote couldn't be emailed from here";
+      else {
+        resent = sent.sent;
+        resendReason = sent.reason;
+      }
+    }
+    return {
+      ok: true, tax, totalCents: plan.totalCents, previousTotalCents: plan.previousTotalCents,
+      resent, resendReason, quotePdfUrl,
+    };
+  };
+
+  // ── set_design_sales_location: which lot a quote was sold from (migration 243) ──────
+  //
+  // Staff pick it; a shopper never does (this function requires a signed-in member). The
+  // location decides the quote's FREE default rate (_shared/taxChain.ts), so picking one on an
+  // issued quote re-prices it here and now rather than at the next resubmit — a rep who moves a
+  // quote to the Macon lot expects the Macon rate on the document they are looking at.
+  //   - a VERIFIED rate on the quote is left exactly as it is: it was bought for the delivery
+  //     address, and where the building was sold does not change what that address owes;
+  //   - no issued quote, or a tenant whose paperwork comes from the CRM: the location is only
+  //     recorded, and the next submit prices from it;
+  //   - otherwise the chain without the home lot (clearing the location means "no lot", and
+  //     borrowing the rep's own lot would put one straight back): the location's rate, else the
+  //     company rate, else refuse. allowLookup stays FALSE — this can never make a paid call.
+  // The location must be this tenant's and active; the composite foreign key (243) enforces the
+  // tenant again in the database.
+  if (action === "set_design_sales_location") {
+    const parsed = parseSetSalesLocation(payload);
+    if (!parsed.ok) return json({ error: parsed.error, reason: parsed.reason }, parsed.status);
+    const { shortCode, locationId, confirmResend } = parsed.value;
+    // ROW SCOPE first, before the design is read — the same placement as resend_quote_email.
+    { const refused = await refuseUnlessDesignVisible(shortCode); if (refused) return refused; }
+
+    const { data: d, error: dErr } = await admin.from("designs")
+      .select(`${RESTAMP_DESIGN_COLUMNS}, sales_location_id, contact`)
+      .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+    if (dErr) return dbFail(req, clientId, "find that design", dErr);
+    if (!d) return json({ error: "Design not found.", reason: "not_found" }, 404);
+    { const agreed = await refuseIfAgreed(d); if (agreed) return agreed; }
+
+    let location: TaxLocation | null = null;
+    if (locationId) {
+      const { data: lot, error: lotErr } = await admin.from("builder_locations").select(TAX_LOCATION_COLUMNS)
+        .eq("client_id", clientId).eq("id", locationId).maybeSingle();
+      if (lotErr) return dbFail(req, clientId, "load that location", lotErr);
+      // Missing, another tenant's, or inactive: one answer for all three.
+      location = taxLocationFrom(lot, clientId);
+      if (!location) return json({ error: "Location not found.", reason: "location_not_found" }, 404);
+    }
+
+    const { data: cs, error: csErr } = await admin.from("client_settings")
+      .select("invoice_in_ghl, ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle();
+    if (csErr) return dbFail(req, clientId, "read your sales tax rate", csErr);
+
+    // deno-lint-ignore no-explicit-any
+    const snap: any = d.estimate_lines;
+    const storedTax = snap?.tax ?? null;
+    const pools = subtotalsFromSnapshot(snap);
+    const reprice = cs?.invoice_in_ghl === false && !!storedTax && typeof storedTax === "object" &&
+      !isVerifiedTax(storedTax) && !!pools;
+
+    if (!reprice) {
+      const { data: wrote, error: wErr } = await admin.from("designs")
+        .update({ sales_location_id: locationId, updated_at: new Date().toISOString() })
+        .eq("client_id", clientId).eq("short_code", shortCode).is("accepted_at", null)
+        .select("short_code");
+      if (wErr) return dbFail(req, clientId, "set this quote's sales location", wErr);
+      if (!Array.isArray(wrote) || wrote.length !== 1) {
+        return json({ error: "This quote changed while you were working on it. Reload it and try again.", reason: "changed" }, 409);
+      }
+      await audit("portal_set_design_sales_location", 1, `design=${shortCode} location=${locationId ?? "none"} repriced=no`);
+      return json({
+        ok: true, salesLocationId: locationId, tax: storedTax, totalCents: designTotalCents(snap) ?? d.total_cents ?? null,
+        resent: false,
+      });
+    }
+
+    const choice = chooseDefaultRate({
+      salesLocationId: locationId, location, homeLot: null,
+      companyRate: cs?.ss_tax_rate, companyLabel: cs?.ss_tax_label ?? null,
+    });
+    if (!choice) {
+      return json({
+        error: "This account has no sales tax rate set, so this quote can't be re-priced. Add a rate to the location, or a company rate in Settings → CRM Connection → Quotes & Invoices (enter 0% if you don't collect sales tax).",
+        reason: "no_tax_rate",
+      }, 400);
+    }
+    const addr = addressFrom(d.contact);
+    // allowLookup stays FALSE: only the chosen default comes back, as source "fallback".
+    const resolved = await resolveRate(addr, choice.rate, { allowLookup: false });
+    const tax = stampTax({ pools: pools!, resolved, choice, address: addr });
+
+    const out = await restampQuoteTax(d, tax, {
+      confirmResend, alsoSet: { sales_location_id: locationId }, where: "set this quote's sales location",
+    });
+    if (!out.ok) return out.response;
+    await audit("portal_set_design_sales_location", 1,
+      `design=${shortCode} location=${locationId ?? "none"} total=${out.previousTotalCents}->${out.totalCents} resent=${out.resent}`);
+    return json({
+      ok: true, salesLocationId: locationId, tax: out.tax, totalCents: out.totalCents,
+      previousTotalCents: out.previousTotalCents, resent: out.resent, resendReason: out.resendReason,
+      quotePdfUrl: out.quotePdfUrl,
+    });
   }
 
   // ── send_change_order: email a pending change order to the customer (migration 126) ──
