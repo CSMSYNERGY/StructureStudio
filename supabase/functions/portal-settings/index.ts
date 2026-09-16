@@ -43,7 +43,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -3696,7 +3696,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       }
     }
 
-    const observedNotes = shapeFirst ? parseObservedNotes(text) : null;
+    // A gambrel whose two slopes are nearly the same angle draws as a plain gable (2026-09-16).
+    // FLAGGED, not refused: the builder reviews before Save, and a refusal would throw away the
+    // porch, colours and notes the same reply got right. The warning rides in `observed`, which
+    // the panel already shows. Charged either way: the model answered and the rest is usable.
+    //
+    // shapeFirst ONLY, on purpose. The photos source is the scan card's, and that card replaces
+    // the AI's roof with the scan's MEASURED one (scanApplyMeasured) and never reads `observed`,
+    // so a warning there would describe a roof nobody sees and pollute the flagged-draft query.
+    const observedNotes = shapeFirst ? flagObservedNotes(parseObservedNotes(text), gambrelRoofWarning(drafted.d3.roof)) : null;
 
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
