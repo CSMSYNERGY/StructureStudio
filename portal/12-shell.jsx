@@ -1306,10 +1306,14 @@ function Dashboard({ session }) {
        photo caller wants a bare spec. One function returning two shapes is how the wrong one
        gets read.
 
-       It takes the VIDEO prompt server-side, because a combined set still contains the
-       walk-around and that prompt is the one that knows the roof was only ever seen from the
-       ground — the single most important fact about this input. Cap is 12, Carolyn's own
-       "three from each side". */
+       It takes a shape-first prompt server-side, because every set it sends contains the
+       walk-around, and those prompts are the ones that know the roof was only ever seen from
+       the ground — the single most important fact about this input. WHICH one depends on the
+       set (2026-09-16, when photos became optional). With photos beside the walk it goes as
+       source "combined": combinedShapePrompt, cap 12, Carolyn's own "three from each side".
+       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
+       path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
+       frames and only `dropped` says so. */
     onDraftFromCombined: async (photoUrls, styleValue, videoCount) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than

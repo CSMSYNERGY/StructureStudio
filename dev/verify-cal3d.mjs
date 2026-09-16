@@ -87,6 +87,7 @@ const CONFIG = {
   buildingStyles: [
     { value: 'barn', label: 'Barn', sizes: [{ label: '12x16', w: 12, h: 16, price: 5000 }] },
     { value: 'shed', label: 'Shed', sizes: [{ label: '10x12', w: 10, h: 12, price: 3000 }] },
+    { value: 'cabin', label: 'Cabin', sizes: [{ label: '12x20', w: 12, h: 20, price: 7000 }] },
   ],
   defaultSizes: [{ label: '12x16', w: 12, h: 16, price: 5000 }],
   options: [],
@@ -102,6 +103,19 @@ const STYLE_ROW2 = {
   show_image_on_estimate: true, d3: null,
   d3_photos: ['http://127.0.0.1:8123/__stub/img-90.png', 'http://127.0.0.1:8123/__stub/img-91.png', 'http://127.0.0.1:8123/__stub/img-92.png', 'http://127.0.0.1:8123/__stub/img-93.png'],
   d3_video_frames: ['http://127.0.0.1:8123/__stub/img-94.png', 'http://127.0.0.1:8123/__stub/img-95.png', 'http://127.0.0.1:8123/__stub/img-96.png', 'http://127.0.0.1:8123/__stub/img-97.png', 'http://127.0.0.1:8123/__stub/img-98.png'],
+  model_url: null, model_status: 'none', model_uploaded_at: null, model_locked_at: null,
+  model_meta: null, taxable: true,
+}
+
+// A THIRD style: a saved walk-around and NO photos (review, 2026-09-16). Since photos became
+// optional this is a complete input on its own, and nothing else covers it: Barn has four photos
+// by the time it is reopened, and Shed was saved with four. Only ever opened at the very end of
+// the run, and never saved, so no earlier block sees it.
+const STYLE_ROW3 = {
+  id: 's3', key: 'cabin', label: 'Cabin', code: 'CBN', image_url: null, active: true, updated_at: '2026-09-14T10:00:00.000+00:00',
+  show_image_on_estimate: true, d3: null,
+  d3_photos: [],
+  d3_video_frames: [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `${BASE}/__stub/img-c${i}.png`),
   model_url: null, model_status: 'none', model_uploaded_at: null, model_locked_at: null,
   model_meta: null, taxable: true,
 }
@@ -211,7 +225,7 @@ async function main() {
         const hold = delay.catalogMs
         delay.catalogMs = 0
         if (hold) await new Promise((r) => setTimeout(r, hold))
-        return json(route, { ok: true, aiReady: true, styles: [STYLE_ROW, STYLE_ROW2], sizes: [], layoutItems: [], fixtures: [], colors: [] })
+        return json(route, { ok: true, aiReady: true, styles: [STYLE_ROW, STYLE_ROW2, STYLE_ROW3], sizes: [], layoutItems: [], fixtures: [], colors: [] })
       }
       if (a === 'style_photo_upload_url') {
         attempts.signedMint++
@@ -393,6 +407,13 @@ async function main() {
   ok('the four named slots are GONE', !t.includes('Left side') && !t.includes('Right side'), 'no Front/Left side/Right side/Back labels')
 
   const gen = page.getByRole('button', { name: /Generate the 3D model/ })
+  // A BOUNDED wait for the button to unlock that answers true or false instead of throwing
+  // (review, 2026-09-16). An unbounded wait on something the gate never allows dies as a
+  // TimeoutError, and a harness that dies before its named FAIL does not say what broke.
+  const genUnlocks = (ms = 15000) => page.waitForFunction(() => {
+    const b = Array.from(document.querySelectorAll('button')).find((x) => /Generate the 3D model/.test(x.textContent || ''))
+    return Boolean(b) && !b.disabled
+  }, null, { timeout: ms }).then(() => true, () => false)
   ok('generate button is RENDERED, never hidden', (await gen.count()) === 1)
   ok('generate disabled with nothing supplied', await gen.first().isDisabled())
   ok('with nothing supplied, the gate asks for the VIDEO and calls photos optional',
@@ -407,67 +428,76 @@ async function main() {
     const g0 = generateCalls.length
     await page.locator('input[type=file][accept="video/*"]').setInputFiles(CLIP)
     await page.waitForFunction(() => /\d+ views ready/.test(document.body.innerText), null, { timeout: 60000 })
-    await page.waitForFunction(() => /^Ready —/m.test(document.body.innerText), null, { timeout: 30000 })
+    // THE UNLOCK IS RECORDED BEFORE ANYTHING ELSE IS WAITED ON (review, 2026-09-16). This block
+    // used to wait for the Ready line first, so against a bundle with the old gate the run died
+    // on a TimeoutError and never printed the FAIL below. Everything that needs the button
+    // unlocked is skipped, as one named FAIL, when it never unlocks.
+    const soloUnlocked = await genUnlocks()
     t = await text()
     soloFrames = Number((t.match(/(\d+) views ready/) || [])[1] || 0)
     // The walk-around strip is alt="View N", in walk order - the order the set must be sent in.
     const frameSrcs = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="View "]')).map((i) => i.getAttribute('src')))
     ok('VIDEO ONLY, NO PHOTOS: GENERATE IS UNLOCKED',
-      soloFrames >= 4 && (await imgCount()) === 0 && !(await gen.first().isDisabled()),
+      soloUnlocked && soloFrames >= 4 && (await imgCount()) === 0,
       `${soloFrames} frames, ${await imgCount()} photos`)
-    ok('the ready line counts the walk-around and calls photos optional',
-      (await line('Ready —')).trim() === `Ready — one generation, reading the ${soloFrames} walk-around views. Photos in step 2 are optional.`,
-      (await line('Ready —')).trim())
-    ok('staging the walk-around charged nothing', generateCalls.length === g0, `${generateCalls.length - g0} generations`)
+    if (!soloUnlocked) {
+      ok('the video-only press and the video + one photo run', false, 'skipped: Generate never unlocked with a video alone')
+    } else {
+      await page.waitForFunction(() => /^Ready —/m.test(document.body.innerText), null, { timeout: 30000 }).catch(() => {})
+      ok('the ready line counts the walk-around and calls photos optional',
+        (await line('Ready —')).trim() === `Ready — one generation, reading the ${soloFrames} walk-around views. Photos in step 2 are optional.`,
+        (await line('Ready —')).trim())
+      ok('staging the walk-around charged nothing', generateCalls.length === g0, `${generateCalls.length - g0} generations`)
 
-    await gen.first().click()
-    await page.waitForFunction(() => / views? from your walk-around\./.test(document.body.innerText), null, { timeout: 30000 })
-    t = await text()
-    const solo = generateCalls[g0] || {}
-    ok('ONE PRESS, ONE GENERATION, from the video alone', generateCalls.length === g0 + 1, `${generateCalls.length - g0}`)
-    // "video", not "combined": combinedShapePrompt opens "from two sources", which is false with
-    // no photos beside the walk. VIDEO_SHAPE_PROMPT describes a frames-only set exactly.
-    ok('A WALK ON ITS OWN IS SENT AS source "video"', solo.source === 'video', String(solo.source))
-    ok('IT CARRIES ONLY THE FRAMES, in walk order',
-      (solo.photoUrls || []).length === soloFrames && (solo.photoUrls || []).every((u, i) => u === frameSrcs[i]),
-      `${(solo.photoUrls || []).length} urls for ${soloFrames} frames`)
-    ok('and videoCount is the whole set', solo.videoCount === soloFrames, `videoCount=${solo.videoCount}`)
-    ok('the result reads from the walk-around, and invents no photos',
-      t.includes(`Read ${soloFrames} views from your walk-around.`) && !t.includes('of your own photos'),
-      (await line('Read ')).trim().slice(0, 110))
-    ok('the colour sentence credits the views, not photos that were never sent',
-      t.includes('Colours are set where the views show them clearly') && !t.includes('Colours are set from the photos'))
-    const soloColors = await page.evaluate(() => Array.from(document.querySelectorAll('input[placeholder="#hex or blank"]')).map((el) => el.value || ''))
-    ok('A COLOUR READ FROM THE WALK-AROUND ALONE REACHES THE SPEC', soloColors.some((c) => c.toLowerCase() === '#00ff00'), soloColors.filter(Boolean).join(',') || 'none set')
-    ok('the observed notes render for a video-only run', t.includes('What the model saw') && t.includes('Gambrel, read from the ground.'))
+      await gen.first().click()
+      await page.waitForFunction(() => / views? from your walk-around\./.test(document.body.innerText), null, { timeout: 30000 })
+      t = await text()
+      const solo = generateCalls[g0] || {}
+      ok('ONE PRESS, ONE GENERATION, from the video alone', generateCalls.length === g0 + 1, `${generateCalls.length - g0}`)
+      // "video", not "combined": combinedShapePrompt opens "from two sources", which is false with
+      // no photos beside the walk. VIDEO_SHAPE_PROMPT describes a frames-only set exactly.
+      ok('A WALK ON ITS OWN IS SENT AS source "video"', solo.source === 'video', String(solo.source))
+      ok('IT CARRIES ONLY THE FRAMES, in walk order',
+        (solo.photoUrls || []).length === soloFrames && (solo.photoUrls || []).every((u, i) => u === frameSrcs[i]),
+        `${(solo.photoUrls || []).length} urls for ${soloFrames} frames`)
+      ok('and videoCount is the whole set', solo.videoCount === soloFrames, `videoCount=${solo.videoCount}`)
+      ok('the result reads from the walk-around, and invents no photos',
+        t.includes(`Read ${soloFrames} views from your walk-around.`) && !t.includes('of your own photos'),
+        (await line('Read ')).trim().slice(0, 110))
+      ok('the colour sentence credits the views, not photos that were never sent',
+        t.includes('Colours are set where the views show them clearly') && !t.includes('Colours are set from the photos'))
+      const soloColors = await page.evaluate(() => Array.from(document.querySelectorAll('input[placeholder="#hex or blank"]')).map((el) => el.value || ''))
+      ok('A COLOUR READ FROM THE WALK-AROUND ALONE REACHES THE SPEC', soloColors.some((c) => c.toLowerCase() === '#00ff00'), soloColors.filter(Boolean).join(',') || 'none set')
+      ok('the observed notes render for a video-only run', t.includes('What the model saw') && t.includes('Gambrel, read from the ground.'))
 
-    // ── VIDEO + ONE PHOTO: still unlocked, and the photo rides after the frames ────────────
-    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'one.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('one-photo') }])
-    await waitForImages(1)
-    await page.waitForFunction(() => /^Ready — .* and 1 of your photos\.$/m.test(document.body.innerText), null, { timeout: 30000 })
-    const onePhoto = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))
-    ok('VIDEO + ONE PHOTO: GENERATE IS STILL UNLOCKED', !(await gen.first().isDisabled()))
-    ok('the ready line counts both sources',
-      (await line('Ready —')).trim() === `Ready — one generation, reading ${soloFrames + 1} views: ${soloFrames} from the walk-around and 1 of your photos.`,
-      (await line('Ready —')).trim())
-    const g1 = generateCalls.length
-    await gen.first().click()
-    await page.waitForFunction(() => /from your walk-around and 1 of your own photos/.test(document.body.innerText), null, { timeout: 30000 })
-    const withOne = generateCalls[g1] || {}
-    ok('ONE PRESS, ONE GENERATION, with one photo', generateCalls.length === g1 + 1, `${generateCalls.length - g1}`)
-    ok('WITH A PHOTO BESIDE THE WALK, THE SOURCE IS "combined"', withOne.source === 'combined', String(withOne.source))
-    ok('FRAMES FIRST, THEN THE ONE PHOTO',
-      (withOne.photoUrls || []).length === soloFrames + 1
-        && (withOne.photoUrls || []).slice(0, soloFrames).every((u, i) => u === frameSrcs[i])
-        && (withOne.photoUrls || [])[soloFrames] === onePhoto[0]
-        && withOne.videoCount === soloFrames,
-      `${(withOne.photoUrls || []).length} urls, videoCount=${withOne.videoCount}`)
+      // ── VIDEO + ONE PHOTO: still unlocked, and the photo rides after the frames ────────────
+      await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'one.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('one-photo') }])
+      await waitForImages(1)
+      await page.waitForFunction(() => /^Ready — .* and 1 of your photos\.$/m.test(document.body.innerText), null, { timeout: 30000 })
+      const onePhoto = await page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src')))
+      ok('VIDEO + ONE PHOTO: GENERATE IS STILL UNLOCKED', !(await gen.first().isDisabled()))
+      ok('the ready line counts both sources',
+        (await line('Ready —')).trim() === `Ready — one generation, reading ${soloFrames + 1} views: ${soloFrames} from the walk-around and 1 of your photos.`,
+        (await line('Ready —')).trim())
+      const g1 = generateCalls.length
+      await gen.first().click()
+      await page.waitForFunction(() => /from your walk-around and 1 of your own photos/.test(document.body.innerText), null, { timeout: 30000 })
+      const withOne = generateCalls[g1] || {}
+      ok('ONE PRESS, ONE GENERATION, with one photo', generateCalls.length === g1 + 1, `${generateCalls.length - g1}`)
+      ok('WITH A PHOTO BESIDE THE WALK, THE SOURCE IS "combined"', withOne.source === 'combined', String(withOne.source))
+      ok('FRAMES FIRST, THEN THE ONE PHOTO',
+        (withOne.photoUrls || []).length === soloFrames + 1
+          && (withOne.photoUrls || []).slice(0, soloFrames).every((u, i) => u === frameSrcs[i])
+          && (withOne.photoUrls || [])[soloFrames] === onePhoto[0]
+          && withOne.videoCount === soloFrames,
+        `${(withOne.photoUrls || []).length} urls, videoCount=${withOne.videoCount}`)
 
-    // Back to nothing at all, so the photos-only block below starts from the state it describes.
-    await page.locator('button[title="Remove this image"]').last().click()
-    // Not waitForImages(0): with no photos the counter reads "Pick several at once", so there is
-    // no "0 of 12 used" for it to find.
-    await page.waitForFunction(() => /Pick several at once/.test(document.body.innerText), null, { timeout: 15000 })
+      // Back to nothing at all, so the photos-only block below starts from the state it describes.
+      await page.locator('button[title="Remove this image"]').last().click()
+      // Not waitForImages(0): with no photos the counter reads "Pick several at once", so there is
+      // no "0 of 12 used" for it to find.
+      await page.waitForFunction(() => /Pick several at once/.test(document.body.innerText), null, { timeout: 15000 })
+    }
     await page.getByRole('button', { name: 'Remove the video', exact: true }).click()
     await page.waitForFunction(() => !/\d+ views ready/.test(document.body.innerText), null, { timeout: 15000 })
     await page.waitForTimeout(600)
@@ -501,13 +531,69 @@ async function main() {
   ok('the gate asks for the video, and says the photos will be read with it',
     (await line('Add a walk-around video in step 1 — a generation needs one. Your 4 images will be read alongside it.')).length > 0,
     (await line('Add a walk-around')).trim())
-  // Pressed anyway, the way an impatient builder does. A disabled button fires no click, so
-  // nothing may reach the paid action.
-  await gen.first().click({ force: true, timeout: 5000 }).catch(() => {})
+  // PRESSED ANYWAY, PAST THE ATTRIBUTE (review, 2026-09-16). This was a `click({ force: true })`,
+  // and a browser fires no click on a disabled button, so it proved the attribute and nothing
+  // else: calGenerate's own refusal never ran. React keeps each element's props on the element,
+  // and the Generate button's onClick IS calGenerate, so calling it is exactly the press the
+  // attribute would have stopped.
+  const handlerPress = await page.evaluate(async () => {
+    const b = Array.from(document.querySelectorAll('button')).find((x) => /Generate the 3D model/.test(x.textContent || ''))
+    const k = b && Object.keys(b).find((x) => x.startsWith('__reactProps$'))
+    if (!k || typeof b[k].onClick !== 'function') return 'no React onClick on the button'
+    await b[k].onClick()
+    return 'called'
+  })
   await page.waitForTimeout(700)
-  ok('A FORCED PRESS WITH PHOTOS ONLY SENDS NOTHING', generateCalls.length === gPhotos, `${generateCalls.length - gPhotos} calls`)
+  const gateWords = 'Add a walk-around video in step 1 — a generation needs one. Your 4 images will be read alongside it.'
+  ok('A PRESS THAT GETS PAST THE DISABLED ATTRIBUTE SENDS NOTHING', handlerPress === 'called' && generateCalls.length === gPhotos,
+    `${handlerPress}; ${generateCalls.length - gPhotos} calls`)
+  ok('and calGenerate answers it in the gate\'s own words',
+    (await text()).split('\n').filter((l) => l.trim() === gateWords).length === 2, 'hint line plus the message under Save')
+  // AND THE HOST'S REFUSAL, the last line before the paid call: onDraftFromCombined in
+  // portal/12-shell.jsx throws on a set with no walk-around frames. Reached by walking up from the
+  // button to the component the portal handed `setup3d`, and called with the staged photos, which
+  // is precisely the set that must never be sent.
+  const hostRefusal = await page.evaluate(async () => {
+    const b = Array.from(document.querySelectorAll('button')).find((x) => /Generate the 3D model/.test(x.textContent || ''))
+    const k = b && Object.keys(b).find((x) => x.startsWith('__reactFiber$'))
+    let f = k ? b[k] : null
+    while (f && !(f.memoizedProps && f.memoizedProps.setup3d && f.memoizedProps.setup3d.onDraftFromCombined)) f = f.return
+    if (!f) return null
+    const photos = Array.from(document.querySelectorAll('img[alt^="Image "]')).map((i) => i.getAttribute('src'))
+    const attempt = async (videoCount) => {
+      try { await f.memoizedProps.setup3d.onDraftFromCombined(photos, 'barn', videoCount); return 'SENT' } catch (e) { return String((e && e.message) || e) }
+    }
+    return { photos: photos.length, zero: await attempt(0), absent: await attempt(undefined) }
+  })
+  await page.waitForTimeout(500)
+  ok('THE PORTAL HOST REFUSES A SET WITH NO WALK-AROUND, BEFORE ANY REQUEST',
+    Boolean(hostRefusal) && hostRefusal.photos === 4
+      && /walk-around video is required/.test(hostRefusal.zero) && /walk-around video is required/.test(hostRefusal.absent)
+      && generateCalls.length === gPhotos,
+    `${JSON.stringify(hostRefusal)}; ${generateCalls.length - gPhotos} calls`)
   ok('adding photos charged no generation', generateCalls.length === gPhotos, `${generateCalls.length - gPhotos} calls`)
   ok('four photo uploads went through the host', uploadCount() - upPhotos === 4, `${uploadCount() - upPhotos} uploads`)
+
+  // ── NINE PHOTOS, NO VIDEO: the hint counts what a walk-around will leave room for ────────
+  // Review, 2026-09-16: it said "Your N images will be read alongside it" for any N, but once a
+  // lap arrives calGenerateSet keeps at least four frames inside the twelve, so only eight photos
+  // are read. Nine is the smallest count where the old sentence was wrong.
+  {
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([4, 5, 6, 7, 8].map((i) => ({ name: `p${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`stub-photo-${i}`) })))
+    await waitForImages(9)
+    await page.waitForTimeout(400)
+    const nine = 'Add a walk-around video in step 1 — a generation needs one. 8 of your 9 images will be read alongside it, since the walk-around keeps at least 4 of the 12 views.'
+    ok('PAST EIGHT PHOTOS, THE HINT PROMISES ONLY THE EIGHT A WALK LEAVES ROOM FOR',
+      (await line(nine)).trim() === nine && !(await text()).includes('Your 9 images will be read'),
+      (await line('Add a walk-around video in step 1 — a generation needs one. 8')).trim() || (await line('Add a walk-around')).trim())
+    ok('nine photos still do not unlock Generate', await gen.first().isDisabled())
+    // Back to the four the blocks below describe.
+    for (let n = 9; n > 4; n--) {
+      await page.locator('button[title="Remove this image"]').last().click()
+      await waitForImages(n - 1)
+    }
+    await page.waitForTimeout(600)
+  }
 
   // ── REGRESSION: the two steps must not block each other ─────────────────────────────────
   // Ahsan hit this with a screenshot: step 1 read "Sending view 2 of 8..." while step 2's button
@@ -958,6 +1044,40 @@ async function main() {
       await page.screenshot({ path: `${process.env.SS_SHOT_DIR}/cal3d-375.png` })
     }
     await page.setViewportSize({ width: 1500, height: 1100 })
+  }
+
+  // ── A SAVED WALK-AROUND AND NO PHOTOS: Generate is unlocked on reopen (review, 2026-09-16) ──
+  // The builder who filmed a lap last week, never added a photo, and comes back to generate. The
+  // gate counts frames RESTORED from d3_video_frames exactly as it counts a fresh upload, and
+  // until this block nothing proved it: every reopen above had four photos staged beside the walk.
+  // Last in the run, because it presses Generate and nothing after it should read that result.
+  {
+    await page.getByRole('button', { name: 'Cabin', exact: true }).first().click()
+    await page.waitForTimeout(1200)
+    // By the frames' OWN URLs, not the count: Barn's lap is also eight views.
+    const restored = await page.waitForFunction((want) => {
+      const got = Array.from(document.querySelectorAll('img[alt^="View "]')).map((i) => i.getAttribute('src'))
+      return got.length === want.length && got.every((u, i) => u === want[i])
+    }, STYLE_ROW3.d3_video_frames, { timeout: 20000 }).then(() => true, () => false)
+    const unlocked = await genUnlocks()
+    const photosShown = await page.locator('img[alt^="Image "]').count()
+    ok('A STYLE REOPENED WITH A SAVED WALK-AROUND AND NO PHOTOS: GENERATE IS UNLOCKED',
+      restored && unlocked && photosShown === 0 && /8 views ready/.test(await text()),
+      `frames restored ${restored}, unlocked ${unlocked}, ${photosShown} photos`)
+    ok('its ready line reads the restored walk-around alone',
+      (await line('Ready —')).trim() === 'Ready — one generation, reading the 8 walk-around views. Photos in step 2 are optional.',
+      (await line('Ready —')).trim())
+    if (unlocked) {
+      const g = generateCalls.length
+      await gen.first().click()
+      for (let i = 0; i < 80 && generateCalls.length === g; i++) await page.waitForTimeout(250)
+      await page.waitForTimeout(500)
+      const c = generateCalls[g] || {}
+      ok('ONE PRESS SENDS THE RESTORED FRAMES ALONE, AS source "video"',
+        generateCalls.length === g + 1 && c.source === 'video' && c.videoCount === 8
+          && JSON.stringify(c.photoUrls) === JSON.stringify(STYLE_ROW3.d3_video_frames),
+        `${generateCalls.length - g} calls, source ${c.source}, videoCount ${c.videoCount}, ${(c.photoUrls || []).length} urls`)
+    }
   }
 
   await browser.close()

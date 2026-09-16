@@ -12806,6 +12806,10 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
 // The probe pass that measures change also gets sharpness for free — it has already
 // decoded those frames — so each chosen viewpoint can be nudged to whichever of its
 // neighbours is least motion-blurred without spending another seek.
+// ⚠️ KEEP THIS AT 8 OR BELOW (2026-09-16). A walk-around generated with no photos goes to
+// calibrate_style_ai as source "video" (onDraftFromCombined in portal/12-shell.jsx), and that
+// source's server cap is 8: sanitizePhotoUrls would drop any frame past it. Raising this means
+// raising that cap in portal-settings first, or the extra frames are cut and only `dropped` says so.
 const SS_VID_FRAMES = 8;          // four elevations + four corners, whatever the pacing
 const SS_VID_PROBE_MAX = 36;      // seeks are ~50-100ms; this bounds the probe at ~3s
 const SS_VID_LONG_EDGE = 1280;    // ~1200 image tokens per frame, ~200KB of JPEG
@@ -16885,12 +16889,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // repo has shipped dead-looking features before: it throws no error and reads as breakage.
   // Since 2026-09-16 the only input it can ask for is the video; with photos but no video it
   // says the photos will be read alongside one, so nobody thinks their uploads were wasted.
+  //
+  // HOW MANY will be read is calGenerateSet's arithmetic, not "all of them" (review, 09-16).
+  // Once a walk-around arrives it keeps at least CAL_VIDEO_MIN of the CAL_PHOTO_MAX views, so
+  // past eight photos some are held back, and a line promising all twelve would be the kind of
+  // count that is worse than no count. A lap is never uploaded with fewer than CAL_VIDEO_MIN
+  // frames (calStageVideo refuses it), so this floor is what the set will actually use.
   const calGenerateReady = calCanGenerate ? calGenerateSet() : null;
+  const calPhotosWithWalk = Math.min(calPhotoCount, CAL_PHOTO_MAX - CAL_VIDEO_MIN);
   const calGenerateWhy = !adminCal ? ""
     : (adminCalVideo.busy || adminCalPhotos.busy) ? "Still uploading — the button unlocks when the upload finishes."
     : scan.status === "locked" ? "This style's 3D setup is locked. Unlock it above before generating."
     : (!calVideoReady && !calPhotoCount) ? "Add a walk-around video in step 1 — it is the one thing a generation needs. Photos in step 2 are optional."
-    : !calVideoReady ? `Add a walk-around video in step 1 — a generation needs one. Your ${calPhotoCount} image${calPhotoCount === 1 ? "" : "s"} will be read alongside it.`
+    : !calVideoReady ? `Add a walk-around video in step 1 — a generation needs one. ${calPhotosWithWalk === calPhotoCount
+      ? `Your ${calPhotoCount} image${calPhotoCount === 1 ? "" : "s"} will be read alongside it.`
+      : `${calPhotosWithWalk} of your ${calPhotoCount} images will be read alongside it, since the walk-around keeps at least ${CAL_VIDEO_MIN} of the ${CAL_PHOTO_MAX} views.`}`
     : (calGenerateReady && calGenerateReady.urls.length > calGenerateReady.videoCount)
       ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos.`
     : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views. Photos in step 2 are optional.`;
