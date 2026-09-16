@@ -41,6 +41,14 @@ async function placeFixture(page, tool, styleName, confirmLabel, fx, fy) {
 // text); the window picker's is "🪟 Window wall", so anchoring the END excludes the rough
 // opening, whose name ends ") wall".
 const placeDoor = (page, fx, fy) => placeFixture(page, /^Door wall$/, "Single Barn Door", "Place door", fx, fy);
+// A rough opening: arm the Door or Window tool, click the wall, choose the picker's "Rough opening" tile.
+async function placeRo(page, tool, kind, fx, fy) {
+  await arm(page, tool);
+  await clickPlan(page, fx, fy);
+  await page.locator(`[data-ss-ro-tile="${kind}"]`).click();
+  await page.getByRole("button", { name: "Place rough opening" }).click();
+  await page.waitForTimeout(300);
+}
 const placeWindow = (page, fx, fy) => placeFixture(page, /Window wall$/, "Double Hung Window", "Place window", fx, fy);
 
 test("public designer boots and places every wall item", async ({ page }) => {
@@ -86,8 +94,12 @@ test("door and window rough openings place with their own geometry and labels", 
   await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
   await expect(page.locator("svg").filter({ hasText: /ft/ }).first()).toBeVisible();
 
-  await arm(page, "Rough Opening (Door)"); await clickPlan(page, 5, 0);
-  await arm(page, "Rough Opening (Window)"); await clickPlan(page, 10, 6);
+  // Rough openings are a tile inside the door and window pickers since 2026-09-16 (Carolyn: "I want
+  // rough opening to be in the door and in the window as an option, not by itself"), so there is no
+  // palette button left to arm, and the tile must place exactly the item the button used to.
+  await expect(page.getByRole("button", { name: /Rough Opening/ }), "no rough-opening palette buttons").toHaveCount(0);
+  await placeRo(page, /^Door wall$/, "door", 5, 0);
+  await placeRo(page, /Window wall$/, "window", 10, 6);
 
   await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([
     expect.objectContaining({ type: "roughOpeningDoor", wall: "north", sillFt: 0 }),

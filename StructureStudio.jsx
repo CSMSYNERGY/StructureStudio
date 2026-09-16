@@ -1740,7 +1740,7 @@ function SSWallElevation({ item, cfg, itemTypes, dims, wallHeightFt, wallLabel }
 // Door placement picker. Doors are grouped by STYLE (exact name): one card per style; picking a
 // style with more than one size reveals a size chooser, then swing/operation where more than one
 // is offered, then place.
-function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCancel, onPlace }) {
+function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCancel, onPlace, ro = false, onPlaceRo = null }) {
   const styles = useMemo(() => {
     const m = new Map();
     doors.forEach((d) => {
@@ -1751,6 +1751,11 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
     return [...m.values()];
   }, [doors]);
   const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  // "Rough opening" is the last tile when the builder offers one (Carolyn 2026-09-16: "I want rough
+  // opening to be in the door and in the window as an option, not by itself") — a framed hole for an
+  // air conditioner, or a door the customer fits themselves. Choosing it clears the door choice;
+  // it starts chosen when it is the only tile.
+  const [roOn, setRoOn] = useState(!!ro && styles.length === 0);
   const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
   const [swing, setSwing] = useState(null);
   const [operation, setOperation] = useState(null);
@@ -1768,7 +1773,7 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
     setDoorColor(colorList.find((c) => c.id === d.colorId) || (d.colorId ? { id: d.colorId, label: d.colorLabel, hex: d.colorHex } : null));
     setTrimColor(colorList.find((c) => c.id === d.trimColorId) || null);
   }, [sel]);
-  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const pickStyle = (st) => { setRoOn(false); setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const swingOpts = sel ? [sel.swingIn && "in", sel.swingOut && "out"].filter(Boolean) : [];
   const opOpts = sel ? [sel.opRight && "right", sel.opLeft && "left", sel.opDouble && "double", sel.opSlideUp && "slideup"].filter(Boolean) : [];
   // Color choices only exist for paint/match modes; a single-entry palette auto-assigns
@@ -1810,6 +1815,17 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
               </div>
             );
           })}
+          {ro && (
+            <div data-ss-ro-tile="door" onClick={() => { setRoOn(true); setStyle(null); setSel(null); }} style={{ border: `2px solid ${roOn ? FIXTURE_DOOR_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+              <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span aria-hidden="true" style={{ width: 34, height: 58, boxSizing: "border-box", border: "3px solid #334155", borderBottom: "none", background: "#FFF" }} />
+              </div>
+              <div style={{ padding: "8px 10px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>Rough opening</div>
+                <div style={{ fontSize: 11.5, color: "#64748B" }}>Framed opening only</div>
+              </div>
+            </div>
+          )}
         </div>
         {style && style.sizes.length > 1 && (
           <div style={{ marginBottom: 14 }}>
@@ -1843,7 +1859,7 @@ function DoorPicker({ doors, showPricing, doorColors, paintBody, paintTrim, onCa
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null)} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place door</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, swing, operation, doorColor, sel.hasTrimColor ? trimColor : null))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_DOOR_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place door"}</button>
         </div>
       </div>
     </div>
@@ -8108,7 +8124,7 @@ function disposeShed3DModel(model) {
 // scene costs zero GPU. Calls onSnapshot({ url, w, h }) when the customer
 // captures a view — and automatically on close if they never did — so the
 // submit flow can add the 3D page to the quote PDF.
-function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
+function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted, paintBody, paintTrim, frontWall, scale, mgX, mgY, accent, style3d, roofType, roofColorHex, fixtures, doorColors, windowColors, bodyColors, trimColors, paletteKeys, roOffer, placeableDoors, placeableWindows, placeableRamps, paintEnabled, wallHeightOptions, wallHeightDeltaIn, wallHeightBaseFt, wallHeightLegacyFt, dormerWindowId, dormerWindowOffset, perimeterFt, showPricing, onPaintChange, onWallHeight, onDormerWindow, onItemAdd, onItemMove, onItemDelete, onItemSelect, onSnapshot, onClose }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
   const engineRef = useRef(null);
@@ -9582,7 +9598,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, place3Wall: (key, x, y) => (itemTypes[key] ? place3(key, itemTypes[key], x, y) : false), delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -9727,6 +9743,23 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
                   {fx.widthIn ? <span style={{ color: "#64748B", fontSize: 10 }}>{fx.widthIn}" wide</span> : null}
                 </button>
               ))}
+              {/* The pickers' "Rough opening" tile, here too (Carolyn 2026-09-16). */}
+              {pick3.kind !== "ramp" && roOffer && roOffer[pick3.kind] && (
+                <button key="ro" data-ss-ro-tile3={pick3.kind}
+                  onClick={() => {
+                    const e = engineRef.current;
+                    if (!e || !e.place3Wall) return;
+                    e.place3Wall(pick3.kind === "window" ? "roughOpeningWindow" : "roughOpeningDoor", pick3.ptx, pick3.pty);
+                    setPick3(null);
+                  }}
+                  style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "#1E293B", border: "1px solid #334155", borderRadius: 8, padding: 8, cursor: "pointer", width: 108 }}>
+                  <span style={{ height: 64, display: "flex", alignItems: "center" }}>
+                    <span aria-hidden="true" style={{ width: pick3.kind === "window" ? 40 : 28, height: pick3.kind === "window" ? 30 : 46, boxSizing: "border-box", border: "3px solid #CBD5E1", borderBottom: pick3.kind === "window" ? "3px solid #CBD5E1" : "none" }} />
+                  </span>
+                  <span style={{ color: "#CBD5E1", fontSize: 11, fontWeight: 700, textAlign: "center" }}>Rough opening</span>
+                  <span style={{ color: "#64748B", fontSize: 10 }}>Framed opening only</span>
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -12853,7 +12886,7 @@ function RampPicker({ ramps, showPricing, onCancel, onPlace }) {
 
 // Window placement picker. Like RampPicker (style → size, no swing/operation), but the placed
 // item goes on a wall. "Choose a window" / "Place window".
-function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFrom, onCancel, onPlace }) {
+function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFrom, onCancel, onPlace, ro = false, onPlaceRo = null }) {
   const styles = useMemo(() => {
     const m = new Map();
     windows.forEach((d) => {
@@ -12864,6 +12897,11 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
     return [...m.values()];
   }, [windows]);
   const [style, setStyle] = useState(styles.length === 1 ? styles[0] : null);
+  // "Rough opening" is the last tile when the builder offers one (Carolyn 2026-09-16: "I want rough
+  // opening to be in the door and in the window as an option, not by itself") — a framed hole for an
+  // air conditioner, or a window the customer fits themselves. Choosing it clears the window choice;
+  // it starts chosen when it is the only tile.
+  const [roOn, setRoOn] = useState(!!ro && styles.length === 0);
   const [sel, setSel] = useState((styles.length === 1 && styles[0].sizes.length === 1) ? styles[0].sizes[0] : null);
   // The chosen window color (full object). The offered list is PER WINDOW — each catalog
   // row carries which of the client's colors it comes in (windowColorsFor) — so the
@@ -12893,7 +12931,7 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
   const [shutterColor, setShutterColor] = useState(() => (swapFrom ? byId(swapFrom.shutterColorId) : null));
   const [flowerBox, setFlowerBox] = useState(!!(swapFrom && swapFrom.flowerBox));
   const [flowerBoxColor, setFlowerBoxColor] = useState(() => (swapFrom ? byId(swapFrom.flowerBoxColorId) : null));
-  const pickStyle = (st) => { setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
+  const pickStyle = (st) => { setRoOn(false); setStyle(st); setSel(st.sizes.length === 1 ? st.sizes[0] : null); };
   const money = (n) => "$" + Number(n).toLocaleString();
   const chip = (key, on, label, onClick) => (
     <div key={key} onClick={onClick} style={{ padding: "6px 14px", borderRadius: 20, fontSize: 13, fontWeight: 600, cursor: "pointer",
@@ -12927,6 +12965,17 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
               </div>
             );
           })}
+          {ro && (
+            <div data-ss-ro-tile="window" onClick={() => { setRoOn(true); setStyle(null); setSel(null); }} style={{ border: `2px solid ${roOn ? FIXTURE_WINDOW_COLOR : "#E2E8F0"}`, borderRadius: 10, overflow: "hidden", cursor: "pointer", background: "#FFF" }}>
+              <div style={{ height: 90, background: "#F1F5F9", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <span aria-hidden="true" style={{ width: 52, height: 40, boxSizing: "border-box", border: "3px solid #334155", background: "#FFF" }} />
+              </div>
+              <div style={{ padding: "8px 10px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B" }}>Rough opening</div>
+                <div style={{ fontSize: 11.5, color: "#64748B" }}>Framed opening only</div>
+              </div>
+            </div>
+          )}
         </div>
         {style && style.sizes.length > 1 && (
           <div style={{ marginBottom: 14 }}>
@@ -12968,7 +13017,7 @@ function WindowPicker({ windows, showPricing, windowColors, dressColors, swapFro
         )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
           <button onClick={onCancel} style={{ padding: "9px 16px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#FFF", color: "#334155", fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-          <button onClick={() => sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor })} disabled={!sel} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: sel ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: sel ? "pointer" : "default" }}>Place window</button>
+          <button onClick={() => (roOn ? onPlaceRo && onPlaceRo() : sel && onPlace(sel, color, { shutters, shutterColor, flowerBox, flowerBoxColor }))} disabled={!sel && !roOn} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: (sel || roOn) ? FIXTURE_WINDOW_COLOR : "#CBD5E1", color: "#FFF", fontWeight: 700, cursor: (sel || roOn) ? "pointer" : "default" }}>{roOn ? "Place rough opening" : "Place window"}</button>
         </div>
       </div>
     </div>
@@ -13373,6 +13422,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // narrowed to the workbench/shelf family by ssSlabModel. The loft is not a slab and is
   // deliberately untouched: it floats free and resizes on four sides, nothing like a shelf.
   const baseItems = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems };
+  // Rough openings are a tile in the door and window pickers (Carolyn 2026-09-16), offered by the
+  // same test the palette used when each was a button of its own.
+  const roOfferedKey = (k) => !!(baseItems[k] && !baseItems[k].noPalette && (embedded || !baseItems[k].internalOnly));
+  const roDoorOffered = roOfferedKey("roughOpeningDoor");
+  const roWindowOffered = roOfferedKey("roughOpeningWindow");
   const shelvingKeys = Object.keys(baseItems).filter((k) => {
     const c = baseItems[k];
     return c && !c.noPalette && (embedded || !c.internalOnly) && ssSlabModel(k, baseItems);
@@ -13458,14 +13512,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const ITEMS = { ...LEGACY_LAYOUT_FALLBACK, ...C.layoutItems, ...BUILT_IN_TOOLS, prop: PROP_CFG, fixtureDoor: FIXTURE_DOOR_CFG,
     ...elecItemTools,
     ...(Object.keys(elecItemTools).length ? { elecItemPicker: ELEC_ITEM_PICKER_CFG } : {}),
-    ...(placeableDoors.length ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    // The Door tool also exists for a builder who offers only the rough opening: its picker holds the tile.
+    ...(placeableDoors.length || roDoorOffered ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
     // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
     // and not-offered are render-only (the picker handles custom placement).
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
-    ...(placeableWindows.length ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    ...(placeableWindows.length || roWindowOffered ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     ...ventTools,
     ...(Object.keys(ventTools).length ? { ventPicker: VENT_PICKER_CFG } : {}),
     // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
@@ -13475,6 +13530,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ...(shelvingKeys.length > 1
       ? { shelfPicker: SHELF_PICKER_CFG, ...Object.fromEntries(shelvingKeys.map((k) => [k, { ...baseItems[k], noPalette: true }])) }
       : {}),
+    // Rough openings leave the palette (and the 3D Add row) for the pickers' "Rough opening" tile. They
+    // stay in ITEMS, so placed ones draw and price as before and an included one keeps its chip.
+    ...Object.fromEntries(["roughOpeningDoor", "roughOpeningWindow"].filter((k) => baseItems[k]).map((k) => [k, { ...baseItems[k], noPalette: true }])),
     // Included catalog fixtures (place-or-decline chips), keyed by fixture id.
     ...includedFixtureTools };
   const [swapId, setSwapId] = useState(null);       // id of a placed catalog fixture being SWAPPED to another
@@ -15182,6 +15240,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return { x: f.x + (cx - r.left) * sx, y: f.y + (cy - r.top) * sx };
   }, []);
 
+  // A door/window/rough-opening style item on a wall at a click point: snapped, checked against what
+  // is already there, and stamped. ONE path for the palette's wall click (handleClick) and the pickers'
+  // "Rough opening" tile (placePickedRo), so a rough opening placed either way is the same item.
+  // Placing a door/window/RO once had NO overlap check at all, so one could be click-placed straight on
+  // top of another door, or onto a workbench's wall span. Both checks run here, matching the wallSnap
+  // (workbench) branch, so the invariant holds whichever item is the one moving.
+  const ssWallItemAt = (key, wall, x, y) => {
+    const cfg = ITEMS[key];
+    const iwPx = cfg.width * scale; const ihPx = slabDepthFt(cfg) * scale;
+    const sn = snapToWall(wall, x, y, iwPx, ihPx, pW, pH, mgX, mgY);
+    const cand = { id: -1, type: key, ...sn, widthFt: cfg.width, heightFt: cfg.height };
+    if (checkDoorCollision(cand, cfg, items, ITEMS, scale)) return { refusal: "Something is already on that spot. Pick a clear part of the wall." };
+    if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, cand)) return { refusal: ssSlabInWay(sn, iwPx, items, ITEMS, scale, cand, "place this somewhere else on the wall.") };
+    return { item: { id: idCounter++, type: key, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(key) } };
+  };
   const handleClick = useCallback((e) => {
     if (dragging) return;
     if (planLockedRef.current) return;   // inventory estimate: the building is already built
@@ -15470,22 +15543,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }
       ni = { id: idCounter++, type: "loft", x: mgX + cxFt * scale, y: mgY + cyFtRound * scale, rotation: 0, wall: null, widthFt: bldgW, heightFt: loftH, elevationFt: D3.LOFT_ELEV };
     } else if (wall) {
-      const sn = snapToWall(wall, pt.x, pt.y, iwPx, ihPx, pW, pH, mgX, mgY);
-      // Placing a door/window/RO had NO overlap check at all, so one could be click-placed straight
-      // on top of another door, or onto a workbench’s wall span. Both checks now run here, matching
-      // the wallSnap (workbench) branch, so the invariant holds whichever item is the one moving.
-      const cand = { id: -1, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height };
-      if (checkDoorCollision(cand, cfg, items, ITEMS, scale)) {
-        setToast("Something is already on that spot. Pick a clear part of the wall.");
-        setTimeout(() => setToast(null), 4000);
-        return;
-      }
-      if (checkWallSlabOverlap(sn, iwPx, items, ITEMS, scale, cand)) {
-        setToast(ssSlabInWay(sn, iwPx, items, ITEMS, scale, cand, "place this somewhere else on the wall."));
-        setTimeout(() => setToast(null), 4000);
-        return;
-      }
-      ni = { id: idCounter++, type: activeTool, ...sn, widthFt: cfg.width, heightFt: cfg.height, ...d3OpeningDefaults(activeTool) };
+      const r = ssWallItemAt(activeTool, wall, pt.x, pt.y);
+      if (r.refusal) { setToast(r.refusal); setTimeout(() => setToast(null), 4000); return; }
+      ni = r.item;
     } else {
       const x = Math.max(mgX + iwPx / 2, Math.min(pt.x, mgX + pW - iwPx / 2));
       const y = Math.max(mgY + ihPx / 2, Math.min(pt.y, mgY + pH - ihPx / 2));
@@ -15512,6 +15572,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Place the door chosen in the picker at the remembered wall/click point. Snapshots the
   // door's spec (so a later catalog edit never changes this saved design) + the shopper's
   // swing/operation choice onto a stable `fixtureDoor` item.
+  // The pickers' "Rough opening" tile: the rough opening at the wall and point the picker was opened
+  // from, placed exactly as the palette button used to place it (ssWallItemAt).
+  const placePickedRo = (key, pick) => {
+    if (!pick || !pick.wall || !ITEMS[key]) return;
+    const r = ssWallItemAt(key, pick.wall, pick.ptx, pick.pty);
+    if (r.refusal) { setToast(r.refusal); setTimeout(() => setToast(null), 4000); return; }
+    setItems((p) => [...p, r.item]); setSelectedId(r.item.id); setActiveTool(null); setToast(null);
+  };
   const placePickedDoor = useCallback((fx, swing, operation, doorColor, trimColor) => {
     // Swap mode: replace the selected door in place with the chosen door — keeping its wall,
     // but RE-LEGALIZED for the new width. The swap used to keep x/y verbatim with no bounds,
@@ -19383,6 +19451,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
+          roOffer={{ door: roDoorOffered && !includedItemKeys.includes("roughOpeningDoor"), window: roWindowOffered && !includedItemKeys.includes("roughOpeningWindow") }}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
@@ -19579,9 +19648,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
       <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} onPlace={placePickedDoor} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorOffered && !includedItemKeys.includes("roughOpeningDoor")} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowOffered && !includedItemKeys.includes("roughOpeningWindow")} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
@@ -22035,6 +22104,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
           paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
+          roOffer={{ door: roDoorOffered && !includedItemKeys.includes("roughOpeningDoor"), window: roWindowOffered && !includedItemKeys.includes("roughOpeningWindow") }}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {
