@@ -56,10 +56,11 @@ const FALLBACK: Pal = {
   tileSelTop: "#eef3fb", tileSelBottom: "#dbeaff", accentShadow: "rgba(27, 120, 149, 0.22)",
   cta: "#75e6da", onCta: "#10303a",
   danger: "#a8342f", dangerWash: "#fdf4f4", dangerLine: "#efc9c9", bolt: "#e0a11b",
-  headerBg: "linear-gradient(97deg, #3d3672 0%, #2f4a7f 52%, #1b7895 100%)",
-  onHeader: "#ffffff", onHeaderMuted: "rgba(255, 255, 255, 0.94)",
-  // 0.04, not the mockup's 0.16: white text on a 16% white chip over the teal end is 3.73:1.
-  headerChipBg: "rgba(255, 255, 255, 0.04)", headerChipLine: "rgba(255, 255, 255, 0.28)", headerLine: "transparent",
+  // The teal end is deepened from the mockup's #1b7895: white 11px text on the design's 16% chip
+  // was 3.73:1 over #1b7895, which used to fade the pill to 4%. The other two stops are untouched.
+  headerBg: "linear-gradient(97deg, #3d3672 0%, #2f4a7f 52%, #17667f 100%)",
+  onHeader: "#ffffff", onHeaderMuted: "rgba(255, 255, 255, 0.78)",
+  headerChipBg: "rgba(255, 255, 255, 0.16)", headerChipLine: "rgba(255, 255, 255, 0.28)", headerLine: "transparent",
 };
 
 const SLATE = "linear-gradient(135deg, #1E293B 0%, #334155 100%)";
@@ -87,7 +88,8 @@ Deno.test("the reference pair returns the mockup's own primary, fill and a three
   const t = P.ssBrandPalette({ accentColor: "#1b7895", headerBg: "#3d3672" });
   assertEquals(t.primary, "#3d3672");
   assertEquals(t.accentFill, "#1b7895");
-  assert(/^linear-gradient\(97deg, #3d3672 0%, #[0-9a-f]{6} 52%, #1b7895 100%\)$/.test(t.headerBg), t.headerBg);
+  // The header's teal end is deepened from the accent's #1b7895 so the design's chip stands on it.
+  assert(/^linear-gradient\(97deg, #3d3672 0%, #[0-9a-f]{6} 52%, #[0-9a-f]{6} 100%\)$/.test(t.headerBg), t.headerBg);
 });
 
 Deno.test("checkPalette is clean for the named spec cases", () => {
@@ -164,10 +166,28 @@ Deno.test("header chip text reaches 4.5:1 over every header stop", () => {
   for (const b of cases) assertEquals(P.checkPalette(P.ssPal(P.ssPalInput(b))), [], JSON.stringify(b));
   // A chip that already passed keeps the design's 16% white.
   assertEquals(P.ssPal(P.ssPalInput({ headerBg: "#14213D", accentColor: "#1B2A4A" })).headerChipBg, "rgba(255, 255, 255, 0.16)");
-  // And checkPalette really measures it: the mockup's own 16% chip on its teal end must fail.
-  const old = { ...FALLBACK, headerChipBg: "rgba(255, 255, 255, 0.16)" };
+  // And checkPalette really measures it: the mockup's UNdeepened teal end under the design's chip
+  // is the 3.73:1 case, and must still fail.
+  const old = { ...FALLBACK, headerBg: "linear-gradient(97deg, #3d3672 0%, #2f4a7f 52%, #1b7895 100%)" };
   assert(P.checkPalette(old).some((f) => f.startsWith("onHeader/headerChipBg")), JSON.stringify(P.checkPalette(old)));
   assert(P.checkPalette({ ...FALLBACK, headerChipBg: "var(--x)" }).length > 0, "an unreadable chip must fail, not skip");
+});
+
+// The pill used to fade toward the header until its own text passed, which left the unbranded chip
+// at 4% (1.1:1 against the header — no visible pill) and swung it 0.04/0.08/0.16 brand to brand.
+// The header stop is deepened instead, so every brand whose header the palette DERIVES keeps the
+// design's own fill. A builder's verbatim gradient is not deepened, so it still fades if it must.
+Deno.test("a derived header keeps the design's chip fill, not a faded one", () => {
+  const cases: Pal[] = [
+    {}, { accentColor: "#1b7895", headerBg: "#3d3672" }, { accentColor: "#D97706", headerBg: "#1E293B" },
+    { accentColor: "#DC2626", headerBg: "#111827" }, { accentColor: "#15803D", headerBg: "#14532D" },
+    ...HARNESS_BRANDS,
+  ];
+  for (const raw of cases) {
+    const t = P.ssPal(P.ssPalInput(raw));
+    const want = t.onHeader === "#ffffff" ? "rgba(255, 255, 255, 0.16)" : "rgba(0, 0, 0, 0.06)";
+    assertEquals(t.headerChipBg, want, JSON.stringify(raw));
+  }
 });
 
 Deno.test("ssOnFill reaches 4.5:1 on the fill as given, for any raw fill", () => {
@@ -197,6 +217,6 @@ Deno.test("ssOnFill picks readable text for light and dark fills", () => {
 Deno.test("toCssVars names every token as a --ss- custom property", () => {
   const v = P.toCssVars(FALLBACK);
   assertEquals(v["--ss-accent-fill"], "#1b7895");
-  assertEquals(v["--ss-on-header-muted"], "rgba(255, 255, 255, 0.94)");
+  assertEquals(v["--ss-on-header-muted"], "rgba(255, 255, 255, 0.78)");
   assertEquals(Object.keys(v).length, Object.keys(FALLBACK).length);
 });

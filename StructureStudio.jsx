@@ -3360,6 +3360,18 @@ const alphaFor = (fg, bgs, min) => {
   for (let i = 36; i < 50; i++) { const a = i / 50; if (bgs.every((b) => contrast(over(fg, a, b), b) >= min + 0.05)) return a }
   return 1
 }
+// A header stop that takes its own text at 4.5:1 can still fail once the design's chip sits on it:
+// 16% white (6% black under dark text) drags the ground toward the text colour. Deepen the stop
+// rather than fade the chip — the same ensureContrast move the palette already makes for primary
+// against white — so the pill keeps the design's fill on every brand. Smallest 0.1 step that works.
+const chipAlpha = (fg) => (lum(fg) > 0.5 ? 0.16 : 0.06)
+const chipRef = (fg) => (lum(fg) > 0.5 ? WHITE : { r: 0, g: 0, b: 0 })
+const chipStands = (c, fg) => contrast(fg, over(chipRef(fg), chipAlpha(fg), c)) >= 4.55
+function chipSafe(c, fg) {
+  if (chipStands(c, fg)) return c
+  for (let m = 46; m <= 80; m++) { const out = ensureContrast(c, chipRef(fg), m / 10); if (chipStands(out, fg)) return out }
+  return ensureContrast(c, chipRef(fg), 8)
+}
 
 // ---------- the derivation ----------
 function ssBrandPalette(branding) {
@@ -3429,20 +3441,21 @@ function ssBrandPalette(branding) {
       const P = R('primary'), [ph, ps] = rgbToHsl(P), [eh, es] = rgbToHsl(E)
       const dist = Math.abs(((eh - ph + 540) % 360) - 180)
       if (ps < 0.12 || es < 0.12 || dist <= 60) {                                  // analogous hues: sweep primary -> accent, as the mockup does
-        const M = mix(P, E, 0.45)
-        setHeaderText(t, `linear-gradient(97deg, ${t.primary} 0%, ${hex(M)} 52%, ${hex(E)} 100%)`, WHITE, [P, M, E])
+        const Ps = chipSafe(P, WHITE), Es = chipSafe(E, WHITE), M = mix(Ps, Es, 0.45)
+        setHeaderText(t, `linear-gradient(97deg, ${hex(Ps)} 0%, ${hex(M)} 52%, ${hex(Es)} 100%)`, WHITE, [Ps, M, Es])
       } else {                                                                      // clashing hues mix to mud: stay inside the primary hue
-        const P2 = ensureContrast(hslToRgb(ph, Math.min(ps + 0.1, 0.6), 0.9), WHITE, 5.5)
-        setHeaderText(t, `linear-gradient(97deg, ${t.primary} 0%, ${hex(P2)} 100%)`, WHITE, [P, P2])
+        const Ps = chipSafe(P, WHITE)
+        const P2 = chipSafe(ensureContrast(hslToRgb(ph, Math.min(ps + 0.1, 0.6), 0.9), WHITE, 5.5), WHITE)
+        setHeaderText(t, `linear-gradient(97deg, ${hex(Ps)} 0%, ${hex(P2)} 100%)`, WHITE, [Ps, P2])
       }
     }
   }
   // The mockup's own header too: 0.72 white fails 4.5:1 over its teal end, where "Powered by" sits,
-  // and so does white text on its 16% white chip.
+  // and so does white text on the design's 16% chip there. Only that end deepens — the indigo start
+  // and the middle stop stay the mockup's own.
   if (!hdrStops.length && !accentIn) {
-    const stops = colorStops(MOCKUP.headerBg)
-    t.onHeaderMuted = rgba(WHITE, alphaFor(WHITE, stops, 4.5))
-    t.headerChipBg = headerChipFor(WHITE, stops)
+    const S = colorStops(MOCKUP.headerBg).map((c) => chipSafe(c, WHITE))
+    setHeaderText(t, `linear-gradient(97deg, ${hex(S[0])} 0%, ${hex(S[1])} 52%, ${hex(S[2])} 100%)`, WHITE, S)
   }
   return t
 }
