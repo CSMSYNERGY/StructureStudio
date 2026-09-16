@@ -18,7 +18,10 @@
 //    photographs are consecutive frames of one lap. Nothing downstream can notice — the only
 //    symptom is a shape reconciled against a walk that never happened.
 
-import { sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT } from "./styleD3.ts";
+import {
+  sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT,
+  SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG,
+} from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -533,4 +536,112 @@ Deno.test("the shape-first prompt asks about the porch truss", () => {
     // The distinguishing detail. Without it a model reports any gable above a porch as framed.
     assert(p.includes("porchTruss false"), `${name} must say a plain gable is false`);
   }
+});
+
+// ─── the gambrel that drew as a gable (2026-09-16) ─────────────────────────────────────────
+// A walk-around of a lofted barn drafted kneeU 0.55 / kneeRise 0.35 / ridgeRise 0.75: both
+// slopes within two degrees of each other, so the render was a plain gable. The head-on frame
+// measured 0.75 / 0.72 / 1.03. The prompts never said kneeU is measured from the CENTRELINE,
+// and a model measures in from the eave by default.
+
+const DRAFTED_0916 = { type: "gambrel", kneeU: 0.55, kneeRise: 0.35, ridgeRise: 0.75 };
+const MEASURED_0916 = { type: "gambrel", kneeU: 0.75, kneeRise: 0.72, ridgeRise: 1.03 };
+
+Deno.test("every prompt says kneeU is measured from the CENTRELINE, and what a gambrel looks like", () => {
+  for (const [name, p] of [
+    ["SPEC_PROMPT", SPEC_PROMPT],
+    ["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4)],
+  ] as const) {
+    const kneeU = p.split("\n").find((l) => l.includes('"kneeU"')) ?? "";
+    assert(kneeU.includes("CENTRELINE"), `${name}: kneeU must name the centreline as its datum`);
+    assert(kneeU.includes("NOT measured in from the eave"), `${name}: kneeU must rule out the eave datum`);
+    assert(kneeU.includes("0.7-0.85"), `${name}: kneeU must give the typical near-the-wall range`);
+    // The knee's height had no datum either, and the 09-16 draft had it at half the real value.
+    const kneeRise = p.split("\n").find((l) => l.includes('"kneeRise"')) ?? "";
+    assert(kneeRise.includes("TOP OF THE WALL"), `${name}: kneeRise must be measured from the top of the wall`);
+    assert(/STEEP lower slope/.test(p) && /SHALLOW upper slope/.test(p), `${name}: must describe a real gambrel's two slopes`);
+    // The old phrase is the bug. It must not survive anywhere, or a model gets two datums.
+    assert(!p.includes("where the lower slope breaks"), `${name}: the old datum-less wording is gone`);
+  }
+});
+
+Deno.test("the shape-first prompt's worked gambrel example is itself a gambrel", () => {
+  // A worked example that fails the very check it teaches would train the defect in.
+  const m = VIDEO_SHAPE_PROMPT.match(/kneeU (\d\.\d+), kneeRise (\d\.\d+), ridgeRise (\d\.\d+)/);
+  assert(m, "the GAMBREL NUMBERS paragraph carries a worked example");
+  if (!m) return;
+  const roof = { type: "gambrel", kneeU: Number(m[1]), kneeRise: Number(m[2]), ridgeRise: Number(m[3]) };
+  assertEquals(gambrelRoofWarning(roof), null, "the example passes the check");
+  assert(combinedShapePrompt(8, 0).includes(m[0]), "the combined prompt carries the same example");
+});
+
+Deno.test("gambrelRoofWarning flags the 09-16 draft and passes the measured barn", () => {
+  const w = gambrelRoofWarning(DRAFTED_0916);
+  assert(w && w.includes("plain gable"), "the flat draft is flagged in plain words");
+  assertEquals(gambrelRoofWarning(MEASURED_0916), null, "the measured roof passes");
+});
+
+Deno.test("a bare 'lower steeper than upper' would have PASSED the 09-16 draft, which is why there is a margin", () => {
+  const { kneeU, kneeRise, ridgeRise } = DRAFTED_0916;
+  const lower = kneeRise / (1 - kneeU), upper = (ridgeRise - kneeRise) / kneeU;
+  assert(lower > upper, `the literal inequality holds (${lower.toFixed(3)} > ${upper.toFixed(3)}) and catches nothing`);
+  assert(GAMBREL_MIN_BEND_DEG >= 10, "the bend floor is a real margin, not a rounding guard");
+  assert(gambrelRoofWarning(DRAFTED_0916), "the bend check catches it anyway");
+});
+
+Deno.test("gambrelRoofWarning judges what the RENDERER draws, defaults included", () => {
+  // d3RoofProfile reads `kneeU || 0.55`, `kneeRise || 0.55`, `ridgeRise || 0.8`, and that is a
+  // 26-degree bend. A gambrel with no knee keys, or with zeros, draws like that and must pass.
+  assertEquals(gambrelRoofWarning({ type: "gambrel" }), null, "absent keys draw the default, which is fine");
+  assertEquals(gambrelRoofWarning({ type: "gambrel", kneeU: 0, kneeRise: 0, ridgeRise: 0 }), null, "zeros draw the default too");
+  assertEquals(gambrelRoofWarning({ type: "gambrel", kneeU: 0.55, kneeRise: 0.55, ridgeRise: 0.8, overhang: 0.5 }), null, "farmland's built-in spec passes");
+  // A knee right above the wall is a vertical lower slope: steep, not undefined.
+  assertEquals(gambrelRoofWarning({ type: "gambrel", kneeU: 1, kneeRise: 0.6, ridgeRise: 1 }), null, "kneeU 1 is a vertical lower slope");
+  // A zero kneeU renders at 0.55, so it is judged there: 0.55 / 0.35 / 0.75 is the flat draft.
+  assert(gambrelRoofWarning({ type: "gambrel", kneeU: 0, kneeRise: 0.35, ridgeRise: 0.75 }), "a zero kneeU is judged at the default it draws");
+});
+
+Deno.test("gambrelRoofWarning catches an inside-out roof the angle test alone would pass", () => {
+  // Ridge below the knee makes the upper "slope" negative, which scores as a huge bend.
+  const w = gambrelRoofWarning({ type: "gambrel", kneeU: 0.75, kneeRise: 0.9, ridgeRise: 0.5 });
+  assert(w && w.includes("Ridge rise has to be higher than Knee rise"), "a ridge below the knee is flagged");
+  assert(gambrelRoofWarning({ type: "gambrel", kneeU: 0.75, kneeRise: 0.7, ridgeRise: 0.7 }), "a ridge level with the knee is flagged");
+  // Upper steeper than lower is not a gambrel either.
+  assert(gambrelRoofWarning({ type: "gambrel", kneeU: 0.3, kneeRise: 0.2, ridgeRise: 1.2 }), "an upside-down bend is flagged");
+});
+
+Deno.test("gambrelRoofWarning leaves every other roof alone", () => {
+  assertEquals(gambrelRoofWarning({ type: "gable", pitch: 0.42, kneeU: 0.55, kneeRise: 0.35, ridgeRise: 0.75 }), null, "stray knee keys on a gable are not a gambrel");
+  assertEquals(gambrelRoofWarning({ type: "shed", pitch: 0.25 }), null);
+  assertEquals(gambrelRoofWarning(null), null);
+  assertEquals(gambrelRoofWarning(undefined), null);
+});
+
+Deno.test("flagObservedNotes puts the warning first, keeps the model's note, and forces low confidence", () => {
+  const notes = { roofNote: "Gambrel with a porch roof on the front.", doors: "one, gable end", confidence: "high" };
+  assertEquals(flagObservedNotes(notes, null), notes, "no warning leaves the notes untouched");
+  assertEquals(flagObservedNotes(null, null), null, "no notes and no warning stays null");
+
+  const w = gambrelRoofWarning(DRAFTED_0916)!;
+  const flagged = flagObservedNotes(notes, w)!;
+  assert(flagged.roofNote!.startsWith(w), "the warning leads");
+  assert(flagged.roofNote!.endsWith("The model's own reading: Gambrel with a porch roof on the front."), "the model's sentence is kept");
+  assertEquals(flagged.confidence, "low", "low is what turns the panel's confidence line amber");
+  assertEquals(flagged.doors, "one, gable end", "the other notes ride along");
+  assertEquals(notes.confidence, "high", "the input is not mutated");
+
+  // A reply with no observed block still gets the warning somewhere the builder will see it.
+  assertEquals(flagObservedNotes(null, w), { roofNote: w, confidence: "low" });
+
+  // Bounded: our fixed warning plus the model's note, which parseObservedNotes caps at 240.
+  const long = parseObservedNotes(JSON.stringify({ observed: { roofNote: "x".repeat(1000) } }));
+  assert(flagObservedNotes(long, w)!.roofNote!.length <= w.length + 26 + 240, "the flagged note stays bounded");
+});
+
+Deno.test("a flagged draft still parses to the spec the builder reviews: nothing is repaired", () => {
+  const r = parseModelSpec(JSON.stringify({ roof: DRAFTED_0916, colors: {}, wallHeightFt: 8 }));
+  assert(r.ok, "the flat draft parses");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof, DRAFTED_0916, "the numbers reach the builder exactly as drafted");
 });

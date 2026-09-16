@@ -34,7 +34,12 @@ const CLAMPS: Record<string, [number, number]> = {
   pitch: [0, 2],
   ridgeOffset: [-0.35, 0.35],   // saltbox shift, as a fraction of the FULL span (d3RoofProfile: ru = S * ridgeOffset)
   overhang: [0, 3],             // feet past the wall
-  kneeU: [0, 1],                // gambrel knee, fraction of half-span
+  // Gambrel knee, fraction of the half-span measured out from the CENTRELINE, so 1 is directly
+  // above the wall: d3RoofProfile puts the knee at x = ±s2*kneeU. The prompts said only
+  // "fraction of the half-span" until 2026-09-16, and a model measures in from the eave by
+  // default -- a lofted barn came back 0.55 where the video frame measured 0.75, and drew as
+  // a gable. Same class of defect as the ridgeRise datum below.
+  kneeU: [0, 1],
   // BOTH rises are measured from the WALL PLATE, not from each other: d3RoofProfile does
   // kY = H + s2*kneeRise and rY = H + s2*ridgeRise off the same H. Describing ridgeRise as
   // "above the knee" anywhere makes every drafted gambrel come out inside-out, because the
@@ -293,8 +298,8 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "pitch": <rise over run, e.g. 0.33 for 4:12>,
     "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.0>,
-    "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
-    "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
+    "kneeU": <gambrel only, 0..1: how far the knee (where the steep lower slope meets the shallow upper one) sits out from the CENTRELINE under the ridge, as a fraction of the half-span -- NOT measured in from the eave. 1 would put the knee directly above the wall; a typical barn knee sits near the wall, about 0.7-0.85>,
+    "kneeRise": <gambrel only, 0..1: height of the knee above the TOP OF THE WALL, as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>
   },
   "siding": "panel" | "lap" | "batten" | "agpanel" | null,
@@ -302,7 +307,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "wallHeightFt": <estimated wall height, typically 6-10; doors are about 6.5 ft tall, use them for scale>
 }
 
-Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel.
+Judge the roof type from the silhouette: one slope = shed, two = gable, four (a break partway down each side) = gambrel. A real gambrel is a barn roof: a STEEP lower slope from the wall up to the knee, then a SHALLOW upper slope from the knee to the ridge. If the two slopes your numbers describe come out at about the same angle, you measured the knee from the wrong point.
 
 SIDING is what the wall surface is made of:
 - "panel" — flat vertical sheets with narrow grooves cut INTO them every 8 inches or so, all flush with each other. Sold as SmartSide, DuraTemp or T1-11. This is the most common; use it when the wall reads as plain vertical sheeting.
@@ -351,8 +356,8 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
     "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
     "overhang": <feet the roof projects past the wall, typically 0.3-1.5>,
-    "kneeU": <gambrel only, 0..1: where the lower slope breaks, as a fraction of the half-span>,
-    "kneeRise": <gambrel only, 0..1: height of the knee as a fraction of the half-span>,
+    "kneeU": <gambrel only, 0..1: how far the knee (where the steep lower slope meets the shallow upper one) sits out from the CENTRELINE under the ridge, as a fraction of the half-span -- NOT measured in from the eave. 1 would put the knee directly above the wall; a typical barn knee sits near the wall, about 0.7-0.85>,
+    "kneeRise": <gambrel only, 0..1: height of the knee above the TOP OF THE WALL, as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>,
     "eave": "open" | "fascia",
     "tailSpacingIn": <only when eave is "open": inches on centre between the rafter tails, typically 16 or 24>,
@@ -383,9 +388,11 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
 
 How to read it:
 
-ROOF TYPE, from the silhouette at a corner: one slope = "shed"; two slopes meeting at a ridge = "gable"; four slopes with a break partway down each side = "gambrel". If the roof is actually a HIP (slopes on all four sides, no vertical gable triangle) or FLAT, none of the three fit — return the closest, "gable" for a hip and "shed" for a flat, and say plainly in observed.roofNote that it is really a hip or flat and the shape will not match.
+ROOF TYPE, from the silhouette at a corner: one slope = "shed"; two slopes meeting at a ridge = "gable"; four slopes with a break partway down each side = "gambrel". A real gambrel is a barn roof: a STEEP lower slope from the wall up to the knee, then a SHALLOW upper slope from the knee to the ridge. If the roof is actually a HIP (slopes on all four sides, no vertical gable triangle) or FLAT, none of the three fit — return the closest, "gable" for a hip and "shed" for a flat, and say plainly in observed.roofNote that it is really a hip or flat and the shape will not match.
 
 PITCH: find a frame looking straight at a gable end and read the slope of the roof edge against the sky, comparing its rise to its horizontal run. A roof that rises half as much as it runs is 0.5. Do not guess from a corner view, where perspective flattens it.
+
+GAMBREL NUMBERS, only for a gambrel, from that same frame straight at a gable end. Measure all three from the CENTRELINE under the ridge and the TOP OF THE WALL, and divide each by the distance from the centreline to the wall: kneeU is how far the knee sits out from the centreline, kneeRise is how high the knee sits above the wall, ridgeRise is how high the ridge sits above the wall. Example: a 12 ft wide barn with its knee 1.5 ft in from each wall and 4.3 ft above it, and the ridge 6.2 ft above the wall, is kneeU 0.75, kneeRise 0.72, ridgeRise 1.03. Check before you answer: kneeRise / (1 - kneeU) is the steepness of the lower slope and (ridgeRise - kneeRise) / kneeU is the upper; the lower must come out clearly larger, or you measured from the wrong point.
 
 OVERHANG: how far the roof edge stands out past the wall below it, in feet, judged against a door for scale. Some styles are sold on a deliberately wide eave, so this number carries the look — do not default it to a middle value if the frames show a wide one.
 
@@ -476,4 +483,60 @@ export function parseObservedNotes(text: string): ObservedNotes | null {
   }
   if (out.confidence && !["high", "medium", "low"].includes(out.confidence)) delete out.confidence;
   return Object.keys(out).length ? out : null;
+}
+
+// ─── A drafted gambrel that cannot look like one (2026-09-16) ─────────────────────────────
+// A walk-around of a lofted barn drafted kneeU 0.55 / kneeRise 0.35 / ridgeRise 0.75. Every
+// number was in range, the type said gambrel, and the read-back looked right. Rendered, the
+// lower slope (0.35/0.45, 38 degrees) and the upper (0.40/0.55, 36 degrees) were two degrees
+// apart, so the roof drew as a plain gable. The head-on frame measured 0.75 / 0.72 / 1.03.
+//
+// "The lower slope must be steeper than the upper" is the rule, but NOT as a bare inequality:
+// that draft PASSES it (0.78 > 0.73). What the eye reads as a gambrel is the BEND at the knee,
+// so the check is on the angle between the two slopes. Real ones bend a lot: the renderer's
+// own default (0.55/0.55/0.8) bends 26 degrees, the measured barn 48, and a common 20:12 over
+// 6:12 shed roof 32. Fifteen leaves room under all of those and is still eight times the draft.
+export const GAMBREL_MIN_BEND_DEG = 15;
+
+// FLAG, NEVER REJECT. A refusal would release the hold and throw away everything else the
+// model read correctly (porch, colours, eave, the observed notes), and the same frames would
+// most likely draft the same roof again. The builder reviews the draft before Save, so the
+// useful act is to tell them where to look. Nor is the roof REPAIRED here: flipping kneeU
+// (the obvious "measured from the eave" correction) makes that same draft worse, 0.64 below
+// 0.89, because its kneeRise was wrong too. There is no safe guess, so none is made.
+//
+// Mirrors d3RoofProfile's defaults EXACTLY, including `||`: a 0 or absent kneeU draws at 0.55,
+// so it is judged at 0.55. Checking the stored number instead would flag a roof that renders
+// fine, or pass one that does not. (One thing the server cannot see: applyDraftedShape merges
+// the draft over the style's current roof, so a key the model OMITS keeps the builder's value,
+// not the default. Judging it at the default is the best reading available here.)
+export function gambrelRoofWarning(roof: Record<string, unknown> | null | undefined): string | null {
+  if (!roof || roof.type !== "gambrel") return null;
+  const kneeU = Number(roof.kneeU) || 0.55;
+  const kneeRise = Number(roof.kneeRise) || 0.55;
+  const ridgeRise = Number(roof.ridgeRise) || 0.8;
+  // Checked first and on its own: a ridge below the knee makes the "upper slope" negative,
+  // which would score as an enormous bend and sail through the angle test.
+  if (ridgeRise <= kneeRise) {
+    return "Check this roof before saving: the gambrel came back with its ridge no higher than its knees, which cannot be right. Ridge rise has to be higher than Knee rise. Compare the preview with the end of the building.";
+  }
+  const deg = (rad: number) => (rad * 180) / Math.PI;
+  const lower = deg(Math.atan2(kneeRise, 1 - kneeU));          // kneeU 1 = a vertical lower slope, 90
+  const upper = deg(Math.atan2(ridgeRise - kneeRise, kneeU));
+  if (lower - upper >= GAMBREL_MIN_BEND_DEG) return null;
+  return "Check this roof before saving: the gambrel came back with its lower and upper slopes at almost the same angle, so it will look like a plain gable. A real gambrel has a steep lower slope and a shallow upper one. Compare the preview with the end of the building, then raise Knee rise or move the knee nearer the wall (Gambrel knee position, where 1 is right above the wall).";
+}
+
+// Puts a roof warning where the builder already looks: `roofNote` in the "What the model saw"
+// panel, with confidence forced to "low", which that panel already renders in amber with
+// "check the roof numbers below against the building". No browser change is needed for the
+// warning to appear, and ai_style_calls.observed records it, so a flagged draft is a query.
+//
+// The warning goes FIRST and the model's own sentence is kept after it rather than replaced:
+// it is usually right about everything but the numbers, and it is what a builder compares.
+// Bounded like parseObservedNotes: the warning is ours and fixed, the model's part is <= 240.
+export function flagObservedNotes(observed: ObservedNotes | null, warning: string | null): ObservedNotes | null {
+  if (!warning) return observed;
+  const own = observed?.roofNote ? ` The model's own reading: ${observed.roofNote}` : "";
+  return { ...(observed || {}), roofNote: `${warning}${own}`, confidence: "low" };
 }

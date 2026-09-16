@@ -1306,15 +1306,34 @@ function Dashboard({ session }) {
        photo caller wants a bare spec. One function returning two shapes is how the wrong one
        gets read.
 
-       It takes the VIDEO prompt server-side, because a combined set still contains the
-       walk-around and that prompt is the one that knows the roof was only ever seen from the
-       ground — the single most important fact about this input. Cap is 12, Carolyn's own
-       "three from each side". */
+       It takes a shape-first prompt server-side, because every set it sends contains the
+       walk-around, and those prompts are the ones that know the roof was only ever seen from
+       the ground — the single most important fact about this input. WHICH one depends on the
+       set (2026-09-16, when photos became optional). With photos beside the walk it goes as
+       source "combined": combinedShapePrompt, cap 12, Carolyn's own "three from each side".
+       A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
+       path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
+       frames and only `dropped` says so. */
     onDraftFromCombined: async (photoUrls, styleValue, videoCount) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls, styleValue, source: "combined", videoCount: videoCount || 0 } });
+      const urls = Array.isArray(photoUrls) ? photoUrls : [];
+      const frames = Math.max(0, Math.floor(Number(videoCount) || 0));
+      // VIDEO REQUIRED (2026-09-16, Ahsan: "make video compulsory and images optional to
+      // generate the 3d model"). Refused HERE as well as in the designer's gate, because this is
+      // the line that spends money: a set with no walk-around frames never reaches the function.
+      if (!frames) throw new Error("A walk-around video is required to generate. Photos are optional.");
+      // A WALK ON ITS OWN GOES AS source "video". Since photos became optional a set can be
+      // frames and nothing else, and "combined" is the wrong description of that: its prompt
+      // (combinedShapePrompt) opens "from two sources", which is false with no photos beside
+      // the walk. VIDEO_SHAPE_PROMPT says exactly what such a set is (every image a frame of one
+      // lap, in walk order), the ledger row reads "video", and the charge is the same hold
+      // either way. Its server cap is 8, which is SS_VID_FRAMES, so a whole lap fits. No
+      // function deploy is needed for any of this: the "video" source has been live since the
+      // walk-around first shipped in August.
+      const source = frames >= urls.length ? "video" : "combined";
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
       return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
