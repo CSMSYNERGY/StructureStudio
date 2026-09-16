@@ -12,7 +12,7 @@
 // (wallet_tx_one_hold is unique on (client_id, meter_kind), so two staff invoicing at once
 // would collide) — which means taxMeter.ts owns them, and a regression there is real money.
 
-import { chargeTaxCalculation, taxInvoiceIdem, taxLookupIdem } from "./taxMeter.ts";
+import { chargeTaxCalculation, taxInvoiceIdem, taxLedgerIdem, taxLookupIdem } from "./taxMeter.ts";
 
 const assert = (cond: unknown, msg = "assertion failed") => {
   if (!cond) throw new Error(msg);
@@ -185,4 +185,72 @@ Deno.test("the two meters can never collide on one key", () => {
 Deno.test("a float rate does not produce a drifting key", () => {
   // 0.1 + 0.0625 is 0.16250000000000003. Keyed raw, the same lookup could mint two keys.
   assertEquals(taxLookupIdem("acme", "SS-1", 0.1 + 0.0625, null), taxLookupIdem("acme", "SS-1", 0.1625, null));
+});
+
+// ── The meter kind reaches the wallet row (migration 242) ────────────────────────────
+// Before 242 wallet_credit dropped it, so every tax debit read "Usage" and no query could say
+// what tax had cost a tenant.
+
+Deno.test("every charge tells wallet_credit which meter it is, for both tax meters", async () => {
+  for (const kind of ["tax_invoice", "tax_lookup"] as const) {
+    const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: true } });
+    const r = await chargeTaxCalculation(admin, { ...base, kind });
+    assertEquals(r.charged, true, kind);
+    assertEquals(calls.rpc[0].args.p_meter_kind, kind, kind);
+  }
+});
+
+// ── Keyed on the ledger row: one call, one row, one charge ───────────────────────────
+
+const ROW = "3f0c2b1e-8a4d-4c2e-9b7a-1d2e3f4a5b6c";
+const ROW2 = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+const ledgerBase = { clientId: "acme", kind: "tax_lookup" as const, refType: "tax_lookup", refId: ROW };
+
+Deno.test("a lookupId charge is keyed on the tax_lookups row, not on the answer", async () => {
+  const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: true }, balance: 490 });
+  const r = await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW });
+  assertEquals(r, { charged: true, priceCents: 10, balanceAfterCents: 490 });
+  assertEquals(calls.rpc[0].args.p_idem, `tax_ledger:tax_lookup:${ROW}`);
+  assertEquals(calls.rpc[0].args.p_meter_kind, "tax_lookup");
+  assertEquals(calls.rpc[0].args.p_amount_cents, -10);
+});
+
+Deno.test("a second press is a second row, so a second key — even when the rate is identical", () => {
+  // The answer-keyed taxLookupIdem folds these two together, which was right for an automatic
+  // retry and wrong for a deliberate press: both presses made a call the account paid for.
+  assert(taxLedgerIdem("tax_lookup", ROW) !== taxLedgerIdem("tax_lookup", ROW2), "two rows, two charges");
+  assertEquals(taxLedgerIdem("tax_lookup", ROW), taxLedgerIdem("tax_lookup", ROW), "a replay of one row collapses");
+  assert(taxLedgerIdem("tax_lookup", ROW) !== taxLedgerIdem("tax_invoice", ROW), "the meters never share a key");
+});
+
+Deno.test("a ledger key can never equal an answer-derived key", () => {
+  // Even a tenant slug chosen to look like the ledger prefix cannot line the families up.
+  const ledger = taxLedgerIdem("tax_lookup", ROW);
+  assert(ledger !== taxLookupIdem("tax_ledger", "tax_lookup", 0, ROW));
+  assert(ledger !== taxInvoiceIdem("tax_ledger", "tax_lookup", ROW));
+  assert(ledger.startsWith("tax_ledger:") && !taxLookupIdem("acme", "SS-1", 0.07, null).startsWith("tax_ledger:"));
+});
+
+Deno.test("a disarmed meter charges nothing on the ledger path either", async () => {
+  const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: false } });
+  assertEquals(await chargeTaxCalculation(admin, { ...ledgerBase, lookupId: ROW }), { charged: false, reason: "inactive" });
+  assertEquals(calls.rpc.length, 0);
+});
+
+Deno.test("a charge with no usable key posts NOTHING and reads nothing", async () => {
+  // wallet_credit treats an empty key as "no idempotency", so a retry would post twice.
+  const keys: ({ idem: string } | { lookupId: string })[] = [
+    { idem: "" },
+    { lookupId: "" },
+    { lookupId: "not-a-uuid" },
+    { lookupId: `tax_ledger:tax_lookup:${ROW}` },
+  ];
+  for (const key of keys) {
+    const { admin, calls } = makeAdmin({ price: { price_cents: 10, active: true } });
+    let reads = 0;
+    const spy = { from: (t: string) => { reads++; return admin.from(t); }, rpc: admin.rpc };
+    const r = await chargeTaxCalculation(spy, { ...ledgerBase, ...key });
+    assertEquals(r, { charged: false, reason: "error" }, JSON.stringify(key));
+    assertEquals([reads, calls.rpc.length], [0, 0], `${JSON.stringify(key)}: nothing read, nothing posted`);
+  }
 });

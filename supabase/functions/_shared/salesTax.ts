@@ -16,20 +16,48 @@
  * which the portal surfaces, because a quote taxed at the wrong jurisdiction is invisible
  * otherwise.
  *
- * WHY A RATE LOOKUP AND NOT A TRANSACTION (Carolyn 2026-08-27): we ask Avalara what the rate
+ * WHY A RATE LOOKUP AND NOT A TRANSACTION (decided 2026-08-27): we ask Avalara what the rate
  * is; the builder files their own returns. Nothing is recorded on Avalara's side, so there is
- * no filing obligation riding on a dropped call, and no per-transaction cost. That is why this
- * uses /taxrates/byaddress rather than an uncommitted SalesOrder CreateTransaction — byaddress
- * needs no company profile or nexus configured per tenant, which keeps tenant onboarding at
- * zero. Its limitation is the trade: it returns the jurisdiction's general rate and applies no
- * product-taxability rules. We supply those ourselves from the per-item `taxable` flags the
- * builder sets on their own catalog, which is the more defensible place for them anyway.
- * Swapping to SalesOrder later is confined to avalaraRate() below.
+ * no filing obligation riding on a dropped call. That is why this uses /taxrates/byaddress
+ * rather than an uncommitted SalesOrder CreateTransaction — byaddress needs no company profile
+ * or nexus configured per tenant, which keeps tenant onboarding at zero. Its limitation is the
+ * trade: it returns the jurisdiction's general rate and applies no product-taxability rules. We
+ * supply those ourselves from the per-item `taxable` flags the builder sets on their own
+ * catalog, which is the more defensible place for them anyway. Swapping to SalesOrder later is
+ * confined to avalaraRate() below.
+ *
+ * EVERY CALL IS METERED BY AVALARA. This comment used to say a rate lookup carried "no
+ * per-transaction cost", and that was wrong: a byaddress request is metered against the volume
+ * the account was bought with, and there is no sandbox — the first request made with the
+ * production credentials is a billed one. Treat every request that leaves this file as money
+ * spent. Three things below exist because of that:
+ *   • resolveRate() never calls out unless the caller opts in (`allowLookup`), however the
+ *     credentials are set;
+ *   • a 4xx other than 429 is never retried — asking again changes nothing and costs again;
+ *   • every lookup that reached the network is reported back through `onResult`, so the caller
+ *     can write it to its ledger (tax_lookups, migration 242) whatever the outcome.
+ * The answer is also APPROXIMATE: a general rate for the address, no product taxability and no
+ * origin/destination sourcing. Anything a builder or customer reads says "verified against the
+ * delivery address", never "exact".
+ *
+ * Deliberately import-free, so its tests run offline with no import map, and so the ledger
+ * write stays with the caller's own admin client rather than hidden in here.
  */
 
-const API_BASE = (Deno.env.get("AVALARA_API_BASE") || "https://rest.avatax.com").replace(/\/+$/, "");
-const ACCOUNT_ID = Deno.env.get("AVALARA_ACCOUNT_ID") || "";
-const LICENSE_KEY = Deno.env.get("AVALARA_LICENSE_KEY") || "";
+/** Read at CALL time, not module load, so a rotated secret is seen by a warm isolate and a
+ *  test can take the credentials away without re-importing the module. */
+function creds() {
+  return {
+    base: (Deno.env.get("AVALARA_API_BASE") || "https://rest.avatax.com").replace(/\/+$/, ""),
+    accountId: Deno.env.get("AVALARA_ACCOUNT_ID") || "",
+    licenseKey: Deno.env.get("AVALARA_LICENSE_KEY") || "",
+  };
+}
+
+/** Avalara's integration identifier, sent on every request:
+ *  `AppName; AppVersion; AdapterName; AdapterVersion; MachineName` (machine name left empty).
+ *  It is how Avalara support tells our traffic apart from anyone else's on the same account. */
+export const AVALARA_CLIENT_HEADER = "StructureStudio; 1.0; CSM Synergy; 1.0;";
 
 /** Matches _shared/contactAddress.ts' StopAddress — the delivery address off designs.contact. */
 export interface TaxAddress {
@@ -39,6 +67,23 @@ export interface TaxAddress {
   zip: string | null;
 }
 
+/** Why a lookup that reached the network did not produce a rate. Mirrors the `outcome` CHECK on
+ *  tax_lookups (migration 242), which adds 'ok' and 'not_configured'. */
+export type AvalaraFailure =
+  | "credentials_rejected" // 401/403: the account id or licence key is wrong
+  | "subscription"         // 401/403 naming a missing entitlement — right key, wrong plan
+  | "bad_address"          // any other 4xx: Avalara could not place the address
+  | "rate_limited"         // 429, after its one retry
+  | "timeout"              // no answer inside TIMEOUT_MS, after its one retry
+  | "network"              // connection failure, or a 5xx after its one retry
+  | "malformed";           // a 2xx whose body carried no usable rate
+
+/** One lookup's outcome, as the ledger records it. `attempts` counts HTTP requests made, so a
+ *  retried 5xx reads 2 — the row is one lookup, the attempts are what Avalara may have counted. */
+export type AvalaraResult =
+  | { ok: true; rate: number; jurisdiction: string | null; httpStatus: number; attempts: number; failure: null }
+  | { ok: false; rate: null; jurisdiction: null; httpStatus: number | null; attempts: number; failure: AvalaraFailure };
+
 export interface ResolvedRate {
   /** Combined rate as a FRACTION (0.0725 = 7.25%). */
   rate: number;
@@ -47,12 +92,34 @@ export interface ResolvedRate {
   source: "avalara" | "fallback";
   /** Why the fallback was used. Telemetry and support only — never shown to a customer. */
   reason: string | null;
+  /** Present only when a lookup was made and failed — which kind of failure. Additive. */
+  failure?: AvalaraFailure;
+}
+
+export interface AvalaraPing {
+  /** Both credentials are present in env. False means no request was made. */
+  configured: boolean;
+  /** Avalara accepted the credentials. */
+  authenticated: boolean;
+  /** "AccountIdLicenseKey", "None", … — a word, never an identity. */
+  authenticationType: string | null;
+  /** Null when no HTTP answer arrived (not configured, timeout, network). */
+  httpStatus: number | null;
 }
 
 /** One retry, because a single dropped connection should not tax a whole sale at the fallback;
  *  more than one would put a customer in front of a spinner while a quote is being issued. */
 const TIMEOUT_MS = 6_000;
 const ATTEMPTS = 2;
+/** A 429 is retried once, after this pause. Asking again immediately would most likely be
+ *  refused inside the same window; waiting longer holds a staff member at a spinner. */
+const RATE_LIMIT_PAUSE_MS = 500;
+const PING_TIMEOUT_MS = 5_000;
+
+/** Error codes Avalara puts on a 401/403 when the credentials are RIGHT but the account is not
+ *  entitled to the endpoint. Told apart from a wrong key because the fix is a phone call to
+ *  Avalara, not a new secret. */
+const SUBSCRIPTION_CODES = new Set(["SubscriptionRequired", "AuthorizationException", "PermissionRequired"]);
 
 /** A rate must be a real fraction. Avalara returns 0.0725; a percent-shaped 7.25 slipping
  *  through would multiply a bill by eight. Bounded to the same 25% ceiling migration 127 puts
@@ -114,7 +181,18 @@ export function taxable(addr: TaxAddress): boolean {
 }
 
 export function isConfigured(): boolean {
-  return !!(ACCOUNT_ID && LICENSE_KEY);
+  const { accountId, licenseKey } = creds();
+  return !!(accountId && licenseKey);
+}
+
+/** The headers every Avalara request carries. Basic auth is base64(accountId:licenseKey). */
+function requestHeaders(): Record<string, string> {
+  const { accountId, licenseKey } = creds();
+  return {
+    Authorization: `Basic ${btoa(`${accountId}:${licenseKey}`)}`,
+    Accept: "application/json",
+    "X-Avalara-Client": AVALARA_CLIENT_HEADER,
+  };
 }
 
 /**
@@ -139,13 +217,47 @@ function jurisdictionOf(rates: unknown, addr: TaxAddress): string | null {
   return place || (region || null);
 }
 
+const isTimeout = (e: unknown) =>
+  (e as { name?: string })?.name === "TimeoutError" || (e as { name?: string })?.name === "AbortError";
+
+/** Read a body we are not going to use, so the connection is released. Never throws. */
+async function discard(res: Response): Promise<void> {
+  try { await res.body?.cancel(); } catch { /* already consumed or closed */ }
+}
+
+/** The `code`s on an Avalara error body — the top-level one and each detail's. Empty when the
+ *  body is not the documented `{ error: { code, details: [{ code }] } }` shape. Never throws. */
+async function errorCodes(res: Response): Promise<string[]> {
+  try {
+    const body = JSON.parse(await res.text());
+    const err = body?.error;
+    const codes = [err?.code, ...(Array.isArray(err?.details) ? err.details.map((d: { code?: unknown }) => d?.code) : [])];
+    return codes.filter((c): c is string => typeof c === "string");
+  } catch {
+    return [];
+  }
+}
+
+const failed = (failure: AvalaraFailure, httpStatus: number | null, attempts: number): AvalaraResult =>
+  ({ ok: false, rate: null, jurisdiction: null, httpStatus, attempts, failure });
+
 /**
- * The Avalara call. Returns null on ANY failure — not configured, timeout, non-2xx, malformed
- * body, insane rate — so the single caller below has one fallback path rather than a ladder.
- * Errors are swallowed here and reported through ResolvedRate.reason; nothing about tax should
- * be able to throw out of a quote submission.
+ * The Avalara call. Returns a result for EVERY outcome — nothing about tax may throw out of a
+ * quote submission — and says precisely what happened, because the ledger and the staff member
+ * who pressed the button both need to know whether to fix the address, the key, or wait.
+ *
+ * RETRIES ARE A BILLING DECISION, so they are spelled out:
+ *   401/403        never retried — `subscription` when the body names a missing entitlement,
+ *                  otherwise `credentials_rejected`;
+ *   429            retried once after a short pause — `rate_limited` if it persists;
+ *   other 4xx      never retried — `bad_address`;
+ *   5xx            retried once — `network` if it persists (the ledger keeps the status);
+ *   timeout/network retried once (unchanged from before the ledger existed). A timed-out
+ *                  request may still have been answered and counted on Avalara's side, which
+ *                  is why `attempts` travels with the result;
+ *   2xx, bad body  never retried — `malformed`. Avalara answered; asking again costs again.
  */
-async function avalaraRate(addr: TaxAddress): Promise<{ rate: number; jurisdiction: string | null } | null> {
+async function avalaraRate(addr: TaxAddress): Promise<AvalaraResult> {
   const qs = new URLSearchParams({
     line1: addr.street || "",
     city: addr.city || "",
@@ -153,28 +265,46 @@ async function avalaraRate(addr: TaxAddress): Promise<{ rate: number; jurisdicti
     postalCode: addr.zip || "",
     country: "US",
   });
-  const auth = btoa(`${ACCOUNT_ID}:${LICENSE_KEY}`);
+  const url = `${creds().base}/api/v2/taxrates/byaddress?${qs}`;
+  const headers = requestHeaders();
 
+  let last: AvalaraResult = failed("network", null, 0);
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    let res: Response;
     try {
-      const res = await fetch(`${API_BASE}/api/v2/taxrates/byaddress?${qs}`, {
-        headers: { Authorization: `Basic ${auth}`, Accept: "application/json" },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-      // 4xx is a bad address or bad credentials — retrying changes neither, so stop.
-      if (!res.ok) {
-        if (res.status < 500) return null;
-        continue;
-      }
-      const body = await res.json();
-      const rate = sane(body?.totalRate);
-      if (rate == null) return null;
-      return { rate, jurisdiction: jurisdictionOf(body?.rates, addr) };
-    } catch {
-      // Timeout or network. Fall through to the next attempt; the last one gives up.
+      res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch (e) {
+      last = failed(isTimeout(e) ? "timeout" : "network", null, attempt);
+      continue;
     }
+
+    const status = res.status;
+    if (res.ok) {
+      let body: { totalRate?: unknown; rates?: unknown } | null;
+      try {
+        body = JSON.parse(await res.text());
+      } catch (e) {
+        return failed(isTimeout(e) ? "timeout" : "malformed", status, attempt);
+      }
+      const rate = sane(body?.totalRate);
+      if (rate == null) return failed("malformed", status, attempt);
+      return { ok: true, rate, jurisdiction: jurisdictionOf(body?.rates, addr), httpStatus: status, attempts: attempt, failure: null };
+    }
+
+    if (status === 401 || status === 403) {
+      const codes = await errorCodes(res);
+      return failed(codes.some((c) => SUBSCRIPTION_CODES.has(c)) ? "subscription" : "credentials_rejected", status, attempt);
+    }
+    await discard(res);
+    if (status === 429) {
+      last = failed("rate_limited", status, attempt);
+      if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, RATE_LIMIT_PAUSE_MS));
+      continue;
+    }
+    if (status < 500) return failed("bad_address", status, attempt);
+    last = failed("network", status, attempt);
   }
-  return null;
+  return last;
 }
 
 /**
@@ -192,11 +322,18 @@ async function avalaraRate(addr: TaxAddress): Promise<{ rate: number; jurisdicti
  * with no button and no consent. Only a deliberate, staff-initiated path may pass true; the
  * automatic paths pass false and get the tenant's own rate, exactly as before the key existed.
  * The early return sits ABOVE isConfigured() so a test with junk credentials in env proves it.
+ *
+ * `onResult` is called EXACTLY ONCE for every resolveRate that reached the network, after the
+ * retries are done, with the full outcome — and never for "not requested", "not configured" or
+ * an untaxable address, none of which made a request. So a ledger written from it holds ONE ROW
+ * PER resolveRate, and that row's `attempts` records how many HTTP requests the lookup took.
+ * It is awaited, so the caller's ledger update lands before the rate is handed back, and a
+ * callback that throws is swallowed: a ledger fault must never change the rate on a document.
  */
 export async function resolveRate(
   addr: TaxAddress,
   fallbackRate: number,
-  opts: { allowLookup?: boolean } = {},
+  opts: { allowLookup?: boolean; onResult?: (result: AvalaraResult) => void | Promise<void> } = {},
 ): Promise<ResolvedRate> {
   const fallback = sane(fallbackRate) ?? 0;
   const give = (reason: string): ResolvedRate =>
@@ -207,8 +344,51 @@ export async function resolveRate(
   if (!taxable(addr)) return give("no state/postcode on the delivery address");
 
   const hit = await avalaraRate(addr);
-  if (!hit) return give("avalara lookup failed");
+  if (opts.onResult) {
+    try {
+      await opts.onResult(hit);
+    } catch {
+      // The caller's ledger is the caller's problem to report; the rate stands either way.
+    }
+  }
+  if (!hit.ok) return { ...give("avalara lookup failed"), failure: hit.failure };
   return { rate: hit.rate, jurisdiction: hit.jurisdiction, source: "avalara", reason: null };
+}
+
+/**
+ * Are the credentials accepted? `GET /api/v2/utilities/ping` — an operator's deliberate check.
+ *
+ * Avalara documents ping as never erroring: wrong credentials come back 200 with
+ * `authenticated: false`. Whether a ping is metered is not documented, so treat it as a counted
+ * call and let the caller write it to the ledger like any other.
+ *
+ * The response body names the account id and user behind the key. NONE of that leaves this
+ * function: the return value is a whitelist of four fields, and `authenticationType` must look
+ * like a single word or it is dropped. NEVER THROWS, and makes no request when unconfigured.
+ */
+export async function pingAvalara(): Promise<AvalaraPing> {
+  if (!isConfigured()) return { configured: false, authenticated: false, authenticationType: null, httpStatus: null };
+  try {
+    const res = await fetch(`${creds().base}/api/v2/utilities/ping`, {
+      headers: requestHeaders(),
+      signal: AbortSignal.timeout(PING_TIMEOUT_MS),
+    });
+    let body: { authenticated?: unknown; authenticationType?: unknown } | null = null;
+    try {
+      body = JSON.parse(await res.text());
+    } catch {
+      body = null;
+    }
+    const type = body?.authenticationType;
+    return {
+      configured: true,
+      authenticated: res.ok && body?.authenticated === true,
+      authenticationType: typeof type === "string" && /^[A-Za-z]{1,40}$/.test(type) ? type : null,
+      httpStatus: res.status,
+    };
+  } catch {
+    return { configured: true, authenticated: false, authenticationType: null, httpStatus: null };
+  }
 }
 
 /**

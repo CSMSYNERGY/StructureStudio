@@ -545,6 +545,11 @@ Deno.serve(withErrorLog("portal-billing", async (req: Request) => {
           if (t.kind === "adjustment") return t.memo ? `Adjustment — ${t.memo}` : "Adjustment";
           if (t.kind === "refund") return "Refund";
           if (t.meter_kind === "video_3d_generation") return "3D generation from a video";
+          // The two sales-tax meters (179). Only reachable since migration 242 taught
+          // wallet_credit to record meter_kind — before it every direct-post debit landed with
+          // a null kind and read "Usage", which is exactly the row a builder cannot explain.
+          if (t.meter_kind === "tax_lookup") return "Tax verification";
+          if (t.meter_kind === "tax_invoice") return "Invoice tax check";
           return "Usage";
         };
         wallet = {
