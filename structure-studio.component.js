@@ -13053,9 +13053,11 @@ async function ssUploadPool(items, worker, onProgress, limit) {
   return { urls: out.filter(Boolean), errs };
 }
 
-// How many images a generation needs before it may be pressed. Ahsan's "four images", now
-// counted rather than named - see calTrimPhotos below for why the names went.
-const CAL_PHOTO_MIN = 4;
+// THERE IS NO MINIMUM PHOTO COUNT ANY MORE (2026-09-16). Ahsan: "make video compulsory and
+// images optional to generate the 3d model". CAL_PHOTO_MIN = 4 was his "four images" of
+// 2026-09-10, and it went rather than dropping to 0, because a constant nothing can fail is a
+// gate that only looks like one. What a generation needs now is a walk-around (calVideoReady).
+// Photos are extra views, counted against CAL_PHOTO_MAX and nothing else.
 // The photo array's shape rule, in one place: a plain list of real URLs, capped at
 // CAL_PHOTO_MAX. No padding, no empty placeholders, no positional meaning.
 //
@@ -13069,11 +13071,11 @@ const CAL_PHOTO_MIN = 4;
 //
 // WHAT CAROLYN WANTED IS NOT LOST, only moved. Her point was that four numbered boxes told a
 // builder how many photos to take and not which ones - so the instruction now lives in the
-// card's copy, where it can say more than a box label ever could, and the count is the only
-// thing the gate enforces. What genuinely goes is the CLAIM that slot 2 is the left side: with
-// a multi-select upload nobody can promise what order a file picker hands back, and a label
-// that is wrong is worse than no label, because the model is told the photo is of a side it
-// never shows.
+// card's copy, where it can say more than a box label ever could. (Until 2026-09-16 the gate
+// enforced a count of four; since then it enforces no photo count at all.) What genuinely goes
+// is the CLAIM that slot 2 is the left side: with a multi-select upload nobody can promise what
+// order a file picker hands back, and a label that is wrong is worse than no label, because the
+// model is told the photo is of a side it never shows.
 function calTrimPhotos(list) {
   const seen = {};
   return (list || [])
@@ -16801,7 +16803,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return true;
   };
 
-  // ─── Is there a video? Are there four photos? ─────────────────────────────────────────
+  // ─── Is there a video? How many photos? ───────────────────────────────────────────────
   // Both questions get asked in four places — the two step headings, the Generate gate, and
   // the generation itself — so they are answered once, here. Every one of them has to survive
   // `adminCal` being null: this block runs on every render of the whole designer, not only
@@ -16811,20 +16813,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // array is at most twelve short strings, so there is nothing to memoise anyway.
   const calVideoFrames = (adminCalVideo.urls || []).filter(Boolean);
   const calVideoReady = calVideoFrames.length > 0;
-  // A COUNT, not a checklist of named sides (2026-09-10). The labels are gone, so "four photos"
-  // is now four images of anything.
-  //
-  // ⚠️ WHAT THIS GIVES UP, said plainly because nothing else records it: four photos of the FRONT
-  // now passes the gate, and the labelled slots existed to stop exactly that. The card's copy
-  // asks for one per side and the walk-around covers every side regardless - a video is still
-  // required - so the input a careless builder can produce is degraded, not useless. If drafts
-  // start coming back wrong, this is the first thing to suspect.
+  // A COUNT, and since 2026-09-16 not a gate at all. It drives the step 2 badge, the hint lines
+  // and the success message; nothing refuses a generation over it.
   const calPhotoCount = adminCal ? adminCal.photos.filter(Boolean).length : 0;
-  const calPhotosReady = calPhotoCount >= CAL_PHOTO_MIN;
+  // VIDEO REQUIRED, PHOTOS OPTIONAL (2026-09-16). Ahsan: "make video compulsory and images
+  // optional to generate the 3d model". The gate has changed direction three times, and the
+  // history is kept because each change overturned the one before:
+  //   until 09-04  video alone was the only way in (Ahsan, 08-24);
+  //   09-04        Carolyn brought the photo slots back, because the walk-around alone cost
+  //                accuracy, and she called twelve photos on their own "similar to what a
+  //                video would generate";
+  //   09-10        video AND four photos (Ahsan: "once they have uploaded both a video and four
+  //                images, then they can generate the 3D model");
+  //   09-16        video required, photos optional. Photos-only still cannot generate.
+  //
+  // ⚠️ WHAT THIS GIVES UP, said plainly because nothing else records it: a builder can now
+  // generate from the walk-around ALONE, which is the input Carolyn restored the photos to
+  // improve. A lap covers every side, so the result is a rougher read and not a wrong one. The
+  // step 2 copy still says why photos help. If drafts start coming back vaguer (pitch and eave
+  // are what a moving phone blurs), check `ai_style_calls.source` for the runs in question
+  // first: a walk-around read on its own is logged as "video", one with photos as "combined".
+  //
   // A locked style is in the gate on purpose. `save_style_d3` answers 409 for one, so
   // generating against it would spend $20 on a spec that cannot be saved — the worst possible
   // order for a paid action.
-  const calCanGenerate = Boolean(adminCal) && calVideoReady && calPhotosReady && scan.status !== "locked";
+  const calCanGenerate = Boolean(adminCal) && calVideoReady && scan.status !== "locked";
 
   // ─── What one generation is allowed to read ───────────────────────────────────────────
   // The two sources are held apart in state — walk-around frames in adminCalVideo.urls, the
@@ -16835,10 +16848,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   //
   // TWELVE IS A HARD CEILING, not a preference: sanitizePhotoUrls ends
   // `.slice(0, Math.min(12, …))`, so a thirteenth view is dropped by the server whatever the
-  // caller asks for. Eight frames plus four photos is exactly twelve, which is why the normal
-  // case fits with nothing held back. Past that the WALK gives ground before the builder's own
-  // photos do — a staged photo was aimed at something, a frame is one of eight views of one
-  // lap — but never below CAL_VIDEO_MIN, because four frames is what covers four sides.
+  // caller asks for. A lap is eight frames, so a walk-around on its own, or with up to four
+  // photos, fits with nothing held back. Past that the WALK gives ground before the builder's
+  // own photos do — a staged photo was aimed at something, a frame is one of eight views of
+  // one lap — but never below CAL_VIDEO_MIN, because four frames is what covers four sides.
   //
   // Frames go FIRST and their count is sent with them: VIDEO_SHAPE_PROMPT opens by telling the
   // model the images are "in walk order, so consecutive frames are adjacent viewpoints", which
@@ -16847,8 +16860,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calGenerateSet = () => {
     const photos = adminCal ? adminCal.photos.filter(Boolean) : [];
     const frames = calVideoFrames;
+    // NO WALK, NO SET (2026-09-16). This branch used to return the photos on their own, which
+    // the gate never let through but nothing else stopped either. Photos-only must not
+    // generate, so the set is empty and calGenerate refuses it a second time, independently of
+    // calCanGenerate. `held` counts the photos, because none of them would be read.
     if (!frames.length) {
-      return { urls: photos.slice(0, CAL_PHOTO_MAX), videoCount: 0, held: Math.max(0, photos.length - CAL_PHOTO_MAX) };
+      return { urls: [], videoCount: 0, held: photos.length };
     }
     const keepFrames = Math.min(frames.length, Math.max(CAL_VIDEO_MIN, CAL_PHOTO_MAX - photos.length));
     const keepPhotos = Math.min(photos.length, CAL_PHOTO_MAX - keepFrames);
@@ -16866,19 +16883,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   };
   // The gate, in words a builder can act on. A disabled button with no explanation is how this
   // repo has shipped dead-looking features before: it throws no error and reads as breakage.
+  // Since 2026-09-16 the only input it can ask for is the video; with photos but no video it
+  // says the photos will be read alongside one, so nobody thinks their uploads were wasted.
+  const calGenerateReady = calCanGenerate ? calGenerateSet() : null;
   const calGenerateWhy = !adminCal ? ""
-    : (adminCalVideo.busy || adminCalPhotos.busy) ? "Still uploading — the button unlocks when both are done."
+    : (adminCalVideo.busy || adminCalPhotos.busy) ? "Still uploading — the button unlocks when the upload finishes."
     : scan.status === "locked" ? "This style's 3D setup is locked. Unlock it above before generating."
-    : (!calVideoReady && !calPhotosReady) ? `Add a walk-around video in step 1, and at least ${CAL_PHOTO_MIN} images in step 2 (${calPhotoCount} so far).`
-    : !calVideoReady ? "Add a walk-around video in step 1 — one lap is what shows the building from every side."
-    : !calPhotosReady ? `${CAL_PHOTO_MIN - calPhotoCount} more image${CAL_PHOTO_MIN - calPhotoCount === 1 ? "" : "s"} needed in step 2 — one of each side is what to aim for.`
-    : `Ready — one generation, reading ${calGenerateSet().urls.length} views.`;
+    : (!calVideoReady && !calPhotoCount) ? "Add a walk-around video in step 1 — it is the one thing a generation needs. Photos in step 2 are optional."
+    : !calVideoReady ? `Add a walk-around video in step 1 — a generation needs one. Your ${calPhotoCount} image${calPhotoCount === 1 ? "" : "s"} will be read alongside it.`
+    : (calGenerateReady && calGenerateReady.urls.length > calGenerateReady.videoCount)
+      ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos.`
+    : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views. Photos in step 2 are optional.`;
 
-  // ─── Generate the shape from the video AND the photos ─────────────────────────────────
+  // ─── Generate the shape from the video, plus the photos when there are any ────────────
   // The button Carolyn asked for at 09-04 17:00: "once they have changed it, there will be a,
   // like, basically a generate button. And this is where we're going to charge them the 20
-  // bucks every time they generate." And the gate Ahsan asked for on 09-10: "once they have
-  // uploaded both a video and four images, then they can generate the 3D model."
+  // bucks every time they generate." The gate is Ahsan's of 2026-09-16: "make video
+  // compulsory and images optional to generate the 3d model" (it replaced his 09-10 "both a
+  // video and four images" — see calCanGenerate).
   //
   // The CHARGE is not decided here and must not be. `calibrate_style_ai` takes the wallet hold
   // server-side, ordered after the daily cap and before the model call, and the wallet
@@ -16900,7 +16922,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!(setup3d && setup3d.onDraftFromCombined)) return;
     if (!calCanGenerate) { setAdminCalMsg({ ok: false, msg: calGenerateWhy }); return; }
     const { urls, videoCount, held } = calGenerateSet();
-    if (!urls.length) { setAdminCalMsg({ ok: false, msg: "Add a walk-around video and four photos first." }); return; }
+    // THE SECOND CHECK, and it reads the SET, not the gate: no walk-around frames in what would
+    // be sent means no generation, so a later edit to calCanGenerate cannot reopen photos-only.
+    if (!urls.length || !videoCount) { setAdminCalMsg({ ok: false, msg: "Add a walk-around video first. Photos are optional." }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
     try {
       const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount);
@@ -16916,11 +16940,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // calibrateFromVideo ever wrote. Both fields are set here, so the panel has something to
       // render however the builder got to it.
       setAdminCalVideo((p) => ({ ...p, observed: (res && res.observed) || p.observed, read: used }));
+      // A walk-around on its own says so rather than "and 0 of your own photos", and the colour
+      // sentence stops crediting photos that were never sent (2026-09-16).
       setAdminCalMsg({
         ok: true,
-        msg: `Read ${used} view${used === 1 ? "" : "s"} — ${videoCount} from your walk-around and ${fromPhotos} of your own photos`
+        msg: `Read ${used} view${used === 1 ? "" : "s"}`
+          + (fromPhotos ? ` — ${videoCount} from your walk-around and ${fromPhotos} of your own photos` : " from your walk-around")
           + (back ? `. ${back} more were held back; twelve views is the most one generation reads` : "")
-          + `. Colours are set from the photos where they read clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
+          + `. Colours are set where the views show them clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
       });
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });
@@ -18424,7 +18451,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           <span style={{ fontWeight: 700, fontSize: 13, color: "#92400E" }}>🧊 3D Style Calibration</span>
           <span style={{ fontSize: 11, color: "#92400E", marginLeft: 8 }}>
             {setup3d
-              ? "Pick one of your styles, add photos of a real building, tune it against the live 3D preview, then Save. This is what your customers see in 3D."
+              ? "Pick one of your styles, film a walk-around of a real building (photos are optional), tune it against the live 3D preview, then Save. This is what your customers see in 3D."
               : "Pick a style, paste its four-side photo URLs, tune the spec against the live preview, then Save (or Copy JSON into building_styles.d3)."}
           </span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
@@ -18462,14 +18489,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   this card no longer calls the drafter. That also fixes a live defect — the
                   card was never gated on `scan.aiReady`, so with ANTHROPIC_API_KEY unset a
                   builder could watch eight frames upload and then receive a 500. Uploading
-                  frames does not touch the AI, so there is nothing left to fail. ── */}
+                  frames does not touch the AI, so there is nothing left to fail.
+
+                  THE ONE REQUIRED STEP since 2026-09-16 (Ahsan: "make video compulsory and
+                  images optional to generate the 3d model"), which is why its badge reads
+                  "required" and step 2's reads "optional". ── */}
               {setup3d && setup3d.onUploadPhoto && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>🎥 Step 1 — Walk-around video</span>
                     {calVideoReady
                       ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calVideoFrames.length} views ready</span>
-                      : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>needed</span>}
+                      : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>required</span>}
                   </div>
                   <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
                     Film one slow lap of a real building — phone sideways, whole building in frame, about 30 to 60 seconds.
@@ -18517,7 +18548,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                 </div>
               )}
-              {/* ── STEP 2: the builder's own photos, and the one button that spends money. ──
+              {/* ── STEP 2: the builder's own photos (OPTIONAL since 2026-09-16), and the one
+                  button that spends money. ──
                   Carolyn 2026-09-04 @16:05: "we put a thing in here that says, you know, front
                   side, left side, right side. And it tells them to get a photo of that." A
                   builder shooting their own building needs to be told WHAT to shoot; four
@@ -18530,15 +18562,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 Step 2 — Photos of the same building</span>
-                  {calPhotosReady
+                  {/* "optional" in GREY, not the amber "N of 4 added" it replaced (2026-09-16):
+                      amber on this surface means something is still missing, and nothing is. */}
+                  {calPhotoCount > 0
                     ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calPhotoCount} image{calPhotoCount === 1 ? "" : "s"}</span>
-                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>{calPhotoCount} of {CAL_PHOTO_MIN} added</span>}
+                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>optional</span>}
                 </div>
                 <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                  Stand back and photograph the <b>same building you filmed</b> — straight on, whole building in
-                  frame, in daylight. <b>One of each side</b> is what to aim for: front, left, right, back. Pick them all at
-                  once. These are sharper than anything a moving phone can give us, so they are what the roof pitch and the
-                  eave get read off — add extra angles for anything that did not come out.
+                  <b>Optional.</b> The video alone is enough to generate; photos make the read sharper. Stand back and
+                  photograph the <b>same building you filmed</b>: straight on, whole building in frame, in daylight.
+                  <b> One of each side</b> is the most useful set (front, left, right, back). Pick them all at once. Stills
+                  are sharper than video frames, so the roof pitch and the eave read best from these.
                 </p>
                 {/* ONE UPLOAD, MANY FILES, NO NAMED SLOTS (2026-09-10). Ahsan: "I want to be
                     able to upload multiple pictures at a single time, remove the option of left
@@ -18609,8 +18643,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                   <span style={{ fontSize: 11.5, color: "#B45309", fontWeight: 600 }}>
                     {calPhotoCount
-                      ? `${calPhotoCount} of ${CAL_PHOTO_MAX} used${calPhotoCount < CAL_PHOTO_MIN ? ` — ${CAL_PHOTO_MIN} is the minimum` : ""}`
-                      : `Pick several at once. ${CAL_PHOTO_MIN} minimum, ${CAL_PHOTO_MAX} maximum.`}
+                      ? `${calPhotoCount} of ${CAL_PHOTO_MAX} used`
+                      : `Pick several at once, up to ${CAL_PHOTO_MAX}.`}
                   </span>
                 </div>
                 {/* Step 2's own error line. It used to share adminCalMsg with the video path and
@@ -18634,11 +18668,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     ))}
                   </div>
                 )}
-                {/* THE ONE PAID BUTTON, and the gate Ahsan asked for on 2026-09-10: "once they
-                    have uploaded both a video and four images, then they can generate the 3D
-                    model of the building." It moved here from the action row beside Save,
-                    because the three steps it belongs to — film, photograph, generate — now
-                    read top to bottom in one place.
+                {/* THE ONE PAID BUTTON. It moved here from the action row beside Save on
+                    2026-09-10, because the steps it belongs to — film, photograph, generate —
+                    read top to bottom in one place. Its gate is Ahsan's of 2026-09-16: "make
+                    video compulsory and images optional to generate the 3d model", which
+                    replaced the 09-10 "both a video and four images". It still sits in step 2's
+                    card, so a builder with a walk-around and no photos reads past an optional
+                    step to reach it; the badge and the line underneath both say it is optional.
 
                     RENDERED DISABLED, NEVER HIDDEN. A button that simply is not there tells a
                     builder nothing about what is missing, and this repo has been bitten by
@@ -18654,8 +18690,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <div style={{ marginTop: 10, borderTop: "1px solid #FEF3C7", paddingTop: 10 }}>
                     <button onClick={calGenerate} disabled={adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy || !calCanGenerate}
                       title={calCanGenerate
-                        ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
-                        : "Add a walk-around video and all four photos first"}
+                        ? (calPhotoCount
+                          ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
+                          : "Read this building's shape from the walk-around frames above")
+                        : "Add a walk-around video first — photos are optional"}
                       style={{ ...S.btn(adminCalBusy || !calCanGenerate ? "#9CA3AF" : "#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : (calCanGenerate ? "pointer" : "not-allowed") }}>
                       {adminCalBusy ? "Working…" : "✨ Generate the 3D model"}
                     </button>
