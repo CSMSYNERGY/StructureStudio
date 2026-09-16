@@ -10600,30 +10600,34 @@ const SSD_CSS = [
   // One height token for the section's fields. 26px is the colour select's height before the redesign;
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
   '.ssd-frame{--ssd-select-h:26px}',
-  '.ssd-s2{display:grid;gap:12px;grid-template-columns:var(--ssd-s2-cols)}',
-  // xl and lg: every field of the row is at least --ssd-fld-min wide, so a colour name is not cut to
-  // "Coffee Bro…" (155px leaves a colour select 96px of name, "Burnished Slate"). Each card's floor comes
-  // from ssS2Floor in the component: the minmax() tracks of --ssd-s2-cols-xl, and --ssd-min on each card.
-  // xl keeps the grid. All six fit at the narrowest xl (1065px of floors in 1070px of content), and
-  // wherever no floor binds the fr tracks give exactly the widths they gave before. lg is a wrapping flex
-  // row instead, because a 1000–1100px designer (a 1024 laptop, the portal at 1280) cannot hold six fields
-  // that wide: there Cladding drops to a row of its own, as at md, and from about 1110px the six share
-  // one line again. The grow is the card's fr; each card's 28px of padding and border sits outside what
-  // grow shares out, so at lg the split is a few px off the grid's.
+  // One wrapping flex row of cards, each sized by the number of FIELDS it holds (Ahsan 2026-09-16, "i need
+  // uniformity in this bar"). --ssd-n on a card is its field count: Building size 1, Roof options 2,
+  // Cladding 1–3 (Siding when the style sells a cladding, Body and Trim when paint is on). A card grows by
+  // its n from a basis of its fixed chrome: the 9px gaps between its fields plus 13px padding and 1px
+  // border each side. So the spare width is shared out per field, not per card, and every field on a line
+  // is the same width whichever cards share it. Every card has the same insides (title, a label row per
+  // field, then the control), so the titles, the labels and the controls each sit on one line, and the
+  // row stretches each card to the tallest one (an "Exact color" box under one field grows only its card).
+  '.ssd-s2{display:flex;flex-wrap:wrap;align-items:stretch;gap:12px}',
+  '.ssd-s2 > .ssd-card{flex:var(--ssd-n,1) 1 calc((var(--ssd-n,1) - 1) * 9px + 28px)}',
+  // xl and lg: every field is at least --ssd-fld-min wide, so a colour name is not cut to "Coffee Bro…"
+  // (155px leaves a colour select 96px of name, "Burnished Slate"). A card's floor is n of those plus its
+  // chrome, and the row wraps on the floors: all six fields share one line at every xl (1065px of floors
+  // in 1070px of content at the narrowest) and at lg from about 1110px. Narrower than that (a 1024 laptop,
+  // the portal at 1280) Cladding drops to a row of its own, as it does at md.
   '.ssd-frame[data-ssd-bp="xl"] .ssd-s2,.ssd-frame[data-ssd-bp="lg"] .ssd-s2{--ssd-fld-min:155px}',
-  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2{grid-template-columns:var(--ssd-s2-cols-xl)}',
-  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2{display:flex;flex-wrap:wrap}',
-  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card{flex:var(--ssd-grow,1) 1 0px;min-width:var(--ssd-min,0px)}',
-  '.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card:only-child{max-width:520px}',
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2 > .ssd-card,.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card{min-width:calc(var(--ssd-n,1) * var(--ssd-fld-min) + (var(--ssd-n,1) - 1) * 9px + 28px)}',
   '.ssd-frame[data-ssd-bp="xl"] .ssd-s2 .ssd-fld,.ssd-frame[data-ssd-bp="lg"] .ssd-s2 .ssd-fld{min-width:var(--ssd-fld-min)}',
-  '.ssd-frame[data-ssd-bp="md"] .ssd-s2{grid-template-columns:var(--ssd-s2-cols-md)}',
-  '.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .is-wide{grid-column:1/-1}',
-  '.ssd-frame[data-ssd-bp="sm"] .ssd-s2,.ssd-frame[data-ssd-bp="xs"] .ssd-s2{grid-template-columns:minmax(0,1fr)}',
+  // A card alone is at most 520px wide from md up; on a phone it spans the width, as before.
+  '.ssd-frame[data-ssd-bp="xl"] .ssd-s2 > .ssd-card:only-child,.ssd-frame[data-ssd-bp="lg"] .ssd-s2 > .ssd-card:only-child,.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .ssd-card:only-child{max-width:520px}',
+  // md: Cladding (.is-wide) takes a row of its own and size and roof share the first. sm and xs: one card
+  // a row, with its fields two-up where two fit (.ssd-flds below).
+  '.ssd-frame[data-ssd-bp="md"] .ssd-s2 > .is-wide{flex-basis:100%}',
+  '.ssd-frame[data-ssd-bp="sm"] .ssd-s2 > .ssd-card,.ssd-frame[data-ssd-bp="xs"] .ssd-s2 > .ssd-card{flex-basis:100%}',
   '.ssd-card{min-width:0;box-sizing:border-box;padding:13px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel)}',
   '.ssd-card-t{display:block;margin:0 0 9px;font-size:10px;font-weight:700;line-height:1.3;letter-spacing:.14em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
   '.ssd-flds{display:flex;gap:9px;min-width:0}',
   '.ssd-fld{display:block;flex:1 1 0;min-width:0}',
-  '.ssd-fld.is-siding{flex-grow:1.1}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-flds,.ssd-frame[data-ssd-bp="xs"] .ssd-flds{flex-wrap:wrap}',
   '.ssd-frame[data-ssd-bp="sm"] .ssd-fld,.ssd-frame[data-ssd-bp="xs"] .ssd-fld{flex:1 1 140px}',
   '.ssd-fld-l{display:block;margin:0 0 4px;font-size:11px;font-weight:500;line-height:1.3;color:var(--ss-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -19310,23 +19314,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // The rail buttons sit outside them, so they still scroll on a locked plan.
   const ssLockStyle = { display: "block", border: "none", padding: 0, margin: 0, minWidth: 0,
     ...(planLocked ? { pointerEvents: "none", opacity: 0.62 } : {}) };
-  // Section 02's card columns, from the cards that render: size 0.8fr, roof 1.3fr, cladding 2.1fr
-  // (DESIGN-SPEC 4.4); one card alone is at most 520px. The -md template leaves Cladding out, because
-  // at a 740–999px designer it takes a row of its own. The breakpoint CSS picks which one applies.
-  // At xl and lg every field is at least --ssd-fld-min wide (.ssd-s2 in SSD_CSS). ssS2Floor(n) is the floor
-  // of a card holding n fields: n fields, the 9px gaps between them, 13px padding and 1px border each side.
-  // It sets the xl grid's minmax() tracks (ssS2ColsXl) and each card's --ssd-min for the lg flex row.
-  // ssS2CladN counts the Cladding card's fields: Siding, then Body and Trim as a pair.
-  const ssS2Fr = [sizeOpts.length > 0 && 0.8, roofTypes.length > 0 && 1.3, (claddingChoices.length > 0 || Boolean(paintOpt)) && 2.1].filter(Boolean);
-  const ssS2Cols = ssS2Fr.length === 1 ? "minmax(0, 520px)" : ssS2Fr.map((f) => `minmax(0, ${f}fr)`).join(" ");
-  const ssS2Short = ssS2Fr.filter((f) => f !== 2.1);
-  const ssS2ColsMd = ssS2Fr.length === 1 ? ssS2Cols
-    : ssS2Short.length > 1 ? ssS2Short.map((f) => `minmax(0, ${f}fr)`).join(" ") : "minmax(0, 1fr)";
+  // Section 02's cards are sized by how many fields each holds (--ssd-n, read by .ssd-s2 in SSD_CSS), so
+  // every field on a line is the same width. Building size holds 1 and Roof options 2. ssS2CladN counts
+  // the Cladding card's: Siding when the style sells a cladding, then Body and Trim as a pair.
   const ssS2CladN = (claddingChoices.length > 0 ? 1 : 0) + (paintOpt ? 2 : 0);
-  const ssS2Floor = (n) => `calc(${n} * var(--ssd-fld-min) + ${(n - 1) * 9 + 28}px)`;
-  const ssS2ColsXl = ssS2Fr.length === 1 ? ssS2Cols
-    : [sizeOpts.length > 0 && `minmax(${ssS2Floor(1)}, 0.8fr)`, roofTypes.length > 0 && `minmax(${ssS2Floor(2)}, 1.3fr)`,
-      (claddingChoices.length > 0 || Boolean(paintOpt)) && `minmax(${ssS2Floor(ssS2CladN)}, 2.1fr)`].filter(Boolean).join(" ");
 
   return (
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
@@ -19610,25 +19601,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               ONE line whenever each gets 155px, which is every xl designer and lg from about 1110px
               (Carolyn 2026-09-14: all six on one line, and they "don't need to be as wide"). Narrower
               than that the colour names were cut ("Coffee Bro…"), so Cladding takes its own row there,
-              as it does at 740–999px, and a phone gets one card a row with its fields two-up. The
-              columns come from the cards present (ssS2Cols, ssS2ColsXl with the floors, and --ssd-grow /
-              --ssd-min on each card for the lg flex row) and the breakpoint CSS picks the layout. Every card is still conditional, so any subset lays
-              out, and Cladding still sits between the roof and the paint, where Carolyn drew it
-              (2026-08-18). minWidth:0 on each card and field is load-bearing: a long colour name would
-              otherwise widen its track past the page on a phone.
-              ⚠️ "Building Size" is the card-title span and its PARENT holds the select (designer.spec.mjs
-              finds the select by that xpath). The "Roof " before Type and Color is visually hidden only,
-              so a screen reader and the harness still read "Roof Type" / "Roof Color". */}
+              as it does at 740–999px, and a phone gets one card a row with its fields two-up.
+              UNIFORM (Ahsan 2026-09-16): every card is built the same way (title, then a label row per
+              field, then the control), which is why Building size has its own "Size" label, and each card
+              carries --ssd-n, its field count, so the CSS gives every field on a line the same width. The
+              selects, the labels and the titles each share one line, whichever cards render. Every card is
+              still conditional, so any subset lays out, and Cladding still sits between the roof and the
+              paint, where Carolyn drew it (2026-08-18). minWidth:0 on each card and field is load-bearing:
+              a long colour name would otherwise widen its card past the page on a phone.
+              ⚠️ "Building Size" is the card-title span and its PARENT (the card) holds the select as a
+              descendant (designer.spec.mjs finds the select by that xpath). The "Roof " before Type and
+              Color is visually hidden only, so a screen reader and the harness still read "Roof Type" /
+              "Roof Color". */}
           {(sizeOpts.length > 0 || roofTypes.length > 0 || claddingChoices.length > 0 || paintOpt) && (
-            <div className="ssd-s2" style={{ "--ssd-s2-cols": ssS2Cols, "--ssd-s2-cols-md": ssS2ColsMd, "--ssd-s2-cols-xl": ssS2ColsXl }}>
+            <div className="ssd-s2">
               {sizeOpts.length > 0 && (
-                <div className="ssd-card" style={{ "--ssd-grow": "0.8", "--ssd-min": ssS2Floor(1) }}>
+                <div className="ssd-card" style={{ "--ssd-n": "1" }}>
                   <span className="ssd-card-t">Building Size</span>
-                  <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
-                    className={"ssd-select ssd-field is-size" + (sel.size ? "" : " is-empty")}>
-                    <option value="" disabled>Select a size…</option>
-                    {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                  <div className="ssd-flds">
+                    <label className="ssd-fld">
+                      <span className="ssd-fld-l">Size</span>
+                      <select value={sel.size || ""} onChange={(e) => setSel((p) => ({ ...p, size: e.target.value }))}
+                        className={"ssd-select ssd-field is-size" + (sel.size ? "" : " is-empty")}>
+                        <option value="" disabled>Select a size…</option>
+                        {sizeOpts.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </label>
+                  </div>
                 </div>
               )}
               {roofTypes.length > 0 && (() => {
@@ -19651,7 +19650,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 // One card, Type then Color. Before a type is picked the Color field shows a greyed
                 // box the height of a select, so the row's controls still line up.
                 return (
-                  <div className="ssd-card" style={{ "--ssd-grow": "1.3", "--ssd-min": ssS2Floor(2) }}>
+                  <div className="ssd-card" style={{ "--ssd-n": "2" }}>
                     <span className="ssd-card-t">Roof options</span>
                     <div className="ssd-flds">
                       <div className="ssd-fld">
@@ -19677,11 +19676,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 );
               })()}
               {(claddingChoices.length > 0 || paintOpt) && (
-                <div className="ssd-card is-wide" style={{ "--ssd-grow": "2.1", "--ssd-min": ssS2Floor(ssS2CladN) }}>
+                <div className="ssd-card is-wide" style={{ "--ssd-n": String(ssS2CladN) }}>
                   <span className="ssd-card-t">Cladding</span>
                   <div className="ssd-flds">
                     {claddingChoices.length > 0 && (
-                      <div className="ssd-fld is-siding">
+                      <div className="ssd-fld">
                         <span className="ssd-fld-l">Siding</span>
                         <select value={sel.cladding || ""} onChange={(e) => setSel((p) => ({ ...p, cladding: e.target.value || "" }))}
                           className={"ssd-select ssd-field" + (sel.cladding ? "" : " is-empty")}>
