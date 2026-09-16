@@ -187,8 +187,8 @@ Deno.test("a float rate does not produce a drifting key", () => {
   assertEquals(taxLookupIdem("acme", "SS-1", 0.1 + 0.0625, null), taxLookupIdem("acme", "SS-1", 0.1625, null));
 });
 
-// ── The meter kind reaches the wallet row (migration 242) ────────────────────────────
-// Before 242 wallet_credit dropped it, so every tax debit read "Usage" and no query could say
+// ── The meter kind reaches the wallet row (migration 243) ────────────────────────────
+// Before 243 wallet_credit dropped it, so every tax debit read "Usage" and no query could say
 // what tax had cost a tenant.
 
 Deno.test("every charge tells wallet_credit which meter it is, for both tax meters", async () => {

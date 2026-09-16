@@ -5,9 +5,9 @@
 // with no registry access — the same rule the other _shared tests follow.
 //
 // Every failure worth pinning here spends money or changes a quote without anyone noticing:
-// a refusal that runs after the ledger row (a press on a draft costs a lookup), a cap that
-// reads "unknown" as zero, a failed lookup that is charged, two presses that collapse into one
-// charge while the account paid for two calls, a verified rate replaced with nothing. No case
+// a refusal that runs after the ledger row (a press on a draft costs a lookup), a claim that
+// reads "unknown" as "go ahead", a failed lookup that is charged, two presses that collapse into
+// one charge while the account paid for two calls, a verified rate replaced with nothing. No case
 // reaches the network: every fetch is a stub and the base URL is a reserved .test host.
 Deno.env.set("AVALARA_ACCOUNT_ID", "test-account");
 Deno.env.set("AVALARA_LICENSE_KEY", "test-key");
@@ -15,10 +15,9 @@ Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
 
 const {
   chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, lookupSwitchRefusal, paidLookup, parseVerifyTax,
-  quoteSentRefusal, rateBucket, rateLimitedRefusal, verifiedTax, VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS,
-  verifyBucket, verifyLookupRefusal, verifyQuoteRefusal,
+  quoteSentRefusal, rateLimitedRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
 } = await import("./taxSpend.ts");
-const { DAILY_TAX_LOOKUP_CAP } = await import("./taxLookups.ts");
+const { DAILY_TAX_LOOKUP_CAP, TAX_LOOKUP_MINUTE_WINDOW_SECONDS, VERIFY_LOOKUPS_PER_MINUTE } = await import("./taxLookups.ts");
 const { taxLedgerIdem } = await import("./taxMeter.ts");
 const { taxOn } = await import("./salesTax.ts");
 const { designTotalCents } = await import("./estimateLines.ts");
@@ -78,32 +77,24 @@ async function withoutCredentials(run: () => Promise<void>) {
 type Answer = { data?: unknown; error?: unknown; count?: unknown };
 
 /**
- * A service-role client stub with an in-memory tax_lookups table, a canned meter, a canned wallet
- * row and a rate_buckets row. Records every `from` chain and every RPC.
+ * A service-role client stub with an in-memory tax_lookups table, a canned meter and a canned
+ * wallet row. Records every `from` chain and every RPC. claim_tax_lookup is simulated from the
+ * counts given — the atomicity itself is SQL's, proven by migration 243's probe.
  */
 function fakeAdmin(opts: {
-  count?: number | null;          // null = the count read fails
-  insertFails?: boolean;
+  count?: number | null;          // the 24-hour count the claim sees; null = the claim call fails
+  minute?: number;                // verify rows in the last 60 seconds
+  claimFails?: boolean;
   closeFails?: boolean;
   price?: { active: boolean; price_cents: number } | null;
   exempt?: boolean;
-  bucket?: { window_started_at: string; hits: number } | null;
-  bucketReadFails?: boolean;
 } = {}) {
   const rows = new Map<string, Record<string, unknown>>();
   const chains: { table: string; ops: unknown[][] }[] = [];
   const rpcs: [string, Record<string, unknown>][] = [];
-  const upserts: Record<string, unknown>[] = [];
   const answer = (table: string, ops: unknown[][]): Answer => {
     const first = ops[0]?.[0];
     if (table === "tax_lookups") {
-      if (first === "select") return opts.count === null ? { error: { message: "down" } } : { count: opts.count ?? 0 };
-      if (first === "insert") {
-        if (opts.insertFails) return { error: { message: "denied" } };
-        const id = crypto.randomUUID();
-        rows.set(id, { ...(ops[0][1] as Record<string, unknown>), outcome: null, finished_at: null });
-        return { data: { id } };
-      }
       if (first === "update") {
         if (opts.closeFails) return { error: { message: "down" } };
         const id = String((ops.find((o) => o[0] === "eq" && o[1] === "id") ?? [])[2]);
@@ -115,10 +106,6 @@ function fakeAdmin(opts: {
     }
     if (table === "usage_prices") return { data: opts.price === undefined ? { active: false, price_cents: 0 } : opts.price };
     if (table === "wallet_accounts") return { data: { metered_exempt: opts.exempt === true } };
-    if (table === "rate_buckets") {
-      if (first === "select") return opts.bucketReadFails ? { error: { message: "down" } } : { data: opts.bucket ?? null };
-      if (first === "upsert") { upserts.push(ops[0][1] as Record<string, unknown>); return {}; }
-    }
     return {};
   };
   const admin = {
@@ -136,11 +123,25 @@ function fakeAdmin(opts: {
     },
     rpc(name: string, args: Record<string, unknown>) {
       rpcs.push([name, args]);
+      if (name === "claim_tax_lookup") {
+        if (opts.count === null || opts.claimFails) return Promise.resolve({ data: null, error: { message: "down" } });
+        if ((opts.count ?? 0) >= Number(args.p_daily_cap)) return Promise.resolve({ data: { refused: "daily_cap" }, error: null });
+        if (args.p_kind === "verify" && args.p_minute_cap != null && (opts.minute ?? 0) >= Number(args.p_minute_cap)) {
+          return Promise.resolve({ data: { refused: "rate_limited" }, error: null });
+        }
+        const id = crypto.randomUUID();
+        rows.set(id, {
+          client_id: args.p_client_id, kind: args.p_kind, short_code: args.p_short_code, invoice_number: args.p_invoice_number,
+          actor_user_id: args.p_actor_user_id, operator: args.p_operator, region: args.p_region, postal_code: args.p_postal_code,
+          outcome: null, finished_at: null,
+        });
+        return Promise.resolve({ data: { id }, error: null });
+      }
       return Promise.resolve({ data: 4900, error: null });
     },
   };
   const touched = (table: string, op: string) => chains.some((c) => c.table === table && c.ops[0]?.[0] === op);
-  return { admin, rows, chains, rpcs, upserts, touched };
+  return { admin, rows, chains, rpcs, touched };
 }
 
 /** One paidLookup against a fetch stub: the outcome and how many requests it made. */
@@ -220,12 +221,19 @@ Deno.test("verifyQuoteRefusal: refusals come in the spec's order — quote, then
 
 // ── quoteSentRefusal ─────────────────────────────────────────────────────────────────────────
 
-Deno.test("quoteSentRefusal: an emailed quote needs confirmResend before the lookup, and names what the customer holds", () => {
-  const r = quoteSentRefusal({ sent: true, confirmResend: false, quoteNumber: "Q-104", totalCents: 1122500 });
+Deno.test("quoteSentRefusal: a quote the customer holds needs confirmResend before the lookup, and names what they hold", () => {
+  const r = quoteSentRefusal({ inCustomerHands: true, confirmResend: false, quoteNumber: "Q-104", totalCents: 1122500 });
   assertEquals([r?.status, r?.body.reason, r?.body.quoteNumber, r?.body.totalCents], [409, "quote_sent", "Q-104", 1122500]);
-  assertEquals(quoteSentRefusal({ sent: true, confirmResend: true, quoteNumber: "Q-104", totalCents: 1122500 }), null);
-  assertEquals(quoteSentRefusal({ sent: false, confirmResend: false, quoteNumber: null, totalCents: 1122500 }), null);
-  assertEquals(quoteSentRefusal({ sent: true, confirmResend: false, quoteNumber: undefined, totalCents: null })?.body.quoteNumber, null);
+  assertEquals(quoteSentRefusal({ inCustomerHands: true, confirmResend: true, quoteNumber: "Q-104", totalCents: 1122500 }), null);
+  assertEquals(quoteSentRefusal({ inCustomerHands: false, confirmResend: false, quoteNumber: null, totalCents: 1122500 }), null);
+  assertEquals(quoteSentRefusal({ inCustomerHands: true, confirmResend: false, quoteNumber: undefined, totalCents: null })?.body.quoteNumber, null);
+});
+
+Deno.test("quoteSentRefusal: the sentence never claims the quote was emailed — it may have been texted or printed", () => {
+  const r = quoteSentRefusal({ inCustomerHands: true, confirmResend: false, quoteNumber: "Q-104", totalCents: 1122500 })!;
+  assert(!/emailed to the customer|been emailed/i.test(r.body.error), r.body.error);
+  assert(/already has this quote/.test(r.body.error), r.body.error);
+  assert(/let them know/.test(r.body.error), "the rep is told they may have to tell the customer themselves");
 });
 
 // ── verifyLookupRefusal: the failure taxonomy, and the quote is always left alone ────────────
@@ -233,6 +241,7 @@ Deno.test("quoteSentRefusal: an emailed quote needs confirmResend before the loo
 Deno.test("verifyLookupRefusal: every failure maps to the contract's status, reason and failure field", () => {
   const table: [PaidLookupFailure, number, string, string | undefined][] = [
     ["daily_cap", 429, "daily_cap", undefined],
+    ["minute_cap", 429, "rate_limited", undefined],
     ["ledger_unavailable", 503, "ledger_unavailable", undefined],
     ["not_configured", 403, "lookup_disabled", undefined],
     ["bad_address", 400, "bad_address", undefined],
@@ -254,64 +263,52 @@ Deno.test("verifyLookupRefusal: every failure maps to the contract's status, rea
 
 Deno.test("rateLimitedRefusal: our own burst limit is 429 rate_limited, apart from Avalara's 429 (502 lookup_failed)", () => {
   const r = rateLimitedRefusal();
-  assertEquals([r.status, r.body.reason, r.body.retryAfterSeconds], [429, "rate_limited", VERIFY_BUCKET_WINDOW_MS / 1000]);
+  assertEquals([r.status, r.body.reason, r.body.retryAfterSeconds], [429, "rate_limited", TAX_LOOKUP_MINUTE_WINDOW_SECONDS]);
+  assertEquals(verifyLookupRefusal("minute_cap"), r, "the claim's per-minute refusal is this refusal");
   assertEquals(verifyLookupRefusal("rate_limited").status, 502);
 });
 
-// ── rateBucket (migration 204's pattern) ─────────────────────────────────────────────────────
+// ── paidLookup: one atomic claim, failing closed, before any request ─────────────────────────
 
-Deno.test("rateBucket: counts first, refuses past the max, and a new window starts over", async () => {
-  const now = Date.parse("2026-09-17T10:00:00Z");
-  const fresh = fakeAdmin({ bucket: null });
-  assertEquals(await rateBucket(fresh.admin, verifyBucket("acme"), VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS, now), { over: false, hits: 1 });
-  assertEquals(fresh.upserts[0], {
-    bucket: "portal-settings:verify_tax:acme", window_started_at: new Date(now).toISOString(), hits: 1, updated_at: new Date(now).toISOString(),
-  });
-
-  const started = new Date(now - 30_000).toISOString();
-  const atMax = fakeAdmin({ bucket: { window_started_at: started, hits: VERIFY_BUCKET_MAX - 1 } });
-  assertEquals(await rateBucket(atMax.admin, "b", VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS, now), { over: false, hits: VERIFY_BUCKET_MAX });
-  const past = fakeAdmin({ bucket: { window_started_at: started, hits: VERIFY_BUCKET_MAX } });
-  assertEquals(await rateBucket(past.admin, "b", VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS, now), { over: true, hits: VERIFY_BUCKET_MAX + 1 });
-  assertEquals(past.upserts[0].hits, VERIFY_BUCKET_MAX + 1, "the refused press is still counted, so the counter never freezes at the cap");
-  assertEquals(past.upserts[0].window_started_at, started, "an open window keeps its start");
-
-  const expired = fakeAdmin({ bucket: { window_started_at: new Date(now - VERIFY_BUCKET_WINDOW_MS).toISOString(), hits: 500 } });
-  assertEquals(await rateBucket(expired.admin, "b", VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS, now), { over: false, hits: 1 });
-});
-
-Deno.test("rateBucket fails OPEN (the daily cap behind it is what fails closed)", async () => {
-  const down = fakeAdmin({ bucketReadFails: true });
-  assertEquals(await rateBucket(down.admin, "b", 1, 60_000), { over: false, hits: 0 });
-  assertEquals(down.upserts.length, 0, "an unreadable bucket is not overwritten");
-  assertEquals(await rateBucket({ from() { throw new Error("network"); } }, "b", 1, 60_000), { over: false, hits: 0 });
-});
-
-// ── paidLookup: the cap fails closed, the row comes first ────────────────────────────────────
-
-Deno.test("paidLookup: an unreadable count refuses — no row, no request (the cap fails CLOSED)", async () => {
-  const f = fakeAdmin({ count: null });
-  const { r, calls } = await run(f.admin, lookupInput(), noFetch);
-  assertEquals(r, { ok: false, failure: "ledger_unavailable", lookupId: null, ledgerClosed: true });
-  assertEquals(calls, 0, "no request");
-  assert(!f.touched("tax_lookups", "insert"), "no row");
+Deno.test("paidLookup: a claim the database could not answer refuses — no row, no request (the cap fails CLOSED)", async () => {
+  for (const f of [fakeAdmin({ count: null }), fakeAdmin({ claimFails: true })]) {
+    const { r, calls } = await run(f.admin, lookupInput(), noFetch);
+    assertEquals(r, { ok: false, failure: "ledger_unavailable", lookupId: null, ledgerClosed: true });
+    assertEquals([calls, f.rows.size], [0, 0], "no request, no row");
+  }
 });
 
 Deno.test("paidLookup: at the daily cap nothing is written or requested; one under, the lookup runs", async () => {
   const full = fakeAdmin({ count: DAILY_TAX_LOOKUP_CAP });
   const capped = await run(full.admin, lookupInput(), noFetch);
-  assertEquals([capped.r.ok, failureOf(capped.r), capped.calls], [false, "daily_cap", 0]);
-  assert(!full.touched("tax_lookups", "insert"));
+  assertEquals([capped.r.ok, failureOf(capped.r), capped.calls, full.rows.size], [false, "daily_cap", 0, 0]);
 
   const under = fakeAdmin({ count: DAILY_TAX_LOOKUP_CAP - 1 });
   const one = await run(under.admin, lookupInput(), avalaraOk());
   assertEquals([one.r.ok, one.calls], [true, 1]);
 });
 
-Deno.test("paidLookup: a row that cannot be written refuses the lookup", async () => {
-  const f = fakeAdmin({ insertFails: true });
-  const { r, calls } = await run(f.admin, lookupInput(), noFetch);
-  assertEquals([r, calls], [{ ok: false, failure: "ledger_unavailable", lookupId: null, ledgerClosed: true }, 0]);
+Deno.test("paidLookup: over the per-minute cap a Verify press is minute_cap (429 rate_limited); an invoice check has no such cap", async () => {
+  const burst = fakeAdmin({ minute: VERIFY_LOOKUPS_PER_MINUTE });
+  const refused = await run(burst.admin, lookupInput(), noFetch);
+  assertEquals([failureOf(refused.r), refused.calls, burst.rows.size], ["minute_cap", 0, 0]);
+  assertEquals([verifyLookupRefusal("minute_cap").status, verifyLookupRefusal("minute_cap").body.reason], [429, "rate_limited"]);
+
+  const invoice = fakeAdmin({ minute: 10_000 });
+  const checked = await run(invoice.admin, { ...lookupInput(), kind: "invoice", shortCode: null, invoiceNumber: 1042 }, avalaraOk());
+  assertEquals([checked.r.ok, checked.calls], [true, 1]);
+  assertEquals(invoice.rpcs.find(([n]) => n === "claim_tax_lookup")![1].p_minute_cap, null);
+});
+
+Deno.test("paidLookup: ONE mechanism — a single claim RPC, no count read and no insert of its own", async () => {
+  const f = fakeAdmin();
+  const { r } = await run(f.admin, lookupInput(), avalaraOk());
+  assert(r.ok);
+  assertEquals(f.rpcs.map(([n]) => n), ["claim_tax_lookup"]);
+  const claim = f.rpcs[0][1];
+  assertEquals([claim.p_daily_cap, claim.p_minute_cap, claim.p_kind, claim.p_client_id], [DAILY_TAX_LOOKUP_CAP, VERIFY_LOOKUPS_PER_MINUTE, "verify", "acme"]);
+  assert(!f.touched("tax_lookups", "select") && !f.touched("tax_lookups", "insert"), "a count read or an insert beside the claim is the race again");
+  assert(!f.chains.some((c) => c.table === "rate_buckets"), "the old fail-open bucket is back");
 });
 
 Deno.test("paidLookup: a rate that comes back is one request, one row, closed with the answer", async () => {

@@ -1,25 +1,28 @@
-// The Avalara call ledger (migration 242): one `tax_lookups` row per deliberate lookup.
+// The Avalara call ledger (migration 243): one `tax_lookups` row per deliberate lookup.
 //
 // WHY A LEDGER WHEN THE WALLET ALREADY RECORDS CHARGES. The wallet cannot count calls. A
 // charge is skipped while the meter is disarmed, priced at zero or the tenant is exempt, and an
 // answer-keyed charge collapses a repeat press that returns the same rate — every one of those
 // still made a request Avalara metered. The billable unit and the cost unit are not the same
-// thing, so the cost unit gets its own table, and that table is also the SPEND CAP: the daily
-// count below is taken from it before any request is made.
+// thing, so the cost unit gets its own table, and that table is also the SPEND CAP.
 //
 // THE ORDER A CALLER FOLLOWS (verify_tax and the invoice-time check do it through one function,
-// taxSpend.ts' paidLookup; the operator ping in admin-catalog does steps 2-4 itself):
-//   1. countLookups24h — refuse when it returns null (unreadable) or reaches the cap;
-//   2. insertLookup    — refuse when it returns null. The row IS the cap: a lookup with no
-//                        row is a lookup nothing counts;
-//   3. the request     — resolveRate(…, { allowLookup: true, onResult }) or pingAvalara();
-//   4. finishLookup    — with what came back. Best-effort: the request already happened, and a
-//                        row left in flight still counts toward the cap.
+// taxSpend.ts' paidLookup; the operator ping in admin-catalog, which no cap counts, writes its
+// own row with insertLookup instead of step 1):
+//   1. claimLookup   — the cap and the in-flight row in ONE database step (claim_tax_lookup):
+//                      the tenant's 24-hour count, the Verify button's per-minute count, and the
+//                      insert, under a per-tenant advisory lock. Refuse on any answer but an id.
+//                      A count read here and an insert made afterwards was check-then-write: a
+//                      parallel burst at 99 all read 99, and every one of them was billed;
+//   2. the request   — resolveRate(…, { allowLookup: true, onResult }) or pingAvalara();
+//   3. finishLookup  — with what came back. Best-effort: the request already happened, and a
+//                      row left in flight still counts toward the cap.
 // `resolveRate` calls `onResult` once per lookup that reached the network, so one row per
-// resolveRate, with `attempts` recording how many HTTP requests it took.
+// resolveRate, with `attempts` recording how many HTTP requests it took. countLookups24h is a
+// DISPLAY read (tax_settings' usage figure) and never decides a spend.
 //
 // Every function here NEVER THROWS; failure is in the return value, because the caller has to
-// decide between refusing (steps 1-2) and logging (step 4).
+// decide between refusing (step 1) and logging (step 3).
 //
 // ⚠️ Bundled per function like every _shared module: a change here means redeploying every
 // importer. Derive them, do not trust a list (CLAUDE.md, importer audits):
@@ -37,6 +40,12 @@ type Admin = any;
  *  operator-only and spend no builder's allowance. */
 export const DAILY_TAX_LOOKUP_CAP = 100;
 
+/** Verify presses a tenant may turn into lookups in any 60 seconds. A deliberate button does not
+ *  need more; a loop does. Counted from the ledger inside claim_tax_lookup, whose window is
+ *  `interval '60 seconds'` — TAX_LOOKUP_MINUTE_WINDOW_SECONDS below, and a test pins the two. */
+export const VERIFY_LOOKUPS_PER_MINUTE = 10;
+export const TAX_LOOKUP_MINUTE_WINDOW_SECONDS = 60;
+
 export type TaxLookupKind = "verify" | "invoice" | "ping";
 /** Mirrors the `outcome` CHECK on tax_lookups. Null (not listed) while the request is in flight. */
 export type TaxLookupOutcome = "ok" | "not_configured" | AvalaraFailure;
@@ -45,7 +54,7 @@ export type TaxLookupOutcome = "ok" | "not_configured" | AvalaraFailure;
 const CAPPED_KINDS: TaxLookupKind[] = ["verify", "invoice"];
 const KINDS: TaxLookupKind[] = ["verify", "invoice", "ping"];
 
-// Column-length CHECKs in migration 242. Clipped here rather than refused there: a long short
+// Column-length CHECKs in migration 243. Clipped here rather than refused there: a long short
 // code must not be the reason a staff member cannot verify a rate.
 const MAX_CODE = 64;
 const MAX_REGION = 16;
@@ -74,32 +83,79 @@ export interface NewTaxLookup {
   postalCode?: string | null;
 }
 
+/** A row's columns as migration 243's CHECKs accept them: free text clipped, a non-UUID actor
+ *  dropped to null. Shared by the insert and the claim, so neither can write what the other
+ *  would refuse. Null for a row with no tenant or no known kind. */
+function lookupColumns(row: NewTaxLookup) {
+  if (!row?.clientId || !KINDS.includes(row.kind)) return null;
+  return {
+    client_id: row.clientId,
+    kind: row.kind,
+    short_code: clip(row.shortCode, MAX_CODE),
+    invoice_number: clip(row.invoiceNumber, MAX_CODE),
+    actor_user_id: typeof row.actorUserId === "string" && UUID.test(row.actorUserId) ? row.actorUserId : null,
+    operator: row.operator === true,
+    region: clip(row.region, MAX_REGION),
+    postal_code: clip(row.postalCode, MAX_POSTAL),
+  };
+}
+
 /**
- * Write the in-flight row BEFORE the request. Returns its id, or null when it could not be
- * written — and a null means the caller refuses the lookup: an uncounted call is exactly the
- * spend the ledger exists to bound.
+ * Write an in-flight row with no cap in front of it: the operator ping only. Returns its id,
+ * or null when it could not be written, and a null means the caller refuses. An uncounted call
+ * is exactly the spend the ledger exists to bound. A capped lookup goes through claimLookup.
  */
 export async function insertLookup(admin: Admin, row: NewTaxLookup): Promise<string | null> {
   try {
-    if (!row?.clientId || !KINDS.includes(row.kind)) return null;
-    const { data, error } = await admin
-      .from("tax_lookups")
-      .insert({
-        client_id: row.clientId,
-        kind: row.kind,
-        short_code: clip(row.shortCode, MAX_CODE),
-        invoice_number: clip(row.invoiceNumber, MAX_CODE),
-        actor_user_id: typeof row.actorUserId === "string" && UUID.test(row.actorUserId) ? row.actorUserId : null,
-        operator: row.operator === true,
-        region: clip(row.region, MAX_REGION),
-        postal_code: clip(row.postalCode, MAX_POSTAL),
-      })
-      .select("id")
-      .single();
+    const cols = lookupColumns(row);
+    if (!cols) return null;
+    const { data, error } = await admin.from("tax_lookups").insert(cols).select("id").single();
     if (error || typeof data?.id !== "string") return null;
     return data.id;
   } catch {
     return null;
+  }
+}
+
+export type LookupClaim =
+  | { ok: true; id: string }
+  /** `daily_cap` / `rate_limited`: the database counted, refused, and wrote nothing.
+   *  `ledger_unavailable`: no answer we can trust (the call failed, threw, or said something
+   *  else). Every refusal means no request. */
+  | { ok: false; refused: "daily_cap" | "rate_limited" | "ledger_unavailable" };
+
+/**
+ * The cap and the in-flight row, atomically (claim_tax_lookup, migration 243). A verify claim
+ * also carries the per-minute cap; an invoice claim never does. FAILS CLOSED: anything but a
+ * well-formed id or a known refusal is `ledger_unavailable`, and the caller refuses the lookup.
+ */
+export async function claimLookup(
+  admin: Admin,
+  row: NewTaxLookup & { kind: "verify" | "invoice" },
+): Promise<LookupClaim> {
+  const unavailable: LookupClaim = { ok: false, refused: "ledger_unavailable" };
+  try {
+    const cols = lookupColumns(row);
+    if (!cols || !CAPPED_KINDS.includes(cols.kind)) return unavailable;
+    const { data, error } = await admin.rpc("claim_tax_lookup", {
+      p_client_id: cols.client_id,
+      p_kind: cols.kind,
+      p_daily_cap: DAILY_TAX_LOOKUP_CAP,
+      p_minute_cap: cols.kind === "verify" ? VERIFY_LOOKUPS_PER_MINUTE : null,
+      p_short_code: cols.short_code,
+      p_invoice_number: cols.invoice_number,
+      p_actor_user_id: cols.actor_user_id,
+      p_operator: cols.operator,
+      p_region: cols.region,
+      p_postal_code: cols.postal_code,
+    });
+    if (error || !data || typeof data !== "object") return unavailable;
+    const d = data as Record<string, unknown>;
+    if (typeof d.id === "string" && UUID.test(d.id)) return { ok: true, id: d.id };
+    if (d.refused === "daily_cap" || d.refused === "rate_limited") return { ok: false, refused: d.refused };
+    return unavailable;
+  } catch {
+    return unavailable;
   }
 }
 
@@ -173,7 +229,7 @@ export async function finishLookup(
  * The `client_id` an operator's credential ping is recorded under. A ping checks the PLATFORM's
  * credentials and belongs to no builder, so it is not filed under anybody's tenant — not even the
  * operator's own, which is a real builder account whose usage query should read only its own
- * calls. The column is text with no foreign key (deliberately, migration 242), so a fixed value
+ * calls. The column is text with no foreign key (deliberately, migration 243), so a fixed value
  * is allowed; the leading underscore is one no tenant slug can have (slugs are
  * `^[a-z0-9][a-z0-9-]*$`), so it can never collide with a tenant created later. Pings are not in
  * the capped kinds either way.
@@ -208,9 +264,10 @@ export function pingResponse(ping: AvalaraPing): {
 
 /**
  * Lookups (verify + invoice) this tenant made in the last rolling 24 hours, in-flight rows
- * included. FAILS CLOSED: null when the count cannot be read, and the caller REFUSES on null.
- * That is the opposite of the AI-drafting cap's fail-open count, and deliberately so — there a
- * blind pass costs cents of our own; here it is an uncapped run of calls billed to the account.
+ * included: the usage figure tax_settings shows beside the cap. Null when the count cannot be
+ * read (unknown, never zero). A DISPLAY read only. The cap itself is claim_tax_lookup's count,
+ * taken under a lock in the same step as the insert; deciding a spend from this read is the
+ * check-then-write race that function exists to close.
  */
 export async function countLookups24h(admin: Admin, clientId: string): Promise<number | null> {
   try {

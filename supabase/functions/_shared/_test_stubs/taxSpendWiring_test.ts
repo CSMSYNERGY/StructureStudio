@@ -4,13 +4,15 @@
 // taxSpend.test.ts proves the decisions; taxLookups.test.ts proves the ledger and the ping
 // redaction. What they cannot see is where the handlers call them, and every mistake worth
 // pinning here is a short edit that throws nothing and passes every unit test:
-//   1. `allowLookup: true` appearing anywhere but paidLookup — a second spender with no cap;
+//   1. `allowLookup: true` appearing anywhere but paidLookup — a second spender with no cap —
+//      or paidLookup going back to a count read and a separate insert (check-then-write: a
+//      parallel burst overshoots the cap) instead of the one atomic claim;
 //   2. a verify_tax refusal moved below the lookup — a press on a draft, an accepted quote or an
 //      unconfirmed operator view costs a billed call before it is refused;
 //   3. the charge moved ahead of the quote write, or out of restampQuoteTax's afterWrite —
 //      a builder billed for a rate that never reached a document;
 //   4. the invoice-time check writing a total, or the old answer-keyed tax_invoice charge back;
-//   5. the switch read folded into send_invoice's settings select, where an unapplied 242 would
+//   5. the switch read folded into send_invoice's settings select, where an unapplied 243 would
 //      null the row and send an SS tenant down the CRM path;
 //   6. avalara_ping added to the read-only list, or answering with the raw ping;
 //   7. the accept-race check placed after the acceptance is recorded;
@@ -79,10 +81,24 @@ Deno.test("allowLookup: true exists exactly once in the functions tree — insid
   const spend = (await functionSources()).find(([p]) => p === "_shared/taxSpend.ts")![1];
   const fn = block(spend, "export async function paidLookup(", "\n}\n", "paidLookup");
   assert(/allowLookup:\s*true/.test(fn), "the opt-in moved out of paidLookup");
-  const cap = at(fn, "countLookups24h(", "paidLookup");
-  const row = at(fn, "insertLookup(", "paidLookup");
+  const claim = at(fn, "claimLookup(", "paidLookup");
   const call = at(fn, "resolveRate(", "paidLookup");
-  assert(cap < row && row < call, "paidLookup must count, then write the row, then make the request");
+  assert(claim < call, "paidLookup must claim (cap + row, atomically) before it makes the request");
+  assert(!/countLookups24h\(|insertLookup\(|rateBucket\(/.test(spend),
+    "taxSpend counts, inserts or buckets outside the atomic claim — the check-then-write race is back");
+});
+
+Deno.test("the display count and the uncapped insert are used only where no spend is decided", async () => {
+  const counts: string[] = [], inserts: string[] = [];
+  for (const [path, src] of await functionSources()) {
+    if (path === "_shared/taxLookups.ts") continue;
+    if (/\bcountLookups24h\(/.test(src)) counts.push(path);
+    if (/\binsertLookup\(/.test(src)) inserts.push(path);
+  }
+  assert(counts.length === 1 && counts[0] === "portal-settings/index.ts", `countLookups24h callers: ${counts.join(", ")}`);
+  assert(/if \(action === "tax_settings"\) \{[\s\S]*?countLookups24h\(admin, clientId\)/.test(SETTINGS) &&
+    [...SETTINGS.matchAll(/countLookups24h\(/g)].length === 1, "countLookups24h is read outside tax_settings' usage figure");
+  assert(inserts.length === 1 && inserts[0] === "admin-catalog/index.ts", `insertLookup callers (the ping only): ${inserts.join(", ")}`);
 });
 
 Deno.test("paidLookup is called from verify_tax and send_invoice only", async () => {
@@ -103,9 +119,8 @@ Deno.test("verify_tax: every refusal before the lookup, in the spec's order", ()
     ["refuseIfAgreed(d)", "accepted / ordered"],
     ["verifyQuoteRefusal(", "no quote / no address / operator confirmation"],
     ['auditStrict("operator_verify_tax_attempt"', "operator strict audit"],
-    ["quoteSentRefusal(", "emailed quote confirmation"],
-    ["rateBucket(", "rate bucket"],
-    ["paidLookup(", "the lookup"],
+    ["quoteSentRefusal(", "the customer-holds-it confirmation"],
+    ["paidLookup(", "the lookup (the claim: daily cap, per-minute cap, ledger row)"],
     ["verifyLookupRefusal(", "failure refusal"],
     ["restampQuoteTax(", "the write"],
   ];
@@ -118,6 +133,17 @@ Deno.test("verify_tax: every refusal before the lookup, in the spec's order", ()
   assert(at(VERIFY, "refuseUnlessDesignVisible(", "verify_tax") < at(VERIFY, "admin.from(", "verify_tax"),
     "the row scope runs after a read");
   assert(/if \(operator\) \{\s*try \{\s*await auditStrict\(/.test(VERIFY), "the strict audit is no longer operator-gated and awaited");
+  assert(!/rateBucket\(|rate_buckets/.test(VERIFY), "verify_tax has a second, non-atomic rate limit beside the claim");
+});
+
+Deno.test("a quote texted or printed is in the customer's hands too — verify and every re-stamp ask before re-pricing it", () => {
+  assert(/quoteSentRefusal\(\{\s*inCustomerHands: quoteInCustomerHands\(d\)/.test(VERIFY),
+    "verify_tax's pre-lookup confirmation no longer asks quoteInCustomerHands");
+  assert(/restampPlan\(\{[\s\S]*?inCustomerHands: quoteInCustomerHands\(fresh\)/.test(RESTAMP),
+    "restampQuoteTax's confirmation no longer asks quoteInCustomerHands of the fresh read");
+  assert(!/ss_quote_sent_at/.test(VERIFY + RESTAMP), "a re-price decides 'the customer has it' from ss_quote_sent_at alone again");
+  assert(/restampSendOutcome\(/.test(RESTAMP), "the not-re-sent sentence no longer comes from restampSendOutcome");
+  assert(!/sms|twilio|sendSms/i.test(RESTAMP), "a re-stamp re-sends by text — email is the only re-send");
 });
 
 Deno.test("verify_tax: the quote is written only through restampQuoteTax, and the charge follows the write", () => {

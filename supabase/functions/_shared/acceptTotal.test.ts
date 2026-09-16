@@ -8,16 +8,32 @@
 // different total (a customer signs a number that is not the one on their screen).
 //
 // promoteMiss is the second half (review, 2026-09-17): a re-price that lands after the handler's
-// read. Its silent failures are the mirror image: a re-price read as "retry" freezes the old lines
-// as the agreement beside the new quote, and an unrelated write read as "repriced" throws away a
-// real customer's acceptance.
+// read. Its silent failures are the mirror image: a re-price read as "retry" freezes the old total
+// as the agreement beside the new quote, and a write that moved no money read as "repriced"
+// throws away a real customer's acceptance.
+//
+// And the sentence itself: production's my-quotes.html signs a customer out when an error matches
+// /token|session|expired|sign.?in/i, so a refusal that says "signing" logs them out instead of
+// showing the new total.
 
-import { checkExpectedTotal, promoteMiss } from "./acceptTotal.ts";
+import { checkExpectedTotal, promoteMiss, REPRICED_SENTENCE } from "./acceptTotal.ts";
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
   const sa = JSON.stringify(a), sb = JSON.stringify(b);
   if (sa !== sb) throw new Error(msg ? `${msg}: ${sa} !== ${sb}` : `${sa} !== ${sb}`);
 };
+
+Deno.test("the repriced sentence matches none of the patterns a customer page reads as an expired login", () => {
+  // Copied from production's my-quotes.html (origin/main), which tests every error with it.
+  const SIGNED_OUT = /token|session|expired|sign.?in/i;
+  assertEquals(SIGNED_OUT.test(REPRICED_SENTENCE), false, `the refusal would sign the customer out: ${REPRICED_SENTENCE}`);
+  assertEquals(SIGNED_OUT.test("This quote was updated. Reload to see the current total before signing."), true,
+    "the pattern no longer catches the sentence this replaced — re-copy it from my-quotes.html");
+  const early = checkExpectedTotal(1, 13316.38);
+  assertEquals(!early.ok && early.body.error, REPRICED_SENTENCE, "the early check answers with it");
+  const late = promoteMiss({ lines: [{ qty: 1, amount: 1 }] }, { estimate_lines: { lines: [{ qty: 1, amount: 2 }] }, accepted_at: null, updated_at: "t" });
+  assertEquals(late.kind === "repriced" && late.body.error, REPRICED_SENTENCE, "the promote-time refusal answers with it");
+});
 
 Deno.test("absent or null expectedTotalCents is today's behaviour: no check at all", () => {
   for (const total of [13316.38, 0, null]) {
@@ -38,12 +54,12 @@ Deno.test("the total on screen is the total about to freeze: accepted, float dus
 Deno.test("a re-priced quote is refused with 409 repriced and the current total", () => {
   assertEquals(checkExpectedTotal(1331638, 13390.1), {
     ok: false, status: 409,
-    body: { error: "This quote was updated. Reload to see the current total before signing.", reason: "repriced", totalCents: 1339010 },
+    body: { error: REPRICED_SENTENCE, reason: "repriced", totalCents: 1339010 },
   });
   assertEquals(checkExpectedTotal(1331638, 13316.37).ok, false, "one cent is a different total");
   const gone = checkExpectedTotal(1331638, null);
   assertEquals([gone.ok, !gone.ok && gone.status, !gone.ok && gone.body], [false, 409, {
-    error: "This quote was updated. Reload to see the current total before signing.", reason: "repriced", totalCents: null,
+    error: REPRICED_SENTENCE, reason: "repriced", totalCents: null,
   }], "the page showed a total the quote no longer has");
 });
 
@@ -59,9 +75,8 @@ const SIGNED = {
   lines: [{ desc: "10x16 Urban", qty: 1, amount: 12416 }], discount: 0,
   tax: { rate: 0.0725, amount: 900.16, label: "Sales tax", source: "fallback", basis: "company" },
 };
-const REPRICED_SENTENCE = "This quote was updated. Reload to see the current total before signing.";
 
-Deno.test("promoteMiss: the lines moved after the read, so the acceptance is refused with the current total", () => {
+Deno.test("promoteMiss: the total moved after the read, so the acceptance is refused with the current total", () => {
   const verified = {
     ...SIGNED,
     tax: { rate: 0.0785, amount: 974.66, label: "Sales tax", source: "avalara", basis: "avalara", jurisdiction: "X" },
@@ -76,11 +91,23 @@ Deno.test("promoteMiss: the lines moved after the read, so the acceptance is ref
   assertEquals(!early.ok && early.body, miss.kind === "repriced" && miss.body, "the two halves of the race answer differently");
 });
 
-Deno.test("promoteMiss: any change to the lines refuses, even one that leaves the total alone", () => {
-  // A verified rate that happens to equal the default still changes the frozen tax columns.
-  const sameTotal = { ...SIGNED, tax: { ...SIGNED.tax, source: "avalara", basis: "avalara" } };
-  const miss = promoteMiss(SIGNED, { estimate_lines: sameTotal, accepted_at: null, updated_at: "t2" });
-  assertEquals([miss.kind, miss.kind === "repriced" && miss.body.totalCents], ["repriced", 1331616]);
+Deno.test("promoteMiss: lines that changed without moving the total are a retry, not a refusal", () => {
+  // A re-stamp at the same rate under another basis, a fresh resolvedAt, a relabel: the customer
+  // is paying exactly the figure they accepted, so nothing is refused (review, 2026-09-17).
+  const sameTotal = {
+    ...SIGNED,
+    tax: { ...SIGNED.tax, source: "avalara", basis: "avalara", label: "County tax", resolvedAt: "2026-09-17T10:00:01Z" },
+  };
+  assertEquals(promoteMiss(SIGNED, { estimate_lines: sameTotal, accepted_at: null, updated_at: "t2" }), { kind: "retry", updatedAt: "t2" });
+  // Float dust in the stored amount is not a different total either: compared in whole cents.
+  const dust = { ...SIGNED, tax: { ...SIGNED.tax, amount: 900.1600000001 } };
+  assertEquals(promoteMiss(SIGNED, { estimate_lines: dust, accepted_at: null, updated_at: "t3" }).kind, "retry");
+});
+
+Deno.test("promoteMiss: one cent, or the total gone, is a re-price", () => {
+  const cent = { ...SIGNED, tax: { ...SIGNED.tax, amount: 900.17 } };
+  const miss = promoteMiss(SIGNED, { estimate_lines: cent, accepted_at: null, updated_at: "t2" });
+  assertEquals([miss.kind, miss.kind === "repriced" && miss.body.totalCents], ["repriced", 1331617]);
   const noLines = promoteMiss(SIGNED, { estimate_lines: null, accepted_at: null, updated_at: "t2" });
   assertEquals([noLines.kind, noLines.kind === "repriced" && noLines.body.totalCents], ["repriced", null], "lines removed");
 });

@@ -49,7 +49,7 @@ import { checkExpectedTotal, promoteMiss } from "../_shared/acceptTotal.ts";
 //      orders row — failure logs loudly; sync-design-status cannot repair this in SS mode,
 //      so the error is surfaced in the response for support. The promote is a
 //      compare-and-swap against the design as this handler read it (the lines step 1
-//      froze): a quote re-priced since WITHDRAWS the step-1 row and refuses 409 repriced (the accept race,
+//      froze): a quote whose total moved since WITHDRAWS the step-1 row and refuses 409 repriced (the accept race,
 //      _shared/acceptTotal.ts promoteMiss). That withdrawal is the one delete this flow
 //      makes. It happens before anything else refers to the row, and before the customer
 //      has been told anything was recorded.
@@ -961,8 +961,11 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
     //     happens before anything refers to the row (the image, the invoice request and the
     //     emails all come later), and without it the quote_once index would answer the
     //     customer's retry with "already accepted" for a design that never was.
-    //   retry: an unrelated write moved updated_at, and the lines are still the accepted
-    //     ones. Swap against the new value, a bounded number of times.
+    //   retry: the TOTAL is still the one accepted (whole cents, totalFromSnapshot, the
+    //     function `total` above was frozen with). An unrelated write moved updated_at, or a
+    //     re-stamp changed words but not money. Swap against the new value, a bounded number
+    //     of times. Deciding "repriced" on any change to the lines refused customers over
+    //     re-stamps that moved nothing they pay (review, 2026-09-17).
     //   stop, or retries spent: today's promote-failure story below, logged loudly.
     const PROMOTE_ATTEMPTS = 3;
     let casUpdatedAt: string | null = typeof design.updated_at === "string" ? design.updated_at : null;

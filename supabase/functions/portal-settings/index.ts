@@ -32,20 +32,20 @@ import { agreedBaseline, changeOrderDescription } from "../_shared/changeOrderDi
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { isConfigured as avalaraConfigured, resolveRate, type ResolvedRate } from "../_shared/salesTax.ts";
 import {
-  carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
-  type TaxLocation,
+  agreedTax, carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
+  type CarryDecision, type TaxLocation,
 } from "../_shared/taxChain.ts";
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
 import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
-  parseSetSalesLocation, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
+  parseSetSalesLocation, quoteInCustomerHands, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
+  restampSendOutcome,
 } from "../_shared/locationTax.ts";
 // The paid lookup (2026-09-17): verify_tax and send_invoice's informational check. The only
 // `allowLookup: true` lives inside paidLookup, so neither caller can skip the cap or the ledger.
 import {
   chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupSwitchRefusal, paidLookup,
-  parseVerifyTax, quoteSentRefusal, rateBucket, rateLimitedRefusal, verifiedTax, VERIFY_BUCKET_MAX,
-  VERIFY_BUCKET_WINDOW_MS, verifyBucket, verifyLookupRefusal, verifyQuoteRefusal,
+  parseVerifyTax, quoteSentRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
 } from "../_shared/taxSpend.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
@@ -193,7 +193,7 @@ const GATES: GateTable = {
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
 
-  // ── Sales tax (migrations 242-243) ───────────────────────────────────────
+  // ── Sales tax (migrations 243-244) ───────────────────────────────────────
   // The SAME area as the company rate (ss_tax_rate is saved through `save`, on this card's
   // area), so whoever may set the company rate sets the per-location ones — and nobody else:
   // not settings_branding, which owns the lot list and is granted so somebody can change a
@@ -4996,11 +4996,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const counts: Record<string, number> = {};
     for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
     let locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
-    // TAX FIELDS (migration 243), ADDITIVE, and only for a caller who can read settings_crm —
+    // TAX FIELDS (migration 244), ADDITIVE, and only for a caller who can read settings_crm —
     // the area that owns the rates. This action is also the Inventory tab's lot picker, reached
     // on inventory:view alone, and a person holding only that has no business with the rates.
     // Its own read, and TOLERANT: this list is the Settings card and the Inventory picker, so a
-    // deploy ahead of 243 must lose the tax fields, not the lots (the `status` fallback-select
+    // deploy ahead of 244 must lose the tax fields, not the lots (the `status` fallback-select
     // precedent). A failure is logged and the fields are simply left off.
     if (canRead("settings_crm") && locations.length) {
       const taxRes = await admin.from("builder_locations").select("id, state, zip, tax_rate, tax_label")
@@ -5055,7 +5055,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const id = String(payload.id ?? "").trim();
     if (!id) return json({ error: "id is required." }, 400);
     // Units at this location keep existing — their location_id FK is ON DELETE SET NULL,
-    // so they show "no location" rather than blocking the delete or vanishing.
+    // so they show "no location" rather than blocking the delete or vanishing. Quotes sold from
+    // it lose their sales_location_id the same way (migration 244): an issued, unsigned one
+    // falls to the company rate on its next re-stamp (a verified rate is kept), and a signed
+    // order keeps its agreed tax (see save_location_tax below).
     const { error, count } = await admin.from("builder_locations").delete({ count: "exact" })
       .eq("id", id).eq("client_id", clientId);
     if (error) return dbFail(req, clientId, "delete that location", error);
@@ -5063,7 +5066,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
-  // ── Sales tax settings (migrations 242-243) ─────────────────────────────────
+  // ── Sales tax settings (migrations 243-244) ─────────────────────────────────
   // One read for the tax card: who issues the paperwork, the company rate, each location's
   // local rate, and whether verified lookups are switched on for this tenant. `configured` says
   // only whether the platform holds Avalara credentials — a boolean, never the credentials or
@@ -5102,8 +5105,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // gated settings_branding: a rate printed on every quote from that lot is a money setting, and
   // belongs with the company rate's area. Blank clears it (the lot then uses the company rate);
   // an explicit 0 is kept. A rate is refused on a lot with no usable state + ZIP (see
-  // _shared/locationTax.ts) — clearing one never is. Changing a rate re-prices no issued quote:
-  // quotes pick it up when they are next submitted, or when staff re-pick the location.
+  // _shared/locationTax.ts) — clearing one never is.
+  // WHAT A RATE CHANGE DOES TO QUOTES. This action writes no quote, but it is not inert:
+  //   - an UNSIGNED quote sold from this lot keeps the tax already stamped on it only until it
+  //     is next re-stamped. Its next resubmit from the designer (by staff or by the customer),
+  //     or staff re-picking its location, prices it at the new rate (a cleared rate: the
+  //     company rate), and a customer who already holds that quote is issued the new total the
+  //     way any revision is;
+  //   - a quote carrying a VERIFIED rate keeps it through those re-stamps (taxChain
+  //     carryDecision), unless staff move its delivery state or ZIP;
+  //   - a SIGNED order never moves. Its change orders and amendments carry the tax the customer
+  //     agreed to (taxChain agreedTax), so a rate edited or cleared here, or the lot deleted,
+  //     raises no tax line on a change order. Only a deliberate feature may re-rate a signed
+  //     order, never this side effect.
   if (action === "save_location_tax") {
     const parsed = parseSaveLocationTax(payload);
     if (!parsed.ok) return json({ error: parsed.error, reason: parsed.reason }, parsed.status);
@@ -7648,13 +7662,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // or Copy-link instead (Carolyn 2026-08-23: email absence never blocks the quote).
   //
   // THE SEND ITSELF IS sendQuoteEmail, shared with restampQuoteTax below (2026-09-17): a quote
-  // re-priced after it was emailed is re-sent through exactly this code, so the two can never
+  // re-priced while the customer holds it is re-sent through exactly this code, so the two can never
   // disagree about what a quote email says. It reads the design fresh, so a caller that has
   // just re-priced it sends the new total. It checks no row scope — every caller does that
-  // first. `refused` carries this action's own refusals, unchanged.
+  // first. `refused` carries this action's own refusals, unchanged. `noEmail` is for the
+  // re-stamp's own wording only; resend_quote_email answers with `sent` and `reason` as before.
   const sendQuoteEmail = async (
     shortCode: string,
-  ): Promise<{ refused: Response } | { sent: boolean; reason: string | null }> => {
+  ): Promise<{ refused: Response } | { sent: boolean; reason: string | null; noEmail?: true }> => {
     const { data: d, error: dErr } = await admin
       .from("designs")
       .select("short_code, contact, selections, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines")
@@ -7673,7 +7688,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     const to = String(d?.contact?.email || "").trim();
-    if (!to) return { sent: false, reason: "no email address on this design" };
+    if (!to) return { sent: false, reason: "no email address on this design", noEmail: true };
 
     const total = totalFromSnapshot(d.estimate_lines);
     const sel = d.selections || {};
@@ -7777,8 +7792,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *   2. refuse an agreed or ordered quote (refuseIfAgreed);
    *   3. refuse when the lines moved since the caller priced them (a resubmit landed): the new
    *      tax was computed for lines the quote no longer has — 409 `changed`;
-   *   4. restampPlan: no issued quote → 409 `no_quote`; an emailed quote whose total would move,
-   *      without confirmResend → 409 `quote_sent` naming both totals;
+   *   4. restampPlan: no issued quote → 409 `no_quote`; a quote the customer holds
+   *      (quoteInCustomerHands: emailed, or numbered and past draft, since a texted or printed
+   *      quote never stamps ss_quote_sent_at) whose total would move, without confirmResend →
+   *      409 `quote_sent` naming both totals;
    *   5. write estimate_lines + total_cents (+ alsoSet) as a compare-and-swap on updated_at
    *      (designs_set_updated_at bumps it on every update) and accepted_at still null, checked:
    *      no row means somebody else wrote first → 409 `changed`;
@@ -7787,12 +7804,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *      and a slow PDF or email must not stand between the two). Awaited, but it cannot
    *      refuse: the quote is already written, and a throw is swallowed;
    *   6. regenerate the quote PDF, best-effort (regenerateQuotePdf's own contract);
-   *   7. when the quote had been emailed and its total moved, send it again through
+   *   7. when the customer holds the quote and its total moved, email it again through
    *      sendQuoteEmail, but only when step 6 rebuilt the PDF (restampResend). The email
    *      links the PDF's fixed path, so a failed rebuild would send the new total next to a
-   *      PDF that still prints the old one. A skipped or failed send does not undo the
-   *      re-price. The rep is told (`resent: false`, `resendReason`) and can reach for
-   *      Print or Copy-link, as with resend_quote_email itself.
+   *      PDF that still prints the old one. Email is the only re-send: nothing here texts.
+   *      A skipped or failed send does not undo the re-price. The rep is told
+   *      (`resent: false`, and a `resendReason` sentence saying the customer has not been sent
+   *      the new total, restampSendOutcome) — a customer with no email address is theirs to
+   *      tell.
    * It never looks anything up and never charges: pricing is the caller's business.
    *
    * KNOWN WINDOW, NOT CLOSED HERE: submit-estimate reads sales_location_id, spends seconds
@@ -7838,7 +7857,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
 
     const plan = restampPlan({
-      snap: fresh.estimate_lines, tax, sent: !!fresh.ss_quote_sent_at, confirmResend: opts.confirmResend,
+      snap: fresh.estimate_lines, tax, inCustomerHands: quoteInCustomerHands(fresh), confirmResend: opts.confirmResend,
     });
     if (!plan.ok) {
       if (plan.reason === "no_quote") {
@@ -7850,7 +7869,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return {
         ok: false,
         response: json({
-          error: "This quote has already been emailed to the customer and its total would change. Confirm to update it and email the customer the new total.",
+          error: "The customer already has this quote, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
           reason: "quote_sent",
           quoteNumber: fresh.ss_quote_number ?? null,
           totalCents: plan.previousTotalCents,
@@ -7886,11 +7905,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     let resendReason: string | null = gate.send ? null : gate.reason;
     if (gate.send) {
       const sent = await sendQuoteEmail(shortCode);
-      if ("refused" in sent) resendReason = "the quote couldn't be emailed from here";
-      else {
-        resent = sent.sent;
-        resendReason = sent.reason;
-      }
+      ({ resent, resendReason } = restampSendOutcome("refused" in sent ? "refused" : sent));
     }
     return {
       ok: true, tax, totalCents: plan.totalCents, previousTotalCents: plan.previousTotalCents,
@@ -7898,7 +7913,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
   };
 
-  // ── set_design_sales_location: which lot a quote was sold from (migration 243) ──────
+  // ── set_design_sales_location: which lot a quote was sold from (migration 244) ──────
   //
   // Staff pick it; a shopper never does (this function requires a signed-in member). The
   // location decides the quote's FREE default rate (_shared/taxChain.ts), so picking one on an
@@ -7911,7 +7926,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //   - otherwise the chain without the home lot (clearing the location means "no lot", and
   //     borrowing the rep's own lot would put one straight back): the location's rate, else the
   //     company rate, else refuse. allowLookup stays FALSE — this can never make a paid call.
-  // The location must be this tenant's and active; the composite foreign key (243) enforces the
+  // The location must be this tenant's and active; the composite foreign key (244) enforces the
   // tenant again in the database.
   if (action === "set_design_sales_location") {
     const parsed = parseSetSalesLocation(payload);
@@ -8004,14 +8019,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //   2. an accepted or ordered quote: a new total there is a change order, never a re-stamp;
   //   3. no issued quote → "issue the quote first"; 4. no usable state + ZIP;
   //   5. an operator in view-as: confirmVerify, and a STRICT audit row (no row, no spend);
-  //   6. an emailed quote: confirmResend, asked now because after the lookup the call is paid;
-  //   7. the per-minute bucket; 8-10. paidLookup: the daily cap (fails closed), the ledger row,
-  //      the request, the row closed;
+  //   6. a quote the customer already holds (emailed, texted or printed: quoteInCustomerHands):
+  //      confirmResend, asked now because after the lookup the call is paid;
+  //   7-9. paidLookup: the claim (the daily cap, the per-minute cap and the ledger row in one
+  //      locked database step, failing closed), the request, the row closed;
   //   on failure: the quote is untouched. A verified rate the builder paid for earlier is never
   //      replaced by a fallback because the service was down this time;
-  //   11. restampQuoteTax writes estimate_lines + total_cents, checked, and only then
-  //   12. the charge, keyed on the ledger row (disarmed meters make it a no-op), then
-  //   13. the PDF, and a re-send when the emailed total moved.
+  //   10. restampQuoteTax writes estimate_lines + total_cents, checked, and only then
+  //   11. the charge, keyed on the ledger row (disarmed meters make it a no-op), then
+  //   12. the PDF, and an email re-send when the total the customer holds moved.
   // A write refused after the lookup (a resubmit landed, the customer accepted) returns that
   // refusal and charges nothing: the call was made and is on the ledger, and nobody is billed for
   // a rate that never reached a document.
@@ -8052,16 +8068,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     }
     {
       const r = quoteSentRefusal({
-        sent: !!d.ss_quote_sent_at, confirmResend, quoteNumber: d.ss_quote_number, totalCents: designTotalCents(d.estimate_lines),
+        inCustomerHands: quoteInCustomerHands(d), confirmResend, quoteNumber: d.ss_quote_number,
+        totalCents: designTotalCents(d.estimate_lines),
       });
       if (r) return json(r.body, r.status);
-    }
-    {
-      const bucket = await rateBucket(admin, verifyBucket(clientId), VERIFY_BUCKET_MAX, VERIFY_BUCKET_WINDOW_MS);
-      if (bucket.over) {
-        const r = rateLimitedRefusal();
-        return json(r.body, r.status);
-      }
     }
 
     // deno-lint-ignore no-explicit-any
@@ -9229,9 +9239,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // NO LOOKUP HERE (2026-09-16/17). This used to re-ask Avalara on every change, so a rep
     // recolouring a roof on a signed order made a billed call nobody chose to make. It now
     // re-stamps through the same chain submit-estimate uses (_shared/taxChain.ts):
-    //   1. a verified rate on the order is CARRIED, while the delivery state and ZIP still match
-    //      the ones it was verified for — the caller here is always staff, so an address that
-    //      moved falls through with "address changed — re-verify";
+    //   0. a SIGNED order CARRIES the tax the customer agreed to (agreedTax): rate, label,
+    //      source, jurisdiction, basis, location and times verbatim, the amount and pools
+    //      recomputed for the new lines. Whatever rate it was, verified or a location's or the
+    //      company's, and whatever happened since: a lot deleted or re-rated, a delivery address
+    //      edited. A change order must never carry a tax-rate line nobody chose (review,
+    //      2026-09-17); the rate on a signed order changes only by a deliberate feature;
+    //   1. otherwise (nobody has signed it) a verified rate is CARRIED while the delivery state
+    //      and ZIP still match the ones it was verified for — the caller here is always staff, so
+    //      an address that moved falls through with "address changed — re-verify";
     //   2. the order's sales location rate;
     //   3. the company rate;
     //   4. refuse — never the silent 0% this path used to price a signed order's tax at.
@@ -9243,9 +9259,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (newSnap.tax) {
       const addrCo = addressFrom(d.contact);
       const poolsCo = subtotalsFromSnapshot(newSnap)!; // non-null: snap.lines was checked above
-      const carryCo = carryDecision({ staffCaller: true, storedTax: snap.tax, address: addrCo });
+      const signedTaxCo = agreedTax(d);
+      const carryCo: CarryDecision = signedTaxCo
+        ? { carry: true }
+        : carryDecision({ staffCaller: true, storedTax: snap.tax, address: addrCo });
       if (carryCo.carry) {
-        newSnap.tax = carriedTax(snap.tax, poolsCo);
+        newSnap.tax = carriedTax(signedTaxCo ?? snap.tax, poolsCo);
       } else {
         const [csRes, locRes] = await Promise.all([
           admin.from("client_settings").select("ss_tax_rate, ss_tax_label").eq("client_id", clientId).maybeSingle(),
@@ -10408,7 +10427,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // on this lookup's ledger row and posted only when a rate came back — the `tax_invoice`
         // meter is disarmed, so today it is a no-op.
         //
-        // The switch is read on its own, never folded into cur0's select: if migration 242 is
+        // The switch is read on its own, never folded into cur0's select: if migration 243 is
         // not applied yet, an unknown column there would null cur0 and send an SS tenant down the
         // CRM branch. Here it only means the check is skipped.
         let taxCheck: InvoiceTaxCheck = { status: "skipped", reason: "lookup_disabled" };

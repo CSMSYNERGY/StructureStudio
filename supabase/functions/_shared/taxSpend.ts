@@ -10,15 +10,17 @@
 // that forgets the cap, so both spenders call this one.
 //
 // THE ORDER paidLookup FOLLOWS, and why each step is where it is:
-//   1. the daily cap, counted from the ledger. FAILS CLOSED: an unreadable count refuses,
-//      because an uncapped run is billed to the account;
-//   2. the ledger row, written BEFORE the request. A row that could not be written refuses:
-//      a lookup with no row is a lookup nothing counts;
-//   3. the request (resolveRate, opted in);
-//   4. the row closed with what came back. Best-effort, because the request already happened,
+//   1. the claim (taxLookups.ts claimLookup → claim_tax_lookup): the daily cap, the Verify
+//      button's per-minute cap and the ledger row, in ONE locked database step, BEFORE the
+//      request. Anything but a written row refuses: an unreadable count or an unwritable row is
+//      an uncapped run billed to the account, and a lookup with no row is one nothing counts;
+//   2. the request (resolveRate, opted in);
+//   3. the row closed with what came back. Best-effort, because the request already happened,
 //      and an in-flight row still counts toward the cap.
-// The cap can overshoot by the number of lookups already in flight when it is read (two presses
-// at 99 both pass). The Verify path's rate bucket bounds how many those can be.
+// The cap cannot be overshot by a parallel burst. The claim for one tenant waits on the lock
+// until the previous claim's row is committed, then counts it. This replaced a count read here
+// and an insert made afterwards, which let every press in a burst at 99 through, plus a
+// separate fail-open per-minute counter.
 //
 // ONE CHARGE PER LEDGER ROW, AND ONLY FOR A RATE THAT CAME BACK. chargeLookup keys the charge on
 // the row id (taxMeter's ledger key), so a deliberate second press is a second charge and a
@@ -44,7 +46,7 @@ import {
   taxable,
 } from "./salesTax.ts";
 import { stampTax } from "./taxChain.ts";
-import { countLookups24h, DAILY_TAX_LOOKUP_CAP, finishLookup, insertLookup } from "./taxLookups.ts";
+import { claimLookup, DAILY_TAX_LOOKUP_CAP, finishLookup, TAX_LOOKUP_MINUTE_WINDOW_SECONDS } from "./taxLookups.ts";
 import { chargeTaxCalculation, type TaxChargeResult, type TaxMeterKind } from "./taxMeter.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -78,7 +80,7 @@ export function parseVerifyTax(
 }
 
 /**
- * May this tenant make a lookup at all? The per-tenant switch (migration 242), then StructureStudio
+ * May this tenant make a lookup at all? The per-tenant switch (migration 243), then StructureStudio
  * paperwork (a CRM-mode tenant has no quote of ours to stamp), then platform credentials. All
  * three are `lookup_disabled`: to the person pressing, each means the same thing — not here, not
  * now — and the sentence says which.
@@ -129,80 +131,43 @@ export function verifyQuoteRefusal(input: {
 }
 
 /**
- * An emailed quote needs confirmResend BEFORE the lookup, not after it. Whether the total moves
- * is only known once the rate is back, and by then the call is paid for, so the confirmation
- * covers "it may change, and if it does the customer is emailed the new quote". After the
- * lookup, restampQuoteTax re-sends only when the total really moved.
+ * A quote the customer already holds needs confirmResend BEFORE the lookup, not after it.
+ * Whether the total moves is only known once the rate is back, and by then the call is paid
+ * for, so the confirmation covers "it may change, and if it does the customer has to hear the
+ * new total". After the lookup, restampQuoteTax re-sends only when the total really moved, and
+ * only by email; a customer it cannot email is named back to the rep to tell.
+ *
+ * `inCustomerHands` is locationTax.ts' quoteInCustomerHands: emailed, or issued and handed over
+ * some other way (a text, a print). The sentence does not say how the customer got it.
  */
 export function quoteSentRefusal(input: {
-  sent: boolean;
+  inCustomerHands: boolean;
   confirmResend: boolean;
   quoteNumber: unknown;
   totalCents: number | null;
 }): SpendRefusal | null {
-  if (!input.sent || input.confirmResend === true) return null;
+  if (!input.inCustomerHands || input.confirmResend === true) return null;
   return refuse(409, "quote_sent",
-    "This quote has already been emailed to the customer. Verifying the tax may change its total, and if it does the customer is emailed the updated quote. Confirm to go ahead.",
+    "The customer already has this quote, and verifying the tax may change its total. If it does, we email them the updated quote, or tell you to let them know if we can't. Confirm to go ahead.",
     { quoteNumber: input.quoteNumber ?? null, totalCents: input.totalCents });
 }
 
-// ── The burst limit (migration 204's pattern) ──────────────────────────────────────────────
-
-/** Presses per tenant per window. A deliberate button does not need more; a loop does. */
-export const VERIFY_BUCKET_MAX = 10;
-export const VERIFY_BUCKET_WINDOW_MS = 60_000;
-export const verifyBucket = (clientId: string) => `portal-settings:verify_tax:${clientId}`;
-
-/**
- * One fixed-window counter in `rate_buckets` (migration 204). The same count-first-then-decide
- * shape as delivery-quote's overCap and submit-estimate's inline cap: refusing before the
- * increment freezes the counter at the cap. Those two are local to their functions, so this is
- * the third copy of the pattern; keep them alike.
- *
- * FAILS OPEN, like its twins. That is safe here only because the daily cap behind it fails
- * CLOSED: an unreadable bucket can let a burst through, and the ledger still stops the day at
- * DAILY_TAX_LOOKUP_CAP. Never throws.
- */
-export async function rateBucket(
-  admin: Admin,
-  bucket: string,
-  max: number,
-  windowMs: number,
-  nowMs: number = Date.now(),
-): Promise<{ over: boolean; hits: number }> {
-  try {
-    const { data: rl, error } = await admin.from("rate_buckets")
-      .select("window_started_at, hits").eq("bucket", bucket).maybeSingle();
-    if (error) return { over: false, hits: 0 };
-    const startedAt = rl?.window_started_at ? Date.parse(String(rl.window_started_at)) : NaN;
-    const inWindow = Number.isFinite(startedAt) && nowMs - startedAt < windowMs;
-    const hits = (inWindow ? Number(rl?.hits) || 0 : 0) + 1;
-    // Best-effort: a failed write means this press went uncounted, the fail-open direction.
-    await admin.from("rate_buckets").upsert({
-      bucket,
-      window_started_at: inWindow ? rl.window_started_at : new Date(nowMs).toISOString(),
-      hits,
-      updated_at: new Date(nowMs).toISOString(),
-    }, { onConflict: "bucket" });
-    return { over: hits > max, hits };
-  } catch {
-    return { over: false, hits: 0 };
-  }
-}
-
+/** Our own per-minute limit on Verify presses (claim_tax_lookup's `rate_limited`). 429, apart
+ *  from Avalara's own 429, which is a 502 `lookup_failed` with failure `rate_limited`. */
 export function rateLimitedRefusal(): SpendRefusal {
-  return refuse(429, "rate_limited", "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again.",
-    { retryAfterSeconds: Math.ceil(VERIFY_BUCKET_WINDOW_MS / 1000) });
+  return refuse(429, "rate_limited", "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
+    { retryAfterSeconds: TAX_LOOKUP_MINUTE_WINDOW_SECONDS });
 }
 
 // ── The spend ──────────────────────────────────────────────────────────────────────────────
 
-/** Why a paid lookup produced no rate: Avalara's answer, or one of ours before any request. */
-export type PaidLookupFailure = AvalaraFailure | "not_configured" | "daily_cap" | "ledger_unavailable";
+/** Why a paid lookup produced no rate: Avalara's answer, or one of ours before any request.
+ *  `minute_cap` is OUR per-minute Verify limit; `rate_limited` stays Avalara's 429. */
+export type PaidLookupFailure = AvalaraFailure | "not_configured" | "daily_cap" | "minute_cap" | "ledger_unavailable";
 
 export type PaidLookup =
   | { ok: true; lookupId: string; rate: number; jurisdiction: string | null; ledgerClosed: boolean }
-  /** `lookupId` is null when no row was written (the cap, or the insert itself failed). */
+  /** `lookupId` is null when no row was written (a cap refused the claim, or it failed). */
   | { ok: false; failure: PaidLookupFailure; lookupId: string | null; ledgerClosed: boolean };
 
 /**
@@ -224,11 +189,7 @@ export async function paidLookup(admin: Admin, input: {
   operator?: boolean;
 }): Promise<PaidLookup> {
   try {
-    const count = await countLookups24h(admin, input.clientId);
-    if (count == null) return { ok: false, failure: "ledger_unavailable", lookupId: null, ledgerClosed: true };
-    if (count >= DAILY_TAX_LOOKUP_CAP) return { ok: false, failure: "daily_cap", lookupId: null, ledgerClosed: true };
-
-    const lookupId = await insertLookup(admin, {
+    const claim = await claimLookup(admin, {
       clientId: input.clientId,
       kind: input.kind,
       shortCode: input.shortCode ?? null,
@@ -238,7 +199,11 @@ export async function paidLookup(admin: Admin, input: {
       region: stateCode(input.address?.state) || null,
       postalCode: input.address?.zip ?? null,
     });
-    if (!lookupId) return { ok: false, failure: "ledger_unavailable", lookupId: null, ledgerClosed: true };
+    if (!claim.ok) {
+      const failure: PaidLookupFailure = claim.refused === "rate_limited" ? "minute_cap" : claim.refused;
+      return { ok: false, failure, lookupId: null, ledgerClosed: true };
+    }
+    const lookupId = claim.id;
 
     // An object rather than two `let`s: the callback writes these, and TypeScript would narrow a
     // `let reached = false` to `false` straight through the await.
@@ -281,6 +246,8 @@ export function verifyLookupRefusal(failure: PaidLookupFailure): SpendRefusal {
       return refuse(429, "daily_cap",
         `This account has used its ${DAILY_TAX_LOOKUP_CAP} verified tax lookups for the last 24 hours. Nothing was looked up. ${keeps}`,
         { dailyCap: DAILY_TAX_LOOKUP_CAP });
+    case "minute_cap":
+      return rateLimitedRefusal();
     case "ledger_unavailable":
       return refuse(503, "ledger_unavailable", `Couldn't record the tax lookup, so nothing was looked up. Try again in a minute. ${keeps}`);
     case "not_configured":

@@ -23,8 +23,8 @@ import { cladLineName } from "../_shared/claddingLineName.ts";
 import { addressFrom } from "../_shared/contactAddress.ts";
 import { resolveRate } from "../_shared/salesTax.ts";
 import {
-  carriedTax, carryDecision, chooseDefaultRate, stampTax, TAX_LOCATION_COLUMNS, taxLocationFrom,
-  type DefaultRate, type TaxLocation,
+  agreedTax, carriedTax, carryDecision, chooseDefaultRate, homeLotApplies, stampTax, TAX_LOCATION_COLUMNS,
+  taxLocationFrom, type CarryDecision, type DefaultRate, type TaxLocation,
 } from "../_shared/taxChain.ts";
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 // draft → sent is this function's job since migration 241; save_design no longer promotes.
@@ -2565,15 +2565,22 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // endpoint runs on every submit and resubmit, from anyone holding the designer link. A
     // verified rate is bought only deliberately, by staff, through portal-settings' verify
     // action. A submit stamps the chain in _shared/taxChain.ts instead:
+    //   0. a SIGNED order (the amendment path) carries the tax the customer agreed to — rate,
+    //      label, basis, location and all — with only the amount and pools recomputed for the
+    //      new lines (agreedTax). A lot deleted or re-rated since the signature, or a staff
+    //      member's address edit, must not put a tax-rate line on the change order; the rate on
+    //      a signed order changes only by a deliberate feature;
     //   1. a verified rate already on this quote, carried over. A shopper's resubmit always
     //      carries it: they send the delivery address, so an address change they control must
     //      not discard a rate the builder paid for. A staff resubmit carries it while the
     //      delivery state and ZIP are unchanged, and otherwise falls through to 2-4 with
     //      "address changed — re-verify";
-    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 243);
-    //   3. a staff member issuing a quote that has no location and is not signed: their home
-    //      lot's rate (migration 234), and that lot is recorded as the quote's location after
-    //      the persist below;
+    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 244);
+    //   3. a staff member issuing a quote for the FIRST time (no quote number before this
+    //      submit) that has no location: their home lot's rate (migration 234), and that lot is
+    //      recorded as the quote's location after the persist below. Never on a resubmit: an
+    //      issued quote with no location may be one staff deliberately cleared, and the home lot
+    //      would put it straight back (homeLotApplies);
     //   4. the company rate (client_settings.ss_tax_rate);
     //   5. refuse.
     // A RESUBMIT RE-STAMPS through that chain — still the live-until-signed rule: a quote is a
@@ -2587,7 +2594,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const taxPools = subtotalsFromSnapshot(estimateLines)!;
     // deno-lint-ignore no-explicit-any
     const storedTax: Record<string, any> | null = (existingDesign.estimate_lines as any)?.tax ?? null;
-    const taxCarry = carryDecision({ staffCaller, storedTax, address: taxAddr });
+    const signedTax = agreedTax(existingDesign);
+    const taxCarry: CarryDecision = signedTax ? { carry: true } : carryDecision({ staffCaller, storedTax, address: taxAddr });
     let taxDefault: DefaultRate | null = null;
     if (!taxCarry.carry) {
       let salesLocationId: string | null = null;
@@ -2599,7 +2607,10 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         if (dErr) throw dErr;
         salesLocationId = dRow?.sales_location_id ? String(dRow.sales_location_id) : null;
         let lotId = salesLocationId;
-        const fromHome = !lotId && staffCaller && !!callerUserId && !existingDesign.accepted_at;
+        const fromHome = homeLotApplies({
+          salesLocationId: lotId, staffCaller, callerUserId,
+          firstIssue: !existingDesign.ss_quote_number, signed: !!existingDesign.accepted_at,
+        });
         if (fromHome) {
           // limit(1), not maybeSingle(): the same duplicate-row tolerance as the staff check above.
           const { data: cu, error: cuErr } = await supabase.from("client_users")
@@ -2619,7 +2630,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         // rate would be emailed at a total the builder did not set, and the next resubmit
         // would quietly change it. Nothing about the quote has been written yet; a first issue
         // loses its allocated number, as it does on every refusal after the allocation above.
-        // This is also what a deploy ahead of migration 243 looks like.
+        // This is also what a deploy ahead of migration 244 looks like.
         await logEdgeError({
           fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
           message: `sales location read failed: ${(e as { message?: string })?.message ?? String(e)}`,
@@ -2690,7 +2701,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // the stored figure and the printed one are the same object, not two computations.
     (estimateLines as Record<string, unknown>).tax = resolved
       ? stampTax({ pools: taxPools, resolved, choice: taxDefault!, address: taxAddr, reason: taxCarry.carry ? null : taxCarry.reason })
-      : carriedTax(storedTax!, taxPools);
+      : carriedTax((signedTax ?? storedTax)!, taxPools);
 
     // WHAT THE CUSTOMER OWES, TAX INCLUDED (audit 2026-09-06). `oppValue` is the pre-tax
     // subtotal — it is computed back in step 7b for the CRM opportunity, before the tax stamp

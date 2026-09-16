@@ -4,16 +4,31 @@
 // Since 2026-09-16 no automatic path calls Avalara (salesTax.ts, `allowLookup`). A submit, a
 // resubmit and a change order stamp a free default instead, from a chain:
 //
+//   0. a SIGNED order carries the tax the customer AGREED to, whatever it was — agreedTax. The
+//      chain below is for quotes nobody has signed;
 //   1. a VERIFIED rate already on the quote (tax.source "avalara"), carried over — carryDecision;
 //   2. the rate of the quote's sales location (designs.sales_location_id → builder_locations,
-//      migration 243), when that location is this tenant's, active, and carries a rate;
-//   3. when the quote has NO location and a signed-in staff member is issuing it: their home
-//      lot's rate (client_users.location_id, migration 234) — and that lot is then recorded as
-//      the quote's location, so the next resubmit, by anyone, lands on the same rate;
+//      migration 244), when that location is this tenant's, active, and carries a rate;
+//   3. when the quote has NO location and a signed-in staff member is issuing it for the FIRST
+//      time: their home lot's rate (client_users.location_id, migration 234) — and that lot is
+//      then recorded as the quote's location, so the next resubmit, by anyone, lands on the same
+//      rate (homeLotApplies);
 //   4. the company rate (client_settings.ss_tax_rate);
 //   5. nothing — the caller refuses rather than issue an untaxed bill.
 // Links 2-4 are chooseDefaultRate. A location rate is the builder's LOCAL rate: right in an
 // origin-sourced state, a guess across a state line. That is what the paid lookup is for.
+//
+// WHY THE HOME LOT IS A FIRST-ISSUE RULE (review, 2026-09-17). An issued quote with no location
+// is either one that never had a lot or one staff deliberately CLEARED (set_design_sales_location
+// with null, or a deleted lot). The two are indistinguishable on the row, and re-applying the home
+// lot on every resubmit put a cleared location straight back, at that lot's rate, the next time
+// anyone on staff pressed Submit. So link 3 answers only before the quote has a number.
+//
+// WHY A SIGNED ORDER CARRIES EVERY AGREED RATE (review, 2026-09-17). Carry-over used to be for a
+// verified rate only, so a change order on an order signed at a LOCATION rate re-ran the chain:
+// a lot deleted or its rate edited since the signature priced the change at a different rate,
+// and the change order put a tax-rate line in front of the customer that nobody chose. The rate
+// on a signed order changes only by a deliberate future feature, never as a side effect.
 //
 // WHY CARRY-OVER IS GATED ON THE CALLER. The delivery address arrives in the request body, and
 // submit-estimate is reachable with the public anon key. If an address change invalidated a
@@ -139,6 +154,22 @@ export function chooseDefaultRate(input: {
   return { rate: company, basis: "company", label: companyLabel, locationId: null, locationName: null, recordLocationId: null };
 }
 
+/**
+ * May link 3 run? Only for a staff member signed in as a user (the home lot belongs to a user),
+ * on a quote with no location, issued for the FIRST time (no quote number before this submit),
+ * that nobody has signed. See the header for why a resubmit never qualifies.
+ */
+export function homeLotApplies(input: {
+  salesLocationId: string | null;
+  staffCaller: boolean;
+  callerUserId: string | null;
+  firstIssue: boolean;
+  signed: boolean;
+}): boolean {
+  return !text(input.salesLocationId) && input.staffCaller === true && !!text(input.callerUserId) &&
+    input.firstIssue === true && input.signed !== true;
+}
+
 /** The first five characters of a ZIP, trimmed: "63090-1234" and "63090" are one place. */
 const zip5 = (zip: unknown): string => String(zip ?? "").trim().slice(0, 5);
 
@@ -171,14 +202,53 @@ export function carryDecision(input: { staffCaller: boolean; storedTax: unknown;
   return sameTaxAddress(t.address, input.address) ? { carry: true } : { carry: false, reason: ADDRESS_CHANGED };
 }
 
+const taxObject = (v: unknown): Record<string, unknown> | null =>
+  v && typeof v === "object" && !Array.isArray(v) && sane((v as Record<string, unknown>).rate) != null
+    ? v as Record<string, unknown>
+    : null;
+
 /**
- * A verified tax moved onto re-priced lines. The rate, jurisdiction, label, address, source and
- * times are carried VERBATIM; what is recomputed is what the lines decide — the amount (through
- * taxOn, at the carried rate) and the four pool figures. The pools cannot be carried: the quote
- * PDF prints its Total from `taxableBase + nonTaxableNet + amount`, so stale pools would print a
- * total for lines the quote no longer has. A stamp from before `basis` existed gains it.
+ * Link 0: the tax a SIGNED order carries, or null for a design nobody has signed (the chain
+ * runs) and for a signed one with no usable tax anywhere (a pre-tax agreement, which the chain
+ * then prices as it always did).
+ *
+ * Signed means accepted_at is set, or the accepted snapshot carries a tax — the second arm
+ * because accepted_snapshot is the agreement even where accepted_at reads null (a promote that
+ * failed after the acceptance froze it). The agreed tax is the accepted snapshot's (153: moved
+ * forward only by an acknowledged change order), else the design's own stamped tax — the same
+ * order changeOrderDiff's agreedBaseline reads the lines in, for designs signed before
+ * accepted_snapshot existed.
+ *
+ * Callers pass it to carriedTax: rate, label, source, jurisdiction, basis, location, address and
+ * the lookup times verbatim; the amount and pools recomputed for the new lines. Whatever happened
+ * to the lot or the company rate since the signature, and whoever amends it, staff or not.
+ */
+export function agreedTax(design: unknown): Record<string, unknown> | null {
+  const d = (design ?? {}) as { accepted_at?: unknown; accepted_snapshot?: unknown; estimate_lines?: unknown };
+  const snap = d.accepted_snapshot as { estimateLines?: { tax?: unknown } } | null | undefined;
+  const fromAgreement = taxObject(snap?.estimateLines?.tax);
+  const signed = d.accepted_at != null || fromAgreement != null;
+  if (!signed) return null;
+  return fromAgreement ?? taxObject((d.estimate_lines as { tax?: unknown } | null | undefined)?.tax);
+}
+
+/**
+ * A tax moved onto re-priced lines: a verified rate a resubmit keeps (carryDecision), or the
+ * rate a signed order was agreed at (agreedTax). The rate, jurisdiction, label, address, source,
+ * basis, location and times are carried VERBATIM; what is recomputed is what the lines decide —
+ * the amount (through taxOn, at the carried rate) and the four pool figures. The pools cannot be
+ * carried: the quote PDF prints its Total from `taxableBase + nonTaxableNet + amount`, so stale
+ * pools would print a total for lines the quote no longer has.
+ *
+ * A stamp from before `basis` existed gains one: "avalara" for a verified rate, and "company"
+ * for a default — every default stamped before the chain was the company rate. verifiedAt is
+ * the lookup time for a verified rate (its resolvedAt on an old stamp), null otherwise.
  */
 export function carriedTax(storedTax: Record<string, unknown>, pools: TaxPools): Record<string, unknown> {
+  const verified = storedTax.source === "avalara";
+  const basis = verified ? "avalara"
+    : storedTax.basis === "location" || storedTax.basis === "company" ? storedTax.basis
+    : "company";
   return {
     ...storedTax,
     amount: taxOn(pools.taxableBase, Number(storedTax.rate)),
@@ -186,10 +256,10 @@ export function carriedTax(storedTax: Record<string, unknown>, pools: TaxPools):
     nonTaxableSubtotal: pools.nonTaxable,
     taxableBase: pools.taxableBase,
     nonTaxableNet: pools.nonTaxableNet,
-    basis: "avalara",
+    basis,
     locationId: storedTax.locationId ?? null,
     locationName: storedTax.locationName ?? null,
-    verifiedAt: storedTax.verifiedAt ?? storedTax.resolvedAt ?? null,
+    verifiedAt: verified ? (storedTax.verifiedAt ?? storedTax.resolvedAt ?? null) : null,
   };
 }
 

@@ -2,11 +2,14 @@
 // with no registry access — the same rule the other _shared tests follow.
 //
 // The ledger is the SPEND CAP for Avalara calls, so the failures that matter are the quiet
-// ones: a count that cannot be read and is treated as zero, an insert that failed and is
-// treated as written, a finished row that a second callback rewrites. Every one of those lets
-// calls through that nothing counted. Most of the effort below is on those paths.
+// ones: a claim whose answer cannot be trusted and is treated as written, an insert that failed
+// and is treated as written, a finished row that a second callback rewrites. Every one of those
+// lets calls through that nothing counted. Most of the effort below is on those paths. The cap's
+// atomicity lives in SQL (claim_tax_lookup, migration 243's probe); what is pinned here is that
+// the function is the one the code calls, with the arguments and the window the code assumes.
 
 import {
+  claimLookup,
   countLookups24h,
   DAILY_TAX_LOOKUP_CAP,
   finishedColumns,
@@ -14,6 +17,8 @@ import {
   insertLookup,
   PING_CLIENT_ID,
   pingResponse,
+  TAX_LOOKUP_MINUTE_WINDOW_SECONDS,
+  VERIFY_LOOKUPS_PER_MINUTE,
 } from "./taxLookups.ts";
 import { pingAvalara } from "./salesTax.ts";
 import type { AvalaraPing, AvalaraResult } from "./salesTax.ts";
@@ -45,7 +50,7 @@ function makeAdmin(answer: { data?: unknown; error?: unknown; count?: unknown })
 const throwingAdmin = { from() { throw new Error("network"); } };
 const op = (ops: unknown[][], name: string) => ops.find((o) => o[0] === name);
 
-// ── insertLookup: the row IS the cap ─────────────────────────────────────────────────────
+// ── insertLookup: the ping's row, which no cap counts ───────────────────────────────────
 
 Deno.test("insertLookup writes the in-flight row and returns its id", async () => {
   const { admin, ops } = makeAdmin({ data: { id: ROW_ID } });
@@ -91,6 +96,79 @@ Deno.test("insertLookup refuses a row it could never count, without writing", as
     const { admin, ops } = makeAdmin({ data: { id: ROW_ID } });
     assertEquals(await insertLookup(admin, row), null, JSON.stringify(row));
     assertEquals(ops.length, 0, "no write for an uncountable row");
+  }
+});
+
+// ── claimLookup: the cap and the row in one database step ────────────────────────────────
+
+/** An rpc-only client stub: records every call, resolves to one canned answer (or throws). */
+function makeRpcAdmin(answer: { data?: unknown; error?: unknown } | "throw") {
+  const calls: [string, Record<string, unknown>][] = [];
+  const admin = {
+    rpc(name: string, args: Record<string, unknown>) {
+      calls.push([name, args]);
+      if (answer === "throw") return Promise.reject(new Error("network"));
+      return Promise.resolve({ data: null, error: null, ...answer });
+    },
+    from() {
+      throw new Error("claimLookup must not read or write a table directly");
+    },
+  };
+  return { admin, calls };
+}
+
+Deno.test("claimLookup: one RPC carries the cap, the per-minute cap for verify, and the row", async () => {
+  const verify = makeRpcAdmin({ data: { id: ROW_ID } });
+  assertEquals(await claimLookup(verify.admin, {
+    clientId: "acme", kind: "verify", shortCode: "SS-ABCDEFGH", actorUserId: USER_ID, operator: true, region: "MO", postalCode: "63090",
+  }), { ok: true, id: ROW_ID });
+  assertEquals(verify.calls, [["claim_tax_lookup", {
+    p_client_id: "acme", p_kind: "verify", p_daily_cap: DAILY_TAX_LOOKUP_CAP, p_minute_cap: VERIFY_LOOKUPS_PER_MINUTE,
+    p_short_code: "SS-ABCDEFGH", p_invoice_number: null, p_actor_user_id: USER_ID, p_operator: true,
+    p_region: "MO", p_postal_code: "63090",
+  }]]);
+
+  const invoice = makeRpcAdmin({ data: { id: ROW_ID } });
+  await claimLookup(invoice.admin, {
+    clientId: "acme", kind: "invoice", invoiceNumber: 1042, shortCode: "S".repeat(100), actorUserId: "not-a-uuid", region: "R".repeat(30),
+  });
+  const args = invoice.calls[0][1];
+  assertEquals(
+    [args.p_minute_cap, args.p_invoice_number, String(args.p_short_code).length, args.p_actor_user_id, String(args.p_region).length, args.p_operator],
+    [null, "1042", 64, null, 16, false],
+    "an invoice claim has no per-minute cap; free text is clipped exactly as the insert clips it",
+  );
+});
+
+Deno.test("claimLookup: the database's refusals come back as refusals, and nothing else is trusted", async () => {
+  assertEquals(await claimLookup(makeRpcAdmin({ data: { refused: "daily_cap" } }).admin, { clientId: "acme", kind: "verify" }),
+    { ok: false, refused: "daily_cap" });
+  assertEquals(await claimLookup(makeRpcAdmin({ data: { refused: "rate_limited" } }).admin, { clientId: "acme", kind: "verify" }),
+    { ok: false, refused: "rate_limited" });
+  // Fails CLOSED: an answer that is not a written row or a known refusal refuses the lookup.
+  for (const answer of [
+    { error: { message: "function public.claim_tax_lookup does not exist" } },
+    { error: { message: "boom" }, data: { id: ROW_ID } },
+    { data: null }, { data: { id: 42 } }, { data: { id: "not-a-uuid" } }, { data: { refused: "maybe" } },
+    { data: ROW_ID }, { data: {} },
+  ]) {
+    assertEquals(await claimLookup(makeRpcAdmin(answer).admin, { clientId: "acme", kind: "verify" }),
+      { ok: false, refused: "ledger_unavailable" }, JSON.stringify(answer));
+  }
+  assertEquals(await claimLookup(makeRpcAdmin("throw").admin, { clientId: "acme", kind: "invoice" }),
+    { ok: false, refused: "ledger_unavailable" }, "a thrown client");
+});
+
+Deno.test("claimLookup: a ping, an unknown kind or no tenant is never claimed", async () => {
+  for (const row of [
+    { clientId: "acme", kind: "ping" },
+    { clientId: "", kind: "verify" },
+    { clientId: "acme", kind: "estimate" },
+  ]) {
+    const { admin, calls } = makeRpcAdmin({ data: { id: ROW_ID } });
+    // deno-lint-ignore no-explicit-any
+    assertEquals(await claimLookup(admin, row as any), { ok: false, refused: "ledger_unavailable" }, JSON.stringify(row));
+    assertEquals(calls.length, 0, "no call for a row no cap can count");
   }
 });
 
@@ -154,7 +232,7 @@ Deno.test("finishLookup reports false for an already-closed row, an error, a bad
   assertEquals(await finishLookup(throwingAdmin, ROW_ID, okResult), false, "thrown client");
 });
 
-// ── countLookups24h: fails CLOSED ──────────────────────────────────────────────────────────
+// ── countLookups24h: the usage figure, never the cap ──────────────────────────────────────
 
 Deno.test("the daily cap is 100", () => {
   assertEquals(DAILY_TAX_LOOKUP_CAP, 100);
@@ -173,8 +251,9 @@ Deno.test("countLookups24h counts this tenant's verify + invoice rows over the l
   assertEquals((op(ops, "gt") as unknown[])[1], "called_at");
 });
 
-Deno.test("countLookups24h returns null — so the caller REFUSES — whenever it cannot count", async () => {
-  // A blind zero here is an uncapped run of billed calls. Null is the only honest answer.
+Deno.test("countLookups24h returns null (unknown, never zero) whenever it cannot count", async () => {
+  // tax_settings shows it beside the cap, and a blind zero would tell a builder they have used
+  // nothing. The cap itself never reads this: claim_tax_lookup counts under its own lock.
   for (const answer of [{ error: { message: "boom" }, count: 0 }, { count: null }, { count: "12" }, { count: NaN }]) {
     assertEquals(await countLookups24h(makeAdmin(answer).admin, "acme"), null, JSON.stringify(answer));
   }
@@ -188,23 +267,23 @@ Deno.test("a zero count is a real zero, not a failure", async () => {
   assertEquals(await countLookups24h(makeAdmin({ count: 0 }).admin, "acme"), 0);
 });
 
-// ── The vocabulary matches migration 242 ───────────────────────────────────────────────────
+// ── The vocabulary matches migration 243 ───────────────────────────────────────────────────
 // The outcome and kind lists live in three places: salesTax.ts' AvalaraFailure, this module,
-// and the CHECKs in 242. A value the CHECK does not know fails the ledger write at runtime —
+// and the CHECKs in 243. A value the CHECK does not know fails the ledger write at runtime —
 // on the finish, after the call was already paid for. Read the SHIPPED migration, not a copy.
 // Needs --allow-read (preflight grants it, scoped to the repo); ignored where it is not granted.
 
-const MIGRATION = new URL("../../migrations/242_avalara_tax_lookups.sql", import.meta.url);
+const MIGRATION = new URL("../../migrations/243_avalara_tax_lookups.sql", import.meta.url);
 const canRead = Deno.permissions.querySync({ name: "read", path: MIGRATION }).state === "granted";
 
 Deno.test({
-  name: "every outcome and kind this module can write is allowed by migration 242's CHECKs",
+  name: "every outcome and kind this module can write is allowed by migration 243's CHECKs",
   ignore: !canRead,
   fn: async () => {
     const sql = await Deno.readTextFile(MIGRATION);
     const list = (re: RegExp) => {
       const m = sql.match(re);
-      assert(m, `could not find ${re} in 242`);
+      assert(m, `could not find ${re} in 243`);
       return [...m![1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort();
     };
     const outcomes = list(/outcome is null or outcome in \(([^)]*)\)/);
@@ -221,7 +300,39 @@ Deno.test({
       ...failures.map((f) => finishedColumns({ ok: false, rate: null, jurisdiction: null, httpStatus: null, attempts: 1, failure: f as never }).outcome),
       ...[200, 401, 429, 503, null].map((s) => finishedColumns({ configured: true, authenticated: false, authenticationType: null, httpStatus: s }).outcome),
     ]);
-    for (const o of produced) assert(outcomes.includes(o), `${o} is not allowed by 242`);
+    for (const o of produced) assert(outcomes.includes(o), `${o} is not allowed by 243`);
+  },
+});
+
+Deno.test({
+  name: "claim_tax_lookup in migration 243 is the function claimLookup calls: arguments, window, lock, posture",
+  ignore: !canRead,
+  fn: async () => {
+    const sql = (await Deno.readTextFile(MIGRATION)).replace(/\r\n/g, "\n");
+    const start = sql.indexOf("create function public.claim_tax_lookup(");
+    assert(start >= 0, "migration 243 no longer creates claim_tax_lookup");
+    const body = sql.slice(start, sql.indexOf("end $fn$;", start));
+    const head = body.match(/^create function public\.claim_tax_lookup\(([\s\S]*?)\) returns jsonb\s+language plpgsql security definer set search_path = ''/);
+    assert(head, "claim_tax_lookup is not a SECURITY DEFINER jsonb function with search_path ''");
+    const params = [...head![1].matchAll(/\b(p_[a-z_]+)\s/g)].map((m) => m[1]);
+
+    const { admin, calls } = makeRpcAdmin({ data: { id: ROW_ID } });
+    await claimLookup(admin, { clientId: "acme", kind: "verify" });
+    assertEquals(Object.keys(calls[0][1]).sort(), [...params].sort(), "the RPC's named arguments and the SQL parameters differ");
+
+    const lock = body.indexOf("pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('tax_lookups:' || p_client_id))");
+    assert(lock >= 0, "the per-tenant advisory lock is gone");
+    assert(lock < body.indexOf("select count(*)"), "the lock is taken after a count: the race is back");
+    assert(body.lastIndexOf("select count(*)") < body.indexOf("insert into public.tax_lookups"), "the insert precedes a count");
+    assert(/kind in \('verify', 'invoice'\)\s+and called_at > pg_catalog\.now\(\) - interval '24 hours'/.test(body),
+      "the daily window or the kinds it counts moved");
+    const minute = body.match(/and called_at > pg_catalog\.now\(\) - interval '(\d+) seconds'/);
+    assertEquals(minute ? Number(minute[1]) : null, TAX_LOOKUP_MINUTE_WINDOW_SECONDS,
+      "the SQL per-minute window and the retry-after the refusal quotes differ");
+    assert(/revoke execute on function public\.claim_tax_lookup\([^)]*\) from public, anon, authenticated;/.test(sql),
+      "claim_tax_lookup is not revoked from public, anon and authenticated");
+    assert(/grant execute on function public\.claim_tax_lookup\([^)]*\) to service_role;/.test(sql),
+      "claim_tax_lookup is not granted to service_role");
   },
 });
 
@@ -277,7 +388,7 @@ Deno.test("pingResponse: a whitelist, not a spread — extra fields, an identity
     { ok: true, configured: true, authenticated: false, authenticationType: "None", httpStatus: 200 });
 });
 
-Deno.test("PING_CLIENT_ID is never a tenant slug, and fits migration 242's client_id CHECK", () => {
+Deno.test("PING_CLIENT_ID is never a tenant slug, and fits migration 243's client_id CHECK", () => {
   assert(!/^[a-z0-9][a-z0-9-]*$/.test(PING_CLIENT_ID), "a tenant could be created with this slug");
   assert(PING_CLIENT_ID.length >= 1 && PING_CLIENT_ID.length <= 100);
 });

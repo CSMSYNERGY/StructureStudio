@@ -30,6 +30,7 @@ import {
 import { resolveRate, taxOn } from "../salesTax.ts";
 import {
   ADDRESS_CHANGED,
+  agreedTax,
   carriedTax,
   carryDecision,
   chooseDefaultRate,
@@ -346,7 +347,7 @@ Deno.test("E2E carry-over: staff moving the delivery ZIP gives the verified rate
   assert(printed.includes(consentFigure));
 
   const co = changeOrderDescription(quote, snap);
-  assert(co !== null && co.includes("Sales tax rate: 8.25% → 8%"), `a signed order would be told why its total moved: ${co}`);
+  assert(co !== null && co.includes("Sales tax rate: 8.25% → 8%"), `a revision of an UNSIGNED quote names why its total moved: ${co}`);
 });
 
 Deno.test("E2E: the first re-stamp of a snapshot written before the chain raises no change order", async () => {
@@ -359,4 +360,96 @@ Deno.test("E2E: the first re-stamp of a snapshot written before the chain raises
   assertEquals((snap.tax as Record<string, unknown>).basis, "company");
   assertEquals(changeOrderDescription(legacy, snap), null, "new bookkeeping keys alone are not a change");
   assertEquals(totalFromSnapshot(snap), totalFromSnapshot(legacy));
+});
+
+// ── A signed order keeps the rate it was agreed at (review, 2026-09-17) ────────────────────
+//
+// Both change-order writers (submit-estimate's amendment path, portal-settings'
+// stage_order_attribute_change) ask agreedTax first and carry it; only a design nobody signed
+// runs the chain. Before that, an order signed at a LOCATION rate was re-priced by its first
+// change after the lot was deleted or re-rated, and the change order asked the customer to
+// approve a tax-rate line nobody chose.
+
+const MACON_LOT = {
+  id: "3f0c2b1e-8a4d-4c2e-9b7a-1d2e3f4a5b6c", client_id: "example-barns", name: "Macon lot", active: true, tax_rate: 0.08, tax_label: "County tax",
+};
+
+/** An order signed at the Macon lot's 8%: the accepted snapshot and the design row as both writers read them. */
+function signedAtLocation() {
+  const snap: Record<string, unknown> = { version: 1, styleId: "style-1", discount: 0, lines: LINES };
+  const location = taxLocationFrom(MACON_LOT, "example-barns");
+  const choice = chooseDefaultRate({ salesLocationId: MACON_LOT.id, location, homeLot: null, companyRate: 0.0725, companyLabel: "Sales tax" })!;
+  snap.tax = stampTax({
+    pools: subtotalsFromSnapshot(snap)!,
+    resolved: { rate: choice.rate, source: "fallback", jurisdiction: null, reason: "not requested" },
+    choice, address: { state: "GA", zip: "31201" }, now: "2026-09-12T09:00:00Z",
+  });
+  return {
+    accepted_at: "2026-09-13T15:00:00Z",
+    accepted_snapshot: { estimateLines: snap, selections: {}, paintColors: {} },
+    estimate_lines: snap,
+  };
+}
+
+/** A change to a design, taxed the way both change-order writers tax it: agreed tax first, then the chain. */
+async function amend(design: Record<string, unknown>, opts: {
+  lines: Record<string, unknown>[];
+  location: Record<string, unknown> | null;
+  salesLocationId: string | null;
+  address: { state: string | null; zip: string | null };
+}) {
+  const snap: Record<string, unknown> = { version: 1, styleId: "style-1", discount: 0, lines: opts.lines };
+  const pools = subtotalsFromSnapshot(snap)!;
+  const signed = agreedTax(design);
+  // deno-lint-ignore no-explicit-any
+  const storedTax = (design.estimate_lines as any)?.tax ?? null;
+  const carry = signed ? { carry: true as const } : carryDecision({ staffCaller: true, storedTax, address: opts.address });
+  if (carry.carry) {
+    snap.tax = carriedTax((signed ?? storedTax)!, pools);
+  } else {
+    const location = taxLocationFrom(opts.location, "example-barns");
+    const choice = chooseDefaultRate({
+      salesLocationId: opts.salesLocationId, location, homeLot: null, companyRate: 0.0725, companyLabel: "Sales tax",
+    })!;
+    const resolved = await resolveRate({ street: "1 Main St", city: "Macon", ...opts.address }, choice.rate, { allowLookup: false });
+    snap.tax = stampTax({ pools, resolved, choice, address: opts.address, reason: carry.reason, now: "2026-09-17T08:00:00Z" });
+  }
+  return snap;
+}
+
+Deno.test("E2E signed order: the lot deleted or re-rated after the signature — the change order raises no tax-rate line", async () => {
+  const original = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (() => { fetches++; return Promise.reject(new Error("no network in this test")); }) as typeof fetch;
+  try {
+    const design = signedAtLocation();
+    const agreed = design.accepted_snapshot.estimateLines;
+    const scenarios: [string, { location: Record<string, unknown> | null; salesLocationId: string | null; address: { state: string; zip: string } }][] = [
+      ["the lot was deleted (sales_location_id set null)", { location: null, salesLocationId: null, address: { state: "GA", zip: "31201" } }],
+      ["the lot's rate was edited to 9%", { location: { ...MACON_LOT, tax_rate: 0.09 }, salesLocationId: MACON_LOT.id, address: { state: "GA", zip: "31201" } }],
+      ["the lot's rate was cleared", { location: { ...MACON_LOT, tax_rate: null }, salesLocationId: MACON_LOT.id, address: { state: "GA", zip: "31201" } }],
+      ["staff moved the delivery ZIP too", { location: null, salesLocationId: null, address: { state: "GA", zip: "31204" } }],
+    ];
+    for (const [label, opts] of scenarios) {
+      const snap = await amend(design, { lines: [...LINES, WORKBENCH], ...opts });
+      const tax = snap.tax as Record<string, unknown>;
+      assertEquals([tax.rate, tax.basis, tax.locationId, tax.locationName, tax.label], [0.08, "location", MACON_LOT.id, "Macon lot", "County tax"],
+        `${label}: the agreed tax is carried`);
+      assertEquals(tax.amount, taxOn(12450 + 600, 0.08), `${label}: only the amount follows the new lines`);
+
+      const co = changeOrderDescription(agreed, snap);
+      assert(co !== null && co.includes("Added: Workbench"), `${label}: the real change is described: ${co}`);
+      assert(!co!.includes("rate:"), `${label}: a tax-rate line nobody chose: ${co}`);
+      assert(co!.includes("County tax: $996.00 → $1,044.00"), `${label}: the tax moves only with the lines: ${co}`);
+    }
+
+    // The control: the same lot deleted on a quote nobody signed does re-price, which is why the
+    // carry is keyed on the agreement and not applied to every design.
+    const unsigned = { ...signedAtLocation(), accepted_at: null, accepted_snapshot: null };
+    const repriced = await amend(unsigned, { lines: LINES, location: null, salesLocationId: null, address: { state: "GA", zip: "31201" } });
+    assertEquals([(repriced.tax as Record<string, unknown>).rate, (repriced.tax as Record<string, unknown>).basis], [0.0725, "company"]);
+  } finally {
+    globalThis.fetch = original;
+  }
+  assertEquals(fetches, 0, "no change order may reach the network");
 });

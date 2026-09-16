@@ -34,11 +34,20 @@ export type AcceptTotalCheck =
 const centsOf = (totalDollars: number | null): number | null =>
   totalDollars == null || !Number.isFinite(totalDollars) ? null : Math.round(totalDollars * 100);
 
+/**
+ * The sentence both halves of the race answer with. It must match NONE of the patterns a
+ * customer page reads as an expired login: production's my-quotes.html tests every error with
+ * /token|session|expired|sign.?in/i and signs the customer out on a match, and "before signing"
+ * matched it (review, 2026-09-17). Refused over a re-price, a customer was logged out instead of
+ * being shown the new total. The test file pins the sentence against that pattern.
+ */
+export const REPRICED_SENTENCE = "This quote was just updated. Reload to see the current total, then accept it.";
+
 /** The one refusal both halves of the race answer with, so the page handles a single shape. */
 const repriced = (totalDollars: number | null): { status: 409; body: RepricedBody } => ({
   status: 409,
   body: {
-    error: "This quote was updated. Reload to see the current total before signing.",
+    error: REPRICED_SENTENCE,
     reason: "repriced",
     totalCents: centsOf(totalDollars),
   },
@@ -71,17 +80,19 @@ export type PromoteMiss =
  * read of the design (`now`, null when the row is gone):
  *   - accepted_at is already set: somebody else promoted it. Stop; a frozen snapshot is never
  *     frozen twice.
- *   - the lines are not the lines the customer accepted (`acceptedLines`, the handler's read):
- *     the quote was re-priced after that read. The acceptance just recorded is for a quote that
- *     no longer exists, so the handler withdraws it and answers with the SAME 409 as the early
- *     check, carrying the current total. Whether or not the page sent expectedTotalCents: without
- *     this, the old lines would be frozen as the agreement beside a quote (and an order total)
- *     that says something else. Any change to the lines counts, not only a changed total; the
- *     acceptance row froze the tax too, and a reload costs the customer one tap.
- *   - the lines are unchanged: an unrelated write moved updated_at (a re-send stamping
- *     ss_quote_sent_at). Retry against the new value.
- * The lines are compared as JSON: jsonb comes back key-normalised, so two reads of the same stored
- * value stringify alike (restampQuoteTax's comparison, for the same reason).
+ *   - the TOTAL is not the total the customer accepted (`acceptedLines`, the handler's read,
+ *     priced by totalFromSnapshot — the same function the acceptance froze its total with, in
+ *     whole cents): the quote was re-priced after that read. The acceptance just recorded names
+ *     a figure the quote no longer has, so the handler withdraws it and answers with the SAME
+ *     409 as the early check, carrying the current total. Whether or not the page sent
+ *     expectedTotalCents: without this, the old total would be frozen as the agreement beside a
+ *     quote (and an order total) that says something else.
+ *   - the total is unchanged: retry against the fresh read's updated_at. Either an unrelated
+ *     write moved it (a re-send stamping ss_quote_sent_at), or a re-stamp that left the money
+ *     where it was (the same rate under another basis or label, or a fresh resolvedAt). The
+ *     customer agreed to that figure, and what freezes is what they were shown. This used to
+ *     compare the lines as JSON, which refused a customer over a re-stamp that changed nothing
+ *     they pay (review, 2026-09-17); the attempts stay bounded by the caller.
  */
 export function promoteMiss(
   acceptedLines: unknown,
@@ -89,8 +100,9 @@ export function promoteMiss(
 ): PromoteMiss {
   if (!now) return { kind: "stop", why: "gone" };
   if (now.accepted_at) return { kind: "stop", why: "accepted" };
-  if (JSON.stringify(now.estimate_lines ?? null) !== JSON.stringify(acceptedLines ?? null)) {
-    return { kind: "repriced", ...repriced(totalFromSnapshot(now.estimate_lines)) };
+  const nowTotal = totalFromSnapshot(now.estimate_lines);
+  if (centsOf(nowTotal) !== centsOf(totalFromSnapshot(acceptedLines))) {
+    return { kind: "repriced", ...repriced(nowTotal) };
   }
   return { kind: "retry", updatedAt: typeof now.updated_at === "string" ? now.updated_at : null };
 }

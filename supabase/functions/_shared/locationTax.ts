@@ -1,5 +1,5 @@
 // Per-location tax rates and a quote's sales location, as portal-settings reads and writes them
-// (migration 243, 2026-09-17). The pure half: payload parsing, the percent <-> fraction
+// (migration 244, 2026-09-17). The pure half: payload parsing, the percent <-> fraction
 // round-trip, whether a location can carry a rate at all, and the decision a re-stamp of an
 // issued quote has to make before it writes anything. The database, the PDF and the email stay
 // in portal-settings.
@@ -13,10 +13,13 @@
 // stateCode() for the same reason the lookup does: "Ohio", "oh" and "OH" are one state.
 //
 // WHY A RE-STAMP ASKS BEFORE IT RE-SENDS. An issued quote's PDF lives at a fixed path and the
-// customer's quote page renders live, so re-pricing a quote that was already emailed changes the
-// total in front of a customer who was never told. When the total moves on an emailed quote, the
-// caller must say so (confirmResend) and the quote is sent again; a re-stamp that leaves the
-// total where it was sends nothing.
+// customer's quote page renders live, so re-pricing a quote the customer already holds changes
+// the total in front of a customer who was never told. "Holds" is not only "was emailed": a
+// quote can reach them by text or on paper and never stamp ss_quote_sent_at
+// (quoteInCustomerHands). When the total moves on such a quote, the caller must say so
+// (confirmResend) and the quote is emailed again; when it cannot be emailed, the rep is told in
+// words that the customer has not been sent the new total. A re-stamp that leaves the total
+// where it was sends nothing.
 //
 // Importer: portal-settings only. Derive it before a deploy rather than trusting this line:
 //     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
@@ -32,7 +35,7 @@ export const LOCATION_TAX_COLUMNS = "id, client_id, name, city, state, zip, acti
 export const RESTAMP_DESIGN_COLUMNS =
   "short_code, status, accepted_at, updated_at, estimate_lines, total_cents, ss_quote_number, ss_quote_sent_at, image_url";
 
-/** Printed on the customer's document; the same cap as ss_tax_label and migration 243's CHECK. */
+/** Printed on the customer's document; the same cap as ss_tax_label and migration 244's CHECK. */
 export const TAX_LABEL_MAX = 40;
 
 /** Design statuses that mean the customer already agreed (migration 197's save_design guard). */
@@ -161,6 +164,20 @@ export function isVerifiedTax(t: unknown): boolean {
   return !!r && typeof r === "object" && r.source === "avalara" && sane(r.rate) != null;
 }
 
+/**
+ * Does the customer already hold this quote? Emailed (ss_quote_sent_at), OR issued (a quote
+ * number) and past draft. The second arm is the quote that went out some other way: the
+ * quote-created text, a printout, a link read out at the lot. None of those stamps
+ * ss_quote_sent_at, and keying only on it re-priced a quote the customer was holding, with no
+ * confirmation and nobody told. A numbered draft is a refused or abandoned issue (a number can
+ * be allocated before a later refusal), which no customer was handed.
+ */
+export function quoteInCustomerHands(d: unknown): boolean {
+  const r = (d ?? {}) as { ss_quote_sent_at?: unknown; ss_quote_number?: unknown; status?: unknown };
+  if (r.ss_quote_sent_at) return true;
+  return !!text(r.ss_quote_number) && String(r.status ?? "") !== "draft";
+}
+
 export type RestampPlan =
   | { ok: false; reason: "no_quote" }
   | { ok: false; reason: "quote_sent"; previousTotalCents: number; totalCents: number }
@@ -170,7 +187,7 @@ export type RestampPlan =
     previousTotalCents: number;
     totalCents: number;
     changed: boolean;
-    /** The quote was emailed and its total moved: send it again. */
+    /** The customer holds the quote and its total moved: send it again. */
     resend: boolean;
   };
 
@@ -178,10 +195,10 @@ export type RestampPlan =
  * What putting `tax` onto an issued quote does, before anything is written.
  *   - no issued quote (no snapshot, no tax on it, or a total that cannot be computed): no_quote —
  *     there is nothing to re-price, and inventing a first tax stamp is submit-estimate's job;
- *   - emailed, the total moves, and the caller did not confirm: quote_sent, with both totals so
- *     the confirmation can name them;
+ *   - in the customer's hands (quoteInCustomerHands), the total moves, and the caller did not
+ *     confirm: quote_sent, with both totals so the confirmation can name them;
  *   - otherwise the new snapshot (every key kept, `tax` replaced), both totals, and whether the
- *     quote must be sent again (only when it was emailed AND the total moved).
+ *     quote must be sent again (only when the customer holds it AND the total moved).
  * Totals are compared as designTotalCents computes them, from the snapshot on both sides, never
  * against the stored total_cents column — an old row whose column lags its snapshot must not
  * read as "the total moved" and trigger a re-send over nothing.
@@ -189,7 +206,7 @@ export type RestampPlan =
 export function restampPlan(input: {
   snap: unknown;
   tax: Record<string, unknown>;
-  sent: boolean;
+  inCustomerHands: boolean;
   confirmResend: boolean;
 }): RestampPlan {
   const s = input.snap as Record<string, unknown> | null | undefined;
@@ -200,11 +217,21 @@ export function restampPlan(input: {
   const totalCents = designTotalCents(snap);
   if (previousTotalCents == null || totalCents == null) return { ok: false, reason: "no_quote" };
   const changed = totalCents !== previousTotalCents;
-  if (input.sent && changed && !input.confirmResend) {
+  if (input.inCustomerHands && changed && !input.confirmResend) {
     return { ok: false, reason: "quote_sent", previousTotalCents, totalCents };
   }
-  return { ok: true, snap, previousTotalCents, totalCents, changed, resend: input.sent && changed };
+  return { ok: true, snap, previousTotalCents, totalCents, changed, resend: input.inCustomerHands && changed };
 }
+
+/** Why a customer holding a re-priced quote was not sent its new total, in words the rep acts on.
+ *  Every one says the customer has not been sent the new total, because the rep may otherwise
+ *  assume the quote went back out as it does when the send lands. */
+export const RESEND_NOT_SENT = {
+  noNumber: "This quote couldn't be emailed from here, so the customer hasn't been sent the new total. Let them know the total changed.",
+  pdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
+  noEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
+  failed: "The updated quote couldn't be emailed, so the customer hasn't been sent the new total. Resend it, or let them know the total changed.",
+} as const;
 
 /**
  * After a re-stamp is written: does the quote go back out to the customer, and if not, what is
@@ -215,7 +242,8 @@ export function restampPlan(input: {
  * totals in one message. Holding the send back leaves the old email and the old PDF agreeing
  * with each other. The rep gets `resent: false` and a reason, and can resend once the PDF
  * rebuilds. A quote with no number cannot be emailed at all (resend_quote_email refuses it), so
- * that case is named on its own rather than blamed on the PDF.
+ * that case is named on its own rather than blamed on the PDF. The reasons are RESEND_NOT_SENT's
+ * sentences; a send that was attempted and did not land is restampSendOutcome's to word.
  */
 export function restampResend(input: {
   resend: boolean;
@@ -223,7 +251,21 @@ export function restampResend(input: {
   quotePdfUrl: string | null;
 }): { send: true } | { send: false; reason: string | null } {
   if (!input.resend) return { send: false, reason: null };
-  if (!input.quoteNumber) return { send: false, reason: "the quote couldn't be emailed from here" };
-  if (!input.quotePdfUrl) return { send: false, reason: "the quote PDF couldn't be rebuilt, so it wasn't emailed again" };
+  if (!input.quoteNumber) return { send: false, reason: RESEND_NOT_SENT.noNumber };
+  if (!input.quotePdfUrl) return { send: false, reason: RESEND_NOT_SENT.pdf };
   return { send: true };
+}
+
+/**
+ * The re-send was attempted: what the rep is told. Email is the only way a re-priced quote goes
+ * back out (nothing here texts). A customer with no email address on the quote is the case a
+ * text- or print-delivered quote most often lands in, so it gets its own sentence: the rep is
+ * the only route to that customer.
+ */
+export function restampSendOutcome(
+  outcome: { sent: boolean; noEmail?: boolean } | "refused",
+): { resent: boolean; resendReason: string | null } {
+  if (outcome === "refused") return { resent: false, resendReason: RESEND_NOT_SENT.noNumber };
+  if (outcome.sent) return { resent: true, resendReason: null };
+  return { resent: false, resendReason: outcome.noEmail ? RESEND_NOT_SENT.noEmail : RESEND_NOT_SENT.failed };
 }

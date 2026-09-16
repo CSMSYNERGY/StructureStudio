@@ -19,7 +19,8 @@ Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
 
 const { resolveRate, taxOn } = await import("./salesTax.ts");
 const {
-  ADDRESS_CHANGED, carriedTax, carryDecision, chooseDefaultRate, sameTaxAddress, stampTax, taxLocationFrom,
+  ADDRESS_CHANGED, agreedTax, carriedTax, carryDecision, chooseDefaultRate, homeLotApplies, sameTaxAddress, stampTax,
+  taxLocationFrom,
 } = await import("./taxChain.ts");
 
 const assertEquals = (a: unknown, b: unknown, msg?: string) => {
@@ -111,6 +112,35 @@ Deno.test("the company rate is the last link; with none, there is no default and
   assertEquals(choose({ companyLabel: "  " })?.label, "Sales tax");
 });
 
+// ── homeLotApplies: link 3 is a first-issue rule ─────────────────────────────────────────────
+
+const USER = "7c1d0b6f-2e3a-4b5c-8d9e-0f1a2b3c4d5e";
+const homeInput = (over: Partial<Parameters<typeof homeLotApplies>[0]> = {}) =>
+  ({ salesLocationId: null, staffCaller: true, callerUserId: USER, firstIssue: true, signed: false, ...over });
+
+Deno.test("homeLotApplies: only a signed-in staff member's FIRST issue of a quote with no location", () => {
+  assert(homeLotApplies(homeInput()), "the first issue by staff, no location");
+  assert(!homeLotApplies(homeInput({ firstIssue: false })), "a resubmit never borrows the home lot");
+  assert(!homeLotApplies(homeInput({ salesLocationId: LOT_A })), "a quote with a location keeps it");
+  assert(!homeLotApplies(homeInput({ staffCaller: false })), "a shopper has no home lot");
+  assert(!homeLotApplies(homeInput({ callerUserId: null })) && !homeLotApplies(homeInput({ callerUserId: "  " })), "no user, no lot");
+  assert(!homeLotApplies(homeInput({ signed: true })), "a signed order is never re-homed");
+});
+
+Deno.test("a CLEARED location + a staff resubmit stays at the company rate and records no location", () => {
+  // Staff cleared the quote's location (set_design_sales_location with null, or the lot was
+  // deleted), then pressed Submit again. The quote already has a number, so it is not a first
+  // issue: the home lot is not read, the company rate applies, and nothing is recorded.
+  const salesLocationId = null;
+  const homeLot = homeLotApplies(homeInput({ salesLocationId, firstIssue: false })) ? home() : null;
+  const got = choose({ salesLocationId, location: null, homeLot });
+  assertEquals(got, { rate: 0.0725, basis: "company", label: "Sales tax", locationId: null, locationName: null, recordLocationId: null });
+
+  // The same quote on its FIRST issue would have taken the home lot and recorded it.
+  const first = choose({ homeLot: homeLotApplies(homeInput()) ? home() : null });
+  assertEquals([first?.basis, first?.recordLocationId], ["location", LOT_HOME]);
+});
+
 Deno.test("a location rate still prices the quote when the company rate is missing", () => {
   assertEquals(choose({ companyRate: null, salesLocationId: LOT_A, location: lot() })?.rate, 0.0825);
   assertEquals(choose({ companyRate: null, homeLot: home() })?.rate, 0.09);
@@ -159,6 +189,39 @@ Deno.test("a STAFF resubmit carries while state + ZIP match, and says why when t
     { carry: false, reason: ADDRESS_CHANGED }, "a verified stamp with no address cannot be confirmed as the same place");
 });
 
+// ── agreedTax: a signed order carries whatever rate it was agreed at ───────────────────────
+
+const LOCATION_AGREED = {
+  rate: 0.0825, amount: 902.63, label: "County tax", taxableSubtotal: 10941, nonTaxableSubtotal: 0,
+  taxableBase: 10941, nonTaxableNet: 0, source: "fallback", jurisdiction: null, address: { state: "GA", zip: "31201" },
+  resolvedAt: "2026-09-12T09:00:00Z", reason: "not requested", basis: "location", locationId: LOT_A, locationName: "Main lot",
+  verifiedAt: null,
+};
+
+Deno.test("agreedTax: nobody signed it — no agreed tax, the chain runs", () => {
+  assertEquals(agreedTax({ accepted_at: null, accepted_snapshot: null, estimate_lines: { tax: LOCATION_AGREED } }), null);
+  assertEquals(agreedTax(null), null);
+  assertEquals(agreedTax({}), null);
+});
+
+Deno.test("agreedTax: a signed order's agreement is the accepted snapshot's tax, whatever its basis", () => {
+  const revised = { ...LOCATION_AGREED, rate: 0.0725, basis: "company", locationId: null, locationName: null };
+  for (const tax of [LOCATION_AGREED, VERIFIED, { ...LOCATION_AGREED, basis: "company", locationId: null, locationName: null, rate: 0 }]) {
+    assertEquals(agreedTax({ accepted_at: "2026-09-13T00:00:00Z", accepted_snapshot: { estimateLines: { tax } }, estimate_lines: { tax: revised } }), tax,
+      `the agreement wins over the live revision (${tax.rate})`);
+  }
+  assertEquals(agreedTax({ accepted_at: null, accepted_snapshot: { estimateLines: { tax: LOCATION_AGREED } }, estimate_lines: null }),
+    LOCATION_AGREED, "an accepted snapshot is agreement even where accepted_at reads null (a promote that failed)");
+});
+
+Deno.test("agreedTax: signed before accepted_snapshot existed — the design's own stamped tax; none usable — null", () => {
+  assertEquals(agreedTax({ accepted_at: "2026-08-01T00:00:00Z", accepted_snapshot: null, estimate_lines: { tax: LOCATION_AGREED } }), LOCATION_AGREED);
+  assertEquals(agreedTax({ accepted_at: "2026-08-01T00:00:00Z", accepted_snapshot: { estimateLines: { lines: [] } }, estimate_lines: { lines: [] } }), null,
+    "a pre-tax agreement has nothing to carry");
+  assertEquals(agreedTax({ accepted_at: "2026-08-01T00:00:00Z", accepted_snapshot: { estimateLines: { tax: { rate: 8.25 } } }, estimate_lines: null }), null,
+    "a percent-shaped rate is not a rate to carry");
+});
+
 // ── carriedTax / stampTax: the object on the snapshot ─────────────────────────────────────
 
 const POOLS = { taxable: 12450, nonTaxable: 600, taxableBase: 12450, nonTaxableNet: 600 };
@@ -177,6 +240,20 @@ Deno.test("carriedTax keeps the verified answer verbatim and recomputes only wha
   assertEquals([got.basis, got.locationId, got.locationName, got.verifiedAt], ["avalara", null, null, "2026-09-10T12:00:00Z"],
     "a stamp from before the chain gains its basis, and its lookup time as verifiedAt");
   assertEquals(carriedTax({ ...VERIFIED, verifiedAt: "2026-09-11T09:00:00Z" }, POOLS).verifiedAt, "2026-09-11T09:00:00Z");
+});
+
+Deno.test("carriedTax carries an agreed LOCATION or company rate verbatim too — basis, location and all", () => {
+  const got = carriedTax(LOCATION_AGREED, POOLS);
+  for (const k of ["rate", "label", "source", "jurisdiction", "address", "resolvedAt", "reason", "basis", "locationId", "locationName"]) {
+    assertEquals(got[k], (LOCATION_AGREED as Record<string, unknown>)[k], `${k} is carried verbatim`);
+  }
+  assertEquals([got.amount, got.taxableBase, got.verifiedAt], [taxOn(12450, 0.0825), 12450, null], "the money follows the new lines; a default is never 'verified'");
+
+  const legacy: Record<string, unknown> = { ...LOCATION_AGREED, rate: 0.0725 };
+  for (const k of ["basis", "locationId", "locationName", "verifiedAt"]) delete legacy[k];
+  const old = carriedTax(legacy, POOLS);
+  assertEquals([old.basis, old.locationId, old.locationName, old.verifiedAt], ["company", null, null, null],
+    "a default stamped before the chain was the company rate");
 });
 
 const NOW = "2026-09-17T08:00:00.000Z";
