@@ -184,12 +184,25 @@ async function avalaraRate(addr: TaxAddress): Promise<{ rate: number; jurisdicti
  * before a tenant can issue their own paperwork. A caller that cannot supply one has a
  * misconfigured tenant and should refuse the quote rather than ask this function to invent a
  * number — hence the explicit 0 rather than an optional parameter.
+ *
+ * `allowLookup` DEFAULTS TO FALSE (2026-09-16, the day the real credentials were set). A
+ * lookup is a live call Avalara bills per request and there is no sandbox, so the credentials
+ * being present must never be what decides whether money is spent. Before this, setting the
+ * two secrets silently turned every quote submit and every change order into a billed call,
+ * with no button and no consent. Only a deliberate, staff-initiated path may pass true; the
+ * automatic paths pass false and get the tenant's own rate, exactly as before the key existed.
+ * The early return sits ABOVE isConfigured() so a test with junk credentials in env proves it.
  */
-export async function resolveRate(addr: TaxAddress, fallbackRate: number): Promise<ResolvedRate> {
+export async function resolveRate(
+  addr: TaxAddress,
+  fallbackRate: number,
+  opts: { allowLookup?: boolean } = {},
+): Promise<ResolvedRate> {
   const fallback = sane(fallbackRate) ?? 0;
   const give = (reason: string): ResolvedRate =>
     ({ rate: fallback, jurisdiction: null, source: "fallback", reason });
 
+  if (opts.allowLookup !== true) return give("not requested");
   if (!isConfigured()) return give("avalara not configured");
   if (!taxable(addr)) return give("no state/postcode on the delivery address");
 
