@@ -690,6 +690,12 @@ const SETTINGS_TAB_AREA = {
   crews: "settings_team",
   drivers: "settings_team",
   connection: "settings_crm",
+  // Company → Tax (2026-09-17): which Avalara tax code each building style and option heading
+  // falls under. settings_crm because tax_codes_get / _search / _save are gated there, beside
+  // the company rate and the location rates — a tab on any other area would show someone a
+  // mapping the server refuses to read, and a new area would mean a row in _shared/access.ts
+  // and its SQL twin area_level_for() for a screen that grants nothing new.
+  tax: "settings_crm",
   quickbooks: "settings_quickbooks",
   email: "settings_email",
   // Texting registers the BUSINESS's legal identity with the carriers and spends real money,
@@ -766,8 +772,12 @@ function ssSettingsTabs({ isOwner = false, isAdmin = false, access = null } = {}
     // someone granted only Team with no way to reach it: the rail would show them My Profile and
     // nothing else, while /portal/settings/team still rendered perfectly for anyone who
     // happened to have the link. Same rule the Settings tab itself uses in the workspace rail.
-    ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team"))
-      ? [["company", "Company", "Your business details, branding, team, locations, crews and drivers", null]] : []),
+    // settings_crm joined on 2026-09-17 with the Tax tab, for the same reason: someone granted
+    // CRM Connection but neither Branding nor Team would otherwise have a Tax tab they may read
+    // and no rail item that leads to it.
+    ...((isAdmin || !access || ssCanRead(access, "settings_branding") || ssCanRead(access, "settings_team")
+      || ssCanRead(access, "settings_crm"))
+      ? [["company", "Company", "Your business details, branding, team, locations, crews, drivers and tax codes", null]] : []),
     // BILLING is a hub too (Carolyn 2026-09-11: "create a new nav called billing then I want
     // to move the subscriptions and the wallet in there"). Subscription and Wallet are its
     // tabs — see ssBillingTabs.
@@ -860,6 +870,11 @@ function ssCompanyTabs({ isOwner = false, isAdmin = false, access = null, schedU
     ["locations", "Locations", "Your sales lots, and the serial numbers your buildings are given"],
     ...(schedUnlocked ? [["crews", "Crews", "Who builds — each crew gets its own Build Schedule calendar"]] : []),
     ...(schedUnlocked ? [["drivers", "Drivers", "Who delivers, what they can haul, and the territories they cover"]] : []),
+    // TAX (Ahsan 2026-09-17, from the owner's 2026-09-14 ask that every product, installation
+    // and delivery carry an Avalara tax code the builder picks). Last, so the order Carolyn
+    // gave for the tabs above is untouched. Gated on settings_crm through SETTINGS_TAB_AREA
+    // like every tab here; the hub gate in ssSettingsTabs admits that area for it.
+    ["tax", "Tax", "Which Avalara tax code each building, option and service falls under"],
   ].filter(([id]) => {
     if (isAdmin || !access) return true;
     const area = SETTINGS_TAB_AREA[id];

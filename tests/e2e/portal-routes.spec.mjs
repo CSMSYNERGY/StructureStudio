@@ -27,7 +27,7 @@ const ROUTES = [
   // Company hub
   "/portal/settings/company", "/portal/settings/branding", "/portal/settings/team",
   "/portal/settings/commissions", "/portal/settings/locations", "/portal/settings/crews",
-  "/portal/settings/drivers",
+  "/portal/settings/drivers", "/portal/settings/tax",
   // Colors hub
   "/portal/settings/colors", "/portal/settings/shingles", "/portal/settings/metal",
   // Billing hub

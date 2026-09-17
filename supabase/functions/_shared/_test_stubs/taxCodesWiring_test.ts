@@ -18,7 +18,9 @@
 //   6. the three gates leaving settings_crm:view/view/edit;
 //   7. delete_client forgetting tax_code_assignments (a reused slug inherits the deleted company's
 //      heading codes), or wiping it after other tables — deployed ahead of 246, that half-deletes;
-//   8. a builder-side tax code action reaching Avalara.
+//   8. a builder-side tax code action reaching Avalara;
+//   9. avalara_tax_codes_status (the Admin console's catalog row) growing an Avalara call or a
+//      read of anything but the catalog, while it sits on READ_ONLY_ACTIONS.
 // Same technique as taxSpendWiring_test / locationTaxWiring_test: read the source, so a drift
 // fails the push. If an anchor moves, re-point it — do not delete the test.
 
@@ -152,6 +154,17 @@ Deno.test("admin-catalog avalara_sync_tax_codes: never read-only, and its refusa
     "the refusal no longer strips status and ok before answering with the outcome's own status");
   const replies = [...sync.matchAll(/return json\(([^;]*)\);/g)].map((m) => m[1]);
   assert(replies.length === 2 && replies.includes("body, status") && replies.includes("out"), `unexpected answers: ${replies.join(" | ")}`);
+});
+
+Deno.test("admin-catalog avalara_tax_codes_status: read-only, reads the catalog and nothing else, never calls Avalara", () => {
+  const readOnly = block(CATALOG, "const READ_ONLY_ACTIONS = new Set([", "]);", "READ_ONLY_ACTIONS");
+  assert(readOnly.includes('"avalara_tax_codes_status"'), "the catalog status read is no longer on the read-only list");
+  const status = block(CATALOG, 'case "avalara_tax_codes_status": {', "\n      case ", "avalara_tax_codes_status");
+  const tables = [...status.matchAll(/sb\.from\("([^"]+)"\)/g)].map((m) => m[1]);
+  assert(tables.length === 3 && tables.every((t) => t === "avalara_tax_codes"), `the status read touches ${tables.join(", ")}`);
+  for (const needle of ["fetch(", "syncTaxCodes", "fetchTaxCodes", ".upsert(", ".update(", ".insert(", ".delete("]) {
+    assert(!status.includes(needle), `the read-only catalog status calls ${needle}`);
+  }
 });
 
 Deno.test("admin-catalog delete_client wipes tax_code_assignments, before anything else", () => {

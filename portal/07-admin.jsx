@@ -1064,7 +1064,7 @@ const ADM_TABS = [
   ["styles",  "Styles & Sizes", "Building styles this builder offers, and the sizes under each",  "client"],
   ["items",   "Items",          "Which placeable layout items this builder gets",                 "client"],
   ["pricing", "Pricing",        "Bulk price and inclusion import/export by CSV",                 "client"],
-  ["master",  "Master Catalog", "The global layout-item palette every builder draws from",        "global"],
+  ["master",  "Master Catalog", "The global layout-item palette and Avalara tax code list every builder draws from", "global"],
 ];
 
 function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
@@ -1251,6 +1251,7 @@ function AdminShell({ onOpenAccount, sub: subProp = null, onSub = null }) {
       )}
       {sub === "billing" && <AdmBilling />}
       {sub === "master" && <AdmMaster master={master} masterErr={masterErr} />}
+      {sub === "master" && <AdmTaxCodes />}
 
       {needsClient && !sel && clients && (
         <div style={S.card}>
@@ -1564,6 +1565,77 @@ function AdmMaster({ master, masterErr }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── Avalara tax codes (global) ───────────────────────────────────────────────
+// The platform catalog every builder's Settings → Company → Tax picker searches (migration 246).
+// Builders never call Avalara: an operator fills the stored copy from here, on purpose, through
+// admin-catalog's avalara_sync_tax_codes. The row first shows what the copy holds
+// (avalara_tax_codes_status, a read of the table only), so a sync is pressed because the list
+// needs one rather than to find out what is in it.
+//
+// The sync needs can_write — a read-only operator gets the server's own sentence — and makes up to
+// ten authenticated Avalara requests. It never deletes a code, and it marks the codes Avalara
+// stopped listing inactive only after reading the whole list. A sync that stopped short still
+// answers ok, with a `warning` sentence; that is shown as the warning it is, because an ok alone
+// would read as a finished sync. Its messages stay on this card, beside the button, rather than in
+// the console's banner at the top of the page.
+function AdmTaxCodes() {
+  const [status, setStatus] = useState(null);   // { count, activeCount, syncedAt } | { err } | null while loading
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);   // { ok } | { warning } | { err }
+  const load = useCallback(async () => {
+    try {
+      const s = await adminApi("avalara_tax_codes_status");
+      setStatus({ count: Number(s.count || 0), activeCount: Number(s.activeCount || 0), syncedAt: s.syncedAt || null });
+    } catch (e) {
+      setStatus({ err: e.message || "Couldn't read the tax code list." });
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const n = (x) => Number(x || 0).toLocaleString("en-US");
+  const sync = async () => {
+    if (!window.confirm("Sync the tax code list from Avalara?\n\nThis makes up to 10 requests to Avalara with the platform's credentials and updates the list every builder picks their tax codes from. No code is deleted. Codes Avalara no longer lists are marked inactive, and only when the whole list was read.")) return;
+    setBusy(true); setResult(null);
+    try {
+      const r = await adminApi("avalara_sync_tax_codes");
+      // A partial sync's warning already says what stopped it, how many codes were saved and that
+      // none were marked inactive; a "Synced" line beside it would contradict it.
+      setResult(r.warning
+        ? { warning: r.warning }
+        : { ok: `Synced — ${n(r.upserted)} codes saved from ${n(r.pages)} ${r.pages === 1 ? "request" : "requests"}, ${n(r.deactivated)} marked inactive${r.skipped ? `, ${n(r.skipped)} unreadable entries skipped` : ""}.` });
+    } catch (e) {
+      setResult({ err: e.message || "The sync failed." });
+    }
+    setBusy(false);
+    load();
+  };
+  const when = (iso) => new Date(iso).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  return (
+    <div style={S.card}>
+      <CardHead title="Avalara tax codes" count={status && !status.err ? n(status.count) : null}
+        desc="The list every builder's Settings → Company → Tax picker searches. Builders never call Avalara: a sync here reads Avalara's full list and stores it."
+        right={
+          /* Disabled only while a sync runs, and the label says so. */
+          <button type="button" onClick={sync} disabled={busy} style={{ ...S.btn(ACCENT, "#FFF"), opacity: busy ? 0.7 : 1 }}>
+            {busy ? "Syncing…" : "Sync from Avalara"}
+          </button>
+        } />
+      {!status && <SkelBar w={300} h={12} />}
+      {status && status.err && <div style={{ fontSize: 13, color: "#B91C1C" }}>{status.err}</div>}
+      {status && !status.err && (
+        <div style={{ fontSize: 13, color: "#334155" }}>
+          {n(status.count)} codes ({n(status.activeCount)} active) ·{" "}
+          {status.syncedAt ? `last synced ${when(status.syncedAt)}` : "never synced, so builders can pick only the starter codes"}
+        </div>
+      )}
+      {result && result.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{result.ok}</div>}
+      {result && result.warning && (
+        <div style={{ ...S.err, background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", marginTop: 12, marginBottom: 0 }}>{result.warning}</div>
+      )}
+      {result && result.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{result.err}</div>}
     </div>
   );
 }

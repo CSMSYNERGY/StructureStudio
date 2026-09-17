@@ -3957,7 +3957,9 @@ function DeliveryView({ viewingLabel = null, clientId = null }) {
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 16, cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#1E293B" }}>
             <input type="checkbox" checked={f.ssTaxDelivery} onChange={set("ssTaxDelivery")} style={{ width: 17, height: 17, cursor: "pointer", accentColor: DOOR_MINT }} />
             Taxable
-            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as Company &rarr; Business details)</span>
+            {/* The twin of "Charge tax on delivery" on CRM Connection → Quotes & Invoices (both write
+                ss_tax_delivery). It used to point at Company → Business details, which has no such switch. */}
+            <span style={{ fontWeight: 500, color: "#64748B" }}>&mdash; charge sales tax on the delivery line (the same switch as CRM Connection &rarr; Quotes &amp; Invoices)</span>
           </label>
 
           <div>

@@ -2814,6 +2814,512 @@ function MyProfileSettings({ prefs, onSaved, profile = null, email = null, onPro
 // separated Building / Exterior / Interior on the one long Options page. The groups are the
 // tab clusters in SubTabs now — see ssOptionTabs — so the component had no caller left.)
 
+// ─── Tax codes (Settings → Company → Tax) ───
+// Which Avalara tax code each building style and option heading falls under (migration 246,
+// 2026-09-17). The owner's ask (2026-09-14): every product, installation and delivery carries a
+// code, and each builder codes their own "so they're not coming back to us and saying, oh, it's
+// not correct". The screen is Ahsan's design, which the owner preferred: one row per code, each a
+// code picker plus a multi-select of everything that code covers.
+//
+// Four things about it are deliberate:
+//   • SAVED, NOT USED. No quote, PDF, acceptance, QuickBooks push or change order reads the
+//     mapping yet — per-line tax by code is a later stage. The note under the explainer says so in
+//     every state, and nothing on this card may suggest that a code changes today's tax.
+//   • ONE CODE PER THING. tax_code_assignments' primary key holds one code per style or heading,
+//     and the server refuses a payload naming a target twice. So ticking something another row
+//     covers MOVES it, and the checkbox names the code it sits under before you tick.
+//   • A ROW WITHOUT A CODE IS NOT SAVED. An empty tenant starts on three suggested rows
+//     (Products, Services, Delivery) with their targets ticked and NO code: a code chosen for the
+//     builder would be tax advice. What a codeless row covers stays "Not assigned" until it has
+//     one, and the save sends only rows with a code and something ticked.
+//   • THE SERVER'S ANSWER IS THE STATE. tax_codes_save replaces the whole set and answers with what
+//     the database now holds, so the rows are rebuilt from that answer. Codeless rows the builder
+//     is still filling in are kept, minus anything the save covered.
+// The styles, headings and heading groups all come from tax_codes_get. The heading keys live in
+// _shared/taxCodes.ts only: the QuickBooks item map kept its line kinds in three places, and one
+// of the three drifted.
+
+const taxTargetId = (type, key) => `${type}:${key}`;
+const taxTargetOf = (id) => {
+  const i = id.indexOf(":");
+  return { type: id.slice(0, i), key: id.slice(i + 1) };
+};
+
+// Every target a tax_codes_get answer offers, in display order: the styles, then the headings.
+// The styles' group is "buildings", a key no heading group uses.
+function taxTargetsOf(d) {
+  return [
+    ...((d && d.styles) || []).map((s) => ({ id: taxTargetId("style", s.id), group: "buildings", label: s.label || "Unnamed style", inactive: s.active === false })),
+    ...((d && d.headings) || []).map((h) => ({ id: taxTargetId("heading", h.key), group: h.group, label: h.label })),
+  ];
+}
+
+// The checklist's sections: Buildings, then the heading groups in the server's order. A heading
+// whose group the answer does not name still gets a section rather than vanishing.
+function taxGroupsOf(d) {
+  const named = (d && d.headingGroups) || [];
+  const seen = new Set(named.map((g) => g.key));
+  const extra = [];
+  for (const h of (d && d.headings) || []) {
+    if (!seen.has(h.group)) { seen.add(h.group); extra.push({ key: h.group, label: h.group }); }
+  }
+  return [{ key: "buildings", label: "Buildings" }, ...named, ...extra];
+}
+
+// The stored mapping as rows: one per code, in the order tax_codes_get lists its codes (the
+// common codes first), each row's targets in display order.
+function taxSavedRows(d) {
+  const rank = new Map(((d && d.codes) || []).map((c, i) => [c.code, i]));
+  const byCode = new Map();
+  for (const a of (d && d.assignments) || []) {
+    if (!byCode.has(a.code)) byCode.set(a.code, new Set());
+    byCode.get(a.code).add(taxTargetId(a.targetType, a.targetKey));
+  }
+  const order = taxTargetsOf(d).map((t) => t.id);
+  const at = (code) => (rank.has(code) ? rank.get(code) : Number.MAX_SAFE_INTEGER);
+  return [...byCode.keys()]
+    .sort((a, b) => at(a) - at(b) || (a < b ? -1 : a > b ? 1 : 0))
+    .map((code) => ({ code, targets: order.filter((id) => byCode.get(code).has(id)) }));
+}
+
+// Where an empty tenant starts: the owner's three groups, ticked, with no code. The group keys
+// are _shared/taxCodes.ts TAX_HEADING_GROUPS'. A key renamed there only leaves a suggestion
+// unticked; the save validates every heading key server-side either way.
+function taxSuggestedRows(d) {
+  const targets = taxTargetsOf(d);
+  const inGroups = (groups) => targets.filter((t) => groups.indexOf(t.group) !== -1).map((t) => t.id);
+  return [
+    { title: "Products", code: "", targets: inGroups(["buildings", "building", "exterior", "interior", "other"]) },
+    { title: "Services", code: "", targets: inGroups(["services"]) },
+    { title: "Delivery", code: "", targets: inGroups(["delivery"]) },
+  ];
+}
+
+// target id → code, over the rows a save would send (a codeless row covers nothing yet).
+function taxCoverage(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    if (!r.code) continue;
+    for (const id of r.targets) m.set(id, r.code);
+  }
+  return m;
+}
+const taxSameCoverage = (a, b) => a.size === b.size && [...a].every(([id, code]) => b.get(id) === code);
+
+// A portal-settings older than this page has no tax code actions: resolveTenant answers 403
+// "Unrecognised action" (no GATES line), the dispatcher 400 "Unknown action". The frontend deploys
+// on push and functions deploy separately, so that window reads "not here yet", not a fault. Any
+// OTHER 403 is a real refusal and shows its sentence — unlike ssTaxReadUnavailable, which treats
+// every 403 as "nothing to show" because its callers render no tax text at all on one.
+function taxCodesUnavailable(err) {
+  if (!err || (err.ssStatus !== 403 && err.ssStatus !== 400)) return false;
+  return /Unrecogni[sz]ed action|^Unknown action\b/i.test(String(err.message || ""));
+}
+
+// One row's code picker: the chosen code with a Change button, or a type-ahead over
+// tax_codes_search — debounced 300ms while typing, at once for an empty box, which lists the
+// common codes first with their hints. The search reads the stored catalog; nothing here reaches
+// Avalara.
+function TaxCodePicker({ code, info, onPick, disabled = false }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [list, setList] = useState(null);      // the latest answer's codes; null before the first
+  const [err, setErr] = useState(null);
+  const [hi, setHi] = useState(0);             // the highlighted option, for the arrow keys
+  const seq = useRef(0);
+  const inputRef = useRef(null);
+  const searching = open || !code;
+  useEffect(() => {
+    if (!open) return undefined;
+    const my = ++seq.current;
+    const t = setTimeout(async () => {
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_search", q } });
+      // Latest search wins: a slow answer for "FR" must not replace the one for "FR01".
+      if (my !== seq.current) return;
+      if (error || !data || data.error) {
+        setErr((data && data.error) || (error && error.message) || "Couldn't search the tax codes.");
+        setList([]);
+        return;
+      }
+      setErr(null);
+      setList(data.codes || []);
+      setHi(0);
+    }, q.trim() ? 300 : 0);
+    return () => clearTimeout(t);
+  }, [open, q]);
+  // "Change" swaps the chosen code for the search box; the box should take the typing at once.
+  useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
+
+  const pick = (c) => {
+    if (!c) return;
+    onPick(c);
+    setQ("");
+    setOpen(false);
+  };
+  const onKey = (e) => {
+    const n = (list || []).length;
+    if (e.key === "ArrowDown") { e.preventDefault(); setOpen(true); if (n) setHi((h) => (h + 1) % n); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); if (n) setHi((h) => (h - 1 + n) % n); }
+    else if (e.key === "Enter") { if (open && n) { e.preventDefault(); pick(list[Math.min(hi, n - 1)]); } }
+    else if (e.key === "Escape") { e.currentTarget.blur(); }
+  };
+  const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
+  const note = { padding: "9px 11px", fontSize: 12.5, color: "#64748B" };
+  const head = { padding: "7px 11px 3px", fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+  const empty = !q.trim();
+  return (
+    <div style={{ position: "relative", maxWidth: 640 }}>
+      {!searching ? (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, border: "1px solid #CBD5E1", borderRadius: 8, padding: "8px 11px", background: "#F8FAFC" }}>
+          <div style={{ flex: 1, minWidth: 0, fontSize: 13, color: "#1E293B", lineHeight: 1.4 }}>
+            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{code}</strong>
+            {info && info.description ? <span> — {info.description}</span> : null}
+            {info && info.hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{info.hint}</div>}
+          </div>
+          {/* Hidden, not disabled, while the card saves: the Save button's "Saving…" is the reason. */}
+          {!disabled && <button type="button" onClick={() => setOpen(true)} style={linkBtn}>Change</button>}
+        </div>
+      ) : (
+        <input ref={inputRef} style={S.input} value={q} disabled={disabled}
+          placeholder={code ? `Replace ${code} — search by code or words` : "Pick a code — search by code or words, e.g. delivery or FR01"}
+          aria-label="Search tax codes" role="combobox" aria-expanded={open} aria-autocomplete="list"
+          onFocus={() => setOpen(true)}
+          onBlur={() => { setOpen(false); setQ(""); }}
+          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onKeyDown={onKey} />
+      )}
+      {searching && open && (
+        // mousedown is swallowed so a click on an option (or the list's scrollbar) does not blur
+        // the box and close the list before the click lands.
+        <div role="listbox" onMouseDown={(e) => e.preventDefault()}
+          style={{ position: "absolute", zIndex: 30, left: 0, right: 0, top: "calc(100% + 4px)", background: "#FFF", border: "1px solid #CBD5E1", borderRadius: 8, boxShadow: "0 10px 28px rgba(15,23,42,0.14)", maxHeight: 320, overflowY: "auto" }}>
+          {err && <div style={{ ...note, color: "#B91C1C" }}>{err}</div>}
+          {list === null && !err && <div style={note}>Searching…</div>}
+          {list && list.length === 0 && !err && <div style={note}>No active tax codes match “{q.trim()}”.</div>}
+          {(list || []).map((c, i) => (
+            <React.Fragment key={c.code}>
+              {empty && i === 0 && c.hint && <div style={head}>Common codes</div>}
+              {empty && i > 0 && !c.hint && list[i - 1].hint && <div style={{ ...head, borderTop: "1px solid #E2E8F0" }}>More codes</div>}
+              <button type="button" role="option" aria-selected={i === hi}
+                onMouseEnter={() => setHi(i)} onClick={() => pick(c)}
+                style={{ display: "block", width: "100%", textAlign: "left", fontFamily: "inherit", cursor: "pointer", border: "none", background: i === hi ? "#F1F5F9" : "#FFF", padding: "8px 11px" }}>
+                <div style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.35 }}>
+                  <strong style={{ fontVariantNumeric: "tabular-nums" }}>{c.code}</strong> — {c.description || "No description"}
+                </div>
+                {c.hint && <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 2 }}>{c.hint}</div>}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
+  const [data, setData] = useState(null);       // tax_codes_get answer | { err, unavailable } | null while loading
+  const [rows, setRows] = useState([]);         // the editor's working copy: [{ rid, title, code, targets: [id] }]
+  const [codeInfo, setCodeInfo] = useState({}); // code → { code, description, typeId, isActive, hint }
+  const [openRid, setOpenRid] = useState(null); // the row whose checklist is open
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);         // { ok } | { err }
+  const ridSeq = useRef(0);
+  // Latest load wins, the LocationsCard rule: a slow first answer must not land over a retry's.
+  const loadSeq = useRef(0);
+  const withRids = (list) => list.map((r) => ({ title: null, ...r, rid: ++ridSeq.current }));
+  const learnCodes = (codes) => setCodeInfo((cur) => {
+    const next = { ...cur };
+    for (const c of codes || []) {
+      if (c && c.code) next[c.code] = c;
+    }
+    return next;
+  });
+
+  const load = useCallback(async () => {
+    if (!canReadTax) return;
+    const seq = ++loadSeq.current;
+    const { data: d, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_get" } });
+    if (seq !== loadSeq.current) return;
+    // The invoke wrapper has already swapped a refusal's generic "non-2xx" for the server's sentence.
+    if (error || !d || d.error) {
+      setData({ err: (d && d.error) || (error && error.message) || "Couldn't load your tax codes.", unavailable: taxCodesUnavailable(error) });
+      return;
+    }
+    learnCodes(d.codes);
+    const saved = taxSavedRows(d);
+    setRows(withRids(saved.length ? saved : taxSuggestedRows(d)));
+    setOpenRid(null);
+    setData(d);
+  }, [canReadTax]);
+  useEffect(() => { load(); }, [load]);
+
+  const d = data && !data.err ? data : null;
+  const targets = useMemo(() => taxTargetsOf(d), [d]);
+  const groups = useMemo(() => taxGroupsOf(d), [d]);
+  const savedRows = useMemo(() => (d ? taxSavedRows(d) : []), [d]);
+  const savedCoverage = useMemo(() => taxCoverage(savedRows), [savedRows]);
+  const coverage = taxCoverage(rows);
+  const editing = !!d && canEditTax;
+  // A reader sees what is STORED, never the suggested rows: those are an editor's starting point,
+  // and to someone who cannot change them they would read as codes the business had chosen.
+  const shownCoverage = editing ? coverage : savedCoverage;
+  const dirty = editing && !taxSameCoverage(coverage, savedCoverage);
+  const unassigned = targets.filter((t) => !shownCoverage.has(t.id));
+  const codeless = editing && rows.some((r) => !r.code && r.targets.length > 0);
+
+  // Tick moves the targets into this row (out of any other); untick takes them out of this row.
+  const toggleTargets = (rid, ids, on) => {
+    setMsg(null);
+    const order = targets.map((t) => t.id);
+    setRows((rs) => rs.map((r) => {
+      if (r.rid === rid) {
+        const have = new Set(r.targets);
+        for (const id of ids) {
+          if (on) have.add(id);
+          else have.delete(id);
+        }
+        return { ...r, targets: order.filter((id) => have.has(id)) };
+      }
+      return on ? { ...r, targets: r.targets.filter((id) => ids.indexOf(id) === -1) } : r;
+    }));
+  };
+  const pickCode = (rid, c) => {
+    setMsg(null);
+    learnCodes([c]);
+    setRows((rs) => rs.map((r) => (r.rid === rid ? { ...r, code: c.code } : r)));
+  };
+  const addRow = () => {
+    setMsg(null);
+    const [r] = withRids([{ code: "", targets: [] }]);
+    setRows((rs) => [...rs, r]);
+    setOpenRid(r.rid);
+  };
+  const removeRow = (rid) => {
+    setMsg(null);
+    setRows((rs) => rs.filter((r) => r.rid !== rid));
+    setOpenRid((o) => (o === rid ? null : o));
+  };
+
+  const save = async () => {
+    const send = rows.filter((r) => r.code && r.targets.length > 0)
+      .map((r) => ({ code: r.code, targets: r.targets.map(taxTargetOf) }));
+    setBusy(true); setMsg(null);
+    const { data: res, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_save", rows: send } });
+    setBusy(false);
+    if (error || !res || res.error || !Array.isArray(res.assignments)) {
+      setMsg({ err: (res && res.error) || (error && error.message) || "Couldn't save your tax codes." });
+      return;
+    }
+    learnCodes(res.codes);
+    const stored = taxSavedRows(res);
+    const covered = taxCoverage(stored);
+    // A suggested row's title follows its code into the rebuilt list.
+    const titleOf = new Map(rows.filter((r) => r.code && r.title).map((r) => [r.code, r.title]));
+    // Codeless rows were not sent. Keep them, minus whatever the save now covers, and drop one that
+    // covered something and has nothing left (a freshly added, still-empty row stays).
+    const pending = [];
+    for (const r of rows) {
+      if (r.code) continue;
+      const left = r.targets.filter((id) => !covered.has(id));
+      if (left.length || !r.targets.length) pending.push({ ...r, targets: left });
+    }
+    setRows([...withRids(stored.map((r) => ({ ...r, title: titleOf.get(r.code) || null }))), ...pending]);
+    setOpenRid(null);
+    setData(res);
+    const total = taxTargetsOf(res).length;
+    setMsg({ ok: `Tax codes saved — ${covered.size} of your ${total} building styles and option headings ${covered.size === 1 ? "has" : "have"} a code.` });
+  };
+
+  const lbl = { fontSize: 10.5, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase", color: "#94A3B8" };
+  const linkBtn = { background: "none", border: "none", padding: 0, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, color: ACCENT, fontWeight: 700 };
+  const chipStyle = { background: "#EEF2FF", color: "#3D3672", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 9px" };
+  const checkRow = { display: "flex", alignItems: "flex-start", gap: 7, fontSize: 12.5, fontWeight: 600, color: "#1E293B", marginTop: 6, cursor: "pointer", lineHeight: 1.35 };
+  const warn = !!d && (d.ssMode !== true || d.lookupEnabled !== true);
+  // What a row covers, as chips. A whole group collapses to one chip, so a Products row reads
+  // "All buildings (9) · Exterior (all 5)" rather than twenty names.
+  const chipsFor = (ids) => {
+    const have = new Set(ids);
+    const out = [];
+    for (const g of groups) {
+      const inGroup = targets.filter((t) => t.group === g.key);
+      const mine = inGroup.filter((t) => have.has(t.id));
+      if (!mine.length) continue;
+      if (inGroup.length > 1 && mine.length === inGroup.length) {
+        out.push({ key: "all:" + g.key, text: g.key === "buildings" ? `All buildings (${inGroup.length})` : `${g.label} (all ${inGroup.length})` });
+      } else {
+        for (const t of mine) out.push({ key: t.id, text: t.label });
+      }
+    }
+    return out;
+  };
+  const chipList = (ids) => {
+    const chips = chipsFor(ids);
+    return chips.length
+      ? chips.map((c) => <span key={c.key} style={chipStyle}>{c.text}</span>)
+      : <span style={{ fontSize: 12.5, color: "#94A3B8" }}>Nothing yet</span>;
+  };
+
+  return (
+    <div style={S.card}>
+      <div style={S.h2}>Tax codes</div>
+      <div style={{ fontSize: 12.5, color: "#64748B", marginBottom: 12, lineHeight: 1.5, maxWidth: 780 }}>
+        Every building, option and service you sell falls under a tax code from Avalara's list. Pick a code, then tick
+        everything that code covers — each building style and option heading takes one code. You (or your accountant)
+        choose the codes, so they match how you file. The notes beside common codes are suggestions, not tax advice.
+        {/* Said up front rather than left to missing buttons, as on the location rates. */}
+        {d && !canEditTax && " Only someone who can edit CRM Connection settings can change these codes."}
+      </div>
+      {/* Every state gets the note, because in none of them does a code change a quote yet. It is
+          the amber warning when this account is not on per-line-ready tax at all (CRM mode, or
+          verified lookups off) and a plain note otherwise. */}
+      {d && (
+        <div data-tax-note="" style={warn
+          ? { background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }
+          : { background: "#F8FAFC", border: "1px solid #E2E8F0", color: "#475569", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 500, lineHeight: 1.55, marginBottom: 14, maxWidth: 780 }}>
+          These codes are saved now and will be used when per-line tax with Avalara is switched on for your account.
+          Until then they don't change the tax on any quote.
+        </div>
+      )}
+
+      {!canReadTax && <p style={{ fontSize: 13, color: "#64748B" }}>Only someone who can view CRM Connection settings can see your tax codes.</p>}
+      {canReadTax && !data && <p style={{ fontSize: 13, color: "#64748B" }}>Loading…</p>}
+      {data && data.err && data.unavailable && (
+        <p style={{ fontSize: 13, color: "#64748B" }}>Tax codes aren't available on your account yet — check back soon.</p>
+      )}
+      {data && data.err && !data.unavailable && (
+        <div style={S.err}>
+          {data.err}{" "}
+          <button type="button" onClick={() => { setData(null); load(); }} style={{ ...linkBtn, color: "#B91C1C", textDecoration: "underline" }}>Try again</button>
+        </div>
+      )}
+
+      {/* ── The editor: one row per code ── */}
+      {editing && rows.map((r, i) => {
+        const info = r.code ? codeInfo[r.code] : null;
+        const open = openRid === r.rid;
+        return (
+          <div key={r.rid} data-tax-row={i} style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", marginBottom: 10, background: "#FFF" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+              <span style={lbl}>{r.title || "Tax code"}</span>
+              {!r.code && (
+                <span style={{ background: "#FFFBEB", border: "1px solid #FDE68A", color: "#92400E", borderRadius: 12, fontSize: 11, fontWeight: 700, padding: "1px 8px" }}>Pick a code</span>
+              )}
+              {/* Hidden while the card saves, like every row control: the answer rebuilds the rows. */}
+              {!busy && <button type="button" onClick={() => removeRow(r.rid)} style={{ ...linkBtn, color: "#94A3B8", marginLeft: "auto" }}>Remove</button>}
+            </div>
+            <TaxCodePicker code={r.code} info={info} disabled={busy} onPick={(c) => pickCode(r.rid, c)} />
+            {info && info.isActive === false && (
+              <div style={{ fontSize: 12, color: "#B45309", fontWeight: 600, marginTop: 6 }}>
+                Avalara no longer lists {r.code} as active, so this row can't be saved with it — pick another code.
+              </div>
+            )}
+            <div style={{ marginTop: 10 }}>
+              <span style={lbl}>Covers</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 5, alignItems: "center" }}>
+                {chipList(r.targets)}
+                {!busy && (
+                  <button type="button" onClick={() => setOpenRid(open ? null : r.rid)} aria-expanded={open} style={{ ...linkBtn, marginLeft: 4 }}>
+                    {open ? "Done" : "Change what it covers"}
+                  </button>
+                )}
+              </div>
+            </div>
+            {open && !busy && (
+              <div style={{ marginTop: 10, background: "#F8FAFC", border: "1px dashed #CBD5E1", borderRadius: 10, padding: "11px 12px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: "12px 18px" }}>
+                {groups.map((g) => {
+                  const inGroup = targets.filter((t) => t.group === g.key);
+                  if (g.key !== "buildings" && !inGroup.length) return null;
+                  const allOn = inGroup.length > 0 && inGroup.every((t) => r.targets.indexOf(t.id) !== -1);
+                  return (
+                    <div key={g.key}>
+                      <div style={lbl}>{g.label}</div>
+                      {g.key === "buildings" && (inGroup.length ? (
+                        <label style={checkRow}>
+                          <input type="checkbox" checked={allOn} onChange={(e) => toggleTargets(r.rid, inGroup.map((t) => t.id), e.target.checked)} />
+                          <span>All buildings</span>
+                        </label>
+                      ) : (
+                        <div style={{ fontSize: 12, color: "#94A3B8", marginTop: 6 }}>No building styles yet — add them under Structures.</div>
+                      ))}
+                      {inGroup.map((t) => {
+                        const mine = r.targets.indexOf(t.id) !== -1;
+                        const other = mine ? null : rows.find((o) => o.rid !== r.rid && o.targets.indexOf(t.id) !== -1);
+                        return (
+                          <label key={t.id} style={checkRow}>
+                            <input type="checkbox" checked={mine} onChange={(e) => toggleTargets(r.rid, [t.id], e.target.checked)} />
+                            <span>
+                              {t.label}
+                              {t.inactive && <span style={{ color: "#94A3B8", fontWeight: 500 }}> · not offered right now</span>}
+                              {other && <span style={{ color: "#B45309", fontWeight: 500 }}> · under {other.code || "a row with no code yet"}</span>}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* ── Read-only: the stored mapping, no controls ── */}
+      {d && !editing && (savedRows.length ? savedRows.map((r) => {
+        const info = codeInfo[r.code];
+        return (
+          <div key={r.code} data-tax-row="" style={{ border: "1px solid #E2E8F0", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, color: "#1E293B", lineHeight: 1.4 }}>
+              <strong style={{ fontVariantNumeric: "tabular-nums" }}>{r.code}</strong>
+              {info && info.description ? <span> — {info.description}</span> : null}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{chipList(r.targets)}</div>
+          </div>
+        );
+      }) : <p style={{ fontSize: 13, color: "#64748B" }}>No tax codes have been chosen yet.</p>)}
+
+      {d && (
+        <div data-tax-unassigned="" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid #F1F5F9" }}>
+          <span style={lbl}>Not assigned</span>
+          {unassigned.length === 0 ? (
+            <div style={{ fontSize: 12.5, color: "#15803D", fontWeight: 600, marginTop: 5 }}>Every building style and option heading has a code.</div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 5 }}>
+              {unassigned.map((t) => (
+                <span key={t.id} style={{ background: "#F1F5F9", color: "#475569", borderRadius: 12, fontSize: 11.5, fontWeight: 700, padding: "3px 9px" }}>{t.label}</span>
+              ))}
+            </div>
+          )}
+          {codeless && unassigned.length > 0 && (
+            <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 6 }}>A row marked “Pick a code” isn't saved until it has one, so what it covers is listed here.</div>
+          )}
+        </div>
+      )}
+
+      {editing && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+          <button type="button" onClick={addRow} disabled={busy} style={S.btn("#F1F5F9", "#334155")}>+ Add tax code</button>
+          <button type="button" onClick={save} disabled={busy || !dirty} style={S.btn(dirty ? ACCENT : "#CBD5E1", "#FFF")}>
+            {busy ? "Saving…" : "Save tax codes"}
+          </button>
+          {/* A disabled Save says why beside it. */}
+          {!busy && <span style={{ fontSize: 12, color: "#64748B" }}>{dirty ? "Unsaved changes" : "No changes to save"}</span>}
+        </div>
+      )}
+      {msg && msg.ok && <div style={{ ...S.okMsg, marginTop: 12, marginBottom: 0 }}>{msg.ok}</div>}
+      {msg && msg.err && <div style={{ ...S.err, marginTop: 12, marginBottom: 0 }}>{msg.err}</div>}
+
+      {d && d.catalog && (
+        <div style={{ fontSize: 11.5, color: "#94A3B8", marginTop: 12 }}>
+          {d.catalog.syncedAt
+            ? `The codes come from Avalara's list: ${Number(d.catalog.count || 0).toLocaleString("en-US")} codes, last updated ${new Date(d.catalog.syncedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
+            : "Only Avalara's common codes are listed until CSM Synergy loads the full list."}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Company: one rail item, six tabs ─────────────────────────────────────────────────────
 // Carolyn 2026-09-11: "I want to create some top navigation inside company. The first tab is
 // business details, next branding, then we want team, then Locations and move the locations
@@ -2958,6 +3464,9 @@ function CompanyShell({ sub: rawSub, onSub, tabs, clientId, viewingLabel = null,
           scheduling entitlement is on (ssCompanyTabs), which is the gate they had in Team. */}
       {sub === "crews" && <DriversTerritoriesCard section="crews" />}
       {sub === "drivers" && <DriversTerritoriesCard section="drivers" />}
+      {/* The whole tab is settings_crm (SETTINGS_TAB_AREA.tax), so reading is already implied by
+          the tab being here; editing is passed separately, the same pair LocationsCard gets. */}
+      {sub === "tax" && <TaxCodesCard canReadTax={canReadTax} canEditTax={canEditTax} />}
     </div>
   );
 }
@@ -3019,8 +3528,8 @@ function SettingsShell({ clientId, viewingLabel = null, sub: subProp = null, onS
       {hubs.company.some((t) => t[0] === sub) && (
         <CompanyShell sub={sub} onSub={setSub} tabs={hubs.company} clientId={clientId}
           viewingLabel={viewingLabel}
-          /* Location tax rates are settings_crm — the area that owns the company rate — not
-             the team/branding areas this tab rides on. Same unclamped reading as ssCompanyTabs: an
+          /* Location tax rates and the Tax tab's codes are settings_crm — the area that owns the
+             company rate — not the team/branding areas Locations rides on. Same unclamped reading as ssCompanyTabs: an
              owner/admin, or a null map (a platform operator in view-as, whose rights come
              from app_operators), sees and edits; everyone else by their own map. The server
              refuses regardless, and a refusal shows its own sentence. */

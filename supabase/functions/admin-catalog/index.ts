@@ -230,7 +230,7 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
   // break-glass console out of every write while telling it the account is read-only.
   const READ_ONLY_ACTIONS = new Set([
     "list_clients", "get_master", "get_client_catalog", "get_email_sender",
-    "get_billing_overview", "get_payments",
+    "get_billing_overview", "get_payments", "avalara_tax_codes_status",
   ]);
   if (identity.via === "operator" && !READ_ONLY_ACTIONS.has(String(action ?? ""))) {
     if (!identity.canWrite) {
@@ -398,6 +398,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         const items = await sb.from("layout_item_types").select("*").order("sort_order").order("item_key");
         if (items.error) throw items.error;
         return json({ ok: true, layoutItemTypes: items.data });
+      }
+      // The Admin console's "Avalara tax codes" row (Master Catalog tab): how many codes the
+      // platform catalog holds, how many are active, and when a sync last wrote it — so an
+      // operator can see whether a sync is needed before pressing one. A read of the stored copy
+      // only; it never calls Avalara, which is why it can sit on READ_ONLY_ACTIONS while
+      // avalara_sync_tax_codes cannot. Same count and syncedAt readings as portal-settings'
+      // tax_codes_get `catalog`, so the operator and a builder's Tax tab report the same list.
+      case "avalara_tax_codes_status": {
+        const [all, active, last] = await Promise.all([
+          sb.from("avalara_tax_codes").select("code", { count: "exact", head: true }),
+          sb.from("avalara_tax_codes").select("code", { count: "exact", head: true }).eq("is_active", true),
+          sb.from("avalara_tax_codes").select("synced_at").not("synced_at", "is", null)
+            .order("synced_at", { ascending: false }).limit(1).maybeSingle(),
+        ]);
+        if (all.error) throw all.error;
+        if (active.error) throw active.error;
+        if (last.error) throw last.error;
+        return json({ ok: true, count: all.count ?? 0, activeCount: active.count ?? 0, syncedAt: last.data?.synced_at ?? null });
       }
       case "get_client_catalog": {
         const clientId = reqStr(p.clientId, "clientId");
