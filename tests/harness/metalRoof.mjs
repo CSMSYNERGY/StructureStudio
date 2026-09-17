@@ -75,7 +75,14 @@ const CLIP_MAX = 0.02;
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
 
+// Waits for the tile first. openDesigner returns once the app has booted, and the tiles only
+// render after get_config answers, so an immediate look found no tile in about 1 run in 5.
 async function pickStyle(page, label) {
+  await page.waitForFunction((lab) => {
+    const want = lab.trim().toLowerCase();
+    return [...document.querySelectorAll("div,span,p,strong,b")]
+      .some((e) => e.children.length === 0 && (e.textContent || "").trim().toLowerCase() === want && e.offsetParent);
+  }, label, { timeout: 30000 }).catch(() => {});
   const ok = await page.evaluate((lab) => {
     const want = lab.trim().toLowerCase();
     const el = [...document.querySelectorAll("div,span,p,strong,b")]
