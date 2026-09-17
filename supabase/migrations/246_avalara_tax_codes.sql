@@ -50,7 +50,10 @@
 --      and a portal array, and the server set drifted, silently skipping seven kinds' saves. The
 --      CHECK below tests shape only; portal-settings validates the key.
 --      No foreign key to building_styles: target_key is shared by two kinds of target. A deleted
---      style's row is hidden by tax_codes_get and dropped by the next save.
+--      style's row is hidden by tax_codes_get and dropped by the next save. Nothing cascades
+--      when a whole tenant goes either, so admin-catalog delete_client wipes this table by
+--      client_id — heading keys are the same for every tenant, so a reused slug would otherwise
+--      inherit the deleted company's heading codes.
 --      tax_code references avalara_tax_codes(code): an unknown code is refused by the database.
 --      updated_by is the auth user who last changed the row (an operator's own id in view-as),
 --      no foreign key, like tax_lookups.actor_user_id.
@@ -65,8 +68,10 @@
 --
 -- ── ORDER OF APPLY ────────────────────────────────────────────────────────────────────────
 -- THIS FILE FIRST, then portal-settings and admin-catalog. Deployed before it, the new actions
--- answer "couldn't load your tax codes" and the sync fails on its first upsert; no existing
--- action reads either table.
+-- answer "couldn't load your tax codes" and the sync fails on its first upsert. One EXISTING
+-- action touches a table here: admin-catalog delete_client wipes tax_code_assignments, and does
+-- it before any other wipe, so deployed ahead of this file it refuses the delete with nothing
+-- removed rather than leaving a half-deleted tenant.
 
 begin;
 
@@ -241,7 +246,8 @@ commit;
 
 -- ROLLBACK:
 -- Revert portal-settings (tax_codes_get / tax_codes_search / tax_codes_save) and admin-catalog
--- (avalara_sync_tax_codes) FIRST, or those actions fail on the missing tables. What a rollback
+-- (avalara_sync_tax_codes, and delete_client's tax_code_assignments wipe) FIRST, or those
+-- actions fail on the missing tables — delete_client refusing every tenant delete. What a rollback
 -- loses: every builder's tax code mapping and the synced catalog — export tax_code_assignments
 -- first if it holds rows. No quote reads either table, so no document changes.
 --

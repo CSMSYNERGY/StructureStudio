@@ -906,8 +906,9 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
       // up to ten authenticated Avalara requests, so it needs can_write. It is not a rate lookup
       // and never touches a tenant's tax_lookup_enabled switch or the lookup ledger's cap. The
       // paging, the write rules (refused credentials write nothing, a partial sync deactivates
-      // nothing) and the operator's sentences are in _shared/taxCodeSync.ts. The answer is counts
-      // only — no credentials, no account ids, no Avalara body.
+      // nothing) and the operator's sentences are in _shared/taxCodeSync.ts. The answer is counts,
+      // plus stoppedBy and a warning sentence when the sync stopped short (still ok: what it read
+      // was saved) — no credentials, no account ids, no Avalara body.
       case "avalara_sync_tax_codes": {
         const out = await syncTaxCodes(sb);
         if (!out.ok) {
@@ -1376,6 +1377,16 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           if (error) throw new Error(`${table}: ${error.message}`);
           deleted[table] = count ?? 0;
         };
+        // tax_code_assignments (migration 246) goes FIRST, ahead of the order below. Its rows have
+        // no foreign key to anything wiped here (target_key is text, shared by style ids and
+        // heading keys), so none cascade; and the HEADING rows — delivery, doors, services — pass
+        // tax_codes_get's visibility filter for any tenant, because the heading keys are the same
+        // everywhere. Left behind, a recreated slug's Tax tab would show the deleted company's
+        // codes as its own saved choices, and a save that kept them would stamp them as theirs.
+        // First, because it is the one table here that can be missing: admin-catalog deployed
+        // before 246 is applied refuses the delete on this line, before anything is gone, instead
+        // of half-deleting the tenant and throwing further down.
+        await wipe("tax_code_assignments");
         // Catalog/design rows first, config last. Order respects FKs
         // (layout_item_pricing & building_sizes → building_styles; inclusions → sizes).
         await wipe("designs");

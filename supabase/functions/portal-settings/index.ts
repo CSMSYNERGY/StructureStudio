@@ -37,8 +37,8 @@ import {
 } from "../_shared/taxChain.ts";
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
 import {
-  COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, searchQuery,
-  TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
+  COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, type PlannedAssignment,
+  searchQuery, TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
 } from "../_shared/taxCodes.ts";
 import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
@@ -5249,6 +5249,17 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   // behind rather than losing one the builder kept. Unchanged targets are not rewritten, so
   // updated_by keeps naming whoever last changed each one (an operator's own id in view-as, whose
   // write is also on the operator_tax_codes_save audit row above).
+  //
+  // The writes do not trust the read they were planned from. Two editors saving at once each
+  // plan against what they read; a delete limited to the rows that read contained left the
+  // OTHER save's new rows behind, so the table held both payloads (doors from one, windows from
+  // the other) though each asked for a whole set. So: a target this save keeps unchanged is
+  // re-inserted if it has gone missing (DO NOTHING when present, so its updated_by stands), and
+  // the delete removes every row of this tenant's that this payload does NOT cover, whatever the
+  // read saw. A save whose writes all land after another's leaves exactly its own targets (a code it
+  // left unchanged keeps the other save's change to it, if any). Two saves whose writes
+  // interleave inside one round trip can still leave a mix — there is no transaction here to
+  // prevent that — and the answer is what the database now holds, so the editor sees it.
   if (action === "tax_codes_save") {
     const parsed = parseAssignmentsPayload(payload);
     if (!parsed.ok) return json({ error: parsed.error, reason: parsed.reason }, parsed.status);
@@ -5290,24 +5301,34 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (storedErr) return dbFail(req, clientId, "load your tax codes", storedErr);
     const plan = planAssignments(stored ?? [], rows);
 
+    const now = new Date().toISOString();
+    const stamp = (a: PlannedAssignment) => ({ ...a, client_id: clientId, updated_at: now, updated_by: userId ?? null });
     if (plan.upserts.length) {
-      const now = new Date().toISOString();
       const { error } = await admin.from("tax_code_assignments").upsert(
-        plan.upserts.map((u) => ({ client_id: clientId, ...u, updated_at: now, updated_by: userId ?? null })),
-        { onConflict: "client_id,target_type,target_key" },
+        plan.upserts.map(stamp), { onConflict: "client_id,target_type,target_key" },
       );
       if (error) return dbFail(req, clientId, "save your tax codes", error);
     }
-    for (const [type, keys] of [["style", plan.deleteStyles], ["heading", plan.deleteHeadings]] as const) {
-      if (!keys.length) continue;
-      const { error } = await admin.from("tax_code_assignments").delete()
-        .eq("client_id", clientId).eq("target_type", type).in("target_key", keys);
+    if (plan.kept.length) {
+      const { error } = await admin.from("tax_code_assignments").upsert(
+        plan.kept.map(stamp), { onConflict: "client_id,target_type,target_key", ignoreDuplicates: true },
+      );
+      if (error) return dbFail(req, clientId, "save your tax codes", error);
+    }
+    // By exclusion, per type, always run. The keys are safe inside the quoted in-list: a style
+    // key passed the uuid shape and a heading key is one of TAX_HEADINGS' (parseAssignmentsPayload).
+    let removed = 0;
+    for (const [type, keys] of [["style", plan.keepStyles], ["heading", plan.keepHeadings]] as const) {
+      let del = admin.from("tax_code_assignments").delete({ count: "exact" })
+        .eq("client_id", clientId).eq("target_type", type);
+      if (keys.length) del = del.not("target_key", "in", `(${keys.map((k) => `"${k}"`).join(",")})`);
+      const { error, count } = await del;
       if (error) return dbFail(req, clientId, "remove the tax codes you unticked", error);
+      removed += count ?? 0;
     }
 
-    const removed = plan.deleteStyles.length + plan.deleteHeadings.length;
     await audit("portal_tax_codes_save", plan.upserts.length + removed,
-      `codes=${codes.join(",").slice(0, 400)} changed=${plan.upserts.length} removed=${removed} unchanged=${plan.unchanged}`);
+      `codes=${codes.join(",").slice(0, 400)} changed=${plan.upserts.length} removed=${removed} unchanged=${plan.kept.length}`);
     return await taxCodesResponse();
   }
 

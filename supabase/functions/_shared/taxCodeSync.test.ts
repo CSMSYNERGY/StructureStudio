@@ -18,7 +18,8 @@ Deno.env.set("AVALARA_LICENSE_KEY", "test-key");
 Deno.env.set("AVALARA_API_BASE", "https://avatax.test");
 
 const {
-  fetchTaxCodes, SYNC_MAX_PAGES, SYNC_PAGE_SIZE, SYNC_PAGE_TIMEOUT_MS, SYNC_UPSERT_CHUNK, syncFailureText, syncTaxCodes,
+  fetchTaxCodes, partialSyncText, SYNC_MAX_PAGES, SYNC_ORDER_BY, SYNC_PAGE_SIZE, SYNC_PAGE_TIMEOUT_MS, SYNC_UPSERT_CHUNK,
+  syncFailureText, syncTaxCodes,
 } = await import("./taxCodeSync.ts");
 const { AVALARA_CLIENT_HEADER } = await import("./salesTax.ts");
 
@@ -100,7 +101,9 @@ const named = (ops: unknown[][], name: string) => ops.filter((o) => o[0] === nam
 Deno.test("one page that reaches @recordsetCount is a complete sync: one request, with the auth and client headers", async () => {
   let got: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
   const requests = await withFetch(() => page(0, 3, 3), async () => { got = await fetchTaxCodes(); });
-  assertEquals(requests.map((r) => r.url), [`https://avatax.test/api/v2/definitions/taxcodes?$top=${SYNC_PAGE_SIZE}&$skip=0`]);
+  assertEquals(requests.map((r) => r.url), [
+    `https://avatax.test/api/v2/definitions/taxcodes?$top=${SYNC_PAGE_SIZE}&$skip=0&$orderBy=taxCode%20ASC`,
+  ]);
   const headers = requests[0].init?.headers as Record<string, string>;
   assertEquals(headers.Authorization, `Basic ${btoa("test-account:test-key")}`);
   assertEquals(headers["X-Avalara-Client"], AVALARA_CLIENT_HEADER);
@@ -118,6 +121,9 @@ Deno.test("pages advance $skip by what was received and stop at @recordsetCount"
     async () => { got = await fetchTaxCodes(); },
   );
   assertEquals(requests.map((r) => new URL(r.url).searchParams.get("$skip")), ["0", "1000", "2000"]);
+  assertEquals(requests.map((r) => new URL(r.url).searchParams.get("$orderBy")), [SYNC_ORDER_BY, SYNC_ORDER_BY, SYNC_ORDER_BY],
+    "every page walks the same fixed order — $skip over an unordered list can repeat one code and never show another");
+  assertEquals(SYNC_ORDER_BY, "taxCode ASC");
   const r = got! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
   assertEquals([r.complete, r.fetched, r.codes.length, r.pages], [true, 2400, 2400, 3]);
 });
@@ -145,13 +151,55 @@ Deno.test("a repeated code keeps its last copy, and an unusable code is counted,
   let got: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
   await withFetch(
     (n) => n === 1
-      ? ok({ "@recordsetCount": 4, value: [{ taxCode: "NT", description: "old" }, { taxCode: "bad code!", description: "x" }] })
-      : ok({ "@recordsetCount": 4, value: [{ taxCode: "NT", description: "new" }, { taxCode: "FR010000", description: "Delivery" }] }),
+      ? ok({ "@recordsetCount": 3, value: [{ taxCode: "NT", description: "old" }, { taxCode: "bad code!", description: "x" }] })
+      : ok({ "@recordsetCount": 3, value: [{ taxCode: "NT", description: "new" }, { taxCode: "FR010000", description: "Delivery" }] }),
     async () => { got = await fetchTaxCodes(); },
   );
   const r = got! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
-  assertEquals([r.complete, r.fetched, r.skipped], [true, 4, 1]);
+  assertEquals([r.complete, r.fetched, r.skipped], [true, 4, 1], "three distinct entries account for a count of three");
   assertEquals(r.codes.map((c) => [c.code, c.description]), [["NT", "new"], ["FR010000", "Delivery"]]);
+});
+
+Deno.test("pages that repeat a code and miss another reach @recordsetCount but are NOT complete", async () => {
+  // Codes 0–999, then 999–1998: code 999 twice, code 1999 never. 2,000 entries for a count of
+  // 2,000 — the raw count says complete, the distinct count (1,999) says something was missed.
+  let got: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
+  const requests = await withFetch(
+    (n) => n === 1 ? page(0, 1000, 2000) : page(999, 1000, 2000),
+    async () => { got = await fetchTaxCodes(); },
+  );
+  assertEquals(requests.length, 2);
+  const r = got! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
+  assertEquals([r.ok, r.complete, r.stoppedBy, r.fetched, r.codes.length], [true, false, "inconsistent_pages", 2000, 1999]);
+  assert(!r.codes.some((c) => c.code === "P0001999"), "the missed code cannot have been read");
+});
+
+Deno.test("an empty page ends the list, but once a count was sent, a repeat or a short list is still partial", async () => {
+  let got: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
+  await withFetch(
+    (n) => n === 1 ? page(0, 1000, 2001) : n === 2 ? page(999, 1000, 2001) : ok({ value: [] }),
+    async () => { got = await fetchTaxCodes(); },
+  );
+  const r = got! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
+  assertEquals([r.complete, r.stoppedBy, r.pages, r.codes.length], [false, "inconsistent_pages", 3, 1999]);
+
+  // Pages that run out before the count does, with no repeat, are just as unfinished.
+  let short: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
+  await withFetch((n) => n === 1 ? page(0, 600, 700) : ok({ "@recordsetCount": 700, value: [] }), async () => { short = await fetchTaxCodes(); });
+  const s = short! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
+  assertEquals([s.complete, s.stoppedBy, s.codes.length], [false, "inconsistent_pages", 600]);
+});
+
+Deno.test("unusable entries count once each toward @recordsetCount, so they cannot hide a missed code either", async () => {
+  let got: Awaited<ReturnType<typeof fetchTaxCodes>> | null = null;
+  await withFetch(
+    (n) => n === 1
+      ? ok({ "@recordsetCount": 3, value: [{ taxCode: "bad code!" }, { taxCode: "NT", description: "Non-taxable product" }] })
+      : ok({ "@recordsetCount": 3, value: [{ taxCode: "bad code!" }] }),
+    async () => { got = await fetchTaxCodes(); },
+  );
+  const r = got! as Extract<Awaited<ReturnType<typeof fetchTaxCodes>>, { ok: true }>;
+  assertEquals([r.complete, r.stoppedBy, r.skipped], [false, "inconsistent_pages", 2]);
 });
 
 // ── The write rules ─────────────────────────────────────────────────────────────────────────
@@ -188,6 +236,26 @@ Deno.test("a sync stopped by the page cap upserts what it read and deactivates N
   const r = out! as Extract<Awaited<ReturnType<typeof syncTaxCodes>>, { ok: true }>;
   assertEquals([r.complete, r.upserted, r.deactivated], [false, 10_000, 0]);
   assertEquals(named(ops, "update"), [], "no deactivation from a partial list");
+  assertEquals(r.stoppedBy, "page_cap");
+  assertEquals(r.warning, partialSyncText("page_cap", null, 10_000));
+  assert(/10000 codes were saved and none were marked inactive/.test(r.warning!), `the warning says what was kept: ${r.warning}`);
+  assert(/page limit/.test(r.warning!) && !/run the sync again/.test(r.warning!), "pressing again cannot finish a capped list, and the warning must not say it will");
+});
+
+Deno.test("pages that repeat one code and miss another save what they read, deactivate NOTHING, and say so", async () => {
+  // The finding this guards: a sync that looks complete by raw count would mark the missed code
+  // inactive — out of every builder's picker, and every save that uses it refused.
+  const { admin, ops } = makeAdmin({ updateCount: 1 });
+  let out: Awaited<ReturnType<typeof syncTaxCodes>> | null = null;
+  await withFetch(
+    (n) => n === 1 ? page(0, 1000, 2000) : page(999, 1000, 2000),
+    async () => { out = await syncTaxCodes(admin, NOW); },
+  );
+  const r = out! as Extract<Awaited<ReturnType<typeof syncTaxCodes>>, { ok: true }>;
+  assertEquals([r.ok, r.complete, r.fetched, r.upserted, r.deactivated, r.stoppedBy], [true, false, 2000, 1999, 0, "inconsistent_pages"]);
+  assertEquals(named(ops, "update"), [], "the missed code must not be deactivated");
+  assert(/fewer different codes than the total/.test(r.warning!) && /1999 codes were saved and none were marked inactive — run the sync again/.test(r.warning!),
+    `the operator is told it stopped short: ${r.warning}`);
 });
 
 Deno.test("a failure after some pages keeps what was read, and deactivates nothing", async () => {
@@ -201,6 +269,51 @@ Deno.test("a failure after some pages keeps what was read, and deactivates nothi
   const r = out! as Extract<Awaited<ReturnType<typeof syncTaxCodes>>, { ok: true }>;
   assertEquals([r.ok, r.complete, r.upserted, r.deactivated], [true, false, 1000, 0]);
   assertEquals(named(ops, "update"), []);
+  // An ok answer alone reads as a finished sync. The partial one names what stopped it — with the
+  // failed page's status — and never claims "Nothing was changed", because 1,000 codes were.
+  assertEquals(r.stoppedBy, "network");
+  assertEquals(r.warning,
+    "Couldn't reach Avalara (HTTP 503). The sync stopped partway: 1000 codes were saved and none were marked inactive — run the sync again.");
+});
+
+Deno.test("a later page rate-limited or timing out reports its own cause on the partial answer", async () => {
+  for (const [stop, respond, cause] of [
+    ["rate_limited", () => status(429), "Avalara is limiting requests right now (HTTP 429)."],
+    ["timeout", () => Promise.reject(new DOMException("timed out", "TimeoutError")), "Avalara didn't answer within 10 seconds."],
+    ["malformed", () => ok({ nope: true }), "Avalara's answer wasn't the tax code list this sync reads (HTTP 200)."],
+  ] as const) {
+    const { admin } = makeAdmin();
+    let out: Awaited<ReturnType<typeof syncTaxCodes>> | null = null;
+    await withFetch((n) => n === 1 ? page(0, 1000, 3000) : (respond as () => Promise<Response>)(), async () => {
+      out = await syncTaxCodes(admin, NOW);
+    });
+    const r = out! as Extract<Awaited<ReturnType<typeof syncTaxCodes>>, { ok: true }>;
+    assertEquals([r.ok, r.complete, r.stoppedBy], [true, false, stop], stop);
+    assert(r.warning!.startsWith(cause), `${stop}: ${r.warning}`);
+    assert(!/Nothing was changed/.test(r.warning!), `${stop}: a partial sync changed something`);
+  }
+});
+
+Deno.test("a complete sync's answer carries no stoppedBy or warning", async () => {
+  const { admin } = makeAdmin();
+  let out: Awaited<ReturnType<typeof syncTaxCodes>> | null = null;
+  await withFetch(() => page(0, 5, 5), async () => { out = await syncTaxCodes(admin, NOW); });
+  assert(out!.ok && !("stoppedBy" in out!) && !("warning" in out!), JSON.stringify(out));
+});
+
+Deno.test("the failure sentences are word for word what they were before partial syncs shared them", () => {
+  assertEquals([
+    syncFailureText("credentials_rejected", 401), syncFailureText("subscription", 403), syncFailureText("rate_limited", 429),
+    syncFailureText("timeout", null), syncFailureText("network", 503), syncFailureText("rejected", 400), syncFailureText("malformed", 200),
+  ], [
+    "Avalara refused the platform's credentials (HTTP 401). Check AVALARA_ACCOUNT_ID and AVALARA_LICENSE_KEY. Nothing was changed.",
+    "Avalara accepted the credentials but this account isn't entitled to list tax codes (HTTP 403). Nothing was changed.",
+    "Avalara is limiting requests right now (HTTP 429). Nothing was changed — try again in a minute.",
+    "Avalara didn't answer within 10 seconds. Nothing was changed — try again.",
+    "Couldn't reach Avalara (HTTP 503). Nothing was changed — try again.",
+    "Avalara refused the tax code request (HTTP 400). Nothing was changed.",
+    "Avalara's answer wasn't the tax code list this sync reads (HTTP 200). Nothing was changed.",
+  ]);
 });
 
 Deno.test("refused credentials write nothing — on the first page or after earlier ones", async () => {

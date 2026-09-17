@@ -336,7 +336,7 @@ Deno.test("stored assignments for a deleted style or a retired heading are not s
 
 // ── planAssignments ─────────────────────────────────────────────────────────────────────────
 
-Deno.test("the save plan writes new and changed targets, skips unchanged ones and deletes the rest", () => {
+Deno.test("the save plan upserts new and changed targets, keeps unchanged ones, and lists every key it covers", () => {
   const stored = [
     { target_type: "style", target_key: STYLE_A, tax_code: "P0000000" },   // unchanged
     { target_type: "heading", target_key: "delivery", tax_code: "FR010000" }, // moved to another code
@@ -352,9 +352,11 @@ Deno.test("the save plan writes new and changed targets, skips unchanged ones an
       { target_type: "heading", target_key: "windows", tax_code: "P0000000" },
       { target_type: "heading", target_key: "delivery", tax_code: "ON030000" },
     ],
-    deleteStyles: [STYLE_B],
-    deleteHeadings: ["doors"],
-    unchanged: 1,
+    kept: [{ target_type: "style", target_key: STYLE_A, tax_code: "P0000000" }],
+    // The unticked doors and STYLE_B are removed because they are NOT here — the save deletes by
+    // exclusion, so a row the read never saw (another editor's save) goes too.
+    keepStyles: [STYLE_A],
+    keepHeadings: ["windows", "delivery"],
   });
 });
 
@@ -362,20 +364,41 @@ Deno.test("a target moved between rows is re-coded, never deleted", () => {
   const stored = [{ target_type: "heading", target_key: "foundation", tax_code: "P0000000" }];
   const plan = planAssignments(stored, [{ code: "SC150100", targets: [{ type: "heading", key: "foundation" }] }]);
   assertEquals(plan.upserts, [{ target_type: "heading", target_key: "foundation", tax_code: "SC150100" }]);
-  assertEquals([plan.deleteStyles, plan.deleteHeadings, plan.unchanged], [[], [], 0]);
+  assertEquals([plan.kept, plan.keepStyles, plan.keepHeadings], [[], [], ["foundation"]]);
 });
 
-Deno.test("an empty mapping deletes every stored target, and an identical one writes nothing", () => {
+Deno.test("an empty mapping keeps no key of either type, and an identical one upserts nothing", () => {
   const stored = [
     { target_type: "style", target_key: STYLE_A, tax_code: "P0000000" },
     { target_type: "heading", target_key: "delivery", tax_code: "FR010000" },
   ];
-  assertEquals(planAssignments(stored, []), { upserts: [], deleteStyles: [STYLE_A], deleteHeadings: ["delivery"], unchanged: 0 });
+  assertEquals(planAssignments(stored, []), { upserts: [], kept: [], keepStyles: [], keepHeadings: [] });
   const same = planAssignments(stored, [
     { code: "P0000000", targets: [{ type: "style", key: STYLE_A }] },
     { code: "FR010000", targets: [{ type: "heading", key: "delivery" }] },
   ]);
-  assertEquals(same, { upserts: [], deleteStyles: [], deleteHeadings: [], unchanged: 2 });
+  assertEquals(same, {
+    upserts: [],
+    kept: [
+      { target_type: "style", target_key: STYLE_A, tax_code: "P0000000" },
+      { target_type: "heading", target_key: "delivery", tax_code: "FR010000" },
+    ],
+    keepStyles: [STYLE_A],
+    keepHeadings: ["delivery"],
+  });
+});
+
+Deno.test("a stale read cannot shrink what the save covers: the keep lists come from the payload alone", () => {
+  // Two editors, both reading an empty table. Each plan must still name exactly its own payload's
+  // keys, so each save's delete removes the other's rows rather than leaving a union behind.
+  const a = planAssignments([], [{ code: "P0000000", targets: [{ type: "heading", key: "doors" }] }]);
+  const b = planAssignments([], [{ code: "P0000000", targets: [{ type: "heading", key: "windows" }] }]);
+  assertEquals([a.keepHeadings, b.keepHeadings], [["doors"], ["windows"]]);
+  // And a row the read holds unchanged is kept, not skipped, so a save that removed it after the
+  // read is undone by the insert-if-missing.
+  const c = planAssignments([{ target_type: "heading", target_key: "doors", tax_code: "P0000000" }],
+    [{ code: "P0000000", targets: [{ type: "heading", key: "doors" }] }]);
+  assertEquals([c.upserts.length, c.kept.length], [0, 1]);
 });
 
 // ── mapAvalaraTaxCode ───────────────────────────────────────────────────────────────────────

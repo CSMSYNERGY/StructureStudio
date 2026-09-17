@@ -349,34 +349,34 @@ export function visibleAssignments(
   return out;
 }
 
+export interface PlannedAssignment { target_type: TargetType; target_key: string; tax_code: string }
+
 export interface AssignmentPlan {
   /** New targets, and targets whose code changed. Unchanged ones are not rewritten, so
    *  updated_at / updated_by keep saying who last CHANGED that target. */
-  upserts: { target_type: TargetType; target_key: string; tax_code: string }[];
-  /** Stored targets the payload no longer covers, split by type for two scoped deletes. */
-  deleteStyles: string[];
-  deleteHeadings: string[];
-  unchanged: number;
+  upserts: PlannedAssignment[];
+  /** Targets the stored read already holds with this code. Not rewritten, but inserted if they
+   *  have gone missing by the time the save writes (DO NOTHING on conflict): another save may
+   *  have removed one after the read. */
+  kept: PlannedAssignment[];
+  /** Every key the payload covers, per type. The save deletes this tenant's rows of that type
+   *  whose key is NOT listed — by exclusion, not from the read, which may already be stale. */
+  keepStyles: string[];
+  keepHeadings: string[];
 }
 
 /** What a save has to write to turn the stored set into exactly the payload's. */
 export function planAssignments(stored: StoredAssignment[], rows: AssignmentRow[]): AssignmentPlan {
   const current = new Map<string, string>();
   for (const a of stored ?? []) current.set(`${a.target_type}:${a.target_key}`, String(a.tax_code));
-  const next = new Set<string>();
-  const plan: AssignmentPlan = { upserts: [], deleteStyles: [], deleteHeadings: [], unchanged: 0 };
+  const plan: AssignmentPlan = { upserts: [], kept: [], keepStyles: [], keepHeadings: [] };
   for (const row of rows) {
     for (const t of row.targets) {
-      const id = `${t.type}:${t.key}`;
-      next.add(id);
-      if (current.get(id) === row.code) plan.unchanged++;
-      else plan.upserts.push({ target_type: t.type, target_key: t.key, tax_code: row.code });
+      const planned = { target_type: t.type, target_key: t.key, tax_code: row.code };
+      if (current.get(`${t.type}:${t.key}`) === row.code) plan.kept.push(planned);
+      else plan.upserts.push(planned);
+      (t.type === "style" ? plan.keepStyles : plan.keepHeadings).push(t.key);
     }
-  }
-  for (const a of stored ?? []) {
-    if (next.has(`${a.target_type}:${a.target_key}`)) continue;
-    if (a.target_type === "style") plan.deleteStyles.push(a.target_key);
-    else plan.deleteHeadings.push(a.target_key);
   }
   return plan;
 }
