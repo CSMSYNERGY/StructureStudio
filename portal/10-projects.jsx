@@ -1581,6 +1581,18 @@ function ProjectsTab({ sub, onSub }) {
             <button type="button" onClick={() => setSettingsOpen(true)}
               style={{ background: "none", border: "none", padding: "9px 4px 9px 12px", fontSize: 12, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>⚙ Board settings</button>
           )}
+          {!SS_POPOUT && (
+            <button type="button" title="Open Projects in its own window"
+              onClick={() => {
+                const slug = setupMode ? "setup" : (activeBoard ? activeBoard.slug : "");
+                // Fresh URL, nothing carried from this window's search: ?view= must NOT ride
+                // into the popout — Projects is the operator's own console, and a popout
+                // booted with ?view= would re-enter view-as and flip supportView.
+                window.open("/portal/projects" + (slug ? "/" + slug : "") + "?popout=1",
+                  "ss_projects_popout", "popup=yes,width=1100,height=800,noopener");
+              }}
+              style={{ background: "none", border: "none", padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#64748B", cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap" }}>↗</button>
+          )}
         </div>
         {err && <div style={S.err}>{err}</div>}
         {ok && <div style={S.okMsg}>{ok}</div>}
