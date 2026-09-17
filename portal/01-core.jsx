@@ -603,6 +603,16 @@ function ssPagePath(page, sub) {
   return base + (window.location.search || "");
 }
 
+// Popout mode: a dedicated small window showing ONLY the Projects boards (?popout=1).
+// Read ONCE at boot on purpose: ssPagePath above carries the whole search string through
+// every navigation, so the flag rides along without the router knowing it exists; nothing
+// rewrites search outside the auth-link landings, which never carry it.
+const SS_POPOUT = (() => {
+  try { return new URLSearchParams(window.location.search).get("popout") === "1"; }
+  catch (_e) { return false; }
+})();
+if (SS_POPOUT) { try { document.title = "Projects — Structure Studio"; } catch (_e) {} }
+
 // Non-admins are confined to the Designs + Leads lists, the Support tab (product news, the
 // setup checklist and their own submissions), and the coming-soon teaser tabs (previews, no
 // data). Everything else is

@@ -644,6 +644,11 @@ function Dashboard({ session }) {
   const resolvedTab = ssClampTab(tab, isOperator, !!canAdminForUrl,
     (tenant && tenant !== "none") ? tenant.access : null, supportView, canProjects);
   useEffect(() => {
+    // Popout windows never normalise the URL: a resolved refusal (canProjects false, or a
+    // hand-typed non-projects path) would replaceState to the fallback tab, and that URL
+    // then reloads chromeless as the wrong page. The popout branch below pins the surface
+    // to Projects regardless of the path, so the address bar is left alone.
+    if (SS_POPOUT) return;
     if (!tenant || tenant === "none") return;          // nothing routable yet
     const p = ssParsePath();
     const gatesResolved = (isOperator || canAdminForUrl || entitlement !== null) && canProjects !== null;
@@ -1659,6 +1664,29 @@ function Dashboard({ session }) {
           <p style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Your login works, but it isn't connected to a business yet. Contact CSM Synergy to finish your setup.</p>
           <button onClick={signOut} style={S.btn("#1E293B", "#FFF")}>Sign Out</button>
         </div>
+      </div>
+    );
+  }
+
+  // Popout window (?popout=1): the Projects boards only, no shell chrome. No nav renders
+  // here and nothing inside ProjectsTab navigates to another tab, so no other page is
+  // reachable — which is why ssClampTab needs no popout branch. Gated on the SAME two doors
+  // as the normal mount below (canProjects && !supportView); canProjects three-states:
+  // null = the can_open_projects RPC is still in flight -> neutral wait, never the fallback
+  // tab; false -> a plain refusal, still chromeless. The wrapper reproduces the
+  // .ss-projects-active geometry (viewport-height flex column, portal.html) because
+  // ProjectsTab is a flex:1/minHeight:0 column that scrolls its own table.
+  if (SS_POPOUT) {
+    const popMsg = (text) => (
+      <div style={{ padding: 40, textAlign: "center", color: "#64748B", fontSize: 14 }}>{text}</div>
+    );
+    return (
+      <div style={{ height: "100vh", boxSizing: "border-box", display: "flex", flexDirection: "column", padding: "14px 16px" }}>
+        {canProjects === null
+          ? popMsg("Loading…")
+          : (canProjects && !supportView)
+            ? <ProjectsTab sub={tab === "projects" ? sub : null} onSub={(x) => navigate("projects", x)} />
+            : popMsg("You don't have access to Projects.")}
       </div>
     );
   }
