@@ -52,7 +52,7 @@ const BLOCK = [
   lift("function d3OpeningDefaults(", "// Resolve a palette value"),
   liftToComment("function d3ScopeForItemsChange(", "Structure3DPanel — the 3D docked"),
 ].join("\n");
-for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ssVentGableDefault", "ssIsGableVent", "d3ProfSpanAt", "ssPorchTrussWall", "reflowItems", "d3ScopeForItemsChange",
+for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ssVentGableDefault", "ssIsGableVent", "d3ProfSpanAt", "ssPorchTrussWall", "d3ProjectingPorch", "reflowItems", "d3ScopeForItemsChange",
   "ssVentWhere", "ssVentAt", "ssVentDragZone", "ssVentRefusal", "ssVentNudge", "ssVentSetZone", "ssRefitGableVents"]) {
   assert(BLOCK.includes(`function ${name}(`), `extracted block is missing ${name}`);
 }
@@ -61,7 +61,7 @@ for (const name of ["ssGableEndWalls", "ssGableVentFit", "ssGableVentPlace", "ss
 type Any = any;
 const F = new Function(`${BLOCK}; return { ssGableEndWalls, ssGableVentFit, ssGableVentPlace, ssVentGableDefault, ssIsGableVent, d3ProfSpanAt,
   d3RoofAxes, d3RoofProfile, ssVentSpan, ssItemVBand, checkDoorCollision, wallSlabBlocker, checkWallSlabOverlap, reflowItems, pageGeom,
-  d3ScopeForItemsChange, SS_GABLE_TOO_SMALL, SS_GABLE_VENT_MIN_RISE,
+  d3ScopeForItemsChange, SS_GABLE_TOO_SMALL, SS_GABLE_VENT_MIN_RISE, SS_PLATE_BAND_TOP, ssPorchTrussWall,
   ssVentWhere, ssVentAt, ssVentDragZone, ssVentNudge, ssVentSetZone, ssRefitGableVents, ssVentStyleDropped, SS_REFUSE_WALL, SS_REFUSE_SLAB,
   SS_VENT_NO_GABLE, SS_VENT_NO_ROOM, SS_VENT_TOP_GABLE, SS_VENT_BOTTOM_GABLE, SS_VENT_TOP_WALL, SS_VENT_TOP_WALL_GABLE, SS_VENT_FLOOR };`)() as Record<string, Any>;
 
@@ -141,6 +141,34 @@ Deno.test("over a porch's king-post truss the sill clears the brace feet; the fa
   const porch = { ...GABLE, porchTruss: true, porchDepthFt: 6 };
   assert(F.ssGableVentFit(porch, 12, 32, "south", H, VENT, null, null).riseFt >= 0.42 - 1e-9);
   assertAlmostEquals(F.ssGableVentFit(porch, 12, 32, "north", H, VENT, null, null).riseFt, MIN_RISE, 1e-9);
+});
+
+Deno.test("a projecting porch has no truss, so its gable vent keeps the 2 in sill", () => {
+  // Raw data holding both porch kinds: the projecting one wins, and the truss goes with the recessed one.
+  const both = { type: "gable", porchDepthFt: 6, porchTruss: true, porchOutFt: 6 };
+  assertEquals(F.ssPorchTrussWall(both, 12, 32), null);
+  assertAlmostEquals(F.ssGableVentFit({ ...GABLE, ...both }, 12, 32, "south", H, VENT, null, null).riseFt, MIN_RISE, 1e-9);
+  // At or under 0.5 ft there is no projecting porch, and the recessed porch keeps its truss.
+  assertEquals(F.ssPorchTrussWall({ ...both, porchOutFt: 0.5 }, 12, 32), "south");
+  assertEquals(F.ssPorchTrussWall({ ...both, porchOutFt: 0 }, 12, 32), "south");
+});
+
+Deno.test("a plate band lifts the gable vent's sill over the band on both ends; no band keeps 2 in", () => {
+  const TRIM = 0.12;
+  const band = { ...GABLE, plateBand: true };
+  for (const wall of ["south", "north"]) {
+    const fit = F.ssGableVentFit(band, 12, 32, wall, H, VENT, null, null);
+    assert(fit && fit.riseFt >= F.SS_PLATE_BAND_TOP + 0.1 + TRIM - 1e-9, `${wall} rise ${fit && fit.riseFt}`);
+    assert(fit.y0 >= H + F.SS_PLATE_BAND_TOP + 0.1 + TRIM - 1e-9, "the louvre sits above the band's top plus the frame board");
+  }
+  // A rise the customer set higher is kept; only the floor moved.
+  assertAlmostEquals(F.ssGableVentFit(band, 12, 32, "south", H, VENT, null, 0.8).riseFt, 0.8, 1e-12);
+  // Only a real true turns it on.
+  assertAlmostEquals(F.ssGableVentFit({ ...GABLE, plateBand: false }, 12, 32, "south", H, VENT, null, null).riseFt, MIN_RISE, 1e-9);
+  assertAlmostEquals(F.ssGableVentFit({ ...GABLE, plateBand: "yes" }, 12, 32, "south", H, VENT, null, null).riseFt, MIN_RISE, 1e-9);
+  // Over a truss AND a band, the higher of the two sills wins.
+  const trussBand = { ...GABLE, porchTruss: true, porchDepthFt: 6, plateBand: true };
+  assert(F.ssGableVentFit(trussBand, 12, 32, "south", H, VENT, null, null).riseFt >= 0.42 - 1e-9);
 });
 
 Deno.test("ssVentSpan and ssItemVBand put a gable vent above the plate and say so", () => {

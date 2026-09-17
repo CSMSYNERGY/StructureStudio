@@ -1181,6 +1181,10 @@ function ssVentSpan(it, wallHeightFt) {
 const SS_GABLE_VENT_MIN_RISE = 2 / 12;
 const SS_GABLE_VENT_TRIM = 0.12;
 const SS_GABLE_VENT_RAKE_CLEAR = 0.25;
+// The plate band's top edge above the plate line (roof.plateBand, 2026-09-17): buildShed3DModel
+// draws a 0.3 ft trim board across both gable caps from H - 0.2 up to H + this. A gable vent over
+// a band sills 0.1 ft above it, the truss's rule, in the fit below and in the style's own vent.
+const SS_PLATE_BAND_TOP = 0.1;
 const SS_GABLE_TOO_SMALL = "This gable is too small for that vent — placed high on the wall.";
 // Which walls have a gable above them: the two ends the ridge runs between. Read off d3RoofAxes,
 // the SAME function the roof and the porch read, so a vent can never be sent into the gable of a
@@ -1193,15 +1197,34 @@ function ssGableEndWalls(roofCfg, bldgW, bldgH) {
 }
 // The gable end that carries the porch's king-post truss, or null. Mirrors buildShed3DModel's
 // porchWall + porchTrussOn exactly (depth clamp, "front" = south/west, gable only): the truss's
-// brace feet stand on the header, and a gable vent on that end has to sill above them.
+// brace feet stand on the header, and a gable vent on that end has to sill above them. A
+// projecting porch on the style switches the recessed porch off, and its truss with it.
 function ssPorchTrussWall(roofCfg, bldgW, bldgH) {
   const cfg = roofCfg || {};
   if (!cfg.porchTruss || (cfg.type || "gable") !== "gable") return null;
+  if (d3ProjectingPorch(cfg, bldgW, bldgH)) return null;
   const ax = d3RoofAxes(cfg, bldgW, bldgH);
   const depth = Math.max(0, Math.min(Number(cfg.porchDepthFt) || 0, (ax.uAxisIsX ? bldgH : bldgW) - 4));
   if (!(depth > 0.5)) return null;
   const front = (cfg.porchEnd || "front") !== "back";
   return ax.uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+}
+// The PROJECTING porch (roof.porchOutFt, 2026-09-17), or null: a deck, posts and a low roof of its
+// own standing IN FRONT of one gable end, where the recessed porch is cut into it. D is how far the
+// posts' outer faces stand out past the wall's footprint line, clamped to 12 like the sanitizer and
+// on above 0.5 ft. The end follows the recessed porch's rule exactly — portrait gable or gambrel:
+// front = south; landscape or shed roof: front = west — so porchEnd names the same end either way.
+//
+// ⛔ ONE PORCH AT A TIME. When this returns a porch the recessed one is off everywhere:
+// buildShed3DModel's porchDepth and ssPorchTrussWall both ask it. The sanitizer deletes
+// porchDepthFt and porchTruss on save for the same reason; this covers raw data holding both.
+function d3ProjectingPorch(roofCfg, bldgW, bldgH) {
+  const cfg = roofCfg || {};
+  const D = Math.max(0, Math.min(12, Number(cfg.porchOutFt) || 0));
+  if (!(D > 0.5)) return null;
+  const front = (cfg.porchEnd || "front") !== "back";
+  const wall = d3RoofAxes(cfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+  return { D, wall };
 }
 // Where a vent sits in the gable above `wall`, or NULL when it cannot.
 //
@@ -1228,7 +1251,9 @@ function ssGableVentFit(roofCfg, bldgW, bldgH, wall, wallHeightFt, it, alongFt, 
   const h = hIn > 0 ? hIn / 12 : 1;
   const F = SS_GABLE_VENT_TRIM, CLR = SS_GABLE_VENT_RAKE_CLEAR;
   // Over the truss the sill clears the brace feet (H + 0.2) by 0.1 ft, the style vent's rule.
-  const minRise = ssPorchTrussWall(roofCfg, bldgW, bldgH) === wall ? Math.max(SS_GABLE_VENT_MIN_RISE, 0.3 + F) : SS_GABLE_VENT_MIN_RISE;
+  const trussRise = ssPorchTrussWall(roofCfg, bldgW, bldgH) === wall ? Math.max(SS_GABLE_VENT_MIN_RISE, 0.3 + F) : SS_GABLE_VENT_MIN_RISE;
+  // Over a plate band it clears the band's top by the same 0.1 ft, on both ends.
+  const minRise = roofCfg && roofCfg.plateBand === true ? Math.max(trussRise, SS_PLATE_BAND_TOP + 0.1 + F) : trussRise;
   // The centre positions a vent may take at a given rise. The frame's TOP corners are the tight
   // point, because the gable only narrows going up (gable, gambrel and a skewed ridge alike).
   const room = (rise) => {
@@ -4661,6 +4686,82 @@ function d3FtIn(ft) {
   let inch = Math.round((Math.abs(ft) - whole) * 12);
   if (inch === 12) { whole += 1; inch = 0; }
   return (neg ? "-" : "") + whole + "' " + inch + '"';
+}
+
+// ── THE PROJECTING PORCH'S NUMBERS (roof.porchOutFt, 2026-09-17) ──────────────────────────
+// One copy, read by buildShed3DModel and by the calibration panel's readout, so the line beside
+// the depth input describes what gets built (d3TransomDormerGeom's rule).
+//
+//   S         the gable-end span, from d3RoofAxes
+//   H         the wall height
+//   D         the projection, from d3ProjectingPorch
+//   trimFace  the cladding's proudest face: the posts' outer faces stand flush with the corner boards
+//   capY      the highest the porch roof may meet the wall. The renderer measures it off the main
+//             roof it has already built (a rake or fascia on a deep overhang, open-eave tails);
+//             the readout has no roof to measure and passes Infinity, so its yHigh is "at most".
+//
+// Frame: d = feet OUT from the gable wall's mid-plane (the footprint line), y = up from the floor.
+//   · The high edge sits at H - 0.2, just under a plate band (SS_PLATE_BAND_TOP - 0.3), and
+//     never above capY.
+//   · It asks for a 2:12 roof and lowers the pitch, never below 0.05, until 6'8" (MIN_CLEAR)
+//     stands under the header. A wall too short for that even at 0.05 comes back `short`: the
+//     porch is drawn and the panel warns, but nothing is refused.
+//   · Flush framing: the header's top meets the ceiling boards, so the rafters hang between the
+//     wall ledger and the header instead of sitting on it.
+//   · A post at each corner and one every 8.5 ft or less between, counted off the SPAN S. Counted
+//     off the post-to-post width it changed with the cladding, and an 8 ft porch drew 3 posts.
+//     8 ft gets 2, 10-17 ft get 3, 18-24 ft get 4.
+//   · hNeeded is the wall height at which the 2:12 roof clears 6'8" when nothing on the main roof
+//     pushes it down: what the panel suggests when a wall is too short.
+function d3PorchGeom(S, H, D, trimFace, capY) {
+  // Member sizes in feet: 6x6 posts, a doubled 2x8 header, 2x6 rafters, the roof sheet, the
+  // ceiling boards, the roof's overhang past the posts and past each side, the sided cheek and
+  // the board over the rafter tails.
+  const sizes = {
+    POST: 0.46, HDR_H: 0.62, HDR_D: 0.29, RAF_W: 0.125, RAF_D: 0.46, PR_T: 0.12, SHEATH: 0.04,
+    OVP: 0.3, SIDE_OV: 0.08, CHEEK_T: 0.1, FAS_T: 0.1,
+  };
+  const { POST, HDR_H, HDR_D, RAF_D, PR_T, SHEATH, OVP } = sizes;
+  const MIN_CLEAR = 6.67, WANT = 2 / 12, POST_SPAN = 8.5, RAF_OC = 2;
+  const dWall = D3.WALL_T / 2;                              // the gable wall's outer face
+  const dPost = D - POST / 2;                               // post centres: outer faces on the deck edge
+  const dEnd = D + OVP;                                     // the porch roof's front edge
+  const side = S / 2 + trimFace;                            // outer post faces, flush with the corner boards
+  const run = Math.max(0.1, dPost - HDR_D / 2 - dWall);     // wall face to the header's inner face
+  const yHigh = Math.min(H - 0.2, capY);
+  const stack = (p) => (PR_T + SHEATH) * Math.sqrt(1 + p * p);   // roof sheet + ceiling, measured plumb
+  const clearAt = (p) => yHigh - p * run - stack(p) - HDR_H;
+  let pitch = WANT;
+  // stack() barely moves over the pitches this solves for (0.160 to 0.162), so it is read at 0.15.
+  if (clearAt(pitch) < MIN_CLEAR) pitch = Math.max(0.05, Math.min(pitch, (yHigh - stack(0.15) - HDR_H - MIN_CLEAR) / run));
+  const hdrTop = yHigh - pitch * run - stack(pitch);
+  const postH = Math.max(1, hdrTop - HDR_H);
+  const bays = Math.max(1, Math.ceil(S / POST_SPAN - 1e-6));
+  return {
+    pitch, pitchClamped: pitch < WANT - 1e-9, yHigh, postH, hdrTop,
+    ceilWall: yHigh - (PR_T + SHEATH + RAF_D) * Math.sqrt(1 + pitch * pitch),   // rafter bottoms at the wall
+    bays, posts: bays + 1,
+    nRaf: Math.max(2, Math.round((2 * side) / RAF_OC) + 1),
+    side, dWall, dPost, dEnd,
+    short: postH < 6.66,
+    hNeeded: MIN_CLEAR + HDR_H + stack(WANT) + WANT * run + 0.2,
+    sizes,
+  };
+}
+// The projecting porch for a SPEC and a size LABEL, for the calibration panel: the size parsed the
+// way d3DormerReadout parses it, then d3PorchGeom with no main roof to measure (capY Infinity).
+// Null when the style has no projecting porch. trimFace is the panel cladding's; it moves only
+// `side` and the rafter count, and none of what the panel prints (clearance, pitch, posts, where
+// the porch roof meets the wall) reads either.
+function d3PorchReadout(spec, sizeLabel) {
+  const roof = (spec && spec.roof) || {};
+  const m = /^(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)/.exec(String(sizeLabel || "12x16"));
+  const w = m ? parseFloat(m[1]) : 12, d = m ? parseFloat(m[2]) : 16;
+  const porch = d3ProjectingPorch(roof, w, d);
+  if (!porch) return null;
+  const S = d3RoofAxes(roof, w, d).S;
+  const H = (spec && spec.wallHeightFt) || D3.WALL_H;
+  return { ...d3PorchGeom(S, H, porch.D, D3.WALL_T / 2 + 0.03, Infinity), D: porch.D, wall: porch.wall, S, H };
 }
 
 // A dimensioned end-elevation of the style being calibrated, drawn from d3RoofProfile --
