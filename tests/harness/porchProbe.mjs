@@ -31,7 +31,9 @@
 //  12. porchOutFt 0 draws no porch; look-inside hides the porch roof and keeps the deck
 //  13. a lean-to on either long side leaves the porch exactly as the same building builds it without
 //      one: high edge, pitch, posts and the band on the porch's end (cases I and J against I0)
-//  14. zero page errors
+//  14. the porch wall and the doors on it receive shadows (the porch roof shades them) and no other
+//      wall does; without a projecting porch no wall does
+//  15. zero page errors
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -228,8 +230,16 @@ async function measure(page, W, L) {
     M.wallsGroup.traverse((o) => { if (o.isMesh) wallTop = Math.max(wallTop, bbOf(o).mx[1]); });
     // Feet OUT from the porch wall's footprint line (the gable wall's mid-plane): the renderer's d.
     const outOn = (wall, bb) => ({ south: bb.mx[2] - L / 2, north: -L / 2 - bb.mn[2], east: bb.mx[0] - W / 2, west: -W / 2 - bb.mn[0] })[wall];
+    // Shadow receivers among the walls and the openings on them, by wall.
+    const recv = { porchWall: 0, porchWallNo: 0, porchOpen: 0, porchOpenNo: 0, other: 0 };
+    [[M.wallsGroup, "Wall"], [M.openingsGroup, "Open"]].forEach(([grp, kind]) => grp.children.forEach((g) => g.traverse((q) => {
+      if (!q.isMesh) return;
+      const onPorch = !!M.porch && g.userData && g.userData.wall === M.porch.wall && !g.userData.gable;
+      if (onPorch) recv[`porch${kind}${q.receiveShadow ? "" : "No"}`]++;
+      else if (q.receiveShadow) recv.other++;
+    })));
     const out = {
-      porch: M.porch, H: wallTop, nRoof: roofs.length, nDeck: decks.length,
+      porch: M.porch, H: wallTop, nRoof: roofs.length, nDeck: decks.length, recv,
       roofInRoofGroup: roofs.length > 0 && roofs.every((g) => under(g, M.roofGroup)),
       deckInRoot: decks.length > 0 && decks.every((g) => under(g, M.root)),
       deckInRoofGroup: decks.some((g) => under(g, M.roofGroup)),
@@ -395,6 +405,7 @@ async function runCase(ctx, c, ok, shots, seen) {
 
     if (c.off) {
       ok(`${tag}: no porch roof or deck groups, and model.porch is null`, m.nRoof === 0 && m.nDeck === 0 && P === null, `roof ${m.nRoof} deck ${m.nDeck} porch ${JSON.stringify(P)}`);
+      ok(`${tag}: ...and no wall receives shadows`, m.recv.other === 0, JSON.stringify(m.recv));
     } else {
       ok(`${tag}: one porch roof group, inside roofGroup`, m.nRoof === 1 && m.roofInRoofGroup, `roof groups ${m.nRoof}`);
       ok(`${tag}: one deck group, reachable from root and NOT inside roofGroup`, m.nDeck === 1 && m.deckInRoot && !m.deckInRoofGroup);
@@ -454,6 +465,8 @@ async function runCase(ctx, c, ok, shots, seen) {
       ok(`${tag}: the porch roof sheet shares the main roof's material`, m.slabSharesRoofMat);
       if (c.metal) ok(`${tag}: ...and on a metal roof, its sky`, m.slab.hasEnv);
       ok(`${tag}: posts take ${c.d3.colors.wood ? "colors.wood" : "the natural fallback wood"} (${c.wood})`, m.posts.length > 0 && m.posts.every((q) => q.color === c.wood), [...new Set(m.posts.map((q) => q.color))].join(" "));
+      ok(`${tag}: the porch wall receives the porch roof's shadow, and no other wall does`, m.recv.porchWall > 0 && m.recv.porchWallNo === 0 && m.recv.other === 0, JSON.stringify(m.recv));
+      if (c.place) ok(`${tag}: ...and so does the door on it`, m.recv.porchOpen > 0 && m.recv.porchOpenNo === 0, JSON.stringify(m.recv));
       ok(`${tag}: look-inside hides the roof and the porch roof, and keeps the deck`, m.inside.roofVisible === false && m.inside.porchRoofVisible === false && m.inside.deckVisible === true, JSON.stringify(m.inside));
       if (c.place) {
         ok(`${tag}: the ramp on the porch wall starts at the deck's edge (D)`, m.ramps.length === 1 && Math.abs(m.ramps[0].near - P.D) <= 0.1, JSON.stringify(m.ramps));

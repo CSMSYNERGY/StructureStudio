@@ -8385,8 +8385,21 @@ function buildShed3DModel(THREE, p) {
   // the grass receives. Transparent fills (glass) don't cast; labels neither.
   // userData.noShadow opts a mesh out (electrical devices: see buildElectrical3D). Checked here
   // rather than set once at build, because every scoped rebuild runs this over its group again.
-  const setShadowFlags = (grp) => grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.userData && o.userData.noShadow) && !(o.material && o.material.transparent); o.receiveShadow = false; } });
+  //
+  // THE WALL UNDER A PROJECTING PORCH RECEIVES (2026-09-17). Walls never took shadows, so the
+  // porch roof's shadow fell on nothing: the wall under it rendered as bright as the gable above,
+  // where the building shows it in deep shade (vd-t8: 0.62 of the gable), and the porch lost its
+  // covered look. Only that wall's group and the doors and windows on it receive, and only when
+  // the porch is built; every other wall and building is unchanged. The openings receive with
+  // the wall, or a door under the porch would stay sunlit on a shaded wall.
+  const porchShadeWall = porchGeom ? porchOut.wall : null;
+  const inPorchShade = (grp) => !!porchShadeWall && !!grp.userData && grp.userData.wall === porchShadeWall && !grp.userData.gable;
+  const setShadowFlags = (grp) => {
+    const receive = inPorchShade(grp);
+    grp.traverse((o) => { if (o.isMesh) { o.castShadow = !(o.userData && o.userData.noShadow) && !(o.material && o.material.transparent); o.receiveShadow = receive; } });
+  };
   setShadowFlags(root);
+  [...wallsGroup.children, ...openingsGroup.children].forEach((g) => { if (inPorchShade(g)) setShadowFlags(g); });
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
   floor.receiveShadow = true;
