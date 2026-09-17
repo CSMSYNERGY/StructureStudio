@@ -127,19 +127,32 @@ const STYLE_ROW3 = {
 // actually does. `attempts` counts every attempt including retries.
 // `stallPuts` makes the next n signed PUTs HANG - no answer at all, which is what a dead
 // connection looks like from the page and what the upload watchdog exists to notice.
-const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false, stallPuts: 0, stallMints: 0, stallSaves: 0, stallAllSaves: false, conflictSaves: 0, mediaMs: 0, stallMedia: 0 }
+// `refuseMints` answers every mint 403 with a sentence, as the settings_structures edit gate does.
+// `dropMints` drops every mint at the transport layer on EITHER host; `stallAllMints` hangs them on
+// either host. `dropPuts` drops the next n signed PUTs at once (a flaky link, not a stall).
+const delay = { catalogMs: 0, uploadMs: 0, failNext: 0, noSignedUrl: false, refuseMints: false, dropMints: false, stallAllMints: false, stallPuts: 0, dropPuts: 0, stallMints: 0, stallSaves: 0, stallAllSaves: false, conflictSaves: 0, mediaMs: 0, stallMedia: 0 }
 // What the stub hands back as the row's CURRENT spec when a save is refused as stale.
 const CONFLICT_D3 = { roof: { type: 'gable', pitch: 0.33 }, wallHeightFt: 8 }
 const CONFLICT_VERSION = "2026-09-14T11:11:11.111+00:00"
-// Counted separately so a test can prove WHICH route an upload took. The signed route is the
-// fast one (raw bytes straight to storage); base64 through the edge function is the fallback.
-const attempts = { upload: 0, signedMint: 0, signedPut: 0, stalledPut: 0 }
+// Counted separately so a test can prove WHICH route an upload took. The signed route (raw bytes
+// straight to storage) is the only one now; base64 through the edge function was the fallback
+// until 2026-09-17, and the stub still answers it so a regression shows up as a count, not a 404.
+// `upload` counts base64 upload_style_photo requests, which this bundle must never send any more
+// (the action stays deployed for production's older frontend). `perFileMint` counts mints with no
+// `count`: the old per-file route, which must never run either.
+const attempts = { upload: 0, signedMint: 0, perFileMint: 0, signedPut: 0, stalledPut: 0, droppedPut: 0 }
 // Raw bytes of each signed PUT. With the base64 route gone this is the wire measurement.
 const putBytes = []
 // The HOST of every PUT attempt, stalled ones included, so a test can prove where a retry went.
 const putHosts = []
 // The HOST of every mint, so a test can prove a stalled one retried through the functions side door.
 const mintHosts = []
+// Mints the PAGE gave up on, with Chromium's reason. net::ERR_ABORTED is the page cancelling its own
+// request; a deadline that only stops WAITING leaves the request open until the stub drops it 8s
+// later, which reads net::ERR_TIMED_OUT and arrives far too late for the assertions that use this.
+const mintFailures = []
+// Every log_error row the page wrote (stubbed, never sent anywhere), by code and action.
+const logRows = []
 // The host of every save_style_d3 attempt, and how many media saves were ever in flight at once.
 const saveHosts = []
 let mediaInFlight = 0, mediaMaxInFlight = 0
@@ -182,6 +195,12 @@ async function main() {
 
   const pageErrors = []
   page.on('pageerror', (e) => pageErrors.push(e.message))
+  page.on('requestfailed', (req) => {
+    try {
+      const b = JSON.parse(req.postData() || '{}')
+      if (b.action === 'style_photo_upload_url') mintFailures.push({ host: new URL(req.url()).host, err: (req.failure() || {}).errorText || '' })
+    } catch (_e) { /* not a JSON body, so not a mint */ }
+  })
 
   const json = (route, body) => route.fulfill({
     status: 200, contentType: 'application/json',
@@ -201,6 +220,10 @@ async function main() {
     // the entitlement grant, which is the path a real customer takes.
     if (url.includes('/rest/v1/rpc/get_config')) return json(route, CONFIG)
     if (url.includes('/rest/v1/rpc/get_fixtures')) return json(route, [])
+    if (url.includes('/rest/v1/rpc/log_error')) {
+      logRows.push({ code: body.p_code || null, severity: body.p_severity || null, action: (body.p_context && body.p_context.action) || null })
+      return json(route, false)
+    }
     if (url.includes('/rest/v1/rpc/')) return json(route, false)
     if (url.includes('/rest/v1/client_users')) return json(route, [{ client_id: CLIENT, role: 'owner' }])
     if (url.includes('/rest/v1/')) return json(route, [])
@@ -229,11 +252,20 @@ async function main() {
       }
       if (a === 'style_photo_upload_url') {
         attempts.signedMint++
+        if (body.count === undefined) attempts.perFileMint++
         mintHosts.push(new URL(url).host)
-        if (delay.stallMints > 0 && new URL(url).host === `${REF}.supabase.co`) {
-          delay.stallMints--
+        if (delay.stallAllMints || (delay.stallMints > 0 && new URL(url).host === `${REF}.supabase.co`)) {
+          if (!delay.stallAllMints) delay.stallMints--
           setTimeout(() => { route.abort('timedout').catch(() => {}) }, 8000)
           return
+        }
+        // Rejected before any answer, which supabase-js reports as FunctionsFetchError.
+        if (delay.dropMints) return route.abort('connectionfailed')
+        if (delay.refuseMints) {
+          return route.fulfill({
+            status: 403, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' },
+            body: JSON.stringify({ error: 'You do not have edit access to Structures' }),
+          })
         }
         if (delay.noSignedUrl) return json(route, { ok: false, error: 'signed urls off for this test' })
         // BULK. `count` is the whole point of the 2026-09-12 change: one mint for the batch.
@@ -339,6 +371,11 @@ async function main() {
       return route.fulfill({ status: 200, headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }, body: '' })
     }
     putHosts.push(new URL(req.url()).host)
+    if (delay.dropPuts > 0) {
+      delay.dropPuts--
+      attempts.droppedPut++
+      return route.abort('connectionfailed')
+    }
     if (delay.stallPuts > 0) {
       delay.stallPuts--
       attempts.stalledPut++
@@ -659,57 +696,191 @@ async function main() {
   {
     const b64before = attempts.upload
     const startCount = await imgCount()
+    const tputBefore = logRows.filter((r) => r.code === 'style_upload_throughput').length
     attempts.signedMint = 0; attempts.signedPut = 0
     await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'fast.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('fast-photo') }])
     await waitForImages(startCount + 1)
     ok('A PHOTO GOES STRAIGHT TO STORAGE, NOT THROUGH BASE64', attempts.signedMint === 1 && attempts.signedPut === 1, `${attempts.signedMint} mint, ${attempts.signedPut} put`)
     ok('and the base64 fallback was NOT used', attempts.upload === b64before, `${attempts.upload - b64before} base64 uploads`)
+    await page.waitForTimeout(300)
+    const tput = logRows.filter((r) => r.code === 'style_upload_throughput').slice(tputBefore)
+    ok('a picked batch still files ONE throughput measurement, as info', tput.length === 1 && tput[0].severity === 'info', JSON.stringify(tput))
     await page.locator('button[title="Remove this image"]').last().click()
     await page.waitForTimeout(500)
   }
 
-  // ── REGRESSION: the fallback still works when signed URLs cannot be minted ──────────────
-  // Minting is itself an invoke, so a connection bad enough to lose it must not lose the
-  // feature. Both routes end at the same object in the same bucket.
+  // ── A REFUSED MINT SAYS THE SERVER'S SENTENCE, AND NOTHING FALLS BACK (2026-09-17) ────────
+  // Until this date a failed mint fell through to a per-file route that minted again and then sent
+  // each photo as base64 through upload_style_photo. That route is gone from the portal (see
+  // ssUploadStylePhotos in portal/12-shell.jsx). A REFUSAL is the server deciding: it is shown in
+  // the server's own words, it is not asked again through the side door, and it is never relabelled
+  // as a connection problem. Both shapes a refusal takes: {ok:false,error} with a 200, and a 403.
   {
-    const b64before = attempts.upload
     const startCount = await imgCount()
-    delay.noSignedUrl = true
-    await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'fallback.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('fallback-photo') }])
-    await waitForImages(startCount + 1)
-    ok('WHEN SIGNED URLS FAIL, THE OLD PATH STILL LANDS IT', attempts.upload > b64before, `${attempts.upload - b64before} base64 upload(s)`)
-    ok('and the builder sees no error', !(await text()).includes('failed:'))
-    delay.noSignedUrl = false
-    await page.locator('button[title="Remove this image"]').last().click()
-    await page.waitForTimeout(500)
+    const b64before = attempts.upload
+    for (const kind of ['ok-false', '403']) {
+      attempts.signedMint = 0; attempts.perFileMint = 0; mintHosts.length = 0
+      if (kind === '403') delay.refuseMints = true
+      else delay.noSignedUrl = true
+      const want = kind === '403' ? 'You do not have edit access to Structures' : 'signed urls off for this test'
+      await page.locator('input[type=file][accept="image/*"]').setInputFiles([1, 2].map((i) => (
+        { name: `refused-${kind}-${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`refused-${kind}-${i}`) })))
+      const shown = await page.waitForFunction((w) => document.body.innerText.includes(w), want, { timeout: 20000 }).then(() => true, () => false)
+      // Room for a fallback to fire, so its absence below means something.
+      await page.waitForTimeout(2000)
+      t = await text()
+      const shownLine = (await line(want)).trim()
+      ok(`A REFUSED MINT (${kind}) SHOWS THE SERVER'S OWN SENTENCE`,
+        shown && !t.includes("Couldn't reach the upload server")
+          && (kind !== '403' || shownLine.includes('ask an owner or admin')),
+        shownLine || '(no line)')
+      ok(`and it is asked ONCE, on the main host: no side door, no per-file mints (${kind})`,
+        attempts.signedMint === 1 && mintHosts[0] === `${REF}.supabase.co` && attempts.perFileMint === 0,
+        `${attempts.signedMint} mint(s): ${mintHosts.join(' -> ')}; ${attempts.perFileMint} per-file`)
+      delay.noSignedUrl = false; delay.refuseMints = false
+    }
+    ok('A REFUSED MINT SENDS NO BASE64 upload_style_photo', attempts.upload === b64before, `${attempts.upload - b64before} base64 upload(s)`)
+    ok('and no image was added by a refused pick', (await imgCount()) === startCount, `${startCount} -> ${await imgCount()}`)
   }
 
-  // ── REGRESSION: a flaky uplink must be retried, not surfaced as a failure ───────────────
-  // THE BUG THIS GUARDS. `FunctionsFetchError` means the fetch REJECTED — the request never
-  // reached the function — so nothing was done twice and retrying is free. Ahsan's link measured
-  // about 42KB/s and dropped requests; the pool reported every drop as a permanent failure
-  // ("1 of 9 uploaded. 8 failed"), when the old sequential loop had simply STOPPED at the first
-  // one and so only ever reported a single failure. The failures were always there; the pool
-  // made them visible and then gave up on them.
+  // ── REGRESSION: a DROPPED signed PUT is retried, not surfaced as a failure ────────────────
+  // THE BUG THIS GUARDS, carried over from the base64 route to the one that is left. A dropped
+  // connection means the PUT never reached storage, so retrying stores nothing twice (and one that
+  // secretly landed comes back Duplicate, which counts as success). Ahsan's link dropped requests,
+  // and a pool that reported every drop as permanent is how "1 of 9 uploaded. 8 failed" happened.
   {
-    const before = uploadCount()
     const startCount = await imgCount()
     const b64start = attempts.upload
-    // FORCE THE FALLBACK ROUTE, because that is where the retry actually lives. A signed-URL
-    // failure does not throw — onUploadPhoto catches it and falls through to base64 — so with
-    // the fast path available this test would drop two attempts nothing was making and pass
-    // while proving nothing. Retries guard the LAST route standing.
-    delay.noSignedUrl = true
-    delay.failNext = 2                       // drop the first two attempts, then let it through
+    putHosts.length = 0
+    attempts.droppedPut = 0; attempts.signedPut = 0
+    delay.dropPuts = 2                       // drop the first two PUTs, then let it through
     await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'flaky.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('flaky-photo') }])
     await waitForImages(startCount + 1)
     ok('A DROPPED UPLOAD IS RETRIED, NOT REPORTED AS FAILED', (await imgCount()) === startCount + 1, `${startCount} -> ${await imgCount()}`)
-    ok('it took three attempts to get there', attempts.upload - b64start === 3, `${attempts.upload - b64start} attempts`)
+    ok('it took three PUTs, switching hosts each time',
+      attempts.droppedPut === 2 && attempts.signedPut === 1 && putHosts.length === 3
+        && putHosts[0] === `${REF}.storage.supabase.co` && putHosts[1] === `${REF}.supabase.co` && putHosts[2] === `${REF}.storage.supabase.co`,
+      `${attempts.droppedPut} dropped, ${attempts.signedPut} landed: ${putHosts.join(' -> ')}`)
     ok('and no error was shown to the builder', !(await text()).includes('failed:'), (await line('0 of')) || 'clean')
-    delay.noSignedUrl = false
-    void before
+    ok('and nothing went through base64', attempts.upload === b64start, `${attempts.upload - b64start} base64 upload(s)`)
+    delay.dropPuts = 0
     await page.locator('button[title="Remove this image"]').last().click()
     await page.waitForTimeout(500)
+  }
+
+  // ── A DEAD MINT: two tries, one readable line, no fallback (2026-09-17) ───────────────────
+  // Beta, 09-10 to 09-14: with the main host's connection stalled, a failed bulk mint fell through
+  // to three lanes of per-file mints and base64 upload_style_photo bodies on that SAME host, and the
+  // builder waited minutes for "0 of N uploaded. N failed: Failed to send a request to the Edge
+  // Function". Now: the main host, the functions side door, and one sentence. Both mints HANG here,
+  // the way that connection did, so this also proves both deadlines really cancel their request.
+  const DEAD_MINT = "Couldn't reach the upload server, so nothing was uploaded. Check your connection and pick the photos again."
+  {
+    const startCount = await imgCount()
+    const b64before = attempts.upload
+    attempts.signedMint = 0; attempts.perFileMint = 0; mintHosts.length = 0; mintFailures.length = 0
+    await page.evaluate(() => { window.__ssUploadMintMs = 1500 })
+    delay.stallAllMints = true
+    const t0 = Date.now()
+    await page.locator('input[type=file][accept="image/*"]').setInputFiles([1, 2, 3].map((i) => (
+      { name: `deadmint${i}.jpg`, mimeType: 'image/jpeg', buffer: Buffer.from(`dead-mint-${i}`) })))
+    const shown = await page.waitForFunction((w) => document.body.innerText.includes(w), DEAD_MINT, { timeout: 30000 }).then(() => true, () => false)
+    const secs = Math.round((Date.now() - t0) / 100) / 10
+    // Long enough for any fallback to have started, and well short of the stub's 8s release.
+    await page.waitForTimeout(2500)
+    t = await text()
+    ok('A DEAD MINT SAYS SO IN ONE READABLE LINE', shown && !t.includes('Failed to send a request'), (await line("Couldn't reach")).trim() || '(no line)')
+    ok('and says it in seconds, not minutes', shown && secs < 8, `${secs}s with a 1.5s mint deadline`)
+    ok('IT IS TRIED EXACTLY TWICE: the main host, then the functions side door',
+      attempts.signedMint === 2 && mintHosts[0] === `${REF}.supabase.co` && mintHosts[1] === `${REF}.functions.supabase.co`,
+      `${attempts.signedMint} mint(s): ${mintHosts.join(' -> ')}`)
+    ok('WITH NO PER-FILE MINTS AND NO BASE64 upload_style_photo',
+      attempts.perFileMint === 0 && attempts.upload === b64before,
+      `${attempts.perFileMint} per-file mint(s), ${attempts.upload - b64before} base64 upload(s)`)
+    ok('BOTH HUNG MINTS WERE CANCELLED BY THE PAGE, NOT LEFT OPEN',
+      mintFailures.length === 2 && mintFailures.every((f) => /ERR_ABORTED/.test(f.err)), JSON.stringify(mintFailures))
+    ok('no image was added by a dead mint', (await imgCount()) === startCount, `${startCount} -> ${await imgCount()}`)
+    ok('and the retired fallback logged nothing', !logRows.some((r) => r.code === 'style_photo_signed_fallback' || r.action === 'upload_style_photo'),
+      `${logRows.filter((r) => r.code === 'style_photo_signed_fallback' || r.action === 'upload_style_photo').length} rows`)
+    delay.stallAllMints = false
+    await page.evaluate(() => { window.__ssUploadMintMs = undefined })
+  }
+
+  // ── THE SAME DEAD MINT FROM THE VIDEO PICKER: the saved walk-around survives ───────────────
+  // calStageVideo swallowed a failed mint and fell through to the per-file pool. It now throws to
+  // its own catch, which keeps the frames already staged. Dropped rather than hung this time, so the
+  // other transport shape (FunctionsFetchError at once, no deadline involved) is covered too.
+  if (hasClip) {
+    const views = () => page.evaluate(() => Array.from(document.querySelectorAll('img[alt^="View "]')).map((i) => i.getAttribute('src')))
+    const framesBefore = await views()
+    const b64before = attempts.upload
+    attempts.signedMint = 0; attempts.perFileMint = 0; mintHosts.length = 0
+    delay.dropMints = true
+    const DEAD_VIDEO = "Couldn't reach the upload server, so nothing was uploaded. Check your connection and pick the video again."
+    await page.locator('input[type=file][accept="video/*"]').setInputFiles(CLIP)
+    const shown = await page.waitForFunction((w) => document.body.innerText.includes(w), DEAD_VIDEO, { timeout: 60000 }).then(() => true, () => false)
+    await page.waitForTimeout(2000)
+    t = await text()
+    const framesAfter = await views()
+    ok('A DEAD MINT ON THE VIDEO SAYS SO, AND ASKS FOR THE VIDEO', shown && !t.includes('Failed to send a request'), (await line("Couldn't reach")).trim() || '(no line)')
+    ok('THE WALK-AROUND ALREADY STAGED IS KEPT',
+      framesBefore.length >= 4 && JSON.stringify(framesAfter) === JSON.stringify(framesBefore) && t.includes(`${framesBefore.length} views ready`),
+      `${framesBefore.length} frames before, ${framesAfter.length} after`)
+    ok('the video mint is tried exactly twice, with no per-file mints and no base64',
+      attempts.signedMint === 2 && mintHosts[0] === `${REF}.supabase.co` && mintHosts[1] === `${REF}.functions.supabase.co`
+        && attempts.perFileMint === 0 && attempts.upload === b64before,
+      `${attempts.signedMint} mint(s): ${mintHosts.join(' -> ')}; ${attempts.perFileMint} per-file; ${attempts.upload - b64before} base64`)
+    delay.dropMints = false
+  }
+
+  // ── onUploadPhoto, THE SCAN'S ROUTE, IS THE SAME PATH WITH ONE FILE (2026-09-17) ───────────
+  // scanGenerate uploads its rendered views one at a time through setup3d.onUploadPhoto. That
+  // handler used to mint per file with no deadline and fall back to base64. It is called here on the
+  // portal's own host object, found the way the refusal check above finds onDraftFromCombined.
+  {
+    const hostUpload = () => page.evaluate(async () => {
+      const b = Array.from(document.querySelectorAll('button')).find((x) => /Generate the 3D model/.test(x.textContent || ''))
+      const k = b && Object.keys(b).find((x) => x.startsWith('__reactFiber$'))
+      let f = k ? b[k] : null
+      while (f && !(f.memoizedProps && f.memoizedProps.setup3d && f.memoizedProps.setup3d.onUploadPhoto)) f = f.return
+      if (!f) return { missing: true }
+      try {
+        const url = await f.memoizedProps.setup3d.onUploadPhoto(new File([new Uint8Array([255, 216, 255, 1, 2, 3])], 'scan-view-1.jpg', { type: 'image/jpeg' }))
+        return { url }
+      } catch (e) {
+        return { threw: String((e && e.message) || e), transport: Boolean(e && e.ssTransport) }
+      }
+    })
+    const reset = () => { attempts.signedMint = 0; attempts.perFileMint = 0; attempts.signedPut = 0; mintHosts.length = 0 }
+    const b64before = attempts.upload
+
+    reset()
+    const tputBefore = logRows.filter((r) => r.code === 'style_upload_throughput').length
+    const good = await hostUpload()
+    await page.waitForTimeout(300)
+    ok('onUploadPhoto LANDS ONE FILE: one bulk mint of one, one PUT',
+      /\/__stub\/img-s\d+\.png$/.test(good.url || '') && attempts.signedMint === 1 && attempts.perFileMint === 0 && attempts.signedPut === 1,
+      `${JSON.stringify(good)}; ${attempts.signedMint} mint, ${attempts.perFileMint} per-file, ${attempts.signedPut} put`)
+    ok('and a single file files no throughput row', logRows.filter((r) => r.code === 'style_upload_throughput').length === tputBefore,
+      `${logRows.filter((r) => r.code === 'style_upload_throughput').length - tputBefore} rows`)
+
+    reset()
+    delay.dropMints = true
+    const dead = await hostUpload()
+    delay.dropMints = false
+    ok('onUploadPhoto ON A DEAD MINT THROWS ONE READABLE, TRANSPORT-MARKED LINE',
+      dead.threw === "Couldn't reach the upload server, so nothing was uploaded. Check your connection and try again." && dead.transport === true
+        && attempts.signedMint === 2 && mintHosts[1] === `${REF}.functions.supabase.co`,
+      `${JSON.stringify(dead)}; ${mintHosts.join(' -> ')}`)
+
+    reset()
+    delay.refuseMints = true
+    const refused = await hostUpload()
+    delay.refuseMints = false
+    ok('onUploadPhoto ON A REFUSED MINT THROWS THE SERVER\'S SENTENCE, ASKED ONCE',
+      /You do not have edit access to Structures/.test(refused.threw || '') && refused.transport === false && attempts.signedMint === 1,
+      `${JSON.stringify(refused)}; ${attempts.signedMint} mint(s)`)
+    ok('onUploadPhoto never sends base64 upload_style_photo', attempts.upload === b64before, `${attempts.upload - b64before} base64 upload(s)`)
   }
 
   // ── REGRESSION: a STALLED upload is noticed and retried on the other storage host ────────
@@ -742,11 +913,16 @@ async function main() {
     const startCount = await imgCount()
     await page.evaluate(() => { window.__ssUploadMintMs = 1500 })
     mintHosts.length = 0
+    mintFailures.length = 0
     delay.stallMints = 1
     await page.locator('input[type=file][accept="image/*"]').setInputFiles([{ name: 'mintstall.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('mint-stall') }])
     await waitForImages(startCount + 1)
     ok('A STALLED MINT RETRIES ON THE FUNCTIONS HOST',
       mintHosts.length === 2 && mintHosts[0] === `${REF}.supabase.co` && mintHosts[1] === `${REF}.functions.supabase.co`, mintHosts.join(' -> '))
+    // Before 2026-09-17 the deadline was a Promise.race: the page stopped waiting and the request
+    // stayed open on the stalled connection, to fail and log minutes later.
+    ok('AND THE STALLED MINT WAS CANCELLED AT THE DEADLINE, NOT LEFT OPEN',
+      mintFailures.length === 1 && mintFailures[0].host === `${REF}.supabase.co` && /ERR_ABORTED/.test(mintFailures[0].err), JSON.stringify(mintFailures))
     ok('and that image still lands with no error', !(await text()).includes('failed:'))
     delay.stallMints = 0
     await page.evaluate(() => { window.__ssUploadMintMs = undefined })

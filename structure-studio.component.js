@@ -16999,8 +16999,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // phone photos is waiting through eight shrink-and-upload round trips and a button that only
   // says "Working…" for half a minute reads as a hang.
   //
-  // Uploads are SEQUENTIAL, not Promise.all: each one is a base64 body through an edge function,
-  // and firing eight at once is how a phone on a builder's yard wifi gets some of them refused.
+  // Uploads go straight into the bucket on signed URLs, three at a time: the host's
+  // onUploadPhotoBatch mints once for the whole pick and PUTs each image. (They were sequential
+  // while each one was a base64 body through an edge function; that route is gone from the portal.)
   //
   // The portal owns the authed call; the public ?admin=1 page has no session and pastes URLs
   // instead (calAddPhotoUrl below).
@@ -17010,11 +17011,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // NO SIZE REFUSAL HERE. A photo straight off a phone is 4-12MB, so the old
     // `file.size > 3_000_000` check fired on the NORMAL case and told a builder to go and find
     // image-editing software - the same refusal Carolyn hit on 2026-09-09 (47a8075) on the
-    // style-image uploads. The host's onUploadPhoto now shrinks the file first
-    // (ssFitImageForUpload: longest edge 1600, JPEG quality stepped down until it fits, a file
-    // already small enough handed back untouched), and the server's own 3MB gate stays as the
-    // backstop. This path is now the PRIMARY way a builder gives us photos, so refusing the
-    // common case here would be worse than it was there.
+    // style-image uploads. The host shrinks the file first (ssShrinkStylePhoto: a JPEG under
+    // 900KB, stepping resolution and quality down until it fits, a small enough JPEG/PNG/WEBP/GIF
+    // sent as it is), and a file it cannot shrink comes back as that file's failure, with the
+    // reason. This path is now the PRIMARY way a builder gives us photos, so refusing the common
+    // case here would be worse than it was there.
     // Room left BEFORE anything is uploaded, so a builder who picks twenty is told twenty was
     // too many rather than watching twenty upload and eight quietly vanish.
     const room = Math.max(0, CAL_PHOTO_MAX - (adminCal ? adminCal.photos.filter(Boolean).length : 0));
@@ -17023,9 +17024,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // adminCalPhotos, NOT adminCalBusy: raising the shared flag here would grey out the video
     // picker beside it, which is the same coupling being removed in the other direction.
     setAdminCalPhotos({ busy: true, step: take.length > 1 ? `Sent 0 of ${take.length}…` : "Uploading…", err: null });
-    // THE BULK PATH FIRST. One mint for the batch instead of one per image — see
-    // onUploadPhotoBatch. Falls through to the per-file pool below if the host is older than
-    // this bundle or the mint itself fails, which costs a round trip and nothing else.
+    // THE BULK PATH, whenever the host has it. One mint for the batch instead of one per image —
+    // see onUploadPhotoBatch. The per-file pool below is only for a host WITHOUT it (the dev mount
+    // fixture). A failed mint no longer falls through to that pool: on a dead connection the pool
+    // sent three lanes of doomed per-file requests down the same link, minutes of "Sent 0 of N"
+    // ending in "Failed to send a request to the Edge Function" (09-10 to 09-14).
     if (setup3d.onUploadPhotoBatch) {
       try {
         // EACH IMAGE SHOWS UP THE MOMENT IT LANDS (2026-09-14), not when the whole batch returns.
@@ -17053,14 +17056,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         });
         return;
       } catch (e) {
-        // Only a MINT failure lands here (ssNoBatch); a failed PUT is already reported inside
-        // the batch. Fall through to the per-file route rather than failing the whole pick.
-        if (!(e && e.ssNoBatch)) {
-          setAdminCalPhotos({ busy: false, step: null, err: (e && e.message) || "Upload failed" });
-          return;
-        }
+        // The uploads could not be started (the mint failed), so nothing was sent; a failed PUT
+        // is reported inside the batch instead. The host's sentence already says which it was:
+        // the connection, or the server's own refusal.
+        setAdminCalPhotos({ busy: false, step: null, err: (e && e.message) || "Upload failed" });
+        return;
       }
     }
+    // A HOST WITHOUT onUploadPhotoBatch ONLY (see above).
     // KEEPS WHAT SUCCEEDED. ssUploadPool never rejects, so a batch where the sixth timed out
     // still adds the other five rather than making the builder re-pick all six.
     const { urls, errs } = await ssUploadPool(
@@ -17318,12 +17321,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       let urls, errs;
       const onFrameProgress = (n, total) => setAdminCalVideo((p) => ({ ...p, step: `Sent ${n} of ${total} views…` }));
       if (setup3d.onUploadPhotoBatch) {
-        try {
-          const r = await setup3d.onUploadPhotoBatch(files, onFrameProgress);
-          urls = r.urls; errs = r.errs;
-        } catch (_e) { /* mint failed — fall through to the per-file pool */ }
-      }
-      if (!urls) {
+        // A failed mint THROWS to the catch below, which keeps the old frames and says why. It
+        // used to fall through to the per-file pool, the dead-link fallback calUploadPhotos
+        // explains; the pool is now only for a host without the batch.
+        const r = await setup3d.onUploadPhotoBatch(files, onFrameProgress);
+        urls = r.urls; errs = r.errs;
+      } else {
         const r2 = await ssUploadPool(files, (f) => setup3d.onUploadPhoto(f), onFrameProgress, 3);
         urls = r2.urls; errs = r2.errs;
       }
@@ -17343,7 +17346,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       }));
       calPersistMedia(adminCal && adminCal.styleValue, undefined, urls);
     } catch (e) {
-      setAdminCalVideo((p) => ({ ...p, busy: false, step: null, err: (e && e.message) || "Could not read that video." }));
+      // ssTransport: the host could not reach the upload server at all. Its own sentence asks for
+      // the photos to be picked again, so this step says it for the video.
+      setAdminCalVideo((p) => ({
+        ...p, busy: false, step: null,
+        err: (e && e.ssTransport)
+          ? "Couldn't reach the upload server, so nothing was uploaded. Check your connection and pick the video again."
+          : ((e && e.message) || "Could not read that video."),
+      }));
     }
   };
   // Forgetting the frames is a LOCAL forget, not a delete: the uploaded JPEGs stay in the
