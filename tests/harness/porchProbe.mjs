@@ -45,9 +45,7 @@
 //
 // Exit 0 = every assertion held.
 import { pathToFileURL } from "node:url";
-import * as LIB from "./lib.mjs";
-
-const { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir } = LIB;
+import { launch, stubSupabase, collectErrors, openDesigner, readItems, svgPoint, buildingRect, reporter, shotsDir, revealTool } from "./lib.mjs";
 
 // The renderer's natural lumber when a style sets no colors.wood (D3_COLORS.wood).
 const WOOD_FALLBACK = "#c4965a";
@@ -119,12 +117,6 @@ const FIXTURES = {
 const settle = (page, ms = 400) => page.waitForTimeout(ms);
 const f3 = (v) => (v == null || !Number.isFinite(Number(v)) ? String(v) : Number(v).toFixed(3));
 
-// A palette tool. The designer's option tabs (ss/designer-options-tabs) hide tools until their tab
-// is open, and bring lib.revealTool to open it; without that helper every tool is a plain button.
-async function tool(page, name) {
-  if (typeof LIB.revealTool === "function") return LIB.revealTool(page, name);
-  return page.getByRole("button", { name }).first();
-}
 // Waits for the tile first: the tiles render only once get_config has answered, which can land
 // after the app reports it booted.
 async function pickStyle(page, label) {
@@ -173,7 +165,7 @@ async function openEditor(page) {
 
 // Case A only: a door, its ramp and a flood light on the porch wall (south), placed in 2D.
 async function placeOnPorchWall(page, ok, W, L) {
-  await (await tool(page, /^Door wall$/)).click();
+  await (await revealTool(page, /^Door wall$/)).click();
   await settle(page, 300);
   let p = await southWall(page, W, L, 10.5);
   await page.mouse.click(p.x, p.y);
@@ -182,12 +174,12 @@ async function placeOnPorchWall(page, ok, W, L) {
   await settle(page, 300);
   await page.getByRole("button", { name: "Place door" }).click();
   await settle(page, 600);
-  await (await tool(page, /Ramp/)).click();
+  await (await revealTool(page, /Ramp/)).click();
   await settle(page, 300);
   p = await southWall(page, W, L, 10.5);
   await page.mouse.click(p.x, p.y);
   await settle(page, 600);
-  await (await tool(page, /Electrical Items/)).click();
+  await (await revealTool(page, /Electrical Items/)).click();
   await settle(page, 300);
   await page.getByText("Flood Light", { exact: true }).first().click({ timeout: 10000 });
   await settle(page, 300);
