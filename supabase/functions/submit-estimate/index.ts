@@ -11,6 +11,7 @@ import { changeOrderEmail, estimateEmail } from "../_shared/emailTemplates.ts";
 import { estimateUrl } from "../_shared/ghlLinks.ts";
 import { buildFormalEstimatePdf } from "../_shared/estimatePdf.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
+import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { myQuotesUrl } from "../_shared/customerPortalUrl.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { deHtml, designTotalCents, round2, subtotalsFromSnapshot, totalFromSnapshot } from "../_shared/estimateLines.ts";
@@ -2790,7 +2791,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         // upsert: one quote document per design, replaced on every resubmit.
         const pdfPath = `${clientId}/${designId}-quote.pdf`;
         const up = await supabase.storage.from("floor-plans")
-          .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+          .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
         if (up.error) {
           console.warn("SS quote PDF upload failed:", up.error.message);
           return null;

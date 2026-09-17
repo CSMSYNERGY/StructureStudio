@@ -26,6 +26,8 @@
 // the re-read saw the final lines. Had they differed from the printed ones, the writer would have
 // uploaded again (3), and that upload would be the last. So the last document prints the final
 // row. Emails are not part of the proof: each names the total its own writer just made current.
+// The proof is about the stored object. What a browser or CDN hands the customer is kept in step by
+// every writer uploading with documentUpload.ts's FIXED_PATH_PDF_UPLOAD (no hour-long cached copy).
 //
 // PURE. Both callers do the reads and writes. Importers: submit-estimate and portal-settings.
 // Derive them before a deploy rather than trusting this line:

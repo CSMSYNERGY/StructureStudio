@@ -6,6 +6,7 @@ import { acceptanceIdentityColumns, loadAddressStanding, ownsDesign } from "../_
 import { amountOwed, orderCentsAfterAck, orderCentsFromSnapshot, taxFreeze, totalFromSnapshot } from "../_shared/estimateLines.ts";
 import { agreedBaseline } from "../_shared/changeOrderDiff.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import { acceptanceEmail, invoiceRequestEmail } from "../_shared/emailTemplates.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
 import { rsSendEmail, resendConfigured, ResendApiError } from "../_shared/resend.ts";
@@ -770,7 +771,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
           });
           const storagePath = invPdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
           const up = await admin.storage.from("floor-plans")
-            .upload(storagePath, countersigned, { contentType: "application/pdf", upsert: true });
+            .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
           signedPdf = !up.error;
           if (up.error) console.warn("countersigned invoice upload failed:", up.error.message);
         }
@@ -1091,7 +1092,7 @@ Deno.serve(withErrorLog("customer-accept", async (req: Request) => {
         });
         const storagePath = quotePdfUrl.slice(`${supabaseUrl}/storage/v1/object/public/floor-plans/`.length);
         const up = await admin.storage.from("floor-plans")
-          .upload(storagePath, countersigned, { contentType: "application/pdf", upsert: true });
+          .upload(storagePath, countersigned, FIXED_PATH_PDF_UPLOAD);
         signedPdf = !up.error;
         if (up.error) console.warn("countersigned PDF upload failed:", up.error.message);
       }

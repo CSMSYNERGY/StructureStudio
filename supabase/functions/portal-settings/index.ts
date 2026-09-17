@@ -57,6 +57,7 @@ import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryD
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
 import { buildQuotePdf } from "../_shared/quotePdf.ts";
 import { appendAcceptancePage } from "../_shared/acceptancePdf.ts";
+import { FIXED_PATH_PDF_UPLOAD } from "../_shared/documentUpload.ts";
 import {
   CLADDING_OPTIONS,
   claddingLabel,
@@ -635,7 +636,7 @@ async function regenerateQuotePdf(
 
     const pdfPath = `${clientId}/${shortCode}-quote.pdf`;
     const up = await admin.storage.from("floor-plans")
-      .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+      .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
     if (up.error) { console.warn("quote PDF regenerate upload failed:", up.error.message); return null; }
     const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
     const url = pub?.publicUrl || null;
@@ -8875,7 +8876,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       });
       const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
       const up = await admin.storage.from("floor-plans")
-        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+        .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
       if (up.error) return dbFail(req, clientId, "rebuild the invoice document", up.error);
       const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
       pdfUrl = pub?.publicUrl || pdfUrl;
@@ -10351,7 +10352,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             });
             const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
             const up = await admin.storage.from("floor-plans")
-              .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+              .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
             if (!up.error) {
               const { data: pub } = admin.storage.from("floor-plans").getPublicUrl(pdfPath);
               invoicePdfUrl = pub?.publicUrl || null;
