@@ -7766,6 +7766,9 @@ function buildShed3DModel(THREE, p) {
     // and open-eave tails keep their own materials.
     const woodMat = mat((p.styleSpec && p.styleSpec.colors && p.styleSpec.colors.wood) || D3_COLORS.wood, { roughness: 0.9 });
     const pg = new THREE.Group(), deck = new THREE.Group();
+    // Every member is tagged with what it is (userData.ssPorchPart), so porchProbe measures the
+    // header, rafters, ledger and cheeks themselves instead of guessing them from box sizes.
+    const part = (m, name) => { m.userData.ssPorchPart = name; return m; };
     // A box lying on the slope, its top face `off` below the roof's top plane, spanning d0..d1.
     const onSlope = (m, d0, d1, uc, w, t, off) => {
       const b = box(m, (d1 - d0) / cosA, t, w);
@@ -7778,26 +7781,26 @@ function buildShed3DModel(THREE, p) {
     // texture and the metal's sky all follow, with the ribs running down the slope.
     const slab = onSlope(roofMat, dWall, dEnd, 0, 2 * (side + SIDE_OV), PR_T, 0);
     d3RoofSlabUVs(slab);
-    pg.add(slab);
+    pg.add(part(slab, "slab"));
     // Wood ceiling boards under the sheet, and 2x6 rafters every 2 ft under those, held inboard of
     // the cheeks (in the first cut the outer rafter hid the cheek).
-    pg.add(onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T));
+    pg.add(part(onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T), "ceiling"));
     const rafU = side - CHEEK_T - RAF_W / 2;
     for (let i = 0; i < geom.nRaf; i++) {
-      pg.add(onSlope(woodMat, dWall + 0.05, dEnd - FAS_T, -rafU + (i * 2 * rafU) / (geom.nRaf - 1), RAF_W, RAF_D, PR_T + SHEATH));
+      pg.add(part(onSlope(woodMat, dWall + 0.05, dEnd - FAS_T, -rafU + (i * 2 * rafU) / (geom.nRaf - 1), RAF_W, RAF_D, PR_T + SHEATH), "rafter"));
     }
     // The header on the posts, flush with the rafters. Its ends stop just inside the cheeks: level
     // with their outer faces the wood and the siding z-fought in a stipple at both front corners.
     const hdr = box(woodMat, 2 * (side - CHEEK_T) + 0.02, HDR_H, HDR_D);
     hdr.position.set(0, geom.hdrTop - HDR_H / 2, dPost);
-    pg.add(hdr);
+    pg.add(part(hdr, "header"));
     // Posts, evenly spaced, the outer two flush with the corner boards. A centre post may stand in
     // front of a door: posts are a rule, not item-aware, because items move in scoped rebuilds that
     // never rebuild the roof.
     for (let i = 0; i <= geom.bays; i++) {
       const post = box(woodMat, POST, geom.postH, POST);
       post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
-      pg.add(post);
+      pg.add(part(post, "post"));
     }
     // A sided cheek each side, from the wall to the board over the rafter tails and down to the post
     // tops, with no side beam — as on the building. Its faces carry the cladding (wallMat, feet UVs
@@ -7811,25 +7814,25 @@ function buildShed3DModel(THREE, p) {
       const cheek = new THREE.Mesh(cg, (cg.groups && cg.groups.length === 2) ? [wallMat, gableMat] : wallMat);
       cheek.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -u
       cheek.position.x = s > 0 ? side : -side + CHEEK_T;
-      pg.add(cheek);
+      pg.add(part(cheek, "cheek"));
       // The rake trim along the porch roof's side edge.
-      pg.add(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06));
+      pg.add(part(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
     }
     // The front: a wood board over the rafter tails and the roof's dark drip edge above it, both the
     // roof's full width, which closes the corners past the cheeks and rake trims.
     const boardH = (SHEATH + RAF_D) / cosA;
     const board = box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
     board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
-    pg.add(board);
+    pg.add(part(board, "board"));
     const drip = box(trimMat, 2 * (side + SIDE_OV), 0.16, 0.05);
     drip.position.set(0, yTop(dEnd) - 0.06, dEnd + 0.025);
-    pg.add(drip);
+    pg.add(part(drip, "drip"));
     // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
     // trimFace), its ends buried in the corner boards.
     const LED_H = 0.3, ledFace = trimFace + 0.04;
     const ledger = box(trimMat, S, LED_H + RAF_D, ledFace);
     ledger.position.set(0, geom.ceilWall + RAF_D - (LED_H + RAF_D) / 2, ledFace / 2);
-    pg.add(ledger);
+    pg.add(part(ledger, "ledger"));
     // DECK at floor level: boards parallel to the wall with 0.03 ft gaps, a rim on the three open
     // sides, and a dark plane under the gaps so they do not show grass. The floor is never raised,
     // so the rim is the 0.23 ft left inside the slab's band, not the real building's 0.6 ft board.
@@ -7839,19 +7842,19 @@ function buildShed3DModel(THREE, p) {
     for (let i = 0; i < nB; i++) {
       const b = box(woodMat, 2 * side, DECK_T, boardStep - GAP);
       b.position.set(0, -DECK_T / 2, dWall + (i + 0.5) * boardStep);
-      deck.add(b);
+      deck.add(part(b, "deckBoard"));
     }
     const rimFront = box(woodMat, 2 * side, RIM_H, RIM_T);
     rimFront.position.set(0, -DECK_T - RIM_H / 2, D - RIM_T / 2);
-    deck.add(rimFront);
+    deck.add(part(rimFront, "rim"));
     for (const s of [-1, 1]) {
       const rim = box(woodMat, RIM_T, RIM_H, D - dWall - RIM_T);
       rim.position.set(s * (side - RIM_T / 2), -DECK_T - RIM_H / 2, (dWall + D - RIM_T) / 2);
-      deck.add(rim);
+      deck.add(part(rim, "rim"));
     }
     const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
     under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
-    deck.add(under);
+    deck.add(part(under, "deckVoid"));
     [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; });
     pg.userData.ssPorch = "roof";
     rg.add(pg);
