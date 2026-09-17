@@ -2923,8 +2923,8 @@ function taxCodesUnavailable(err) {
 function TaxCodePicker({ code, info, onPick, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
-  const [list, setList] = useState(null);      // the latest answer's codes; null before the first
-  const [err, setErr] = useState(null);
+  // The latest answer, with the (trimmed) text it answers: { q, codes, err }; null before the first.
+  const [answer, setAnswer] = useState(null);
   const [hi, setHi] = useState(0);             // the highlighted option, for the arrow keys
   const seq = useRef(0);
   const inputRef = useRef(null);
@@ -2932,21 +2932,27 @@ function TaxCodePicker({ code, info, onPick, disabled = false }) {
   useEffect(() => {
     if (!open) return undefined;
     const my = ++seq.current;
+    const asked = q.trim();
     const t = setTimeout(async () => {
       const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "tax_codes_search", q } });
       // Latest search wins: a slow answer for "FR" must not replace the one for "FR01".
       if (my !== seq.current) return;
       if (error || !data || data.error) {
-        setErr((data && data.error) || (error && error.message) || "Couldn't search the tax codes.");
-        setList([]);
+        setAnswer({ q: asked, codes: [], err: (data && data.error) || (error && error.message) || "Couldn't search the tax codes." });
         return;
       }
-      setErr(null);
-      setList(data.codes || []);
+      setAnswer({ q: asked, codes: data.codes || [], err: null });
       setHi(0);
-    }, q.trim() ? 300 : 0);
+    }, asked ? 300 : 0);
     return () => clearTimeout(t);
   }, [open, q]);
+  // Only an answer to what is in the box now counts. The previous answer stays in state through
+  // the debounce and the round trip, and Enter on it would pick a code the builder never searched
+  // for: the empty box's P0000000 still highlighted while "FR010200" waits. Until the answer
+  // catches up the list reads "Searching…", so nothing stale can be picked, clicked or counted.
+  const fresh = !!answer && answer.q === q.trim();
+  const list = fresh ? answer.codes : null;
+  const err = fresh ? answer.err : null;
   // "Change" swaps the chosen code for the search box; the box should take the typing at once.
   useEffect(() => { if (open && inputRef.current) inputRef.current.focus(); }, [open]);
 

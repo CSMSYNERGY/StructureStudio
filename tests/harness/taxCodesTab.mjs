@@ -8,7 +8,8 @@
 //      Products, Services, Delivery — ticked, with NO code, marked "Pick a code", nothing to save
 //   B. picking a code in the type-ahead and saving posts exactly the Products row (the codeless
 //      rows are not sent); typing is debounced; the answer rebuilds the rows and keeps the
-//      still-codeless ones
+//      still-codeless ones; Enter picks only from the answer to what is in the box — pressed while
+//      that search is still out it picks nothing, and once the answer lands it picks the top match
 //   C. a target ticked in a second row says which code it is under, moves out of the first row,
 //      and the save posts it under the new code only
 //   D. a settings_crm READER (no Branding, no Team) reaches Company → Tax through the widened hub
@@ -36,7 +37,9 @@
 // fails and the run stops there, with no card to drive. Against artifacts compiled from single
 // mutations of this build: the hub gate without settings_crm fails D's rail check and the four D
 // checks after it; a save that also sends codeless rows fails B's payload and success checks; a
-// tick that does not take the target out of its old row fails C's move and payload checks.
+// tick that does not take the target out of its old row fails C's move and payload checks. The
+// picker as it was at 8907d3d, which kept the last answer pickable while a new search was out,
+// fails B's three Enter checks: Enter there puts the empty box's P0000000 on the row.
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 import {
@@ -288,6 +291,27 @@ try {
   ok("B: the rebuilt rows keep Products' title and the two codeless rows", JSON.stringify(titlesB) === JSON.stringify(["PRODUCTS", "SERVICES", "DELIVERY"]), JSON.stringify(titlesB));
   const unassignedB = await page.locator("[data-tax-unassigned]").innerText();
   ok("B: Not assigned is now the services and delivery headings only", !unassignedB.includes("Utility") && unassignedB.includes("Foundation & site work") && unassignedB.includes("Delivery"), unassignedB.replace(/\n/g, " | "));
+  // The empty box answers at once with P0000000 highlighted. Typing a code and pressing Enter
+  // before that code's answer lands must not pick P0000000. The stub holds the search back so the
+  // window is wider than the keystrokes, whatever the machine's speed.
+  const services = row(1).locator('input[aria-label="Search tax codes"]');
+  await services.click();
+  await waitText("COMMON CODES");
+  S.searchDelayMs = 1500;
+  await services.pressSequentially("SI020200");
+  await services.press("Enter");
+  await page.waitForTimeout(200);
+  const servicesStale = await row(1).innerText();
+  ok("B: Enter while the search is still out picks nothing", servicesStale.includes("Pick a code") && (await row(1).locator('input[aria-label="Search tax codes"]').count()) === 1, servicesStale.replace(/\n/g, " | "));
+  ok("B: …and the list says Searching… instead of offering the last answer", (await page.locator('[role="option"]').count()) === 0 && (await row(1).innerText()).includes("Searching…"));
+  // A stale pick has already closed the box; checking the row is enough then, and the run goes on.
+  if (await services.count()) {
+    await page.locator('[role="option"]').filter({ hasText: "SI020200" }).first().waitFor({ timeout: 8000 }).catch(() => {});
+    await services.press("Enter");
+    await page.waitForTimeout(300);
+  }
+  ok("B: once the answer lands, Enter picks its top match", (await row(1).innerText()).includes("SI020200 — Installation-not associated with the sale of tpp (labor only)"));
+  S.searchDelayMs = 0;
 
   // ── C ──
   await boot({
