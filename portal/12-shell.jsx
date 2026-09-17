@@ -3151,12 +3151,20 @@ function PortalApp() {
       if (errCode || rawErr) {
         const desc = String(pick("error_description") || "").replace(/\+/g, " ");
         const isExpired = /expired/i.test(errCode || "") || /expired/i.test(desc);
+        // "Sign-in link", not "password reset link": this branch fires for invite emails too.
         setLinkError(
           isExpired
-            ? "That password reset link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one."
-            : "That password reset link is no longer valid. Enter your email below and click “Forgot password?” to get a new one.",
+            ? "That sign-in link has expired or was already used. Enter your email below and click “Forgot password?” to get a fresh one."
+            : "That sign-in link is no longer valid. Enter your email below and click “Forgot password?” to get a new one.",
         );
-        ssLogError(SS_ERR_SOURCE, "recovery link rejected: " + (desc || "no description"), errCode || rawErr, { expired: isExpired });
+        // Severity: GoTrue answers EVERY used, superseded or out-of-date one-time link with
+        // error_code=otp_expired ("Email link is invalid or has expired"). That is Supabase
+        // correctly refusing a dead link (someone reopened an old reset/invite email), so it is
+        // a refusal and logs as info (migration 141). The row stays, so a spike is still
+        // visible. Any other code (server_error, …) is not explained and stays an error, as do
+        // pkce_exchange_failed and recovery_no_session below: those cannot be told apart from
+        // a link that was mangled on the way.
+        ssLogError(SS_ERR_SOURCE, "recovery link rejected: " + (desc || "no description"), errCode || rawErr, { expired: isExpired }, isExpired ? "info" : "error");
         scrubUrl();
         if (!cancelled) setSession(null);
         return;
