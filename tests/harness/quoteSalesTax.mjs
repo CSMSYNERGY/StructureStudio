@@ -7,11 +7,13 @@
 //   A. an SS quote's record shows its tax line, which rate priced it, the total, the location picker
 //      and — with lookups on and settings_crm edit — the billed-lookup warning and the button
 //   B. dismissing the first confirm calls nothing
-//   C. verify on an emailed quote: quote_sent → a second confirm naming the quote and the re-send →
-//      the call repeats with confirmResend, and the screen takes its figures from the response
+//   C. verify on a quote the customer already has: quote_sent → a second confirm that names the quote,
+//      says its total will change if the rate differs, and neither says it was emailed nor promises a
+//      re-send → the call repeats with confirmResend, and the screen takes its figures from the response
 //   D. a failed lookup shows the server's sentence and leaves the tax line as it was
 //   E. confirm_operator → a view-as confirm → the call repeats with confirmVerify
-//   F. changing the sales location on an emailed quote: quote_sent names both totals → confirmResend
+//   F. changing the sales location on a quote the customer already has: quote_sent names both totals
+//      (same wording rules as C) → confirmResend
 //   G. lookups switched off: no warning, no button
 //   H. a CRM-mode (GHL) design shows no Sales tax card and reads nothing for one
 //   I. an accepted quote is read-only
@@ -19,14 +21,20 @@
 //      send_invoice's tax check shown as a note beside the success message
 //   K. the Pipeline's Send invoice shows a failed tax check as a note, not an error, with a reason
 //      for every failure code the server sends (ledger_unavailable included)
-//   L. my-quotes: Accept sends the total it showed; a "repriced" 409 shows the sentence and a Reload
-//      button, keeps the customer signed in, and Reload lists the quotes again
-//   M. the re-send outcome comes from resendReason, not from the confirm: an emailed quote whose
-//      verified total did not move says nothing about re-sending; a reason (verify or location
-//      change) names why it did not go
+//   L. my-quotes: Accept sends the total it showed; a "repriced" 409 shows the server's sentence and a
+//      Reload button, keeps the customer signed in, and Reload lists the quotes again — and so does a
+//      "repriced" 409 whose sentence the session test's word match would catch ("before signing")
+//   M. the re-send outcome comes from resendReason, not from the confirm: a confirmed verify whose
+//      total did not move says nothing about re-sending; a reason (verify or location change) is the
+//      server's whole sentence, shown as written
 //   N. a stale-row refusal (accepted / ordered / changed) shows the sentence and re-reads the design;
 //      a status the server counts as agreed (invoiced, accepted_at still null) locks the card
 //   O. lookups on but no platform credentials (configured:false): no warning, no button
+//   P. the per-minute Verify limit (429 rate_limited): the server's sentence, one call, no retry, the
+//      tax line and total unchanged, and the button offered again
+//
+// The replies below use the avalara-api branch's own sentences and fields (f3f3c55): a stub that
+// said something the server never says would pass a check the real page fails.
 //
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/quoteSalesTax.mjs            (exit 0 = every check held)
@@ -35,7 +43,11 @@
 // to prove the checks can fire: against 57ae592's artifact every A check that looks for the card
 // fails, and the run then stops at B with nothing to press. (L drives my-quotes.html, which that
 // variable does not swap.) Against 366b93b's artifact the contract checks fail (9): C's re-send confirm,
-// K's ledger_unavailable wording, all three M, the three N reloads and O.
+// K's ledger_unavailable wording, all three M, the three N reloads and O. Against 815dde4's artifact 9
+// fail: C's and F's success lines and both of each one's confirm checks, and the three M reason checks.
+// 815dde4's my-quotes.html fails L's direct invalidSession check (its word match signs a customer out
+// over the old "before signing" sentence); that file is not swapped by the variable, so that was
+// proven by lifting the function out of the old file.
 import { readFileSync } from "node:fs";
 import { launch, reporter, BASE, REF } from "./lib.mjs";
 
@@ -51,9 +63,29 @@ const SESSION = {
 const SS = "SS-TAXQUOTE1", GHL = "SS-GHLQUOTE1", ACC = "SS-ACCQUOTE1";
 const CONTACT = { name: "Pat Tester", phone: "(478) 555-0100", email: "pat@example.test", street: "1 Main St", city: "Macon", state: "GA", zip: "31201" };
 const LINES = [{ name: "Utility 10x12", qty: 1, amount: 9000, kind: "building" }];
-const TAX_LOCATION = { rate: 0.0725, amount: 652.5, label: "Sales tax", source: "fallback", basis: "location", locationId: "L1", locationName: "Hwy 65 Display", verifiedAt: null, jurisdiction: null, address: { state: "GA", zip: "31201" } };
-const TAX_VERIFIED = { rate: 0.081, amount: 729, label: "Sales tax", source: "avalara", basis: "avalara", locationId: null, locationName: null, verifiedAt: "2026-09-17T12:00:00Z", jurisdiction: "Bibb County, GA", address: { state: "GA", zip: "31201" } };
-const TAX_COMPANY = { rate: 0.065, amount: 585, label: "Sales tax", source: "fallback", basis: "company", locationId: null, locationName: null, verifiedAt: null, jurisdiction: null };
+// taxChain.ts stampTax's shape: every key it writes, so the card is read against a real stamp.
+const POOLS = { taxableSubtotal: 9000, nonTaxableSubtotal: 0, taxableBase: 9000, nonTaxableNet: 0 };
+const TAX_LOCATION = { rate: 0.0725, amount: 652.5, label: "Sales tax", ...POOLS, source: "fallback", jurisdiction: null, address: { state: "GA", zip: "31201" }, resolvedAt: "2026-09-16T15:00:00Z", basis: "location", locationId: "L1", locationName: "Hwy 65 Display", verifiedAt: null };
+const TAX_VERIFIED = { rate: 0.081, amount: 729, label: "Sales tax", ...POOLS, source: "avalara", jurisdiction: "Bibb County, GA", address: { state: "GA", zip: "31201" }, resolvedAt: "2026-09-17T12:00:00Z", basis: "avalara", locationId: null, locationName: null, verifiedAt: "2026-09-17T12:00:00Z" };
+const TAX_COMPANY = { rate: 0.065, amount: 585, label: "Sales tax", ...POOLS, source: "fallback", jurisdiction: null, address: { state: "GA", zip: "31201" }, resolvedAt: "2026-09-17T12:00:00Z", basis: "company", locationId: null, locationName: null, verifiedAt: null };
+// The server's sentences, verbatim from the avalara-api branch (taxSpend.ts, locationTax.ts,
+// portal-settings restampQuoteTax / refuseIfAgreed, acceptTotal.ts).
+const SAY = {
+  verifyQuoteSent: "The customer already has this quote, and verifying the tax may change its total. If it does, we email them the updated quote, or tell you to let them know if we can't. Confirm to go ahead.",
+  locationQuoteSent: "The customer already has this quote, and its total would change. Confirm to update it. We email them the new total, or tell you to let them know if we can't.",
+  confirmOperator: "You're viewing this account as an operator, and verifying tax is a paid lookup on the builder's account. Confirm to go ahead (confirmVerify).",
+  network: "Couldn't reach the tax service. Try again. The quote keeps its current tax rate.",
+  rateLimited: "Too many tax lookups in the last minute. Nothing was looked up — wait a minute and try again. The quote keeps its current tax rate.",
+  resendPdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
+  resendNoEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
+  accepted: "The customer has already accepted this quote, so its tax can't be changed here. A change to a signed order goes through a change order.",
+  ordered: "This quote already has an order, so its tax can't be changed here.",
+  changed: "This quote changed while you were working on it. Reload it and try again.",
+  repriced: "This quote was just updated. Reload to see the current total, then accept it.",
+};
+// A confirm that claims the quote was emailed, or promises to send it again, says something the
+// server cannot know yet (the quote may have gone out by text or on paper; the send may not land).
+const CLAIMS_EMAIL = /emailed|e-?mail|re-?sen[dt]/i;
 const LOCS = [
   { id: "L1", name: "Hwy 65 Display", street: "9 Hwy 65", city: "Macon", state: "GA", zip: "31201", active: true, sort_order: 0, buildings: 2, taxRatePct: 7.25, taxLabel: null, taxReady: true },
   { id: "L2", name: "North Lot", street: null, city: "Warner Robins", state: "GA", zip: "31088", active: true, sort_order: 1, buildings: 0, taxRatePct: null, taxLabel: null, taxReady: true },
@@ -221,14 +253,16 @@ try {
   // C
   resetCalls();
   S.verifyReplies = [
-    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 965250 } },
-    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 965250, resent: true, charged: false } },
+    { status: 409, body: { error: SAY.verifyQuoteSent, reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 965250 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 965250, resent: true, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("C: success message with the totals from the response", await waitText("The quote total changed from $9,652.50 to $9,729.00. The updated quote was re-sent to the customer."));
+  ok("C: success message with the totals from the response", await waitText("The quote total changed from $9,652.50 to $9,729.00. The updated quote was emailed to the customer."));
   const vc = actionCalls("verify_tax");
   ok("C: two calls, the second with confirmResend", vc.length === 2 && !vc[0].confirmResend && vc[1].confirmResend === true && vc[1].shortCode === SS, JSON.stringify(vc));
-  ok("C: second confirm names the quote and the re-send", dialogs.length === 2 && dialogs[1].message.includes("SST-1041") && /If the verified tax changes the total, the updated quote is re-sent to them/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
+  ok("C: second confirm says the customer already has the quote, and that its total will change", dialogs.length === 2
+    && dialogs[1].message.includes("The customer already has quote SST-1041 at $9,652.50.") && /its total will change/.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
+  ok("C: second confirm neither says it was emailed nor promises a re-send", dialogs.length === 2 && !CLAIMS_EMAIL.test(dialogs[1].message), dialogs[1] && dialogs[1].message);
   t = await cardText();
   ok("C: tax line now the verified one", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t), t.slice(0, 120));
   ok("C: basis says verified, with jurisdiction and date", t.includes("Verified for Bibb County, GA on Sep 17, 2026"));
@@ -236,9 +270,9 @@ try {
 
   // D
   resetCalls();
-  S.verifyReplies = [{ status: 502, body: { error: "The tax lookup failed — the tax service couldn't be reached. The quote is unchanged.", reason: "lookup_failed", failure: "network" } }];
+  S.verifyReplies = [{ status: 502, body: { error: SAY.network, reason: "lookup_failed", failure: "network" } }];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("D: the server's sentence is shown", await waitText("The tax lookup failed — the tax service couldn't be reached. The quote is unchanged."));
+  ok("D: the server's sentence is shown", await waitText(SAY.network));
   t = await cardText();
   ok("D: tax line unchanged", /Sales tax \(8\.1%\)\s*\$729\.00/.test(t) && /Quote total\s*\$9,729\.00/.test(t));
   ok("D: no ask-an-admin suffix on the refusal", !/ask an owner or admin/.test(t));
@@ -246,27 +280,29 @@ try {
   // E
   resetCalls();
   S.verifyReplies = [
-    { status: 409, body: { error: "Confirm you want to run a billed lookup as this builder.", reason: "confirm_operator" } },
-    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 972900, resent: false, charged: false } },
+    { status: 409, body: { error: SAY.confirmOperator, reason: "confirm_operator" } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 972900, resent: false, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
   ok("E: success after the operator confirm", await waitText("The quote total didn't change."));
   const ec = actionCalls("verify_tax");
   ok("E: second call carries confirmVerify", ec.length === 2 && !ec[0].confirmVerify && ec[1].confirmVerify === true, JSON.stringify(ec));
   ok("E: the operator confirm says AS", dialogs.length === 2 && /You are doing this AS/.test(dialogs[1].message));
-  ok("E: nothing said about re-sending", !/re-sent/.test(await cardText()));
+  ok("E: nothing said about re-sending", !/re-sent|emailed|hasn't been sent/i.test(await cardText()));
 
   // F
   resetCalls();
   S.locationReplies = [
-    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 972900, newTotalCents: 958500 } },
-    { status: 200, body: { ok: true, salesLocationId: "L2", tax: TAX_COMPANY, totalCents: 958500, resent: true } },
+    { status: 409, body: { error: SAY.locationQuoteSent, reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 972900, newTotalCents: 958500 } },
+    { status: 200, body: { ok: true, salesLocationId: "L2", tax: TAX_COMPANY, totalCents: 958500, previousTotalCents: 972900, resent: true, resendReason: null, quotePdfUrl: null } },
   ];
   await card().locator("select").selectOption("L2");
-  ok("F: success message", await waitText("Sales location set to North Lot — quote total $9,585.00. The updated quote was re-sent to the customer."));
+  ok("F: success message", await waitText("Sales location set to North Lot — quote total $9,585.00. The updated quote was emailed to the customer."));
   const fc = actionCalls("set_design_sales_location");
   ok("F: two calls, locationId L2, the second with confirmResend", fc.length === 2 && fc[0].locationId === "L2" && !fc[0].confirmResend && fc[1].confirmResend === true, JSON.stringify(fc));
-  ok("F: confirm names both totals", dialogs.length === 1 && dialogs[0].message.includes("from $9,729.00 to $9,585.00") && dialogs[0].message.includes("SST-1041"), dialogs[0] && dialogs[0].message);
+  ok("F: confirm says the customer already has the quote and names both totals", dialogs.length === 1
+    && dialogs[0].message.includes("The customer already has quote SST-1041.") && dialogs[0].message.includes("its total will change from $9,729.00 to $9,585.00"), dialogs[0] && dialogs[0].message);
+  ok("F: confirm neither says it was emailed nor promises a re-send", dialogs.length === 1 && !CLAIMS_EMAIL.test(dialogs[0].message), dialogs[0] && dialogs[0].message);
   t = await cardText();
   ok("F: basis and total from the response", t.includes("Company rate") && /Quote total\s*\$9,585\.00/.test(t));
   ok("F: picker now on North Lot", (await card().locator("select").inputValue()) === "L2");
@@ -274,45 +310,59 @@ try {
   // M
   resetCalls();
   S.verifyReplies = [
-    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
-    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 958500, previousTotalCents: 958500, resent: false, resendReason: null, charged: false } },
+    { status: 409, body: { error: SAY.verifyQuoteSent, reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 958500, previousTotalCents: 958500, resent: false, resendReason: null, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
   ok("M: confirmed re-send, total unchanged: success", await waitText("Verified: 8.1% for Bibb County, GA. The quote total didn't change."));
   t = await cardText();
-  ok("M: confirmed re-send, total unchanged: no re-send failure claimed", !/re-sent/i.test(t), t);
+  ok("M: confirmed re-send, total unchanged: nothing said about sending", !/re-sent|emailed|hasn't been sent/i.test(t), t);
   ok("M: that run confirmed the re-send", actionCalls("verify_tax").length === 2 && actionCalls("verify_tax")[1].confirmResend === true);
 
   resetCalls();
   S.verifyReplies = [
-    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
-    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 958500, resent: false, resendReason: "the quote PDF couldn't be rebuilt, so it wasn't emailed again", charged: false } },
+    { status: 409, body: { error: SAY.verifyQuoteSent, reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 958500 } },
+    { status: 200, body: { ok: true, tax: TAX_VERIFIED, totalCents: 972900, previousTotalCents: 958500, resent: false, resendReason: SAY.resendPdf, quotePdfUrl: null, charged: false } },
   ];
   await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-  ok("M: verify with a resendReason names it", await waitText("The quote total changed from $9,585.00 to $9,729.00. The updated quote was NOT re-sent (the quote PDF couldn't be rebuilt, so it wasn't emailed again) — send it again from the Pipeline."));
+  ok("M: verify with a resendReason shows the server's sentence as written", await waitText(`The quote total changed from $9,585.00 to $9,729.00. ${SAY.resendPdf}`));
+  ok("M: verify: the reason is not wrapped in our own re-send wording", !/NOT re-sent|\(The quote PDF/.test(await cardText()), await cardText());
 
   resetCalls();
   S.locationReplies = [
-    { status: 409, body: { error: "Quote SST-1041 has already been emailed.", reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 972900, newTotalCents: 965250 } },
-    { status: 200, body: { ok: true, salesLocationId: "L1", tax: TAX_LOCATION, totalCents: 965250, previousTotalCents: 972900, resent: false, resendReason: "no email address on this design" } },
+    { status: 409, body: { error: SAY.locationQuoteSent, reason: "quote_sent", quoteNumber: "SST-1041", totalCents: 972900, newTotalCents: 965250 } },
+    { status: 200, body: { ok: true, salesLocationId: "L1", tax: TAX_LOCATION, totalCents: 965250, previousTotalCents: 972900, resent: false, resendReason: SAY.resendNoEmail, quotePdfUrl: null } },
   ];
   await card().locator("select").selectOption("L1");
-  ok("M: location change with a resendReason names it", await waitText("Sales location set to Hwy 65 Display — quote total $9,652.50. The updated quote was NOT re-sent (no email address on this design) — send it again from the Pipeline."));
+  ok("M: location change with a resendReason shows the server's sentence as written", await waitText(`Sales location set to Hwy 65 Display — quote total $9,652.50. ${SAY.resendNoEmail}`));
+
+  // P
+  resetCalls();
+  S.verifyReplies = [{ status: 429, body: { error: SAY.rateLimited, reason: "rate_limited", retryAfterSeconds: 60 } }];
+  await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
+  ok("P: the per-minute refusal shows the server's sentence", await waitText(SAY.rateLimited));
+  await page.waitForTimeout(700);
+  t = await cardText();
+  ok("P: one call, no retry", actionCalls("verify_tax").length === 1, JSON.stringify(actionCalls("verify_tax")));
+  ok("P: not treated as a stale row (no re-read)", !restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`)), restReads.join(" | "));
+  ok("P: tax line and total unchanged", /Sales tax \(7\.25%\)\s*\$652\.50/.test(t) && /Quote total\s*\$9,652\.50/.test(t), t);
+  ok("P: no ask-an-admin suffix", !/ask an owner or admin/.test(t));
+  ok("P: the button is offered again", await card().getByRole("button", { name: "Verify tax for the delivery address" }).isEnabled());
 
   // N
   for (const reason of ["changed", "ordered"]) {
     resetCalls();
-    S.verifyReplies = [{ status: 409, body: { error: `Refused as ${reason}.`, reason } }];
+    S.verifyReplies = [{ status: 409, body: { error: SAY[reason], reason } }];
     await card().getByRole("button", { name: "Verify tax for the delivery address" }).click();
-    ok(`N: ${reason}: the server's sentence is shown`, await waitText(`Refused as ${reason}.`));
+    ok(`N: ${reason}: the server's sentence is shown`, await waitText(SAY[reason]));
     ok(`N: ${reason}: the design is read again`, await until(() => restReads.some((u) => u.includes("/designs") && u.includes(`short_code=eq.${SS}`))), restReads.join(" | "));
   }
   resetCalls();
   // Invoiced by the status re-projection, accepted_at not yet set: the reload must lock the card.
   S.designs[SS] = design(SS, { status: "invoiced", accepted_at: null });
-  S.locationReplies = [{ status: 409, body: { error: "The customer has already accepted this quote, so its tax can't be changed here.", reason: "accepted" } }];
+  S.locationReplies = [{ status: 409, body: { error: SAY.accepted, reason: "accepted" } }];
   await card().locator("select").selectOption("L2");
-  ok("N: accepted: the server's sentence is shown", await waitText("The customer has already accepted this quote, so its tax can't be changed here."));
+  ok("N: accepted: the server's sentence is shown", await waitText(SAY.accepted));
   ok("N: accepted: the reload locks the card", await page.waitForFunction(() => {
     const el = document.querySelector("[data-quote-sales-tax]");
     return !!el && el.innerText.includes("Accepted — this quote keeps the tax the customer agreed to.") && !el.querySelector("select") && !el.innerText.includes("Verify tax");
@@ -404,22 +454,55 @@ try {
 
   // L
   resetCalls();
-  S.acceptReplies = [{ status: 409, body: { error: "This quote was updated. Reload to see the current total before signing.", reason: "repriced", totalCents: 972900 } }];
+  S.acceptReplies = [{ status: 409, body: { error: SAY.repriced, reason: "repriced", totalCents: 972900 } }];
   await page.goto(`${BASE}/my-quotes.html?client=${CLIENT}`, { waitUntil: "domcontentloaded" });
   ok("L: quotes list renders", await waitText("SST-1041", 20000));
-  await page.getByRole("button", { name: "Review & Accept" }).click();
-  await page.locator(".sign-panel input[type=text]").fill("Pat Tester");
-  await page.locator(".sign-panel input[type=checkbox]").check();
-  await page.getByRole("button", { name: "Accept Quote" }).click();
-  ok("L: the server's sentence is shown", await waitText("This quote was updated. Reload to see the current total before signing."));
+  const signedIn = () => page.evaluate(() => !document.getElementById("screen-quotes").hidden && document.getElementById("screen-phone").hidden);
+  const acceptOnce = async () => {
+    await page.getByRole("button", { name: "Review & Accept" }).click();
+    await page.locator(".sign-panel input[type=text]").fill("Pat Tester");
+    await page.locator(".sign-panel input[type=checkbox]").check();
+    await page.getByRole("button", { name: "Accept Quote" }).click();
+  };
+  await acceptOnce();
+  ok("L: the server's sentence is shown", await waitText(SAY.repriced));
   const ac = calls.filter((c) => c.fn === "customer-accept").map((c) => c.body);
   ok("L: accept sent the total it displayed", ac.length === 1 && ac[0].expectedTotalCents === 965250 && ac[0].action === "accept_quote", JSON.stringify(ac));
-  ok("L: still signed in (not bounced to the phone screen)", await page.evaluate(() => !document.getElementById("screen-quotes").hidden && document.getElementById("screen-phone").hidden));
+  ok("L: still signed in (not bounced to the phone screen)", await signedIn());
   ok("L: Accept stays disabled", await page.getByRole("button", { name: "Accept Quote" }).isDisabled());
+  ok("L: a Reload control is offered", (await page.getByRole("button", { name: "Reload", exact: true }).count()) === 1);
   const listsBefore = calls.filter((c) => c.fn === "customer-quotes").length;
   await page.getByRole("button", { name: "Reload", exact: true }).click();
   await page.waitForTimeout(800);
   ok("L: Reload lists the quotes again", calls.filter((c) => c.fn === "customer-quotes").length === listsBefore + 1);
+
+  // The same refusal worded the way an older build of the server worded it: "before signing" is what
+  // invalidSession's /sign.?in/ word match catches. The code, not the sentence, must decide.
+  const OLD_REPRICED = "This quote was updated. Reload to see the current total before signing.";
+  calls.length = 0;
+  S.acceptReplies = [{ status: 409, body: { error: OLD_REPRICED, reason: "repriced", totalCents: 972900 } }];
+  await waitText("SST-1041", 20000);
+  await acceptOnce();
+  ok("L: a repriced sentence the session test would match: shown", await waitText(OLD_REPRICED));
+  ok("L: a repriced sentence the session test would match: still signed in", await signedIn());
+  ok("L: a repriced sentence the session test would match: token kept", await page.evaluate((c) => !!localStorage.getItem("ssq_token_" + c), CLIENT));
+  ok("L: a repriced sentence the session test would match: Reload offered", (await page.getByRole("button", { name: "Reload", exact: true }).count()) === 1);
+  // The accept handler checks "repriced" first, so the drive above passes on call order alone.
+  // invalidSession has other callers; lift it out of the page and ask it directly.
+  {
+    const src = readFileSync(new URL("../../my-quotes.html", import.meta.url), "utf8");
+    // \r? — a Windows checkout has CRLF in the working tree.
+    const m = src.match(/function invalidSession\(r\) \{[\s\S]*?\r?\n {2}\}\r?\n/);
+    let fn = null;
+    try { fn = m ? new Function(`${m[0]}; return invalidSession;`)() : null; } catch (_e) { fn = null; }
+    ok("L: invalidSession found in my-quotes.html", typeof fn === "function");
+    if (fn) {
+      ok("L: invalidSession never reads a repriced 409 as a dead session, whatever it says",
+        fn({ status: 409, data: { reason: "repriced", error: OLD_REPRICED } }) === false && fn({ status: 409, data: { reason: "repriced", error: SAY.repriced } }) === false);
+      ok("L: invalidSession still reads a session sentence and a 401 as a dead session",
+        fn({ status: 200, data: { error: "Your session expired." } }) === true && fn({ status: 401, data: null }) === true);
+    }
+  }
 
   ok("no uncaught page errors", pageErrors.length === 0, pageErrors.join(" | "));
 } finally {

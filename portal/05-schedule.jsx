@@ -3936,7 +3936,7 @@ function DriversTerritoriesCard({ section = "all" }) {
 // building serial numbers to business details") — a shop-wide counter belongs with the
 // business, not with the lots. It is SerialNumbersCard, directly below.
 //
-// SALES TAX PER LOCATION (migration 243). A lot can carry the builder's local rate, and a quote
+// SALES TAX PER LOCATION (migration 244). A lot can carry the builder's local rate, and a quote
 // whose sales location has one charges it instead of the company rate. Three choices here are
 // deliberate:
 //   • The tax half reads and saves under settings_crm — the area that owns the company rate —

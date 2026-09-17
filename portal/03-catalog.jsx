@@ -576,7 +576,7 @@ function SettingsView({ section }) {
         {/* Sales tax (migration 158). SS mode only: in CRM mode GHL computes tax on its
             own documents. The rate here is the COMPANY rate, and it is the last rung a quote
             can land on: a rate verified for the delivery address wins, then the quote's
-            sales location's own rate (migration 243), then this. Nothing looks an address up
+            sales location's own rate (migration 244), then this. Nothing looks an address up
             on its own — a verified rate only exists where someone asked for one. That is why
             the server refuses to flip SS mode on while this is blank: with no location rate
             either, a quote would have nothing to charge. 0 is a real answer, "unanswered" is

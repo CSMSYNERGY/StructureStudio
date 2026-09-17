@@ -22,6 +22,10 @@
 //   I. lookups on: the 24-hour usage line shows a counted number, and is left out when the ledger
 //      could not be counted (usage24h null means unknown, not zero)
 //
+// list_locations answers the way the avalara-api branch does for a settings_crm reader: every lot
+// carries taxRatePct / taxLabel / taxReady, whatever the mode (an older function omits them). So B
+// and D also prove a CRM-mode tenant's Locations tab prints none of those rates.
+//
 //   python -m http.server 8125 --bind 127.0.0.1   (repo root)
 //   node tests/harness/salesTaxModeGate.mjs         (exit 0 = every check held)
 //
@@ -90,7 +94,13 @@ const handler = async (route) => {
       businessAddress: {}, branding: {}, emailReady: true,
     });
   }
-  if (a === "list_locations") return json(route, { ok: true, nextSerial: 100, locations: LOCS });
+  // The avalara-api branch adds taxRatePct / taxLabel / taxReady to every lot for a caller who can
+  // read settings_crm (this owner can) — in CRM mode too, since that read does not ask the mode. So a
+  // CRM-mode tenant's Locations tab receives rates it must not print; B and D check it doesn't. An
+  // older function ("old") predates the fields.
+  if (a === "list_locations") {
+    return json(route, { ok: true, nextSerial: 100, locations: S.taxMode === "old" ? LOCS : LOCS.map((l) => ({ ...l, ...TAX[l.id] })) });
+  }
   if (a === "tax_settings") {
     taxCallsThisBoot += 1;
     if (S.taxDelayMs) await new Promise((r) => setTimeout(r, S.taxDelayMs));

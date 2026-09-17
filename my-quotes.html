@@ -606,6 +606,11 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
     // talks about the token/session means the same thing from a function that prefers
     // soft errors. Anything else is a transient failure, NOT a reason to sign out.
     if (r.status === 401 || r.status === 403) return true;
+    // A quote re-priced under the customer (customer-accept's 409 "repriced") is never a dead
+    // session, whatever its sentence says. The regex below reads words, and an older build of
+    // that refusal said "before signing", which /sign.?in/ matches: the customer was signed out
+    // instead of being shown the new total. Decided on the code, so no wording can do it again.
+    if (r.data && r.data.reason === "repriced") return false;
     if (r.data && typeof r.data.error === "string" && /token|session|expired|sign.?in/i.test(r.data.error)) return true;
     return false;
   }
@@ -1369,11 +1374,13 @@ input:focus{outline:none;border-color:#3D3672;box-shadow:0 0 0 3px rgba(61,54,11
         .then(function (r) {
           // Re-priced since this page loaded: say so in the server's words, and offer the one
           // thing that helps. Accept stays disabled — pressing it again would only repeat this.
-          // ⚠️ BEFORE invalidSession, not after: its sentence test reads "sign in" into
-          // "signing", and this refusal's sentence ends "before signing." — checked second, it
-          // would sign the customer out for a quote that merely changed.
+          // ⚠️ BEFORE invalidSession, not after, and invalidSession refuses this code too: its
+          // sentence test reads words ("sign in" in "signing"), and a customer signed out over a
+          // quote that merely changed never sees the new total. The server's sentence was
+          // reworded to stay clear of that test; these two guards keep that from being the only
+          // thing standing between the customer and a sign-out.
           if (r.status === 409 && r.data && r.data.reason === "repriced") {
-            setError(errEl, errText(r, "This quote was updated. Reload to see the current total before signing."));
+            setError(errEl, errText(r, "This quote was just updated. Reload to see the current total, then accept it."));
             submit.textContent = "Accept Quote";
             if (!panel.querySelector("[data-reload-quotes]")) {
               var reloadBtn = document.createElement("button");

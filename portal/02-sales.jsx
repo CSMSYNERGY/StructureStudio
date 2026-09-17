@@ -1876,6 +1876,9 @@ const SS_TAX_FAILURE_TEXT = {
   daily_cap: "today's lookup limit has been reached",
   not_configured: "address lookups aren't set up",
   ledger_unavailable: "the lookup couldn't be recorded, so none was made",
+  // Our own per-minute cap. The claim only applies it to a Verify press, so an invoice check
+  // should never carry it; worded anyway, because the server's failure type includes it.
+  minute_cap: "too many lookups were made in the last minute",
 };
 // Informational, so neither the red of a failure nor the amber of a warning: the Locations tab's
 // blue "what this does" banner.
@@ -1925,7 +1928,7 @@ async function ssTaxOutcome(res) {
 //
 // ⚠️ IT READS THE DESIGN ITSELF, which the record page above it deliberately never does. The
 // estimate snapshot and `sales_location_id` are not in crm_record's projection, and the API
-// publishes the stored location through the RLS'd `designs` select (migration 243). That read
+// publishes the stored location through the RLS'd `designs` select (migration 244). That read
 // returns NOTHING in operator view-as — designs RLS is current_client_id() — so view-as reads
 // through `orders_designs` instead, where the server resolves the tenant, and the stored location
 // is then only known when the tax stamp names it.
@@ -1957,7 +1960,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
           return q.maybeSingle();
         };
         let r = await direct(true);
-        // Before migration 243 the column does not exist and PostgREST refuses the whole select.
+        // Before migration 244 the column does not exist and PostgREST refuses the whole select.
         // The tax line still has something true to say without it.
         if (r.error && /sales_location_id/.test(String(r.error.message || ""))) r = await direct(false);
         if (r.error) return { err: r.error.message || "Couldn't load this quote's tax." };
@@ -2033,9 +2036,14 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   // The row this card shows is out of date: the customer agreed, an order exists, or something
   // else wrote the quote first. The server's sentence says which; the card re-reads the design.
   const staleRefusal = (reason) => reason === "accepted" || reason === "ordered" || reason === "changed";
-  // The server re-sends only when an emailed quote's total moved, so no reason means nothing
-  // needed sending. A reason means one was due and didn't go.
-  const notResentText = (d) => d.resendReason ? ` The updated quote was NOT re-sent (${d.resendReason}) — send it again from the Pipeline.` : "";
+  // After a re-price the server emails the quote again only when the customer already holds it
+  // and its total moved, so no resendReason means nothing needed sending. A reason is the
+  // server's own whole sentence: the customer hasn't been sent the new total, and what to do
+  // about it. It is shown as written — the server knows whether it was the PDF, a missing email
+  // address or a failed send, and a customer who got the quote by text or on paper may only
+  // hear the new total from the rep. `resent` means it went out by email, the only re-send there is.
+  const notResentText = (d) => { const why = String(d.resendReason || "").trim(); return why ? ` ${why}` : ""; };
+  const resentText = (d) => d.resent ? " The updated quote was emailed to the customer." : notResentText(d);
 
   const changeLocation = async (value) => {
     if (value === "__current") return;
@@ -2043,8 +2051,9 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
     if (!locUnknown && locationId === curLocId) return;
     setBusy("location"); setMsg(null);
     let confirmResend = false;
-    // At most two calls: the plain one, and — when the quote has already been emailed and the
-    // total would move — the one the builder confirmed, which re-sends the updated quote.
+    // At most two calls: the plain one, and — when the customer already has the quote (emailed,
+    // texted or printed: the server decides) and the total would move — the one the builder
+    // confirmed.
     for (let attempt = 0; attempt < 2; attempt++) {
       const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
         body: { action: "set_design_sales_location", shortCode, locationId, ...(confirmResend ? { confirmResend: true } : {}) },
@@ -2054,14 +2063,20 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         applyTax(d, { sales_location_id: d.salesLocationId !== undefined ? d.salesLocationId : locationId });
         setLocKnown(true);
         const name = locationId ? ((locs || []).find((l) => l.id === locationId) || {}).name : null;
-        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${d.resent ? " The updated quote was re-sent to the customer." : notResentText(d)}` });
+        setMsg({ ok: `${name ? `Sales location set to ${name}` : "Sales location cleared"}${d.totalCents != null ? ` — quote total ${ssTaxMoney(d.totalCents)}` : ""}.${resentText(d)}` });
         if (onChanged) onChanged();
         break;
       }
       if (out.reason === "quote_sent" && !confirmResend) {
         const b = out.body;
-        const moves = b.totalCents != null && b.newTotalCents != null ? ` Its total moves from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}.` : "";
-        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer.${moves}\n\nChanging the sales location re-sends the updated quote to them. Change it and re-send?`)) break;
+        // "Already has", never "was emailed": the server asks for a quote handed over by text or
+        // on paper too. And no promise of a re-send — whether one goes out is only known after
+        // the change, and the success message reports it.
+        const moves = b.totalCents != null && b.newTotalCents != null
+          ? `its total will change from ${ssTaxMoney(b.totalCents)} to ${ssTaxMoney(b.newTotalCents)}`
+          : "its total will change";
+        const qn = b.quoteNumber || row.ss_quote_number;
+        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}. If you change the sales location, ${moves}.\n\nChange it anyway?`)) break;
         confirmResend = true;
         continue;
       }
@@ -2076,9 +2091,10 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
     if (!window.confirm(`Verify the sales tax on ${quoteNo} for the delivery address${deliveryAddr ? ` (${deliveryAddr})` : ""}?\n\nAvalara bills each verification. If the verified rate is different, the quote's tax and total change to it.`)) return;
     setBusy("verify"); setMsg(null);
     const flags = {};
-    // The server asks for each confirmation in turn — view-as first, then a quote already in the
-    // customer's inbox — so this is at most three calls, and every refusal after a confirmation
-    // is a real one whose sentence is shown.
+    // The server asks for each confirmation in turn — view-as first, then a quote the customer
+    // already has — so this is at most three calls, and every refusal after a confirmation is a
+    // real one whose sentence is shown. The per-minute limit (rate_limited) and the daily cap
+    // are among those: nothing was looked up, and pressing again at once would only repeat them.
     for (let attempt = 0; attempt < 3; attempt++) {
       const out = await ssTaxOutcome(await sb.functions.invoke("portal-settings", {
         body: { action: "verify_tax", shortCode, ...flags },
@@ -2090,7 +2106,7 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
         const moved = d.previousTotalCents != null && d.totalCents != null && d.previousTotalCents !== d.totalCents;
         setMsg({ ok: `Verified: ${ssTaxPct(t.rate) || "the rate"} for ${String(t.jurisdiction || "").trim() || "the delivery address"}.`
           + (moved ? ` The quote total changed from ${ssTaxMoney(d.previousTotalCents)} to ${ssTaxMoney(d.totalCents)}.` : " The quote total didn't change.")
-          + (d.resent ? " The updated quote was re-sent to the customer." : notResentText(d)) });
+          + resentText(d) });
         if (onChanged) onChanged();
         break;
       }
@@ -2101,7 +2117,11 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
       }
       if (out.reason === "quote_sent" && !flags.confirmResend) {
         const b = out.body;
-        if (!window.confirm(`Quote ${b.quoteNumber || row.ss_quote_number || ""} has already been emailed to the customer${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}.\n\nIf the verified tax changes the total, the updated quote is re-sent to them. Verify anyway?`)) break;
+        // Asked before the lookup, so the new total isn't known yet: the total will change if the
+        // verified rate differs. Same rules as the location confirm — "already has", no promised
+        // re-send.
+        const qn = b.quoteNumber || row.ss_quote_number;
+        if (!window.confirm(`The customer already has ${qn ? `quote ${qn}` : "this quote"}${b.totalCents != null ? ` at ${ssTaxMoney(b.totalCents)}` : ""}. If the verified tax rate is different, its total will change.\n\nVerify anyway?`)) break;
         flags.confirmResend = true;
         continue;
       }
