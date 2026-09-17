@@ -17260,6 +17260,46 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSet = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, ...patch } }));
   const calSetRoof = (patch) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, roof: { ...p.spec.roof, ...patch } } }));
   const calSetColor = (k, v) => setAdminCal((p) => ({ ...p, spec: { ...p.spec, colors: { ...p.spec.colors, [k]: v } } }));
+  // THE PORCH IS ONE KIND AT A TIME (2026-09-17). Recessed is roof.porchDepthFt, cut into a gable end
+  // under the main roof; projecting is roof.porchOutFt, a deck, posts and a low roof of its own in
+  // front of that end. Projecting wins wherever both are on (d3ProjectingPorch, the sanitizer), so it
+  // is read first here too, and the select shows what the preview draws.
+  const calPorchKind = (roof) => (((roof && roof.porchOutFt) || 0) > 0.5 ? "projecting"
+    : ((roof && roof.porchDepthFt) || 0) > 0.5 ? "recessed" : "none");
+  // Switches the kind, or sets the depth of the one that is on. The other kind's key is DELETED, not
+  // written as 0, so a row carries only the porch it has:
+  //   none        deletes both depths. porchEnd stays, so a porch turned back on keeps its end.
+  //   recessed    sets porchDepthFt, deletes porchOutFt.
+  //   projecting  sets porchOutFt, deletes porchDepthFt and porchTruss (the truss stands in a
+  //               recessed porch's gable; the sanitizer drops it on save as well).
+  // With no depth given the number carries across from the porch that is on, else 6 ft, so a switch
+  // never leaves the builder an empty field.
+  const calSetPorch = (kind, depth) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    const was = calPorchKind(roof);
+    const d = depth > 0.5 ? depth : was === "projecting" ? roof.porchOutFt : was === "recessed" ? roof.porchDepthFt : 6;
+    delete roof.porchDepthFt;
+    delete roof.porchOutFt;
+    if (kind === "recessed") roof.porchDepthFt = d;
+    if (kind === "projecting") { roof.porchOutFt = d; delete roof.porchTruss; }
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // roof.plateBand: checked writes true, unchecked DELETES the key. Writing false would park
+  // plateBand:false in every row a builder ever ticked and unticked, where absent already means no band.
+  const calSetPlateBand = (on) => setAdminCal((p) => {
+    const roof = { ...p.spec.roof };
+    if (on) roof.plateBand = true;
+    else delete roof.plateBand;
+    return { ...p, spec: { ...p.spec, roof } };
+  });
+  // colors.wood, the projecting porch's lumber. A blank box DELETES the key and the renderer falls
+  // back to natural wood (D3_COLORS.wood), which is never written into a row.
+  const calSetWood = (v) => setAdminCal((p) => {
+    const colors = { ...p.spec.colors };
+    if (String(v || "").trim()) colors.wood = v;
+    else delete colors.wood;
+    return { ...p, spec: { ...p.spec, colors } };
+  });
   // Grow and shrink the set. Carolyn 2026-09-04 @16:30: "they may just add more, but they may
   // also just remove one." Both are simple now that no position carries a meaning: append, and
   // splice. The old calRemovePhoto had to BLANK the first four in place rather than splice them,
@@ -17300,6 +17340,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     },
   }));
 
+  // The roof half of a shape draft (applyDraftedShape, below): the draft's keys over the stored ones,
+  // then, when the draft reports a porch, the OTHER kind cleared. A plain spread kept a stored
+  // porchOutFt under a redraft that reported a recessed porch, so the preview went on drawing the
+  // projecting one and Save dropped the new depth without a word. Projecting is checked first, the
+  // sanitizer's order. A draft that reports neither keeps the stored porch, as it always has.
+  const calDraftRoof = (stored, drafted) => {
+    const dr = drafted || {};
+    const roof = { ...stored, ...dr };
+    if ((dr.porchOutFt || 0) > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
+    else if ((dr.porchDepthFt || 0) > 0.5) delete roof.porchOutFt;
+    return roof;
+  };
+
   // The SHAPE-only merge, for a draft read off a walk-around video. It deliberately does
   // NOT reuse applyDraftedSpec above: sanitizeD3Spec ALWAYS emits `siding` — line 69 of
   // _shared/styleD3.ts collapses anything it does not recognise to null — so
@@ -17339,7 +17392,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ...p,
     spec: {
       ...p.spec,
-      roof: { ...p.spec.roof, ...((d3 && d3.roof) || {}) },
+      roof: calDraftRoof(p.spec.roof, d3 && d3.roof),
       // Only the keys the model actually read — see the header. An unreported colour is absent
       // from `d3.colors`, so this cannot blank one the builder set.
       colors: { ...p.spec.colors, ...((d3 && d3.colors) || {}) },
@@ -19644,6 +19697,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <option value="agpanel">AG Panel (metal)</option>
                   </select>
                 </label>
+                {/* THE PLATE BAND (roof.plateBand, 2026-09-17): a trim board across both gable ends at
+                    the top of the wall. Its own key, independent of any porch, and a projecting porch's
+                    roof tucks under it. Unticking deletes the key (calSetPlateBand). */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
+                  <input type="checkbox" checked={adminCal.spec.roof.plateBand === true}
+                    onChange={(e) => calSetPlateBand(e.target.checked)} />
+                  Trim band across both gable ends at the top of the wall
+                </label>
               </div>
               {/* THE "Cladding this style offers the customer" CHECKBOX GRID WAS HERE, and it
                   is gone on purpose (Carolyn 2026-09-07) — do not put it back. It wrote
@@ -19726,32 +19787,89 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <input type="number" step="0.05" {...calNumProps("dormerOffsetU", adminCal.spec.roof.dormerOffsetU != null ? adminCal.spec.roof.dormerOffsetU : 0.45, (n) => calSetRoof({ dormerOffsetU: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                   </label>
                 )}
-                {/* The porch depth is measured INTO the building, which is the number a builder
-                    already has in their head ("a 10x16 with a 4 ft porch"), not an amount the
-                    building grows by. It reads as a size, so it sits with the other sizes. */}
-                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch depth (ft, 0 = none)
-                  <input type="number" step="0.5" min="0" {...calNumProps("porchDepthFt", adminCal.spec.roof.porchDepthFt != null ? adminCal.spec.roof.porchDepthFt : 0, (n) => calSetRoof({ porchDepthFt: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
-                  {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
-                    <div style={{ fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" }}>
-                      Comes out of the building, not off it {String.fromCharCode(0x2014)} the roof and the footprint do not move.
-                    </div>
-                  )}
-                </label>
-                {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
-                    <select value={adminCal.spec.roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
-                      <option value="front">Front gable end</option>
-                      <option value="back">Back gable end</option>
-                    </select>
-                  </label>
-                )}
-                {(adminCal.spec.roof.porchDepthFt || 0) > 0.5 && (
-                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
-                    <input type="checkbox" checked={!!adminCal.spec.roof.porchTruss}
-                      onChange={(e) => calSetRoof({ porchTruss: e.target.checked })} />
-                    Timber truss in the porch gable
-                  </label>
-                )}
+                {/* THE PORCH (2026-09-17): None, Recessed or Projecting, one select, because a style has
+                    one kind or the other and calSetPorch deletes the key of the one that is off.
+
+                    RECESSED is cut into one gable end under the main roof, and its depth is measured
+                    INTO the building, the number a builder already has in their head ("a 10x16 with a
+                    4 ft porch"). PROJECTING stands in front of that end, a deck, posts and a low roof
+                    of its own, and its depth is how far the posts stand out. Neither changes the size
+                    or the price, so both read as sizes and sit with the other sizes. */}
+                {(() => {
+                  const roof = adminCal.spec.roof;
+                  const kind = calPorchKind(roof);
+                  const key = kind === "projecting" ? "porchOutFt" : "porchDepthFt";
+                  const hint = { fontSize: 10, fontWeight: 700, marginTop: 3, color: "#A16207" };
+                  // WHAT THE PROJECTING PORCH WILL BUILD at the preview size, from d3PorchGeom, the
+                  // function the renderer builds it with. The panel has no main roof to measure, so
+                  // the height where the porch roof meets the wall is the most it can be. Amber when
+                  // the wall is too short for a 2:12 porch roof over 6'8" posts. It warns and nothing
+                  // is refused: the porch is still drawn.
+                  const pr = kind === "projecting" ? d3PorchReadout(adminCal.spec, sel.size) : null;
+                  const warn = !!(pr && (pr.short || pr.pitchClamped));
+                  return (
+                    <>
+                      <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch
+                        <select value={kind} onChange={(e) => calSetPorch(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                          <option value="none">None</option>
+                          <option value="recessed">Recessed: cut into the end, under the main roof</option>
+                          <option value="projecting">Projecting: deck and its own roof in front of the end</option>
+                        </select>
+                      </label>
+                      {kind !== "none" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Depth (ft)
+                          {/* ONE input, on whichever key is on. A number at or under 0.5 ft is not
+                              committed: None is how a porch comes off, and committing the 0 of a
+                              half-typed 0.75 would flip the kind and unmount this field mid-keystroke. */}
+                          <input type="number" step="0.5" min="0" {...calNumProps(key, roof[key], (n) => { if (n > 0.5) calSetPorch(kind, n); })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                          {kind === "recessed" ? (
+                            <div style={hint}>
+                              Comes out of the building, not off it {String.fromCharCode(0x2014)} the roof and the footprint do not move.
+                            </div>
+                          ) : (
+                            <div style={hint}>Stands in front of the building. The size and the price do not change.</div>
+                          )}
+                          {pr && (
+                            <div style={{ ...hint, color: warn ? "#B45309" : "#A16207" }}>
+                              {warn
+                                ? `Walls this short leave ${d3FtIn(pr.postH)} under the porch beam. About ${d3FtIn(pr.hNeeded)} walls give a door's height at 2:12`
+                                : `Posts ${d3FtIn(pr.postH)} clear, porch roof meets the wall at ${d3FtIn(pr.yHigh)} on ${sel.size || "this size"}`}
+                            </div>
+                          )}
+                        </label>
+                      )}
+                      {kind !== "none" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Porch end
+                          <select value={roof.porchEnd === "back" ? "back" : "front"} onChange={(e) => calSetRoof({ porchEnd: e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                            <option value="front">Front gable end</option>
+                            <option value="back">Back gable end</option>
+                          </select>
+                        </label>
+                      )}
+                      {/* Gable only: the renderer draws the truss on a gable roof and nowhere else,
+                          so on a gambrel this box used to tick and change nothing. */}
+                      {kind === "recessed" && (roof.type || "gable") === "gable" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, alignSelf: "end", paddingBottom: 6 }}>
+                          <input type="checkbox" checked={!!roof.porchTruss}
+                            onChange={(e) => calSetRoof({ porchTruss: e.target.checked })} />
+                          Timber truss in the porch gable
+                        </label>
+                      )}
+                      {/* Its own box, NOT a fourth entry in the colour loop below: that loop offers the
+                          catalog, and for any key but body or trim the catalog is ROOFING, so a pick
+                          would write a metal roof colour as lumber. Blank means natural wood, and blank
+                          is what is stored (calSetWood deletes the key). */}
+                      {kind === "projecting" && (
+                        <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wood colour (posts, deck, ceiling)
+                          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                            <input type="text" placeholder="#C4965A (natural)" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                            <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #FCD34D", background: adminCal.spec.colors.wood || D3_COLORS.wood, flexShrink: 0 }} />
+                          </div>
+                        </label>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               {adminCal.spec.roof.type === "gambrel" && (
                 <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 8 }}>
