@@ -5453,6 +5453,65 @@ function d3MakeGrassTexture(THREE) {
   tex.anisotropy = 8;   // the lawn is the biggest grazing-angle surface on screen
   return tex;
 }
+
+// Painted metal, on a roof or an AG Panel wall, is a DIELECTRIC: the steel sits under a paint
+// film, and paint reflects light the way any painted surface does. It used to be drawn with
+// metalness 0.35, which takes that share of the paint colour away and expects the surroundings
+// to show up in the reflection instead. The scene had no surroundings to reflect, so the colour
+// simply went missing: a mid-grey roof rendered near-black from most angles and turned into a
+// warm glare from the few that caught the fixed sun.
+//
+// Every painted metal surface now has metalness 0, and the ROOF alone reflects a soft sky (see
+// d3MakeMetalEnvironment) at envMapIntensity 0.4. Walls get no sky, so AG Panel paint reads
+// like lap, panel or batten siding in the same colour. The sky goes on the roof material, not
+// on scene.environment: a scene-wide sky was measured and it relit every wall, trim piece and
+// fixture of every style along with the roof.
+const D3_PAINTED_METAL = { roughness: 0.45, metalness: 0, envMapIntensity: 0.4 };
+
+// The sky a metal roof reflects: a small pre-filtered environment (PMREM) made from a 64x32
+// gradient. Pale blue overhead to near-white at the horizon; below it a light warm ground that
+// darkens to an earth tone straight down. The blends are done in linear light. The blue is
+// softer than the sky dome's on purpose: at the same brightness it keeps more of the warmth in
+// light catalogue colours such as taupe and ivory.
+//
+// One per RENDERER, because the result lives in that WebGL context. Returns null when the three
+// build or the renderer cannot make one; a roof built without it is matte, never black.
+// Otherwise it returns { texture, refresh, dispose }:
+//   texture  goes on the metal roof material as envMap, and nowhere else. It belongs to the
+//            renderer, not to a model, so userData.ssShared marks it: rebuilds never free it.
+//   refresh  draws into the SAME render target again, so materials keep the texture they hold.
+//            A WebGL context restore wipes the target; call this before the next render.
+//   dispose  frees the target, the gradient and the generator. Call it before renderer.dispose().
+function d3MakeMetalEnvironment(THREE, renderer) {
+  if (!THREE.PMREMGenerator || !renderer) return null;
+  const W = 64, H = 32, data = new Uint8Array(W * H * 4);
+  // THREE.Color reads a hex into LINEAR components; toS writes a linear value back as an sRGB byte.
+  const lin = (hex) => { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; };
+  const zen = lin("#A5BDD4"), hor = lin("#E6EBEE"), gh = lin("#B9B5A6"), gr = lin("#8D8573");
+  const toS = (x) => Math.round(255 * (x <= 0.0031308 ? x * 12.92 : 1.055 * Math.pow(x, 1 / 2.4) - 0.055));
+  for (let y = 0; y < H; y++) {
+    // Row 0 looks straight DOWN: a DataTexture is not flipped, so its first row is v = 0.
+    const s = Math.sin(((y + 0.5) / H - 0.5) * Math.PI);   // sine of the elevation
+    const c = s >= 0 ? hor.map((h, j) => h + (zen[j] - h) * Math.sqrt(s)) : gh.map((h, j) => h + (gr[j] - h) * Math.pow(-s, 0.35));
+    const rgb = c.map(toS);
+    for (let x = 0; x < W; x++) { const k = (y * W + x) * 4; data[k] = rgb[0]; data[k + 1] = rgb[1]; data[k + 2] = rgb[2]; data[k + 3] = 255; }
+  }
+  const src = new THREE.DataTexture(data, W, H, THREE.RGBAFormat);
+  src.colorSpace = THREE.SRGBColorSpace;
+  src.mapping = THREE.EquirectangularReflectionMapping;
+  src.magFilter = THREE.LinearFilter; src.minFilter = THREE.LinearFilter;
+  src.needsUpdate = true;
+  // The generator is KEPT rather than disposed after the first pass. Drawing into an existing
+  // target reuses the generator's own blur target, and a new generator would not have one.
+  const gen = new THREE.PMREMGenerator(renderer);
+  const rt = gen.fromEquirectangular(src);
+  rt.texture.userData.ssShared = true;
+  return {
+    texture: rt.texture,
+    refresh() { gen.fromEquirectangular(src, rt); },
+    dispose() { rt.dispose(); src.dispose(); gen.dispose(); },
+  };
+}
 function d3MakeSkyTexture(THREE) {
   if (typeof document === "undefined") return null;
   const W = 512, H = 512, cv = document.createElement("canvas"); cv.width = W; cv.height = H;
@@ -5653,9 +5712,11 @@ function buildShed3DModel(THREE, p) {
     wallMat.map = wallTex;
     const wallBump = d3MakeBumpTexture(THREE, wallKind);
     if (wallBump) { wallBump.repeat.copy(wallTex.repeat); wallMat.bumpMap = wallBump; wallMat.bumpScale = clad.bump; }
-    // Metal reads as metal only with the surface response, not the pattern alone — the
-    // same recipe the metal ROOF already uses.
-    if (clad.metal) { wallMat.roughness = 0.45; wallMat.metalness = 0.35; }
+    // Metal cladding keeps the painted-metal sheen (D3_PAINTED_METAL's roughness) but not the
+    // roof's sky reflection: its paint reads like any other siding in the same colour. At the
+    // old metalness 0.35 an AG Panel wall came out darker than lap or panel in the same paint,
+    // by as much as half on a dark brown.
+    if (clad.metal) { wallMat.roughness = D3_PAINTED_METAL.roughness; wallMat.metalness = D3_PAINTED_METAL.metalness; }
   }
   const box = (m, w, h, d) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
   // The building itself is all boxes; wheels and bins are the one place that reads as wrong
@@ -7345,8 +7406,10 @@ function buildShed3DModel(THREE, p) {
   // Roof texture: shingle courses, or a metal PROFILE. The customer's
   // roof-type pick wins; the STYLE's own roofMaterial (photo-derived, in d3)
   // fills in before any pick — a bare flat-color slab was the single biggest
-  // "this looks fake" tell. Metal also gets a metal SURFACE (lower roughness,
-  // some metalness) so the sun actually glints off the pans.
+  // "this looks fake" tell. Metal also gets the painted-metal SURFACE
+  // (D3_PAINTED_METAL): a lower roughness so the pans catch a sheen, and the soft
+  // sky reflection when the renderer passes p.metalEnv. Without it the roof is
+  // matte paint, never the near-black that metalness with nothing to reflect gave.
   //
   // WHICH metal is the style's alone (D3_METAL_ROOF_PROFILES): AG Panel unless the style says
   // standing seam. The customer's pick only decides metal vs shingle, exactly as before.
@@ -7376,7 +7439,10 @@ function buildShed3DModel(THREE, p) {
     roofMat.map = roofTex; roofMat.needsUpdate = true;
     const roofBump = d3MakeBumpTexture(THREE, roofKind);
     if (roofBump) { roofBump.repeat.copy(roofTex.repeat); roofMat.bumpMap = roofBump; roofMat.bumpScale = roofProfile ? roofProfile.bump : 0.35; }
-    if (roofProfile) { roofMat.roughness = 0.45; roofMat.metalness = 0.35; }
+    if (roofProfile) {
+      roofMat.roughness = D3_PAINTED_METAL.roughness; roofMat.metalness = D3_PAINTED_METAL.metalness;
+      if (p.metalEnv) { roofMat.envMap = p.metalEnv; roofMat.envMapIntensity = D3_PAINTED_METAL.envMapIntensity; }
+    }
     else { roofMat.roughness = 0.95; roofMat.metalness = 0.0; }
   }
   let profPeak = -Infinity;
@@ -8018,6 +8084,7 @@ function disposeSubtree(obj, sharedMats) {
   // Fixture photo textures are shared across every rebuild (see d3FixtureTexture)
   // — disposing one here would blank every catalog door on the first drag frame.
   // Bump maps are per-build mints like color maps and dispose with them.
+  // envMap is NEVER disposed here: the metal roof's sky belongs to the renderer (d3MakeMetalEnvironment).
   mats.forEach((m) => {
     if (m.map && !(m.map.userData && m.map.userData.ssShared)) m.map.dispose();
     if (m.bumpMap && !(m.bumpMap.userData && m.bumpMap.userData.ssShared)) m.bumpMap.dispose();
@@ -8063,6 +8130,7 @@ function d3ConfigureRenderer(THREE, renderer) {
 async function renderDefault3DShot(p) {
   let renderer = null;
   let model = null;
+  let metalEnv = null;
   try {
     const { THREE } = await loadThree();
     const W = 1200, H = 900;
@@ -8072,6 +8140,9 @@ async function renderDefault3DShot(p) {
     renderer.setPixelRatio(1);
     renderer.setClearColor("#E7EEF5", 1);
     d3ConfigureRenderer(THREE, renderer);
+    // The metal roof's sky, like every other render path's: the quote's 3D page must show the
+    // same roof the customer saw in the viewer.
+    metalEnv = d3MakeMetalEnvironment(THREE, renderer);
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#E7EEF5");
@@ -8088,6 +8159,7 @@ async function renderDefault3DShot(p) {
       // dormer on a building the customer put a window in — and that page is the picture the
       // estimate is built around.
       dormerWindowId: p.dormerWindowId, dormerWindowOffset: p.dormerWindowOffset,
+      metalEnv: metalEnv && metalEnv.texture,
     });
     scene.add(model.root);
     scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
@@ -8121,6 +8193,7 @@ async function renderDefault3DShot(p) {
     return null;
   } finally {
     if (model) { try { disposeShed3DModel(model); } catch (_e) { /* nothing left to free */ } }
+    if (metalEnv) { try { metalEnv.dispose(); } catch (_e) { /* context already gone */ } }
     if (renderer) {
       try { renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss(); } catch (_e) { /* context already gone */ }
     }
@@ -8289,6 +8362,10 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       // needsUpdate; setLiveColors doesn't (paint never moves geometry).
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.needsUpdate = true;
+      // The metal roof's sky (D3_PAINTED_METAL). One for this renderer, handed to every build
+      // below and freed in the cleanup; a rebuild never makes or frees one.
+      const metalEnv = d3MakeMetalEnvironment(THREE, renderer);
+      const metalEnvTex = metalEnv && metalEnv.texture;
       const scene = new THREE.Scene();
       scene.background = new THREE.Color("#E7EEF5");
       // Per-style appearance (roof profile/pitch/overhang, siding relief,
@@ -8305,7 +8382,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       let liveBodyCss = painted ? d3SwatchCss(paintBody, D3_COLORS.body, bodyColors) : (spec.colors.body || D3_COLORS.body);
       let liveTrimCss = painted ? d3SwatchCss(paintTrim, D3_COLORS.trim, trimColors) : (spec.colors.trim || D3_COLORS.trim);
       const roofCss = roofColorHex || spec.colors.roof || D3_COLORS.roof;
-      const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off }));
+      const model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off, metalEnv: metalEnvTex }));
       scene.add(model.root);
       // Sky-tinted fill + warm sun: under ACES, white-on-white lighting reads
       // as overcast plastic; a blue-ish ambient with a warm key is what makes
@@ -8750,7 +8827,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
           if (sc.full || nf !== e.model.builtFrontWall) {
             scene.remove(e.model.root);
             disposeShed3DModel(e.model);
-            e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: nf, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off }));
+            e.model = d3TimedBuild(() => buildShed3DModel(THREE, { bldgW, bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofCss, roofType, items: liveItems, itemTypes, bodyColor: liveBodyCss, trimColor: liveTrimCss, frontWall: nf, scale, mgX, mgY, fixtures, dormerWindowId: dormPick.id, dormerWindowOffset: dormPick.off, metalEnv: metalEnvTex }));
             scene.add(e.model.root);
           } else {
             d3TimedBuild(() => {
@@ -9613,7 +9690,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
         setShotTaken(false);
         onSnapshot(null);
       });
-      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, place3Wall: (key, x, y) => (itemTypes[key] ? place3(key, itemTypes[key], x, y) : false), delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
+      engineRef.current = { renderer, scene, camera, controls, model, sky, sun, metalEnv, render, resize, ro, applyShellMode, setViewPreset, disposeInteraction, setLiveColors, setWallHeight, setDormerWindow, place3Fixture: placeFixture3, place3Ramp: placeRamp3, place3Wall: (key, x, y) => (itemTypes[key] ? place3(key, itemTypes[key], x, y) : false), delete3: deleteItem3, recolorItems3, placeProp3, offFxTex, baseDpr, interior: false, roofOn: true, envOn: true };
       // Dev-only: expose the engine for the perf-measurement protocol.
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dEngine = engineRef.current;
       resize();
@@ -9635,6 +9712,7 @@ function Structure3DViewer({ bldgW, bldgH, items, itemTypes, styleValue, painted
       disposeShed3DModel(e.model);
       if (e.sky) { e.sky.geometry.dispose(); if (e.sky.material.map) e.sky.material.map.dispose(); e.sky.material.dispose(); }
       if (e.sun && e.sun.shadow && e.sun.shadow.map) e.sun.shadow.map.dispose(); // renderer.dispose() won't free the shadow target
+      if (e.metalEnv) e.metalEnv.dispose();   // nor the metal roof's sky target
       e.renderer.dispose();
     };
   // The modal mounts fresh on every open and the 2D designer can't change
@@ -10187,6 +10265,8 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       // depth map. Every geometry mutation below re-arms needsUpdate by hand.
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.needsUpdate = true;
+      // The metal roof's sky, as in the modal: one for this renderer, shared by every rebuild.
+      const metalEnv = d3MakeMetalEnvironment(THREE, renderer);
 
       const scene = new THREE.Scene();
       scene.background = new THREE.Color("#E7EEF5");
@@ -10197,7 +10277,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       const roofOf = (p) => p.roofColorHex || specOf(p).colors.roof || D3_COLORS.roof;
       const buildArgs = (p, fw) => {
         const spec = specOf(p);
-        return { bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofOf(p), roofType: p.roofType, items: p.items, itemTypes: p.itemTypes, bodyColor: bodyOf(p), trimColor: trimOf(p), frontWall: fw, scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures, dormerWindowId: p.dormerWindowId, dormerWindowOffset: p.dormerWindowOffset };
+        return { bldgW: p.bldgW, bldgH: p.bldgH, wallHeightFt: spec.wallHeightFt, styleSpec: spec, roofColor: roofOf(p), roofType: p.roofType, items: p.items, itemTypes: p.itemTypes, bodyColor: bodyOf(p), trimColor: trimOf(p), frontWall: fw, scale: p.scale, mgX: p.mgX, mgY: p.mgY, fixtures: p.fixtures, dormerWindowId: p.dormerWindowId, dormerWindowOffset: p.dormerWindowOffset, metalEnv: metalEnv && metalEnv.texture };
       };
 
       const p0 = pRef.current;
@@ -10336,7 +10416,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
 
       let builtItems = p0.items;
       engineRef.current = {
-        renderer, scene, camera, controls, model, sky, sun, render, resize, ro, offFxTex,
+        renderer, scene, camera, controls, model, sky, sun, metalEnv, render, resize, ro, offFxTex,
         applyItems: (next) => {
           const scope = d3ScopeForItemsChange(builtItems, next, pRef.current.itemTypes);
           builtItems = next;
@@ -10399,6 +10479,9 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       canvas.addEventListener("webglcontextrestored", () => {
         setPhase("ready");
         renderer.shadowMap.needsUpdate = true;
+        // The restore wiped the sky's render target too. Redraw it into the same target BEFORE
+        // the render, or the roof samples an empty environment.
+        if (metalEnv) metalEnv.refresh();
         render();   // direct, not rAF — a backgrounded tab never fires rAF
       });
       if (typeof window !== "undefined" && window.__SS3D_DEBUG) window.__ss3dPanel = engineRef.current;
@@ -10420,6 +10503,7 @@ function Structure3DPanel({ bldgW, bldgH, items, itemTypes, painted, paintBody, 
       disposeShed3DModel(e.model);
       if (e.sky) { e.sky.geometry.dispose(); if (e.sky.material.map) e.sky.material.map.dispose(); e.sky.material.dispose(); }
       if (e.sun && e.sun.shadow && e.sun.shadow.map) e.sun.shadow.map.dispose();
+      if (e.metalEnv) e.metalEnv.dispose();
       e.renderer.dispose();
       // The modal omits this. This surface toggles open and shut far more often,
       // and browsers cap live WebGL contexts hard — dropping it deterministically
