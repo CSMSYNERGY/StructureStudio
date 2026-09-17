@@ -2459,10 +2459,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           : prodStatus >= 500
             ? "GoHighLevel is having trouble right now — try again in a few minutes."
             : "GoHighLevel rejected the request. Check the Location ID and API key are from the same sub-account.";
+      // Severity: anything below 500 is the CRM refusing what the builder just typed (a wrong
+      // key, a wrong Location ID, a key without that location's scope), which the hint above
+      // already explains, so it files as info. Only a vendor 5xx is a fault.
       logEdgeError({
         fn: "portal-settings", req, clientId, code: prodStatus,
         message: `verify_save_ghl: GoHighLevel rejected the products probe (HTTP ${prodStatus})`,
         context: { action: "verify_save_ghl", body: prodBody.slice(0, 600) },
+        severity: prodStatus >= 500 ? "error" : "info",
       }).catch(() => {});
       return json({ error: `Verification failed (HTTP ${prodStatus}). ${hint}` }, 400);
     }
@@ -2542,10 +2546,15 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         : r.status >= 500
           ? "GoHighLevel is having trouble right now — try Refresh again shortly."
           : "GoHighLevel rejected the request — re-verify the connection above.";
+      // Severity: a 401/403 is the SAVED key being refused, which the hint tells the builder to
+      // re-verify, and the portal files its own info row for the same 400, so it is info here
+      // too. The Settings page loads pipelines on every visit, so an invalid key would otherwise
+      // file a fault per visit. Any other status stays an error.
       logEdgeError({
         fn: "portal-settings", req, clientId, code: r.status,
         message: `list_ghl_pipelines: GoHighLevel rejected the pipelines fetch (HTTP ${r.status})`,
         context: { action: "list_ghl_pipelines", body },
+        severity: (r.status === 401 || r.status === 403) ? "info" : "error",
       }).catch(() => {});
       return json({ error: `Couldn't load pipelines (HTTP ${r.status}). ${hint}` }, 400);
     }

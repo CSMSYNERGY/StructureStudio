@@ -570,12 +570,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       // reason it exists): this response is read by an anonymous caller, and the CRM's own
       // body carries the tenant's location id and account shape. Triage still gets every
       // byte, just not through the shopper's browser.
+      //
+      // A 401/403 is the CRM refusing the tenant's SAVED CREDENTIAL (invalid, rotated or out of
+      // scope). Retrying cannot fix that until the business re-saves it, so it is a REFUSAL, not
+      // a fault: a 400 filed as info, in words that never suggest trying again and name neither
+      // the CRM vendor nor the credential. It returns before any opportunity, estimate, quote
+      // number or promotion exists, which is what lets the designer keep the draft on a 4xx, so
+      // ONLY this pre-issue step may answer that way. Every other status stays the 502 fault.
+      // Keep this block plain JS: _test_stubs/ghlAuthRefusal_test.ts lifts it and runs it.
+      const credentialRefused = r.status === 401 || r.status === 403;
       const body = await r.text();
       await logEdgeError({
         fn: "submit-estimate", req, clientId, code: `ghl_contact_upsert_${r.status}`,
         message: `GHL contact upsert failed (${r.status}): ${body.slice(0, 2000)}`,
         context: { designId: String(designId) },
+        severity: credentialRefused ? "info" : "error",
       });
+      if (credentialRefused) {
+        return json({
+          error: `${businessName} can't send quotes online right now. Your design is saved, so please contact them directly. (For the business: re-check your CRM connection under Settings → CRM Connection.)`,
+        }, 400);
+      }
       return json({ error: "We couldn't save your details with this business's CRM just now. Please try again in a moment." }, 502);
     }
     const d = await r.json();
