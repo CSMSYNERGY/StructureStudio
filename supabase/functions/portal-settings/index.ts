@@ -43,7 +43,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -375,6 +375,14 @@ function json(body: unknown, status = 200) {
     headers: { ...cors, "Content-Type": "application/json" },
   });
 }
+
+// 5xx responses whose app_errors row was already written at the return site, with more detail
+// than the wrapper can see (withErrorLog's `alreadyFiled` option skips them). Only the AI draft
+// failures in calibrate_style_ai use it: each one logs its own coded row carrying the reply's
+// shape, and the wrapper's generic copy of the same failure added a third row per press that
+// said nothing new. Faults still land as `error`; this removes a duplicate, not a record.
+// A WeakSet, so a response that has been answered is not held onto.
+const filedAtReturnSite = new WeakSet<Response>();
 
 /**
  * A database or storage call failed. Log the real reason server-side; tell the caller
@@ -3621,16 +3629,35 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (error) await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_release_failed", message: `Could not release hold ${holdId}: ${error.message}` });
     };
 
+    // ── THE MODEL CALL: bounded in tokens AND in time (2026-09-17) ──────────────────────
+    // The model thinks adaptively, and max_tokens caps thinking and the answer TOGETHER. The
+    // old 700/900 left a few hundred tokens beyond the JSON, so a reply that thought first
+    // could run out before writing it. 8000 gives the thinking room; effort "medium" keeps
+    // its depth (and latency) in check without switching it off, which the gambrel knee
+    // arithmetic in the shape prompt benefits from.
+    //
+    // The timeout is the other half. Supabase's gateway answers 504 on its own at 150 s of
+    // silence, and that 504 is invisible to withErrorLog and leaves the wallet hold open until
+    // the stale sweep. 110 s leaves room to release the hold and say so. The same signal
+    // covers the body read, which is why the body is read inside this try: a reply that
+    // stalls mid-body is a timeout, not an "unparseable" spec.
+    const aiSource = combined ? "combined" : fromVideo ? "video" : "photos";
+    const t0 = Date.now();
+    const aiSignal = AbortSignal.timeout(110_000);
     let res: Response;
+    let replyBody = "";
     try {
       res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        signal: aiSignal,
         body: JSON.stringify({
           model: "claude-sonnet-5",
-          // The video prompt asks for an `observed` block on top of the spec, so it needs
-          // the headroom. A truncated reply is unparseable, not partially useful.
-          max_tokens: shapeFirst ? 900 : 700,
+          // Thinking and the answer share this. The video prompt's `observed` block rides on
+          // top of the spec. A truncated reply is unparseable, not partially useful.
+          max_tokens: 8000,
+          thinking: { type: "adaptive" },
+          output_config: { effort: "medium" },
           messages: [{
             role: "user",
             content: [
@@ -3647,24 +3674,69 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           }],
         }),
       });
+      replyBody = await res.text();
     } catch (e) {
-      await releaseHold("fetch failed");            // never reached Anthropic
+      if (aiSignal.aborted) {
+        // Ours, not the network's: the signal fired. Release first, then file one coded row
+        // and mark the response so withErrorLog does not add a generic copy of it.
+        await releaseHold("model timeout");
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_call_timeout",
+          message: "The AI model did not answer within the time limit.",
+          context: { elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length },
+        });
+        const timedOut = json({ error: "The AI took too long to answer - please try again." }, 504);
+        filedAtReturnSite.add(timedOut);
+        return timedOut;
+      }
+      await releaseHold("fetch failed");            // never reached Anthropic, or dropped mid-reply
       return json({ error: `Could not reach the AI service: ${e instanceof Error ? e.message : String(e)}` }, 502);
     }
     if (!res.ok) {
       await releaseHold(`upstream ${res.status}`);  // our 429/500 is not the builder's fault
-      const body = (await res.text()).slice(0, 300);
-      return json({ error: `AI service returned ${res.status}: ${body}` }, 502);
+      return json({ error: `AI service returned ${res.status}: ${replyBody.slice(0, 300)}` }, 502);
     }
-    const data = await res.json().catch(() => null) as any;
-    const text = data?.content?.[0]?.text ?? "";
+    let data: any = null;
+    try { data = JSON.parse(replyBody); } catch { data = null; }
+    // Every text block joined, never content[0] -- see modelReplyText for why that mattered.
+    const reply = modelReplyText(data);
+    const text = reply.text;
+    // SHAPES ONLY in the failure rows below: no reply text, no image URLs. Enough for the next
+    // failure to name its own cause (thinking used the budget, a refusal, a prose reply) and
+    // for elapsedMs to show how close real calls come to the timeout.
+    const replyShape = {
+      stopReason: reply.stopReason, blockTypes: reply.blockTypes, outputTokens: reply.outputTokens,
+      elapsedMs: Date.now() - t0, source: aiSource, frames: photoUrls.length,
+    };
+    if (reply.stopReason === "refusal") {
+      await releaseHold("model refused");
+      const category = typeof data?.stop_details?.category === "string" ? String(data.stop_details.category).slice(0, 60) : null;
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_spec_refused",
+        message: "The AI model declined to draft a spec from these images.",
+        context: { ...replyShape, category },
+      });
+      const refused = json({ error: "The AI declined to read these images. Try a different set, or set the shape by hand." }, 502);
+      filedAtReturnSite.add(refused);
+      return refused;
+    }
     const drafted = parseModelSpec(text);
     if (!drafted.ok) {
       // The model answered unusably. The builder got nothing, so charging for our own
       // parse failure buys a support ticket and teaches them not to trust the feature.
-      await releaseHold("unparseable spec");
-      await logEdgeError({ fn: "portal-settings", req, clientId, code: "ai_spec_unparseable", message: `Model reply did not parse: ${drafted.error}` });
-      return json({ error: drafted.error }, 502);
+      // A reply cut off at max_tokens gets its own code and sentence, so neither the edge row
+      // nor the portal's mirror of this response reads as a reply that never came.
+      const truncated = reply.stopReason === "max_tokens";
+      await releaseHold(truncated ? "reply truncated" : "unparseable spec");
+      await logEdgeError({
+        fn: "portal-settings", req, clientId,
+        code: truncated ? "ai_spec_truncated" : "ai_spec_unparseable",
+        message: truncated ? `Model reply was cut off at max_tokens: ${drafted.error}` : `Model reply did not parse: ${drafted.error}`,
+        context: replyShape,
+      });
+      const failed = json({ error: truncated ? "The AI ran out of room before finishing - please try again." : drafted.error }, 502);
+      filedAtReturnSite.add(failed);
+      return failed;
     }
 
     // ── CAPTURE ────────────────────────────────────────────────────────────────────
@@ -10081,4 +10153,4 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   }
 
   return json({ error: `Unknown action "${action}".` }, 400);
-}));
+}, { alreadyFiled: (res) => filedAtReturnSite.has(res) }));

@@ -455,6 +455,48 @@ export function parseModelSpec(text: string): { ok: true; d3: D3Spec } | { ok: f
   return sanitizeD3Spec(parsed);
 }
 
+// ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
+// The answer is EVERY `text` block joined in order, never `content[0].text`. The model this
+// feature calls thinks adaptively by default, and when it decides to think the reply opens
+// with a `thinking` block whose visible text is empty. Reading only the first block handed
+// parseModelSpec an empty string, so an identical press failed or succeeded depending on
+// whether the model chose to think, and every failure read "The model did not return a spec."
+// The original standalone function (calibrate-style) filtered text blocks; the port into
+// portal-settings did not.
+//
+// The other three fields are SHAPES for the failure log, never content: the stop reason, the
+// block types (capped), and the output token count. None of them carries model text, so a
+// log row built from them cannot leak what the model said about a building.
+export type ModelReply = {
+  text: string;
+  stopReason: string | null;
+  blockTypes: string[];
+  outputTokens: number | null;
+};
+
+const MAX_LOGGED_BLOCK_TYPES = 8;
+
+export function modelReplyText(data: unknown): ModelReply {
+  const d = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const content = Array.isArray(d.content) ? d.content : [];
+  let text = "";
+  const blockTypes: string[] = [];
+  for (const block of content) {
+    const b = block && typeof block === "object" ? block as Record<string, unknown> : null;
+    const type = b && typeof b.type === "string" ? b.type : "unknown";
+    if (blockTypes.length < MAX_LOGGED_BLOCK_TYPES) blockTypes.push(type.slice(0, 40));
+    if (type === "text" && typeof b?.text === "string") text += b.text;
+  }
+  const usage = d.usage && typeof d.usage === "object" ? d.usage as Record<string, unknown> : null;
+  const out = usage?.output_tokens;
+  return {
+    text,
+    stopReason: typeof d.stop_reason === "string" ? d.stop_reason.slice(0, 40) : null,
+    blockTypes,
+    outputTokens: typeof out === "number" && Number.isFinite(out) ? out : null,
+  };
+}
+
 // The video prompt's `observed` block: notes for the builder about what the walk-around
 // actually showed. Never stored, never rendered by the 3D engine — it exists because the
 // spec has no field for a door, a window or a vent, and the builder about to place those

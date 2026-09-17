@@ -20,7 +20,7 @@
 
 import {
   sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT,
-  SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG,
+  SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG, modelReplyText,
 } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -644,4 +644,100 @@ Deno.test("a flagged draft still parses to the spec the builder reviews: nothing
   assert(r.ok, "the flat draft parses");
   if (!r.ok) return;
   assertEquals(r.d3.roof, DRAFTED_0916, "the numbers reach the builder exactly as drafted");
+});
+
+// ─── modelReplyText: reading the whole reply, not its first block (2026-09-17) ─────────────
+// The model thinks adaptively by default. When it does, the reply opens with a `thinking`
+// block whose visible text is empty, and the old `content[0].text ?? ""` handed the parser an
+// empty string: "The model did not return a spec." on a reply that contained a good one. These
+// fixtures are shaped like Messages API replies; the thinking text is empty and the signature is
+// an opaque placeholder, as the API returns them by default.
+const THINKING_FIRST_REPLY = {
+  type: "message",
+  role: "assistant",
+  content: [
+    { type: "thinking", thinking: "", signature: "sig-placeholder" },
+    { type: "text", text: VIDEO_REPLY },
+  ],
+  stop_reason: "end_turn",
+  usage: { input_tokens: 12000, output_tokens: 1450 },
+};
+
+Deno.test("REGRESSION: the old content[0] read turns a thinking-first reply into 'did not return a spec'", () => {
+  // Exactly what portal-settings did before this fix. Kept as a test so the failure stays
+  // reproducible from the fixture rather than from memory.
+  // deno-lint-ignore no-explicit-any
+  const oldText = (THINKING_FIRST_REPLY as any)?.content?.[0]?.text ?? "";
+  const old = parseModelSpec(oldText);
+  assert(!old.ok, "the old path must fail on this fixture, or the fixture no longer reproduces the bug");
+  if (old.ok) return;
+  assertEquals(old.error, "The model did not return a spec.");
+});
+
+Deno.test("modelReplyText: a thinking-first reply yields the text block, which parses", () => {
+  const reply = modelReplyText(THINKING_FIRST_REPLY);
+  const r = parseModelSpec(reply.text);
+  assert(r.ok, "the spec after the thinking block must parse");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof, { type: "gable", pitch: 0.42, ridgeOffset: 0, overhang: 1 });
+  // portal-settings reads `observed` from the same joined text, so it must survive too.
+  assertEquals(parseObservedNotes(reply.text)?.confidence, "high");
+  assertEquals(reply.stopReason, "end_turn");
+  assertEquals(reply.blockTypes, ["thinking", "text"]);
+  assertEquals(reply.outputTokens, 1450);
+});
+
+Deno.test("modelReplyText: thinking that used the whole budget is empty text with stop_reason max_tokens", () => {
+  const reply = modelReplyText({
+    content: [{ type: "thinking", thinking: "", signature: "sig-placeholder" }],
+    stop_reason: "max_tokens",
+    usage: { output_tokens: 8000 },
+  });
+  assertEquals(reply.text, "");
+  assertEquals(reply.stopReason, "max_tokens");
+  assertEquals(reply.blockTypes, ["thinking"]);
+  assertEquals(reply.outputTokens, 8000);
+  // The parser's sentence is unchanged; the CALLER uses stopReason to give it its own code.
+  const r = parseModelSpec(reply.text);
+  assert(!r.ok, "an empty answer does not parse");
+});
+
+Deno.test("modelReplyText: a refusal with empty content has no text and no blocks", () => {
+  const reply = modelReplyText({ content: [], stop_reason: "refusal", stop_details: { type: "refusal", category: null } });
+  assertEquals(reply.text, "");
+  assertEquals(reply.stopReason, "refusal");
+  assertEquals(reply.blockTypes, []);
+  assertEquals(reply.outputTokens, null, "no usage means null, not zero");
+});
+
+Deno.test("modelReplyText: several text blocks are joined in order", () => {
+  const reply = modelReplyText({
+    content: [
+      { type: "text", text: '{"roof": {"type": "gable", ' },
+      { type: "thinking", thinking: "", signature: "sig-placeholder" },
+      { type: "text", text: '"pitch": 0.4}}' },
+    ],
+    stop_reason: "end_turn",
+  });
+  assertEquals(reply.text, '{"roof": {"type": "gable", "pitch": 0.4}}');
+  assertEquals(reply.blockTypes, ["text", "thinking", "text"]);
+  const r = parseModelSpec(reply.text);
+  assert(r.ok, "the joined text parses");
+});
+
+Deno.test("modelReplyText: junk in, empty shapes out, never a throw", () => {
+  for (const junk of [null, undefined, "text", 42, [], {}, { content: "nope" }, { content: [null, 7, { type: 3 }] }]) {
+    const reply = modelReplyText(junk);
+    assertEquals(reply.text, "", `no text from ${JSON.stringify(junk)}`);
+    assertEquals(reply.stopReason, null);
+    assertEquals(reply.outputTokens, null);
+  }
+  // Unknown or malformed blocks are named "unknown" rather than dropped, so the log still
+  // shows how many there were. A text block whose text is not a string contributes nothing.
+  assertEquals(modelReplyText({ content: [null, { type: 3 }] }).blockTypes, ["unknown", "unknown"]);
+  assertEquals(modelReplyText({ content: [{ type: "text", text: 5 }] }).text, "");
+  // The logged list is capped, so a pathological reply cannot bloat an app_errors row.
+  const many = modelReplyText({ content: Array.from({ length: 30 }, () => ({ type: "text", text: "x" })) });
+  assertEquals(many.blockTypes.length, 8);
+  assertEquals(many.text.length, 30, "the cap is on the LOG, never on the answer");
 });
