@@ -275,8 +275,11 @@ export function verifyLookupRefusal(failure: PaidLookupFailure): SpendRefusal {
  * amount is computed once, the same way every other stamp computes it, and the object has the
  * same shape: basis "avalara", verifiedAt now, no location, and no stale `reason` (a staff
  * resubmit's "address changed — re-verify" is answered by this). The label the quote already
- * prints is kept; a quote with none takes the company's. Null when the lines price to no pools
- * (verifyQuoteRefusal has already refused that case).
+ * prints is kept, UNLESS it came from a sales location: "KC sales tax" names a lot's local rate,
+ * and printing it over a rate verified for a delivery address in another county or state is
+ * wrong (seen live 2026-09-17 on a Minnesota address). A location label, or no label, gives way
+ * to the company's. Null when the lines price to no pools (verifyQuoteRefusal has already
+ * refused that case).
  */
 export function verifiedTax(input: {
   snap: unknown;
@@ -289,10 +292,11 @@ export function verifiedTax(input: {
   const pools = subtotalsFromSnapshot(s);
   if (!s || !pools) return null;
   const stored = (s.tax && typeof s.tax === "object" ? s.tax : {}) as Record<string, unknown>;
+  const keptLabel = stored.basis === "location" ? null : text(stored.label);
   return stampTax({
     pools,
     resolved: { rate: input.lookup.rate, source: "avalara", jurisdiction: input.lookup.jurisdiction, reason: null },
-    choice: { basis: "company", label: text(stored.label) ?? text(input.companyLabel) ?? "Sales tax", locationId: null, locationName: null },
+    choice: { basis: "company", label: keptLabel ?? text(input.companyLabel) ?? "Sales tax", locationId: null, locationName: null },
     address: { state: input.address?.state ?? null, zip: input.address?.zip ?? null },
     now: input.now,
   });

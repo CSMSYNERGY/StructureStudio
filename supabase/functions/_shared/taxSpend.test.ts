@@ -407,7 +407,7 @@ Deno.test("chargeLookup: with the meters as they are live (disarmed) a verified 
 
 Deno.test("verifiedTax: the new stamp is Avalara's rate on the same lines, with the quote's label and no stale reason", () => {
   const now = "2026-09-17T12:00:00.000Z";
-  const tax = verifiedTax({ snap: quote(), lookup: { rate: 0.08, jurisdiction: "Bibb, GA" }, companyLabel: "Sales tax", address: ADDR, now })!;
+  const tax = verifiedTax({ snap: quote(storedTax({ basis: "company" })), lookup: { rate: 0.08, jurisdiction: "Bibb, GA" }, companyLabel: "Sales tax", address: ADDR, now })!;
   assertEquals(
     [tax.rate, tax.amount, tax.source, tax.basis, tax.jurisdiction, tax.verifiedAt, tax.resolvedAt, tax.label],
     [0.08, taxOn(10000, 0.08), "avalara", "avalara", "Bibb, GA", now, now, "County sales tax"],
@@ -417,7 +417,12 @@ Deno.test("verifiedTax: the new stamp is Avalara's rate on the same lines, with 
   assertEquals([tax.taxableBase, tax.nonTaxableNet], [10000, 500]);
   assertEquals(designTotalCents({ ...quote(), tax }), 1130000, "10,000 + 800 tax + 500 delivery");
 
-  const unlabeled = verifiedTax({ snap: quote(storedTax({ label: "" })), lookup: { rate: 0.08, jurisdiction: null }, companyLabel: "  GA tax ", address: ADDR })!;
+  // A lot's own label names that lot's local rate; it must not survive onto a rate verified for
+  // the delivery address (live 2026-09-17: "KC sales tax" printed over a Minnesota rate).
+  const fromLot = verifiedTax({ snap: quote(), lookup: { rate: 0.07375, jurisdiction: "Minnesota" }, companyLabel: "Sales tax", address: ADDR })!;
+  assertEquals([fromLot.label, fromLot.basis, fromLot.locationName], ["Sales tax", "avalara", null]);
+
+  const unlabeled = verifiedTax({ snap: quote(storedTax({ label: "", basis: "company" })), lookup: { rate: 0.08, jurisdiction: null }, companyLabel: "  GA tax ", address: ADDR })!;
   assertEquals(unlabeled.label, "GA tax");
   assertEquals(verifiedTax({ snap: quote(storedTax({ label: null })), lookup: { rate: 0.08, jurisdiction: null }, companyLabel: null, address: ADDR })!.label, "Sales tax");
   assertEquals(verifiedTax({ snap: { tax: storedTax() }, lookup: { rate: 0.08, jurisdiction: null }, companyLabel: null, address: ADDR }), null);
