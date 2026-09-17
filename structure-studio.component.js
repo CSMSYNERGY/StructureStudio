@@ -10811,18 +10811,21 @@ const SSD_CSS = [
   // laptop; otherwise the columns share the width equally, so switching a tab never moves the column beside
   // it (panels are min-width:0 and wrap their chips). Two by two at tablet widths; on a phone the headers
   // flow as one wrapping strip and only the group tapped last (.is-focus) shows its panel, so the plan stays
-  // near the top of the screen.
+  // near the top of the screen. The tab buttons are .ssd-optab: .ssd-opt is section 02's option cards.
   '.ssd-op{flex:0 0 100%;min-width:0;display:grid;grid-template-columns:repeat(var(--ssd-opn,4),minmax(auto,1fr));column-gap:11px;row-gap:0}',
   '.ssd-opc{display:grid;grid-row:span 2;grid-template-rows:subgrid}',
   '.ssd-oph{display:flex;flex-direction:column;justify-content:flex-end;border-bottom:2px solid var(--ss-line-card)}',
   '.ssd-opc:not(:last-child) > .ssd-oph{margin-right:-11px;padding-right:11px}',
   '.ssd-oph-t{padding:0 2px;font-size:9.5px;font-weight:800;line-height:1.3;letter-spacing:.13em;text-transform:uppercase;color:var(--ss-muted);white-space:nowrap}',
   '.ssd-oph-tabs{display:flex;flex-wrap:nowrap;gap:2px}',
-  '.ssd-opt{font-family:inherit;flex:0 0 auto;margin:0 0 -2px;padding:8px 9px 7px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--ss-muted);font-size:12.5px;font-weight:700;line-height:1.2;letter-spacing:.2px;white-space:nowrap;cursor:pointer}',
-  '.ssd-opt:hover{color:var(--ss-ink)}',
-  '.ssd-opt.is-on{color:var(--ss-primary);border-bottom-color:var(--ss-primary)}',
-  '.ssd-opt:focus-visible{outline:2px solid var(--ss-primary-line);outline-offset:-2px}',
+  '.ssd-optab{font-family:inherit;flex:0 0 auto;margin:0 0 -2px;padding:8px 9px 7px;border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--ss-muted);font-size:12.5px;font-weight:700;line-height:1.2;letter-spacing:.2px;white-space:nowrap;cursor:pointer}',
+  '.ssd-optab:hover{color:var(--ss-ink)}',
+  '.ssd-optab.is-on{color:var(--ss-primary);border-bottom-color:var(--ss-primary)}',
+  '.ssd-optab:focus-visible{outline:2px solid var(--ss-primary-line);outline-offset:-2px}',
   '.ssd-opp{margin-top:9px}',
+  // Wall height and the insulation type are segmented controls; in a half-width column they wrap onto
+  // a second row instead of clipping the last choices (.ssd-seg is overflow:hidden everywhere else).
+  '.ssd-opp .ssd-seg{flex-wrap:wrap;overflow:visible}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-op,.ssd-frame[data-ssd-bp="sm"] .ssd-op{grid-template-columns:repeat(2,minmax(0,1fr))}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-op[data-ssd-opn="1"],.ssd-frame[data-ssd-bp="sm"] .ssd-op[data-ssd-opn="1"]{grid-template-columns:minmax(0,1fr)}',
   '.ssd-frame[data-ssd-bp="md"] .ssd-opc,.ssd-frame[data-ssd-bp="sm"] .ssd-opc{min-width:0}',
@@ -10835,7 +10838,7 @@ const SSD_CSS = [
   '.ssd-frame[data-ssd-bp="xs"] .ssd-oph-tabs{flex-wrap:wrap}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-opp{order:1;flex:0 0 100%;display:none;margin-top:6px}',
   '.ssd-frame[data-ssd-bp="xs"] .ssd-opc.is-focus > .ssd-opp{display:block}',
-  '.ssd-frame[data-ssd-bp="xs"] .ssd-opc:not(.is-focus) .ssd-opt.is-on{color:var(--ss-ink);border-bottom-color:var(--ss-line)}',
+  '.ssd-frame[data-ssd-bp="xs"] .ssd-opc:not(.is-focus) .ssd-optab.is-on{color:var(--ss-ink);border-bottom-color:var(--ss-line)}',
   // Services › Delivery: the figure (or why there is none yet), then the rep's fee editor.
   '.ssd-dlv{display:flex;flex-direction:column;gap:8px;min-width:0;width:100%}',
   '.ssd-dlv-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;font-size:12.5px;line-height:1.35;color:var(--ss-ink)}',
@@ -13473,6 +13476,44 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const roOfferedKey = (k) => !!(baseItems[k] && !baseItems[k].noPalette && (embedded || !baseItems[k].internalOnly));
   const roDoorOffered = roOfferedKey("roughOpeningDoor");
   const roWindowOffered = roOfferedKey("roughOpeningWindow");
+
+  // Phase 4a: which placeable items are INCLUDED (free) with the selected
+  // style+size — from get_config's per-style sizeInclusions map. Everything else
+  // is an "additional" (chargeable) option. Empty until a style+size is chosen.
+  // includedItemQty maps item key -> included quantity (loft = sq ft, doors = count)
+  // from the parallel sizeInclusionQty map; configs predating migration 039 fall
+  // back to quantity 1 per included key.
+  const includedItemQty = useMemo(() => {
+    if (!sel.style || !sel.size) return {};
+    const st = C.buildingStyles.find((s) => s.value === sel.style);
+    if (!st) return {};
+    // Size labels can drift between "12x16" and "12×16" (CSV rewrite vs. saved design),
+    // so fall back to a normalized-label match like the sizePricing lookup does.
+    const pick = (map) => {
+      if (!map || typeof map !== "object") return null;
+      if (map[sel.size] != null) return map[sel.size];
+      const want = normSizeLabel(sel.size);
+      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
+      return null;
+    };
+    const qmap = pick(st.sizeInclusionQty);
+    if (qmap && typeof qmap === "object" && !Array.isArray(qmap)) {
+      const out = {};
+      for (const k in qmap) out[k] = Math.max(1, Number(qmap[k]) || 1);
+      return out;
+    }
+    const arr = pick(st.sizeInclusions);
+    const out = {};
+    if (Array.isArray(arr)) for (const k of arr) out[k] = 1;
+    return out;
+  }, [sel.style, sel.size, C.buildingStyles]);
+  const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
+  // The 2D pickers' tile: offered and not already included with this size, where the Included chip
+  // offers it instead (the palette hid included keys the same way). The Door/Window tool only exists
+  // when its picker has something in it. The 3D chooser has no chip row, so it offers the tile whenever
+  // the rough opening is offered, as the old 3D Add row did.
+  const roDoorTile = roDoorOffered && !includedItemKeys.includes("roughOpeningDoor");
+  const roWindowTile = roWindowOffered && !includedItemKeys.includes("roughOpeningWindow");
   const shelvingKeys = Object.keys(baseItems).filter((k) => {
     const c = baseItems[k];
     return c && !c.noPalette && (embedded || !c.internalOnly) && ssSlabModel(k, baseItems);
@@ -13559,14 +13600,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     ...elecItemTools,
     ...(Object.keys(elecItemTools).length ? { elecItemPicker: ELEC_ITEM_PICKER_CFG } : {}),
     // The Door tool also exists for a builder who offers only the rough opening: its picker holds the tile.
-    ...(placeableDoors.length || roDoorOffered ? { doorPicker: DOOR_PICKER_CFG } : {}),
+    ...(placeableDoors.length || roDoorTile ? { doorPicker: DOOR_PICKER_CFG } : {}),
     ...(rampCustom ? { rampPicker: RAMP_PICKER_CFG } : {}),
     // Ramp is ALWAYS the self-contained SIMPLE_RAMP_CFG (overrides any built-in `ramp` layout item),
     // so every placed ramp renders. Placeable only when the tenant offers a SIMPLE ramp; custom mode
     // and not-offered are render-only (the picker handles custom placement).
     ramp: { ...SIMPLE_RAMP_CFG, noPalette: !(rampMode === "simple" && rampEnabled) },
     // Catalog windows add a "Window" picker tool; the built-in window stays as-is (like doors).
-    ...(placeableWindows.length || roWindowOffered ? { windowPicker: WINDOW_PICKER_CFG } : {}),
+    ...(placeableWindows.length || roWindowTile ? { windowPicker: WINDOW_PICKER_CFG } : {}),
     ...ventTools,
     ...(Object.keys(ventTools).length ? { ventPicker: VENT_PICKER_CFG } : {}),
     // Shelving: collapse the slab family behind one picker, but ONLY when there is a choice to
@@ -13684,38 +13725,6 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return changed ? next : prev;
     });
   }, [sel.style, C.options]);
-
-  // Phase 4a: which placeable items are INCLUDED (free) with the selected
-  // style+size — from get_config's per-style sizeInclusions map. Everything else
-  // is an "additional" (chargeable) option. Empty until a style+size is chosen.
-  // includedItemQty maps item key -> included quantity (loft = sq ft, doors = count)
-  // from the parallel sizeInclusionQty map; configs predating migration 039 fall
-  // back to quantity 1 per included key.
-  const includedItemQty = useMemo(() => {
-    if (!sel.style || !sel.size) return {};
-    const st = C.buildingStyles.find((s) => s.value === sel.style);
-    if (!st) return {};
-    // Size labels can drift between "12x16" and "12×16" (CSV rewrite vs. saved design),
-    // so fall back to a normalized-label match like the sizePricing lookup does.
-    const pick = (map) => {
-      if (!map || typeof map !== "object") return null;
-      if (map[sel.size] != null) return map[sel.size];
-      const want = normSizeLabel(sel.size);
-      for (const k in map) { if (normSizeLabel(k) === want) return map[k]; }
-      return null;
-    };
-    const qmap = pick(st.sizeInclusionQty);
-    if (qmap && typeof qmap === "object" && !Array.isArray(qmap)) {
-      const out = {};
-      for (const k in qmap) out[k] = Math.max(1, Number(qmap[k]) || 1);
-      return out;
-    }
-    const arr = pick(st.sizeInclusions);
-    const out = {};
-    if (Array.isArray(arr)) for (const k of arr) out[k] = 1;
-    return out;
-  }, [sel.style, sel.size, C.buildingStyles]);
-  const includedItemKeys = useMemo(() => Object.keys(includedItemQty), [includedItemQty]);
   // The inclusion keys the customer can actually ACT on, and the single source of truth for
   // both the "✓ Included — place or decline" chips and submitQuote's gate. Those two must
   // never disagree: the gate demands every included item be placed or declined, so a key it
@@ -19487,8 +19496,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
-          roOffer={{ door: roDoorOffered && !includedItemKeys.includes("roughOpeningDoor"), window: roWindowOffered && !includedItemKeys.includes("roughOpeningWindow") }}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+          roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={false}
           onSnapshot={() => {}}
@@ -19685,9 +19694,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     <div ref={gateBgRef} style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: pal.surface, minHeight: embedded ? "100%" : "100vh" }}>
       <SSDesignerFrame pal={pal} embedded={embedded}>
       {gateEl && createPortal(gateEl, document.body)}
-      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorOffered && !includedItemKeys.includes("roughOpeningDoor")} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
+      {doorPick && createPortal(<DoorPicker doors={placeableDoors} showPricing={!!C.showPricing} doorColors={doorPaintColors} paintBody={paintColors.body} paintTrim={paintColors.trim} onCancel={() => { setDoorPick(null); setSwapId(null); }} ro={!doorPick.swap && roDoorTile} onPlaceRo={() => { const p = doorPick; setDoorPick(null); placePickedRo("roughOpeningDoor", p); }} onPlace={placePickedDoor} />, document.body)}
       {rampPick && createPortal(<RampPicker ramps={placeableRamps} showPricing={!!C.showPricing} onCancel={() => { setRampPick(null); setSwapId(null); }} onPlace={placePickedRamp} />, document.body)}
-      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowOffered && !includedItemKeys.includes("roughOpeningWindow")} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
+      {windowPick && createPortal(<WindowPicker windows={placeableWindows} showPricing={!!C.showPricing} windowColors={windowColorList} dressColors={dressColorList} swapFrom={swapId != null ? items.find((i) => i.id === swapId) : null} onCancel={() => { setWindowPick(null); setSwapId(null); }} ro={!windowPick.swap && roWindowTile} onPlaceRo={() => { const p = windowPick; setWindowPick(null); placePickedRo("roughOpeningWindow", p); }} onPlace={placePickedWindow} />, document.body)}
       {elecItemPick && createPortal(
         <ElectricalItemPicker
           items={elecItemsOffered(C, !!(sel && sel.electrical), embedded)}
@@ -20347,18 +20356,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           const dv = ssDeliveryView(C, sel, deliveryQuote, embedded);
           const dlvAuto = !!(C.delivery && C.delivery.automate);
           const dlvShowAmt = !!C.showPricing && !detailsLocked;
+          // The quote effect's own test for an address complete enough to price.
+          const dlvAddrReady = !!String(contact.city || "").trim() && !!String(contact.state || "").trim() && /^\d{5}$/.test(String(contact.zip || "").trim());
           const deliveryBody = (embedded || dlvAuto || dv.manual) ? (
             <div className="ssd-dlv" data-ss-delivery-panel="1">
               {dv.manual && !embedded ? (
                 <div className="ssd-dlv-line"><span className="ssd-dlv-t">Delivery fee</span>{dlvShowAmt && <span className="ssd-dlv-amt">{fmtMoney2(dv.amount)}</span>}</div>
               ) : dv.auto ? (
-                <div className="ssd-dlv-line"><span className="ssd-dlv-t">{dv.auto.desc || "Delivery"}</span>{dlvShowAmt && dv.auto.fee != null && <span className="ssd-dlv-amt">{fmtMoney2(dv.auto.fee)}</span>}</div>
+                <div className="ssd-dlv-line"><span className="ssd-dlv-t">{detailsLocked ? "Delivery is priced for your address" : (dv.auto.desc || "Delivery")}</span>{dlvShowAmt && dv.auto.fee != null && <span className="ssd-dlv-amt">{fmtMoney2(dv.auto.fee)}</span>}</div>
               ) : dv.pending ? (
                 <div className="ssd-dlv-line"><span className="ssd-dlv-t">To be confirmed — {ssDeliveryReason(dv.pending.reason)}</span></div>
               ) : (dlvAuto && !embedded) ? (
                 <div className="ssd-dlv-line">
-                  <span className="ssd-dlv-t">Priced from your delivery address</span>
-                  {ssSteps.some((s) => s.key === "customer") && <button type="button" className="ssd-dlv-go" onClick={() => ssGo("customer")}>Add your address</button>}
+                  <span className="ssd-dlv-t">{dlvAddrReady ? "Delivery will be priced on your quote" : "Priced from your delivery address"}</span>
+                  {!dlvAddrReady && ssSteps.some((s) => s.key === "customer") && <button type="button" className="ssd-dlv-go" onClick={() => ssGo("customer")}>Add your address</button>}
                 </div>
               ) : null}
               {embedded && (
@@ -20418,7 +20429,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div className="ssd-oph-tabs" role="tablist" aria-label={g.label}>
                       {g.tabs.map(([tk, tl]) => (
                         <button key={tk} type="button" role="tab" aria-selected={tk === g.active[0]} data-ss-opt-tab={tk}
-                          onClick={() => pickOptTab(g.key, tk)} className={tk === g.active[0] ? "ssd-opt is-on" : "ssd-opt"}>{tl}</button>
+                          onClick={() => pickOptTab(g.key, tk)} className={tk === g.active[0] ? "ssd-optab is-on" : "ssd-optab"}>{tl}</button>
                       ))}
                     </div>
                   </div>
@@ -22171,8 +22182,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
              shelfPicker stand-in, so this row showed a button that could not place anything and
              hid the three that could. Re-admit the slab keys and drop the stand-in; the 2D
              palette keeps its collapsed Shelving popup, which is what Carolyn asked for there. */
-          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k]) && (embedded || !ITEMS[k].internalOnly))}
-          roOffer={{ door: roDoorOffered && !includedItemKeys.includes("roughOpeningDoor"), window: roWindowOffered && !includedItemKeys.includes("roughOpeningWindow") }}
+          paletteKeys={Object.keys(ITEMS).filter((k) => ITEMS[k] && !ITEMS[k].isShelfPicker && !ITEMS[k].isVentPicker && (!ITEMS[k].noPalette || shelvingKeys.indexOf(k) !== -1 || !!ventTools[k] || (k === "roughOpeningDoor" && roDoorOffered && !ITEMS.doorPicker) || (k === "roughOpeningWindow" && roWindowOffered && !ITEMS.windowPicker)) && (embedded || !ITEMS[k].internalOnly))}
+          roOffer={{ door: roDoorOffered, window: roWindowOffered }}
           placeableDoors={placeableDoors} placeableWindows={placeableWindows} placeableRamps={placeableRamps}
           paintEnabled={C.options.some((o) => o.id === "paint" && isOptionApplicable(o, sel.style))}
           onPaintChange={(pc) => {

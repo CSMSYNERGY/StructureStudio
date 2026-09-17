@@ -506,16 +506,60 @@ test("Services › Delivery: priced from the address, and Details charges the sa
   await page.getByPlaceholder("City").fill("Kansas City");
   await page.locator("select").filter({ has: page.locator("option", { hasText: "Select state…" }) }).selectOption({ label: "Missouri" });
   await page.getByPlaceholder("00000").fill("64105");
-  await expect(panel).toContainText("12 mi from Main Lot");
-  await expect(panel, "no amount before the contact is complete").not.toContainText("$150.00");
+  // Before the contact gate: that delivery is priced, but neither the figure nor the rule's description,
+  // which can carry the price itself ("free within 30 miles").
+  await expect(panel).toContainText("Delivery is priced for your address");
+  await expect(panel, "no description or amount before the contact is complete").not.toContainText(/12 mi from Main Lot|\$150\.00/);
+  await expect(panel.getByRole("button", { name: "Add your address" }), "the address is already in").toHaveCount(0);
   await page.getByPlaceholder("Full Name").fill("Pat Tester");
   await page.getByPlaceholder("email@example.com").fill("pat@example.com");
   await page.getByPlaceholder("(555) 555-5555").fill("5550104477");
+  await expect(panel).toContainText("12 mi from Main Lot");
   await expect(panel).toContainText("$150.00");
   await page.getByRole("button", { name: /See your quote details/ }).click();
   const row = page.locator(".ssd-dt-row").filter({ hasText: "12 mi from Main Lot" });
   await expect(row).toContainText("$150.00");
   expect(quotes.length, "delivery-quote was asked").toBeGreaterThan(0);
+  expect(errors, "page errors").toEqual([]);
+});
+
+// A builder whose only door option is a rough opening that the size already INCLUDES: the Included chip
+// offers it, so there is no Door tool that would open an empty "Choose a door" (review 2026-09-17), and the
+// chip still places the rough opening. The window rough opening, not included, stays a tile.
+test("an included rough opening with no catalog doors: no empty Door tool, and the chip places it", async ({ page }) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  const o = await routeLayout(page);
+  o.rewrite = (j) => {
+    for (const st of j.buildingStyles || []) {
+      st.sizeInclusionQty = Object.fromEntries((st.sizes || []).map((s) => [sizeLabel(s), { roughOpeningDoor: 1 }]));
+    }
+  };
+  // Registered after routeLayout, so it answers first: no catalog doors, windows or ramps at all.
+  await page.route(`${SUPABASE_URL}/rest/v1/rpc/get_fixtures`, (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ items: [], ramp: { enabled: false } }) }));
+  await bypassGate(page, CLIENT);
+  await page.goto(`/?client=${CLIENT}`);
+  await page.waitForFunction(() => window.__ssAppBooted === true && typeof window.StructureStudio === "function");
+  await page.locator("[data-ss-style-strip] [data-ss-style]").first().click();
+  await page.locator('xpath=//span[normalize-space(.)="Building Size"]/..//select').first().selectOption({ index: 1 });
+  await expect(page.locator("[data-ss-opt-strip]")).toBeVisible();
+  await expect(page.locator('[data-ss-opt-tab="doors"]'), "no Doors tab: nothing to put in it").toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Door wall$/ })).toHaveCount(0);
+  // The window rough opening is not included, so the Window tool exists and its picker holds only the tile.
+  await arm(page, /Window wall$/);
+  await clickPlan(page, 10, 6);
+  await expect(page.locator('[data-ss-ro-tile="window"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Place rough opening" })).toBeEnabled();
+  await page.getByRole("button", { name: "Place rough opening" }).click();
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "roughOpeningWindow", wall: "east" })]));
+  // The included door rough opening is placed from its chip.
+  const chip = page.locator("[data-ss-included]").getByRole("button", { name: /Rough Opening/ }).first();
+  await expect(chip).toBeVisible();
+  await chip.click();
+  await page.waitForTimeout(250);
+  await clickPlan(page, 5, 0);
+  await expect.poll(() => designerItems(page)).toEqual(expect.arrayContaining([expect.objectContaining({ type: "roughOpeningDoor", wall: "north" })]));
   expect(errors, "page errors").toEqual([]);
 });
 
