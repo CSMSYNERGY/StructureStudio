@@ -80,6 +80,7 @@ import { chargeTopup, autoTopupDecision } from "../_shared/walletTopup.ts";
 // filters it drives are below, in the handler — RLS cannot do this job here, because every
 // client this function builds is the SERVICE ROLE and the service role is BYPASSRLS.
 import { ownContactsOnly, type GateTable } from "../_shared/access.ts";
+import { isQboLineKind } from "../_shared/qboLineKinds.ts";
 
 // WHAT EACH ACTION REQUIRES (migration 100). resolveTenant checks this BEFORE dispatch and
 // refuses anything absent, so adding a branch without adding a line here 403s on the first
@@ -7072,7 +7073,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!Array.isArray(payload?.rows)) return json({ error: "rows[] required" }, 400);
     { const e = tooMany(payload.rows, "mappings"); if (e) return json({ error: e }, 400); }
 
-    const KINDS = new Set(["building", "paint", "roof", "door", "window", "ramp", "layout_item", "custom_option", "discount", "delivery", "fallback"]);
+    // The line kinds come from _shared/qboLineKinds.ts, which a test pins to the table's CHECK and
+    // to the portal grid. This used to be a local 11-kind copy that migration 239 left behind, so
+    // every mapping for the seven kinds 239 added was skipped as "unknown line kind".
 
     // Validate against the tenant's OWN catalog — an item key or style id from another
     // tenant must not be writable here.
@@ -7097,7 +7100,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       const qboItemId = String(row?.qboItemId ?? "").trim();
       const qboItemName = String(row?.qboItemName ?? "").trim() || null;
 
-      if (!KINDS.has(lineKind)) { skipped.push(`${lineKind || "(blank)"}: unknown line kind`); continue; }
+      if (!isQboLineKind(lineKind)) { skipped.push(`${lineKind || "(blank)"}: unknown line kind`); continue; }
       if ((lineKind === "layout_item") !== (itemKey !== "")) { skipped.push(`${lineKind}: item key ${itemKey ? "not allowed" : "required"}`); continue; }
       if (itemKey && !validKeys.has(itemKey)) { skipped.push(`${itemKey}: not an enabled item`); continue; }
       if (styleId && !validStyles.has(styleId)) { skipped.push(`${lineKind}: unknown style`); continue; }

@@ -277,8 +277,17 @@ function QuickBooksView({ clientId, viewingLabel = null }) {
     const parts = [];
     if (d.saved) parts.push(`${d.saved} saved`);
     if (d.deleted) parts.push(`${d.deleted} removed`);
-    if (d.skipped && d.skipped.length) parts.push(`${d.skipped.length} skipped`);
-    setMsg({ ok: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}.` });
+    const skipped = Array.isArray(d.skipped) ? d.skipped : [];
+    // Name what was skipped and why. A bare "N skipped" is how seven whole line kinds went
+    // unmappable without anyone noticing (2026-09-17): the rows looked saved, the count was easy
+    // to miss, and those lines kept billing against the fallback item.
+    if (skipped.length) {
+      const shown = skipped.slice(0, 3).join("; ");
+      const more = skipped.length > 3 ? `; and ${skipped.length - 3} more` : "";
+      setMsg({ err: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}, but ${skipped.length} ${skipped.length === 1 ? "wasn't" : "weren't"} saved: ${shown}${more}.` });
+    } else {
+      setMsg({ ok: `Mappings updated${parts.length ? ` (${parts.join(", ")})` : ""}.` });
+    }
     setDraft({});
     const g = await sb.functions.invoke("portal-settings", { body: { action: "list_item_map" } });
     if (!g.error && g.data && !g.data.error) setGrid(g.data);
