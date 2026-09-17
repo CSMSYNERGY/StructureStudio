@@ -16,7 +16,8 @@
 //      sheet, its ends inside the cheeks
 //   5. the frame: the rafters (model.porch.nRaf) hang from the ceiling boards inside the cheeks,
 //      the ledger's top is ceilWall + RAF_D on the wall, and a cheek each side runs from the wall
-//      to the front board and from the post tops to the ceiling
+//      to the front board and from the post tops to the ceiling; no rafter reaches a cheek's inner
+//      face (flush, the two faces flickered as grey dots along the cheek)
 //   6. the front corners: no cheek past the post's face below the front board (the light block),
 //      and the step there is closed in wood from the post top to the board
 //   7. no recessed set-back: the porch-end wall spans the footprint, flush with it
@@ -445,6 +446,13 @@ async function runCase(ctx, c, ok, shots, seen) {
         ch.length === 2 && ch.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - yU(P.dWall)) < 0.01 && Math.abs(q.near - P.dWall) < 0.005 && Math.abs(q.out - dC) < 0.005 && Math.abs(q.across[1] - q.across[0] - Z.CHEEK_T) < 0.005)
           && Math.abs(Math.abs(ch[0].across[0]) - P.side) < 0.005 && Math.abs(Math.abs(ch[1].across[1]) - P.side) < 0.005,
         ch.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} u ${q.across.map(f3)}`).join(" | "));
+      // THE CHEEK STIPPLE. An outer rafter laid flush against a cheek put its face in the cheek's inner
+      // plane, and faint grey single-pixel dots ran along both cheeks. Every rafter's across extent must
+      // stop short of the nearer (inner) face of the cheeks as they are built, not of a number.
+      const cheekInner = ch.length === 2 ? Math.min(...ch.map((q) => Math.min(Math.abs(q.across[0]), Math.abs(q.across[1])))) : null;
+      const rafReach = parts.rafter.length ? Math.max(...parts.rafter.map((r) => Math.max(Math.abs(r.across[0]), Math.abs(r.across[1])))) : null;
+      ok(`${tag}: no rafter reaches a cheek's inner face (the stipple)`, cheekInner != null && rafReach != null && rafReach <= cheekInner - 0.005,
+        `rafters reach |u| ${f3(rafReach)}, cheek inner face |u| ${f3(cheekInner)}`);
       ok(`${tag}: no cheek shows below the front board past the posts' face (the corner block)`, m.boardBot != null && m.cheekStub.length === 0, `board bottom ${f3(m.boardBot)} stub ${JSON.stringify(m.cheekStub.slice(0, 4))}`);
       const fills = parts.cornerFill;
       ok(`${tag}: ...and each front corner is closed in wood from the post top to the board`,

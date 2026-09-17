@@ -7816,8 +7816,15 @@ function buildShed3DModel(THREE, p) {
     pg.add(part(slab, "slab"));
     // Wood ceiling boards under the sheet, and 2x6 rafters every 2 ft under those, held inboard of
     // the cheeks (in the first cut the outer rafter hid the cheek).
+    //
+    // A GAP, NOT FLUSH. The outer rafters stop RAF_GAP short of each cheek's inner face. Laid flush
+    // their outer faces shared that plane, and faint grey single-pixel dots ran along both cheeks
+    // from outside — the two coplanar faces trading pixels. The cheeks receive no shadows, so this
+    // was never acne: hiding the rafters removed the dots and moving them inboard does too. A
+    // quarter inch is what it took; an eighth left one pixel of it on the 16x24 at eye level.
+    const RAF_GAP = 0.02;
     pg.add(part(onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T), "ceiling"));
-    const rafU = side - CHEEK_T - RAF_W / 2;
+    const rafU = side - CHEEK_T - RAF_GAP - RAF_W / 2;
     for (let i = 0; i < geom.nRaf; i++) {
       pg.add(part(onSlope(woodMat, dWall + 0.05, dEnd - FAS_T, -rafU + (i * 2 * rafU) / (geom.nRaf - 1), RAF_W, RAF_D, PR_T + SHEATH), "rafter"));
     }
