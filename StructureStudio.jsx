@@ -7729,7 +7729,8 @@ function buildShed3DModel(THREE, p) {
   // already built, and a band built first would push the porch roof down under the band's own
   // bottom instead of tucking it against it. The porch reads no items, so only the full build draws
   // it; a porch, band or wood change reaches it through the spec, which forces a full build.
-  let porchDeckGroup = null;
+  // porchCapZ: the cap end the porch stands off (local z 0 or L), for the plate band below.
+  let porchDeckGroup = null, porchCapZ = null;
   const porchGeom = (() => {
     if (!porchOut) return null;
     const D = porchOut.D;
@@ -7854,21 +7855,28 @@ function buildShed3DModel(THREE, p) {
     porchDeckGroup = new THREE.Group();
     porchDeckGroup.userData.ssPorch = "deck";
     porchDeckGroup.add(deck);
+    porchCapZ = atZero ? 0 : L;
     return geom;
   })();
   // ── PLATE BAND (roof.plateBand, 2026-09-17) ──
   // A 0.3 ft trim board across both gable caps at the top of the wall, H - 0.2 to
   // H + SS_PLATE_BAND_TOP: the belly band both gable ends of the Barnstead show, and the line a
-  // projecting porch's roof tucks under (d3PorchGeom's high edge is the band's bottom). Its own key,
-  // independent of the porch. Deep enough to cover the step where a flush cap meets the wall and to
-  // stand in front of battens and ribs. A recessed porch's end has no wall under its cap, so no band.
-  // Built after the porch's scan, which would otherwise read the band as main roof.
+  // projecting porch's roof tucks under. Its own key, independent of the porch. Deep enough to cover
+  // the step where a flush cap meets the wall and to stand in front of battens and ribs. A recessed
+  // porch's end has no wall under its cap, so no band. Built after the porch's scan, which would
+  // otherwise read the band as main roof.
+  //
+  // On the projecting porch's end the band reaches DOWN to the porch roof's high edge. That edge is
+  // H - 0.2 unless the main roof pushed it lower (a rake or fascia on a deep overhang), and a band
+  // left at H - 0.2 then showed a strip of bare siding between itself and the porch roof, across
+  // the whole porch wall. The top never moves, so the vent sills above it are unchanged.
   if (roofCfg.plateBand === true) {
     [[0, -1, capOut0], [L, 1, capOutL]].forEach(([z0, s, co]) => {
       if (capPorchEnd === z0) return;
       const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
-      const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3, face - back);
-      band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15, z0 + s * (back + face) / 2);
+      const drop = porchGeom && porchCapZ === z0 ? Math.max(0, H - 0.2 - porchGeom.yHigh) : 0;
+      const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3 + drop, face - back);
+      band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15 - drop / 2, z0 + s * (back + face) / 2);
       band.userData.ssPorch = "band";
       rg.add(band);
     });

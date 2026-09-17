@@ -20,7 +20,8 @@
 //   8. the porch roof sheet shares the main roof's material (metal: with its sky); posts take
 //      colors.wood, else the natural fallback
 //   9. the plate band: 2 meshes with the porch (whose high edge is exactly H - 0.2), 1 on a recessed
-//      porch's building (none on its porch end), and neither kind of porch group there
+//      porch's building (none on its porch end), and neither kind of porch group there. Where the
+//      main roof pushes the porch roof lower, the band on the porch's end reaches down to it (H)
 //  10. porchOutFt 0 draws no porch; look-inside hides the porch roof and keeps the deck
 //  11. zero page errors
 //
@@ -61,6 +62,10 @@ const CASES = [
     d3: { roof: { ...GAMBREL, porchOutFt: 0 }, siding: null, colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
   { id: "G", label: "Harness Recessed Band", size: "12x32", H: 7.5, off: true, bands: 1,
     d3: { roof: { ...RECESSED, plateBand: true }, siding: "batten", colors: { body: "#4a3327", trim: "#b0a081", roof: "#8a8f94" }, gableVent: { widthFrac: 0.12 }, foundation: "skids", roofMaterial: "metal", wallHeightFt: 7.5 } },
+  // A deep overhang's rake pushes the porch roof under H - 0.2, with a plate band: the band on the
+  // porch's end must come down to meet it, or bare siding shows between the two.
+  { id: "H", label: "Harness Deep Rake", size: "12x16", H: 8, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2, bandDrops: true,
+    d3: { roof: { type: "gable", pitch: 0.33, overhang: 1, eave: "fascia", porchOutFt: 6, plateBand: true }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
 ];
 
 const configFor = (c) => {
@@ -200,16 +205,19 @@ async function measure(page, W, L) {
     const roofs = tagged("roof"), decks = tagged("deck"), bands = tagged("band");
     let wallTop = -Infinity;
     M.wallsGroup.traverse((o) => { if (o.isMesh) wallTop = Math.max(wallTop, bbOf(o).mx[1]); });
+    // Feet OUT from the porch wall's footprint line (the gable wall's mid-plane): the renderer's d.
+    const outOn = (wall, bb) => ({ south: bb.mx[2] - L / 2, north: -L / 2 - bb.mn[2], east: bb.mx[0] - W / 2, west: -W / 2 - bb.mn[0] })[wall];
     const out = {
       porch: M.porch, H: wallTop, nRoof: roofs.length, nDeck: decks.length,
       roofInRoofGroup: roofs.length > 0 && roofs.every((g) => under(g, M.roofGroup)),
       deckInRoot: decks.length > 0 && decks.every((g) => under(g, M.root)),
       deckInRoofGroup: decks.some((g) => under(g, M.roofGroup)),
-      bands: bands.map((b) => { const bb = bbOf(b); return { isMesh: !!b.isMesh, minY: bb.mn[1], maxY: bb.mx[1], inRoofGroup: under(b, M.roofGroup) }; }),
+      // porchEnd: the band in front of the projecting porch's wall (the far one sits a length behind).
+      bands: bands.map((b) => { const bb = bbOf(b); return { isMesh: !!b.isMesh, minY: bb.mn[1], maxY: bb.mx[1], inRoofGroup: under(b, M.roofGroup), porchEnd: !!M.porch && outOn(M.porch.wall, bb) > -1 }; }),
     };
     if (!roofs.length || !decks.length || !M.porch) return out;
     const P = M.porch, S = P.sizes, pg = roofs[0];
-    const outDist = (bb) => ({ south: bb.mx[2] - L / 2, north: -L / 2 - bb.mn[2], east: bb.mx[0] - W / 2, west: -W / 2 - bb.mn[0] })[P.wall];
+    const outDist = (bb) => outOn(P.wall, bb);
     const nearDist = (bb) => ({ south: bb.mn[2] - L / 2, north: -L / 2 - bb.mx[2], east: bb.mn[0] - W / 2, west: -W / 2 - bb.mx[0] })[P.wall];
     const across = (bb) => (P.wall === "south" || P.wall === "north") ? [bb.mn[0], bb.mx[0]] : [bb.mn[2], bb.mx[2]];
     const boxIs = (q, w, h, d) => {
@@ -353,8 +361,18 @@ async function runCase(ctx, c, ok, shots) {
     }
     if (c.bands != null) {
       ok(`${tag}: ${c.bands} plate band mesh(es), in roofGroup`, m.bands.length === c.bands && m.bands.every((b) => b.isMesh && b.inRoofGroup), `bands ${m.bands.length}`);
-      ok(`${tag}: each band runs H - 0.2 to H + 0.1`, m.bands.length > 0 && m.bands.every((b) => Math.abs(b.minY - (c.H - 0.2)) < 0.005 && Math.abs(b.maxY - (c.H + 0.1)) < 0.005),
-        m.bands.map((b) => `${f3(b.minY)}..${f3(b.maxY)}`).join(" "));
+      // The top is always H + 0.1. The bottom is H - 0.2, except on a projecting porch's end, where
+      // it comes down to the porch roof's high edge when the main roof pushed that edge lower.
+      const bandBot = (b) => (b.porchEnd && P ? Math.min(c.H - 0.2, P.yHigh) : c.H - 0.2);
+      ok(`${tag}: each band runs H - 0.2 (or the porch roof's high edge, on the porch's end) to H + 0.1`,
+        m.bands.length > 0 && m.bands.every((b) => Math.abs(b.minY - bandBot(b)) < 0.005 && Math.abs(b.maxY - (c.H + 0.1)) < 0.005),
+        m.bands.map((b) => `${b.porchEnd ? "porch end " : ""}${f3(b.minY)}..${f3(b.maxY)}`).join(" "));
+      if (c.bandDrops) {
+        const pb = m.bands.filter((b) => b.porchEnd);
+        ok(`${tag}: the main roof really pushes the porch roof under H - 0.2 here`, !!P && P.yHigh < c.H - 0.3, P ? `yHigh ${f3(P.yHigh)}` : "no porch");
+        ok(`${tag}: the band on the porch's end reaches down to the porch roof: no bare siding between them`, !!P && pb.length === 1 && pb[0].minY <= P.yHigh + 0.005,
+          P ? `porch-end bands ${pb.length} bottom ${f3(pb[0] && pb[0].minY)} yHigh ${f3(P.yHigh)}` : "no porch");
+      }
     } else ok(`${tag}: no plate band without roof.plateBand`, m.bands.length === 0, `bands ${m.bands.length}`);
     if (c.off && c.bands) await shot(page, `${shots}/${c.id}-band.png`, [W + 6, c.H + 4, -L / 2 - 12], [0, c.H * 0.6, -L / 2]);
     ok(`${tag}: no page errors`, errors.length === 0, JSON.stringify(errors).slice(0, 300));
