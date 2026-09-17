@@ -344,6 +344,26 @@ try {
   ] };
   ok("C: the save posts Doors under FR010000 only", bodyC && JSON.stringify({ rows: bodyC.rows }) === JSON.stringify(expectedC), JSON.stringify(bodyC && bodyC.rows));
 
+  // ── C2: an item with a saved code moved into a row with NO code must not be deleted silently.
+  // The save replaces the whole set and leaves codeless rows out, so it is refused instead.
+  await boot({
+    lookupEnabled: true,
+    stored: [
+      { target_type: "style", target_key: UTILITY, tax_code: "P0000000" },
+      { target_type: "heading", target_key: "doors", tax_code: "P0000000" },
+    ],
+  });
+  await openTax();
+  await page.waitForTimeout(400);
+  await page.getByRole("button", { name: "+ Add tax code" }).click();
+  await page.waitForTimeout(200);
+  const savesBeforeC2 = callsOf("tax_codes_save").length;
+  await checkbox(row(1), "Doors").check();
+  await page.waitForTimeout(200);
+  await page.getByRole("button", { name: "Save tax codes" }).click();
+  ok("C2: a coded item moved into a codeless row refuses the save", await waitText("Some items that already have a tax code are now in a row with no code"));
+  ok("C2: …and nothing is posted", callsOf("tax_codes_save").length === savesBeforeC2);
+
   // ── D ──
   ok("D: a settings_crm-only reader has Company in the Settings rail", await boot({
     role: "user", access: { settings_crm: "view" },

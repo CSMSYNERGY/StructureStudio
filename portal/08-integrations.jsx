@@ -3107,6 +3107,16 @@ function TaxCodesCard({ canReadTax = false, canEditTax = false }) {
   };
 
   const save = async () => {
+    // tax_codes_save REPLACES the whole set, so a codeless row is dropped from the payload. That is
+    // harmless for a suggested row nobody has coded yet, but an item MOVED into it from a saved row
+    // would have its saved code deleted without a word. Refuse only that case: a codeless row
+    // holding something that already has a code on the server.
+    const saved = data && !data.err ? taxCoverage(taxSavedRows(data)) : new Map();
+    const orphaned = rows.filter((r) => !r.code && r.targets.some((id) => saved.has(id)));
+    if (orphaned.length) {
+      setMsg({ err: "Some items that already have a tax code are now in a row with no code. Pick a code for that row, or move those items back, then save." });
+      return;
+    }
     const send = rows.filter((r) => r.code && r.targets.length > 0)
       .map((r) => ({ code: r.code, targets: r.targets.map(taxTargetOf) }));
     setBusy(true); setMsg(null);
