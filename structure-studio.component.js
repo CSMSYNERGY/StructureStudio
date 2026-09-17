@@ -7802,25 +7802,43 @@ function buildShed3DModel(THREE, p) {
       post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
       pg.add(part(post, "post"));
     }
+    // The front: a wood board over the rafter tails. Its bottom is needed by the cheeks below.
+    const boardH = (SHEATH + RAF_D) / cosA;
+    const boardBot = yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH;
     // A sided cheek each side, from the wall to the board over the rafter tails and down to the post
     // tops, with no side beam — as on the building. Its faces carry the cladding (wallMat, feet UVs
     // from the shape); the thin sides and the underside take gableMat, plain body colour, because
     // the cladding's UVs striped them.
+    //
+    // THE FRONT CORNER. The board's bottom sits above the post tops (0.05 ft at 2:12, more on a
+    // flatter porch roof), so a cheek bottom run at post-top height all the way out to the board
+    // left its body-colour underside and end showing past the post's face: a small light block at
+    // both front corners. Past the post's face the cheek now steps up to the board's bottom, and a
+    // wood block the cheek's thickness fills the step, so post and board read as one piece of
+    // lumber, as on the building. The notch alone left a light step face over the post; stopping
+    // the cheek at the post's face opened a gap under the roof.
     const dC = dEnd - FAS_T;
+    const stepUp = boardBot - geom.postH > 0.005 && dC - D > 0.005;
     for (const s of [-1, 1]) {
       const sh = new THREE.Shape();
-      sh.moveTo(dWall, geom.postH); sh.lineTo(dC, geom.postH); sh.lineTo(dC, yU(dC)); sh.lineTo(dWall, yU(dWall));
+      sh.moveTo(dWall, geom.postH);
+      if (stepUp) { sh.lineTo(D, geom.postH); sh.lineTo(D, boardBot); sh.lineTo(dC, boardBot); } else sh.lineTo(dC, geom.postH);
+      sh.lineTo(dC, yU(dC)); sh.lineTo(dWall, yU(dWall));
       const cg = new THREE.ExtrudeGeometry(sh, { depth: CHEEK_T, bevelEnabled: false });
       const cheek = new THREE.Mesh(cg, (cg.groups && cg.groups.length === 2) ? [wallMat, gableMat] : wallMat);
       cheek.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -u
       cheek.position.x = s > 0 ? side : -side + CHEEK_T;
       pg.add(part(cheek, "cheek"));
+      if (stepUp) {
+        const fill = box(woodMat, CHEEK_T, boardBot - geom.postH, dC - D);
+        fill.position.set(s * (side - CHEEK_T / 2), (geom.postH + boardBot) / 2, (D + dC) / 2);
+        pg.add(part(fill, "cornerFill"));
+      }
       // The rake trim along the porch roof's side edge.
       pg.add(part(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
     }
-    // The front: a wood board over the rafter tails and the roof's dark drip edge above it, both the
-    // roof's full width, which closes the corners past the cheeks and rake trims.
-    const boardH = (SHEATH + RAF_D) / cosA;
+    // The board and the roof's dark drip edge above it, both the roof's full width, which closes the
+    // corners past the cheeks and rake trims.
     const board = box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
     board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
     pg.add(part(board, "board"));

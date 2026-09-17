@@ -17,17 +17,19 @@
 //   5. the frame: the rafters (model.porch.nRaf) hang from the ceiling boards inside the cheeks,
 //      the ledger's top is ceilWall + RAF_D on the wall, and a cheek each side runs from the wall
 //      to the front board and from the post tops to the ceiling
-//   6. no recessed set-back: the porch-end wall spans the footprint, flush with it
-//   7. the ground label on the porch wall stands more than D + 2 out
-//   8. a ramp on the porch wall starts at the deck's edge; a flood light there hangs under the
+//   6. the front corners: no cheek past the post's face below the front board (the light block),
+//      and the step there is closed in wood from the post top to the board
+//   7. no recessed set-back: the porch-end wall spans the footprint, flush with it
+//   8. the ground label on the porch wall stands more than D + 2 out
+//   9. a ramp on the porch wall starts at the deck's edge; a flood light there hangs under the
 //      porch ceiling (ceilWall - 0.45)
-//   9. the porch roof sheet shares the main roof's material (metal: with its sky); posts take
+//  10. the porch roof sheet shares the main roof's material (metal: with its sky); posts take
 //      colors.wood, else the natural fallback
-//  10. the plate band: 2 meshes with the porch (whose high edge is exactly H - 0.2), 1 on a recessed
+//  11. the plate band: 2 meshes with the porch (whose high edge is exactly H - 0.2), 1 on a recessed
 //      porch's building (none on its porch end), and neither kind of porch group there. Where the
 //      main roof pushes the porch roof lower, the band on the porch's end reaches down to it (H)
-//  11. porchOutFt 0 draws no porch; look-inside hides the porch roof and keeps the deck
-//  12. zero page errors
+//  12. porchOutFt 0 draws no porch; look-inside hides the porch roof and keeps the deck
+//  13. zero page errors
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -225,16 +227,31 @@ async function measure(page, W, L) {
     const outDist = (bb) => outOn(P.wall, bb);
     const nearDist = (bb) => ({ south: bb.mn[2] - L / 2, north: -L / 2 - bb.mx[2], east: bb.mn[0] - W / 2, west: -W / 2 - bb.mx[0] })[P.wall];
     const across = (bb) => (P.wall === "south" || P.wall === "north") ? [bb.mn[0], bb.mx[0]] : [bb.mn[2], bb.mx[2]];
+    const dOf = (v) => ({ south: v.z - L / 2, north: -L / 2 - v.z, east: v.x - W / 2, west: -W / 2 - v.x })[P.wall];
     // Every member by its tag, never by its size: a member built the wrong size must still be found.
     const partsOf = (name) => { const a = []; pg.traverse((q) => { if (q.isMesh && q.userData && q.userData.ssPorchPart === name) a.push(q); }); return a; };
     const boxOf = (q) => { const b = bbOf(q); return { minY: b.mn[1], maxY: b.mx[1], near: nearDist(b), out: outDist(b), across: across(b), color: hex(Array.isArray(q.material) ? q.material[0] : q.material) }; };
     const db = bbOf(decks[0]);
     out.deck = { top: db.mx[1], out: outDist(db), visibleChain: true };
-    const NAMES = ["slab", "ceiling", "rafter", "header", "post", "cheek", "rake", "board", "drip", "ledger"];
+    const NAMES = ["slab", "ceiling", "rafter", "header", "post", "cheek", "cornerFill", "rake", "board", "drip", "ledger"];
     out.parts = Object.fromEntries(NAMES.map((n) => [n, partsOf(n).map(boxOf)]));
     let untagged = 0;
     pg.traverse((q) => { if (q.isMesh && !(q.userData && q.userData.ssPorchPart)) untagged++; });
     out.untagged = untagged;
+    // THE FRONT CORNERS: every cheek vertex out past the posts' face (d > D) that sits below the
+    // front board's bottom. Each one is body-colour cheek showing under the board: the light block.
+    const boards = partsOf("board");
+    const boardBot = boards.length ? Math.min(...boards.map((q) => bbOf(q).mn[1])) : null;
+    out.boardBot = boardBot;
+    out.cheekStub = [];
+    if (boardBot != null) partsOf("cheek").forEach((q) => {
+      const pos = q.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const v = new V(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(q.matrixWorld);
+        const d = dOf(v);
+        if (d > P.D + 0.005 && v.y < boardBot - 0.005) out.cheekStub.push([+d.toFixed(3), +v.y.toFixed(3)]);
+      }
+    });
     // The sheet.
     const slab = partsOf("slab")[0];
     if (slab) {
@@ -377,6 +394,11 @@ async function runCase(ctx, c, ok, shots) {
         ch.length === 2 && ch.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - yU(P.dWall)) < 0.01 && Math.abs(q.near - P.dWall) < 0.005 && Math.abs(q.out - dC) < 0.005 && Math.abs(q.across[1] - q.across[0] - Z.CHEEK_T) < 0.005)
           && Math.abs(Math.abs(ch[0].across[0]) - P.side) < 0.005 && Math.abs(Math.abs(ch[1].across[1]) - P.side) < 0.005,
         ch.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} u ${q.across.map(f3)}`).join(" | "));
+      ok(`${tag}: no cheek shows below the front board past the posts' face (the corner block)`, m.boardBot != null && m.cheekStub.length === 0, `board bottom ${f3(m.boardBot)} stub ${JSON.stringify(m.cheekStub.slice(0, 4))}`);
+      const fills = parts.cornerFill;
+      ok(`${tag}: ...and each front corner is closed in wood from the post top to the board`,
+        fills.length === 2 && m.boardBot > P.postH && fills.every((q) => Math.abs(q.minY - P.postH) < 0.005 && Math.abs(q.maxY - m.boardBot) < 0.005 && Math.abs(q.near - P.D) < 0.005 && Math.abs(q.out - dC) < 0.005 && q.color === c.wood),
+        fills.map((q) => `y ${f3(q.minY)}..${f3(q.maxY)} d ${f3(q.near)}..${f3(q.out)} ${q.color}`).join(" | "));
       ok(`${tag}: no recessed set-back: the porch-end wall spans the footprint, flush`,
         m.wallAcross && (m.wallAcross[1] - m.wallAcross[0]) > ((P.wall === "south" || P.wall === "north") ? W : L) - 0.05 && Math.abs(m.wallOut) < 0.3,
         `across ${m.wallAcross && m.wallAcross.map(f3)} out ${f3(m.wallOut)}`);
