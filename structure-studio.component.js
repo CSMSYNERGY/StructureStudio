@@ -4962,6 +4962,9 @@ const D3_COLORS = {
   body: "#CDBA92", trim: "#8F7B55", roof: "#565C66",
   floor: "#B7AC99", ground: "#DCE2D8", door: "#77664C",
   glass: "#B9D8EA", loft: "#C2A67D", bench: "#8B7355", ramp: "#9AA0A6",
+  // Natural lumber, for a projecting porch whose style sets no colors.wood (posts, header, rafters,
+  // ceiling, the board over the rafter tails, deck). The sanitizer never writes it into a style.
+  wood: "#C4965A",
 };
 
 // Curated paint swatches for the 3D color picker. The LABEL is what lands in
@@ -5832,6 +5835,12 @@ function buildShed3DModel(THREE, p) {
   const ftX = (px) => (px - mgX) / scale - bldgW / 2;
   const ftZ = (py) => (py - mgY) / scale - bldgH / 2;
 
+  // The style's roof, resolved before anything is placed. The WALLS table and the roof section
+  // below read this same binding rather than re-deriving one, and the ground labels need it now:
+  // a projecting porch (d3ProjectingPorch, 2026-09-17) moves the label on its wall out past the deck.
+  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
+  const porchOut = d3ProjectingPorch(roofCfg, bldgW, bldgH);
+
   // Environment: grass field to the horizon + on-ground dimension labels
   // (SmartBuild-style landscape; the "Landscape" toggle hides this group).
   const envGroup = new THREE.Group();
@@ -5854,7 +5863,8 @@ function buildShed3DModel(THREE, p) {
     const len = (pos === "north" || pos === "south") ? bldgW : bldgH;
     const lbl = d3MakeGroundLabel(THREE, `${want} - ${Math.round(len)}'`, lblH);
     if (!lbl) return;
-    const off = 2 + lblH;
+    // A projecting porch's deck stands D out from its wall, so that wall's label moves out with it.
+    const off = 2 + lblH + (porchOut && pos === porchOut.wall ? porchOut.D : 0);
     const holder = new THREE.Group();
     if (pos === "north") { holder.position.set(0, 0, -bldgH / 2 - off); holder.rotation.y = Math.PI; }
     else if (pos === "south") { holder.position.set(0, 0, bldgH / 2 + off); }
@@ -5910,10 +5920,8 @@ function buildShed3DModel(THREE, p) {
   // Wall frames: O = the wall's along=0 end (in x/z), U = unit vector along the
   // wall, N = exterior normal. `along` runs west→east on N/S walls and
   // north→south on E/W walls — exactly how the 2D snap logic measures items.
-  // Hoisted above the WALLS table: the recessed porch has to know which ends are GABLE ends
-  // before it can decide which walls move, and d3RoofAxes reads this. The roof section below
-  // uses the same binding rather than re-deriving one.
-  const roofCfg = (p.styleSpec && p.styleSpec.roof) || D3_DEFAULT_ROOF;
+  // roofCfg is resolved further up, above the ground labels: the recessed porch has to know which
+  // ends are GABLE ends before it can decide which walls move, and d3RoofAxes reads it.
   // ── RECESSED PORCH (Carolyn 2026-09-03; shape settled 2026-09-05) ────────────────────────────────────────
   // Carolyn, looking at a competitor: "even they build it like this. They do it like this ...
   // Do you see how this roof just comes down like that?" ([08:00])
@@ -5935,7 +5943,9 @@ function buildShed3DModel(THREE, p) {
   // and a wall clamped to zero length is a crash rather than a shape.
   const porchAxes = d3RoofAxes(roofCfg, bldgW, bldgH);
   const porchRun = porchAxes.uAxisIsX ? bldgH : bldgW;        // the run a porch eats into
-  const porchDepth = Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
+  // A projecting porch wins over a recessed one. The sanitizer never stores both; raw data holding
+  // both draws the projecting porch and no set-back, and ssPorchTrussWall drops the truss to match.
+  const porchDepth = porchOut ? 0 : Math.max(0, Math.min(Number(roofCfg.porchDepthFt) || 0, porchRun - 4));
   const porchOn = porchDepth > 0.5;
   // "FRONT" IS SOUTH for a gable or gambrel roof on a portrait footprint (2026-09-14) — the
   // footprints whose gable ends are north/south. A shed roof swaps the axes in d3RoofAxes, so it
@@ -6978,7 +6988,10 @@ function buildShed3DModel(THREE, p) {
     // brace feet, with siding showing between. Both ends share the one layout (the batten
     // splitter takes one rect, and a building's two gable vents match), so the far end's vent
     // rises with it — 3 in more sill on a wall nobody sees beside the first.
-    const VENT_SILL = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
+    // Over a PLATE BAND (roof.plateBand) the sill clears the band's top by the same 0.1 ft, on both
+    // ends: ssGableVentFit's rule for a placed vent, so the two vents sit alike.
+    const VENT_SILL0 = porchTrussOn ? Math.max(2 / 12, TRUSS_FOOT + 0.1 - H + F) : 2 / 12;
+    const VENT_SILL = roofCfg.plateBand === true ? Math.max(VENT_SILL0, SS_PLATE_BAND_TOP + 0.1 + F) : VENT_SILL0;
     let vW = S * Math.min(0.6, Math.max(0.05, gv.widthFrac));
     let vH = vW / 2;                                     // 2:1 wide-to-tall, as measured
     let vCy = H + VENT_SILL + vH / 2;
@@ -7702,6 +7715,167 @@ function buildShed3DModel(THREE, p) {
       rg.add(rake);
     });
   });
+  // ── PROJECTING PORCH (roof.porchOutFt, 2026-09-17) ──────────────────────────────────────────
+  // A deck, posts and a low roof of its own IN FRONT of one gable end, as on the Barnstead
+  // walk-around: a 16x24 gambrel with a 6.5 ft porch across its front end. The recessed porch above
+  // is cut into the building under the main roof; this one stands outside it, and
+  // d3ProjectingPorch keeps the two from ever both drawing. Every number is d3PorchGeom's, the
+  // function the calibration panel's readout calls too.
+  //
+  // Built in the porch's own frame `pg`: x = profile u, y = up, z = d = feet OUT from the gable
+  // wall's mid-plane. pg lives in rg, so look-inside and the Roof toggle hide it with the roof, the
+  // way they hide the lean-to and the truss. The DECK does not hide: it is floor, so it goes in a
+  // twin group that joins root with rg's transform once rg is placed (after `roofGroup.add(rg)`).
+  //
+  // ⚠️ BUILD ORDER. Here: after every slab, fascia, rake board and lean-to is in rg, and BEFORE the
+  // plate band, the vents and the cap strips. The high edge is measured off what the main roof has
+  // already built, and a band built first would push the porch roof down under the band's own
+  // bottom instead of tucking it against it. The porch reads no items, so only the full build draws
+  // it; a porch, band or wood change reaches it through the spec, which forces a full build.
+  let porchDeckGroup = null;
+  const porchGeom = (() => {
+    if (!porchOut) return null;
+    const D = porchOut.D;
+    // The cap end it stands off, local z = 0 or z = L: the recessed porch's porchAtLocalZero rule.
+    const onNegEnd = porchOut.wall === "north" || porchOut.wall === "west";
+    const atZero = uAxisIsX ? onNegEnd : !onNegEnd;
+    // HIGH EDGE: under everything the main roof has already built that reaches past the wall face
+    // into the porch's width — a rake or fascia on a deep overhang, open-eave fly rafters, a lean-to
+    // slab. Read off the meshes themselves (rg is untransformed here), so there is no second copy of
+    // the eave arithmetic. Conservative: the box around a sloped rake reports its lowest corner,
+    // which can cost a deep overhang a few inches of porch height it did not need to lose.
+    const g0 = d3PorchGeom(S, H, D, trimFace, Infinity);
+    const reach = g0.side + g0.sizes.SIDE_OV;
+    let capY = Infinity;
+    const bb = new THREE.Box3();
+    rg.children.forEach((o) => {
+      if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
+      bb.setFromObject(o);
+      const past = atZero ? -bb.min.z : bb.max.z - L;
+      if (past <= g0.dWall + 0.005 || bb.max.x < -reach || bb.min.x > reach) return;
+      capY = Math.min(capY, bb.min.y - 0.03);
+    });
+    const geom = d3PorchGeom(S, H, D, trimFace, capY);
+    const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;
+    const { pitch, yHigh, side, dWall, dPost, dEnd } = geom;
+    const ang = Math.atan(pitch), cosA = Math.cos(ang), sinA = Math.sin(ang);
+    const yTop = (d) => yHigh - pitch * (d - dWall);            // the porch roof's top plane
+    const yU = (d) => yTop(d) - (PR_T + SHEATH) / cosA;         // the underside of the ceiling boards
+    // colors.wood colours this porch and nothing else: the recessed porch, the truss, the lean-to
+    // and open-eave tails keep their own materials.
+    const woodMat = mat((p.styleSpec && p.styleSpec.colors && p.styleSpec.colors.wood) || D3_COLORS.wood, { roughness: 0.9 });
+    const pg = new THREE.Group(), deck = new THREE.Group();
+    // A box lying on the slope, its top face `off` below the roof's top plane, spanning d0..d1.
+    const onSlope = (m, d0, d1, uc, w, t, off) => {
+      const b = box(m, (d1 - d0) / cosA, t, w);
+      const dm = (d0 + d1) / 2, k = off + t / 2;
+      b.position.set(uc, yTop(dm) - cosA * k, dm - sinA * k);
+      b.rotation.set(0, -Math.PI / 2, -ang);
+      return b;
+    };
+    // The roof sheet takes the SHARED roofMat, so the customer's roof colour, the metal or shingle
+    // texture and the metal's sky all follow, with the ribs running down the slope.
+    const slab = onSlope(roofMat, dWall, dEnd, 0, 2 * (side + SIDE_OV), PR_T, 0);
+    d3RoofSlabUVs(slab);
+    pg.add(slab);
+    // Wood ceiling boards under the sheet, and 2x6 rafters every 2 ft under those, held inboard of
+    // the cheeks (in the first cut the outer rafter hid the cheek).
+    pg.add(onSlope(woodMat, dWall, dEnd - FAS_T, 0, 2 * side, SHEATH, PR_T));
+    const rafU = side - CHEEK_T - RAF_W / 2;
+    for (let i = 0; i < geom.nRaf; i++) {
+      pg.add(onSlope(woodMat, dWall + 0.05, dEnd - FAS_T, -rafU + (i * 2 * rafU) / (geom.nRaf - 1), RAF_W, RAF_D, PR_T + SHEATH));
+    }
+    // The header on the posts, flush with the rafters. Its ends stop just inside the cheeks: level
+    // with their outer faces the wood and the siding z-fought in a stipple at both front corners.
+    const hdr = box(woodMat, 2 * (side - CHEEK_T) + 0.02, HDR_H, HDR_D);
+    hdr.position.set(0, geom.hdrTop - HDR_H / 2, dPost);
+    pg.add(hdr);
+    // Posts, evenly spaced, the outer two flush with the corner boards. A centre post may stand in
+    // front of a door: posts are a rule, not item-aware, because items move in scoped rebuilds that
+    // never rebuild the roof.
+    for (let i = 0; i <= geom.bays; i++) {
+      const post = box(woodMat, POST, geom.postH, POST);
+      post.position.set(-(side - POST / 2) + (i * 2 * (side - POST / 2)) / geom.bays, geom.postH / 2, dPost);
+      pg.add(post);
+    }
+    // A sided cheek each side, from the wall to the board over the rafter tails and down to the post
+    // tops, with no side beam — as on the building. Its faces carry the cladding (wallMat, feet UVs
+    // from the shape); the thin sides and the underside take gableMat, plain body colour, because
+    // the cladding's UVs striped them.
+    const dC = dEnd - FAS_T;
+    for (const s of [-1, 1]) {
+      const sh = new THREE.Shape();
+      sh.moveTo(dWall, geom.postH); sh.lineTo(dC, geom.postH); sh.lineTo(dC, yU(dC)); sh.lineTo(dWall, yU(dWall));
+      const cg = new THREE.ExtrudeGeometry(sh, { depth: CHEEK_T, bevelEnabled: false });
+      const cheek = new THREE.Mesh(cg, (cg.groups && cg.groups.length === 2) ? [wallMat, gableMat] : wallMat);
+      cheek.rotation.y = -Math.PI / 2;                    // shape x -> d, extrusion -> -u
+      cheek.position.x = s > 0 ? side : -side + CHEEK_T;
+      pg.add(cheek);
+      // The rake trim along the porch roof's side edge.
+      pg.add(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06));
+    }
+    // The front: a wood board over the rafter tails and the roof's dark drip edge above it, both the
+    // roof's full width, which closes the corners past the cheeks and rake trims.
+    const boardH = (SHEATH + RAF_D) / cosA;
+    const board = box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
+    board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
+    pg.add(board);
+    const drip = box(trimMat, 2 * (side + SIDE_OV), 0.16, 0.05);
+    drip.position.set(0, yTop(dEnd) - 0.06, dEnd + 0.025);
+    pg.add(drip);
+    // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
+    // trimFace), its ends buried in the corner boards.
+    const LED_H = 0.3, ledFace = trimFace + 0.04;
+    const ledger = box(trimMat, S, LED_H + RAF_D, ledFace);
+    ledger.position.set(0, geom.ceilWall + RAF_D - (LED_H + RAF_D) / 2, ledFace / 2);
+    pg.add(ledger);
+    // DECK at floor level: boards parallel to the wall with 0.03 ft gaps, a rim on the three open
+    // sides, and a dark plane under the gaps so they do not show grass. The floor is never raised,
+    // so the rim is the 0.23 ft left inside the slab's band, not the real building's 0.6 ft board.
+    const DECK_T = 0.09, BOARD = 0.46, GAP = 0.03, RIM_T = 0.12, RIM_H = Math.max(0.1, D3.FLOOR_T - DECK_T - 0.03);
+    const nB = Math.max(1, Math.round((D - dWall) / (BOARD + GAP)));
+    const boardStep = (D - dWall) / nB;
+    for (let i = 0; i < nB; i++) {
+      const b = box(woodMat, 2 * side, DECK_T, boardStep - GAP);
+      b.position.set(0, -DECK_T / 2, dWall + (i + 0.5) * boardStep);
+      deck.add(b);
+    }
+    const rimFront = box(woodMat, 2 * side, RIM_H, RIM_T);
+    rimFront.position.set(0, -DECK_T - RIM_H / 2, D - RIM_T / 2);
+    deck.add(rimFront);
+    for (const s of [-1, 1]) {
+      const rim = box(woodMat, RIM_T, RIM_H, D - dWall - RIM_T);
+      rim.position.set(s * (side - RIM_T / 2), -DECK_T - RIM_H / 2, (dWall + D - RIM_T) / 2);
+      deck.add(rim);
+    }
+    const under = box(mat("#3B3024", { roughness: 1 }), 2 * side - 2 * RIM_T, 0.02, D - dWall - RIM_T);
+    under.position.set(0, -DECK_T - 0.06, (dWall + D - RIM_T) / 2);
+    deck.add(under);
+    [pg, deck].forEach((grp) => { grp.position.z = atZero ? 0 : L; grp.rotation.y = atZero ? Math.PI : 0; });
+    pg.userData.ssPorch = "roof";
+    rg.add(pg);
+    porchDeckGroup = new THREE.Group();
+    porchDeckGroup.userData.ssPorch = "deck";
+    porchDeckGroup.add(deck);
+    return geom;
+  })();
+  // ── PLATE BAND (roof.plateBand, 2026-09-17) ──
+  // A 0.3 ft trim board across both gable caps at the top of the wall, H - 0.2 to
+  // H + SS_PLATE_BAND_TOP: the belly band both gable ends of the Barnstead show, and the line a
+  // projecting porch's roof tucks under (d3PorchGeom's high edge is the band's bottom). Its own key,
+  // independent of the porch. Deep enough to cover the step where a flush cap meets the wall and to
+  // stand in front of battens and ribs. A recessed porch's end has no wall under its cap, so no band.
+  // Built after the porch's scan, which would otherwise read the band as main roof.
+  if (roofCfg.plateBand === true) {
+    [[0, -1, capOut0], [L, 1, capOutL]].forEach(([z0, s, co]) => {
+      if (capPorchEnd === z0) return;
+      const back = Math.min(co, T / 2) - 0.01, face = Math.max(trimFace, capReliefFace(co)) + 0.03;
+      const band = box(trimMat, S + 2 * (trimFace + 0.01), 0.3, face - back);
+      band.position.set(0, H + SS_PLATE_BAND_TOP - 0.15, z0 + s * (back + face) / 2);
+      band.userData.ssPorch = "band";
+      rg.add(band);
+    });
+  }
   // ── Louvered gable vent, both ends ──────────────────────────────────────────────────
   // Applied boxes proud of the extrusion's end CAPS (local z = 0 and z = L), NOT a hole
   // in the profile: one hole extrudes the whole length L and punches out through the far
@@ -7783,6 +7957,12 @@ function buildShed3DModel(THREE, p) {
   if (uAxisIsX) { rg.position.z = -L / 2; }
   else { rg.rotation.y = -Math.PI / 2; rg.position.x = L / 2; }
   roofGroup.add(rg);
+  // The projecting porch's deck joins root with rg's transform, so look-inside keeps it like the floor.
+  if (porchDeckGroup) {
+    porchDeckGroup.position.copy(rg.position);
+    porchDeckGroup.rotation.copy(rg.rotation);
+    root.add(porchDeckGroup);
+  }
   // Corner trim boards live in roofGroup so "look inside" hides them with the roof.
   // Half-extent from trimFace, not a constant of its own: the post must reach past the
   // cladding's proudest surface or the siding renders through it — the 2026-08-27 lap bug,
@@ -7856,7 +8036,10 @@ function buildShed3DModel(THREE, p) {
         // and never higher than H - 0.75. The harness asserts that gap against the fascia it
         // measures in the scene.
         const EAVE_CAP = Math.min(H - 0.75, eaveHangY - 0.45);
-        const top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        let top = gableEnd ? Math.max(EAVE_CAP, profYAt(u) - 0.5) : EAVE_CAP;
+        // On a projecting porch's wall it hangs under the porch ceiling, the way it hangs under an
+        // eave: rising into the gable would put it behind the porch roof.
+        if (porchGeom && it.wall === porchOut.wall) top = Math.min(top, porchGeom.ceilWall - 0.45);
         const y = Math.min(hFt != null ? hFt : EAVE_CAP, top);
         const dark = mat("#2B2F36", { roughness: 0.6, metalness: 0.3 });
         // Base from just inside the bare wall face out past the cladding, so battens and lap
@@ -8093,10 +8276,13 @@ function buildShed3DModel(THREE, p) {
       deck.position.set(0, -drop / 2 + 0.06, run / 2);
       g.add(deck);
       g.rotation.y = Math.atan2(wf.N[0], wf.N[1]); // local +z → exterior normal
+      // On a projecting porch's wall it starts at the deck's edge. The deck top is the floor, so the
+      // drop is unchanged. (The 2D plan still draws it at the wall.)
+      const rampOut = porchOut && it.wall === porchOut.wall ? porchOut.D : T / 2;
       g.position.set(
-        wf.O[0] + wf.U[0] * along + wf.N[0] * (T / 2),
+        wf.O[0] + wf.U[0] * along + wf.N[0] * rampOut,
         0,
-        wf.O[1] + wf.U[1] * along + wf.N[1] * (T / 2)
+        wf.O[1] + wf.U[1] * along + wf.N[1] * rampOut
       );
       interiorGroup.add(g);
     } else if (c.propType) {
@@ -8131,6 +8317,7 @@ function buildShed3DModel(THREE, p) {
   envGroup.traverse((o) => { if (o.isMesh) o.castShadow = false; });
   ground.receiveShadow = true;
   floor.receiveShadow = true;
+  if (porchDeckGroup) porchDeckGroup.traverse((o) => { if (o.isMesh) o.receiveShadow = true; });
 
   // Scoped rebuilds for the live drag. sharedMats = the model-lifetime wall and
   // trim materials that per-wall disposal must keep (their maps ride along, so
@@ -8139,7 +8326,10 @@ function buildShed3DModel(THREE, p) {
   // The roof does NOT re-home -- see d3RoofAxes -- so that rebuild produces an
   // identical roof and could one day be narrowed to the label group alone.
   const sharedMats = new Set([wallMat, trimMat, battenMat]);
-  const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall };
+  // porch: the projecting porch's numbers as built (d3PorchGeom plus its depth and wall), or null.
+  // Read by tests/harness/porchProbe.mjs.
+  const model = { root, envGroup, wallMat, trimMat, battenMat, gableMat, roofGroup, openingsGroup, wallsGroup, interiorGroup, builtFrontWall: frontWall,
+    porch: porchGeom ? { ...porchGeom, D: porchOut.D, wall: porchOut.wall } : null };
   model.rebuildWalls = (names, itemsNow) => {
     names.forEach((wname) => {
       if (!WALLS[wname]) return;
