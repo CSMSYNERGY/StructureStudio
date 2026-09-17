@@ -2580,7 +2580,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     //      not discard a rate the builder paid for. A staff resubmit carries it while the
     //      delivery state and ZIP are unchanged, and otherwise falls through to 2-4 with
     //      "address changed — re-verify";
-    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 244);
+    //   2. the rate of this quote's sales location (designs.sales_location_id, migration 245);
     //   3. a staff member issuing a quote for the FIRST time (no quote number before this
     //      submit) that has no location: their home lot's rate (migration 234), and that lot is
     //      recorded as the quote's location after the persist below. Never on a resubmit: an
@@ -2635,7 +2635,7 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
         // rate would be emailed at a total the builder did not set, and the next resubmit
         // would quietly change it. Nothing about the quote has been written yet; a first issue
         // loses its allocated number, as it does on every refusal after the allocation above.
-        // This is also what a deploy ahead of migration 244 looks like.
+        // This is also what a deploy ahead of migration 245 looks like.
         await logEdgeError({
           fn: "submit-estimate", req, clientId, code: "tax_location_read_failed",
           message: `sales location read failed: ${(e as { message?: string })?.message ?? String(e)}`,

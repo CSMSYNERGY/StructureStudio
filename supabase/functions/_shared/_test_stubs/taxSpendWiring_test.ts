@@ -12,7 +12,7 @@
 //   3. the charge moved ahead of the quote write, or out of restampQuoteTax's afterWrite —
 //      a builder billed for a rate that never reached a document;
 //   4. the invoice-time check writing a total, or the old answer-keyed tax_invoice charge back;
-//   5. the switch read folded into send_invoice's settings select, where an unapplied 243 would
+//   5. the switch read folded into send_invoice's settings select, where an unapplied 244 would
 //      null the row and send an SS tenant down the CRM path;
 //   6. avalara_ping added to the read-only list, or answering with the raw ping;
 //   7. the accept-race check placed after the acceptance is recorded;

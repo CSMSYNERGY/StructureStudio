@@ -35,7 +35,7 @@
  *     credentials are set;
  *   • a 4xx other than 429 is never retried — asking again changes nothing and costs again;
  *   • every lookup that reached the network is reported back through `onResult`, so the caller
- *     can write it to its ledger (tax_lookups, migration 243) whatever the outcome.
+ *     can write it to its ledger (tax_lookups, migration 244) whatever the outcome.
  * The answer is also APPROXIMATE: a general rate for the address, no product taxability and no
  * origin/destination sourcing. Anything a builder or customer reads says "verified against the
  * delivery address", never "exact".
@@ -68,7 +68,7 @@ export interface TaxAddress {
 }
 
 /** Why a lookup that reached the network did not produce a rate. Mirrors the `outcome` CHECK on
- *  tax_lookups (migration 243), which adds 'ok' and 'not_configured'. */
+ *  tax_lookups (migration 244), which adds 'ok' and 'not_configured'. */
 export type AvalaraFailure =
   | "credentials_rejected" // 401/403: the account id or licence key is wrong
   | "subscription"         // 401/403 naming a missing entitlement — right key, wrong plan

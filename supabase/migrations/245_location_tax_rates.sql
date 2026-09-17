@@ -1,7 +1,7 @@
--- 244_location_tax_rates.sql — a tax rate per sales location, and the location a quote was sold
+-- 245_location_tax_rates.sql — a tax rate per sales location, and the location a quote was sold
 -- from.
 --
--- APPLY BY HAND through the SQL editor, as the owner, then record version 244 in
+-- APPLY BY HAND through the SQL editor, as the owner, then record version 245 in
 -- supabase_migrations.schema_migrations. NEVER `supabase db push`. Not as a whole file inline
 -- from the CLI: "<newline>$(cat …)" was refused as an EMPTY query when 242 was applied (see
 -- 242_lead_sms_consent_box.sql), and inside a double-quoted bash string `$probe$` expands to
@@ -9,7 +9,7 @@
 --   select pg_get_constraintdef(oid) from pg_constraint where conname = 'designs_sales_location_fk';
 --     -- must end in ON DELETE SET NULL (sales_location_id)
 -- The probe at the bottom runs inside the transaction and aborts the whole file if any property
--- below does not hold. Independent of 243; either may be applied first.
+-- below does not hold. Independent of 244; either may be applied first.
 --
 -- ── WHY ───────────────────────────────────────────────────────────────────────────────────
 -- The free default rate a quote is taxed at becomes a chain: a verified Avalara rate carried
@@ -76,9 +76,9 @@ alter table public.builder_locations
   check (tax_label is null or char_length(tax_label) <= 40);
 
 comment on column public.builder_locations.tax_rate is
-  'Migration 244. This lot''s local sales tax rate as a FRACTION (0.0725 = 7.25%). NULL = none; quotes from this lot use the company rate. Set in settings (save_location_tax). A local rate, not a verified one.';
+  'Migration 245. This lot''s local sales tax rate as a FRACTION (0.0725 = 7.25%). NULL = none; quotes from this lot use the company rate. Set in settings (save_location_tax). A local rate, not a verified one.';
 comment on column public.builder_locations.tax_label is
-  'Migration 244. What the tax row is called on a quote taxed at this lot''s rate. NULL = the company label.';
+  'Migration 245. What the tax row is called on a quote taxed at this lot''s rate. NULL = the company label.';
 
 -- 2 + 3. The link. Dropped in dependency order first so a re-run rebuilds cleanly: the foreign
 -- key depends on the unique constraint.
@@ -102,7 +102,7 @@ create index if not exists designs_sales_location
   where sales_location_id is not null;
 
 comment on column public.designs.sales_location_id is
-  'Migration 244. The sales location (builder_locations) this quote was sold from; its tax_rate is the quote''s default rate when set. Composite FK with client_id, so it can only name a location of the same tenant; deleting the location nulls this column only. Set by staff through portal-settings; save_design never writes it.';
+  'Migration 245. The sales location (builder_locations) this quote was sold from; its tax_rate is the quote''s default rate when set. Composite FK with client_id, so it can only name a location of the same tenant; deleting the location nulls this column only. Set by staff through portal-settings; save_design never writes it.';
 
 -- 4. The probe. Everything it writes is undone by the ROLLBACK_PROBE exception; any other
 --    exception aborts the whole file. Synthetic tenants, a draft design (the orders trigger
@@ -116,31 +116,31 @@ declare
 begin
   begin
     insert into public.builder_locations (client_id, name, state, zip, tax_rate, tax_label)
-    values ('probe-244-tenant-a', 'Probe lot A', 'MO', '63090', 0.0725, 'Sales tax')
+    values ('probe-245-tenant-a', 'Probe lot A', 'MO', '63090', 0.0725, 'Sales tax')
     returning id into a_loc;
     insert into public.builder_locations (client_id, name)
-    values ('probe-244-tenant-b', 'Probe lot B')
+    values ('probe-245-tenant-b', 'Probe lot B')
     returning id into b_loc;
 
     insert into public.designs (short_code, client_id, bldg_w, bldg_h, status, sales_location_id)
-    values ('SS-PROBE244QA', 'probe-244-tenant-a', 10, 12, 'draft', a_loc);
+    values ('SS-PROBE244QA', 'probe-245-tenant-a', 10, 12, 'draft', a_loc);
 
     -- Another tenant's location is refused by the key, not by a caller remembering to check.
     begin
       update public.designs set sales_location_id = b_loc where short_code = 'SS-PROBE244QA';
-      raise exception '244 probe: a design was pointed at another tenant''s location';
+      raise exception '245 probe: a design was pointed at another tenant''s location';
     exception when foreign_key_violation then null;
     end;
 
     -- A percent-shaped rate and an over-long label are refused.
     begin
       update public.builder_locations set tax_rate = 7.25 where id = a_loc;
-      raise exception '244 probe: a percent-shaped location rate was stored';
+      raise exception '245 probe: a percent-shaped location rate was stored';
     exception when check_violation then null;
     end;
     begin
       update public.builder_locations set tax_label = repeat('x', 41) where id = a_loc;
-      raise exception '244 probe: a 41-character tax label was stored';
+      raise exception '245 probe: a 41-character tax label was stored';
     exception when check_violation then null;
     end;
 
@@ -148,8 +148,8 @@ begin
     delete from public.builder_locations where id = a_loc;
     select client_id, sales_location_id into got_client, got_loc
       from public.designs where short_code = 'SS-PROBE244QA';
-    if got_client is distinct from 'probe-244-tenant-a' or got_loc is not null then
-      raise exception '244 probe: deleting a location did not null only sales_location_id (client_id %, location %)',
+    if got_client is distinct from 'probe-245-tenant-a' or got_loc is not null then
+      raise exception '245 probe: deleting a location did not null only sales_location_id (client_id %, location %)',
         got_client, got_loc;
     end if;
 
@@ -157,7 +157,7 @@ begin
   exception
     when others then
       if sqlerrm = 'ROLLBACK_PROBE' then
-        raise notice '244: location rates are bounded; a design can only name its own tenant''s location; deleting a location nulls only the link';
+        raise notice '245: location rates are bounded; a design can only name its own tenant''s location; deleting a location nulls only the link';
       else
         raise;
       end if;

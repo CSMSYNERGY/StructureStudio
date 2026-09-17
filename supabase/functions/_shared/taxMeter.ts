@@ -10,11 +10,11 @@
 //     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
 //       | xargs -0 -I{} perl -0777 -ne 'print "$ARGV\n" if m{import[^;]*?from\s+"[^"]*taxMeter\.ts"}s' {}
 //
-// ⛔ MIGRATION 243 BEFORE THE DEPLOY. Every charge passes `p_meter_kind`, which only 243's
+// ⛔ MIGRATION 244 BEFORE THE DEPLOY. Every charge passes `p_meter_kind`, which only 244's
 // wallet_credit accepts; against the old eight-argument function PostgREST finds no match and
 // the charge fails (reported as `error`, never thrown). Harmless while the meters are
 // disarmed — the arming rail returns before the RPC — but it must be true before arming.
-// The other order is safe: 243 defaults the new parameter, so callers that omit it keep working.
+// The other order is safe: 244 defaults the new parameter, so callers that omit it keep working.
 //
 // ── WHY DIRECT-POST AND NOT A HOLD ─────────────────────────────────────────────────
 // 128's rule is that holds are for expensive, slow, failure-prone meters and cheap ones post
@@ -47,7 +47,7 @@ export type TaxMeterKind = "tax_invoice" | "tax_lookup";
  * How a charge is deduplicated — exactly one of:
  *   `idem`     a key derived from the ACT (taxInvoiceIdem / taxLookupIdem). The automatic paths,
  *              where the thing to collapse is a retried submit or a resent invoice.
- *   `lookupId` the `tax_lookups` row id (migration 243). The deliberate paths — the verify
+ *   `lookupId` the `tax_lookups` row id (migration 244). The deliberate paths — the verify
  *              button and the invoice-time check — where each row is one real request, so a
  *              second press is a second charge even when it returns the same rate. Keying those
  *              on the answer would bill one press and let the next ones through free while
@@ -80,7 +80,7 @@ export type TaxChargeResult =
  * a row id — is never posted (`error`): wallet_credit reads an empty key as "no idempotency",
  * and a charge nothing can deduplicate is one a retry posts twice.
  *
- * The meter kind is recorded on the wallet row (`p_meter_kind`, migration 243), which is what
+ * The meter kind is recorded on the wallet row (`p_meter_kind`, migration 244), which is what
  * lets the Billing tab label a tax debit as one instead of the bare word "Usage".
  */
 export async function chargeTaxCalculation(

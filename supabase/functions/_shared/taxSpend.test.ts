@@ -79,7 +79,7 @@ type Answer = { data?: unknown; error?: unknown; count?: unknown };
 /**
  * A service-role client stub with an in-memory tax_lookups table, a canned meter and a canned
  * wallet row. Records every `from` chain and every RPC. claim_tax_lookup is simulated from the
- * counts given — the atomicity itself is SQL's, proven by migration 243's probe.
+ * counts given — the atomicity itself is SQL's, proven by migration 244's probe.
  */
 function fakeAdmin(opts: {
   count?: number | null;          // the 24-hour count the claim sees; null = the claim call fails

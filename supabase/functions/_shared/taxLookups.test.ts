@@ -5,7 +5,7 @@
 // ones: a claim whose answer cannot be trusted and is treated as written, an insert that failed
 // and is treated as written, a finished row that a second callback rewrites. Every one of those
 // lets calls through that nothing counted. Most of the effort below is on those paths. The cap's
-// atomicity lives in SQL (claim_tax_lookup, migration 243's probe); what is pinned here is that
+// atomicity lives in SQL (claim_tax_lookup, migration 244's probe); what is pinned here is that
 // the function is the one the code calls, with the arguments and the window the code assumes.
 
 import {
@@ -267,23 +267,23 @@ Deno.test("a zero count is a real zero, not a failure", async () => {
   assertEquals(await countLookups24h(makeAdmin({ count: 0 }).admin, "acme"), 0);
 });
 
-// ── The vocabulary matches migration 243 ───────────────────────────────────────────────────
+// ── The vocabulary matches migration 244 ───────────────────────────────────────────────────
 // The outcome and kind lists live in three places: salesTax.ts' AvalaraFailure, this module,
-// and the CHECKs in 243. A value the CHECK does not know fails the ledger write at runtime —
+// and the CHECKs in 244. A value the CHECK does not know fails the ledger write at runtime —
 // on the finish, after the call was already paid for. Read the SHIPPED migration, not a copy.
 // Needs --allow-read (preflight grants it, scoped to the repo); ignored where it is not granted.
 
-const MIGRATION = new URL("../../migrations/243_avalara_tax_lookups.sql", import.meta.url);
+const MIGRATION = new URL("../../migrations/244_avalara_tax_lookups.sql", import.meta.url);
 const canRead = Deno.permissions.querySync({ name: "read", path: MIGRATION }).state === "granted";
 
 Deno.test({
-  name: "every outcome and kind this module can write is allowed by migration 243's CHECKs",
+  name: "every outcome and kind this module can write is allowed by migration 244's CHECKs",
   ignore: !canRead,
   fn: async () => {
     const sql = await Deno.readTextFile(MIGRATION);
     const list = (re: RegExp) => {
       const m = sql.match(re);
-      assert(m, `could not find ${re} in 243`);
+      assert(m, `could not find ${re} in 244`);
       return [...m![1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort();
     };
     const outcomes = list(/outcome is null or outcome in \(([^)]*)\)/);
@@ -300,17 +300,17 @@ Deno.test({
       ...failures.map((f) => finishedColumns({ ok: false, rate: null, jurisdiction: null, httpStatus: null, attempts: 1, failure: f as never }).outcome),
       ...[200, 401, 429, 503, null].map((s) => finishedColumns({ configured: true, authenticated: false, authenticationType: null, httpStatus: s }).outcome),
     ]);
-    for (const o of produced) assert(outcomes.includes(o), `${o} is not allowed by 243`);
+    for (const o of produced) assert(outcomes.includes(o), `${o} is not allowed by 244`);
   },
 });
 
 Deno.test({
-  name: "claim_tax_lookup in migration 243 is the function claimLookup calls: arguments, window, lock, posture",
+  name: "claim_tax_lookup in migration 244 is the function claimLookup calls: arguments, window, lock, posture",
   ignore: !canRead,
   fn: async () => {
     const sql = (await Deno.readTextFile(MIGRATION)).replace(/\r\n/g, "\n");
     const start = sql.indexOf("create function public.claim_tax_lookup(");
-    assert(start >= 0, "migration 243 no longer creates claim_tax_lookup");
+    assert(start >= 0, "migration 244 no longer creates claim_tax_lookup");
     const body = sql.slice(start, sql.indexOf("end $fn$;", start));
     const head = body.match(/^create function public\.claim_tax_lookup\(([\s\S]*?)\) returns jsonb\s+language plpgsql security definer set search_path = ''/);
     assert(head, "claim_tax_lookup is not a SECURITY DEFINER jsonb function with search_path ''");
@@ -388,7 +388,7 @@ Deno.test("pingResponse: a whitelist, not a spread — extra fields, an identity
     { ok: true, configured: true, authenticated: false, authenticationType: "None", httpStatus: 200 });
 });
 
-Deno.test("PING_CLIENT_ID is never a tenant slug, and fits migration 243's client_id CHECK", () => {
+Deno.test("PING_CLIENT_ID is never a tenant slug, and fits migration 244's client_id CHECK", () => {
   assert(!/^[a-z0-9][a-z0-9-]*$/.test(PING_CLIENT_ID), "a tenant could be created with this slug");
   assert(PING_CLIENT_ID.length >= 1 && PING_CLIENT_ID.length <= 100);
 });

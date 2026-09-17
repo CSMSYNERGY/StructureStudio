@@ -1,5 +1,5 @@
 // Per-location tax rates and a quote's sales location, as portal-settings reads and writes them
-// (migration 244, 2026-09-17). The pure half: payload parsing, the percent <-> fraction
+// (migration 245, 2026-09-17). The pure half: payload parsing, the percent <-> fraction
 // round-trip, whether a location can carry a rate at all, and the decision a re-stamp of an
 // issued quote has to make before it writes anything. The database, the PDF and the email stay
 // in portal-settings.
@@ -37,7 +37,7 @@ export const LOCATION_TAX_COLUMNS = "id, client_id, name, city, state, zip, acti
 export const RESTAMP_DESIGN_COLUMNS =
   "short_code, status, accepted_at, updated_at, estimate_lines, total_cents, ss_quote_number, ss_quote_sent_at, image_url";
 
-/** Printed on the customer's document; the same cap as ss_tax_label and migration 244's CHECK. */
+/** Printed on the customer's document; the same cap as ss_tax_label and migration 245's CHECK. */
 export const TAX_LABEL_MAX = 40;
 
 /** Design statuses that mean the customer already agreed (migration 197's save_design guard). */

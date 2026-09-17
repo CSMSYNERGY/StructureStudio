@@ -1,7 +1,7 @@
--- 243_avalara_tax_lookups.sql — a per-tenant Avalara switch, a ledger of every call, and a
+-- 244_avalara_tax_lookups.sql — a per-tenant Avalara switch, a ledger of every call, and a
 -- wallet_credit that records which meter it charged.
 --
--- APPLY BY HAND through the SQL editor, as the owner, then record version 243 in
+-- APPLY BY HAND through the SQL editor, as the owner, then record version 244 in
 -- supabase_migrations.schema_migrations. NEVER `supabase db push`. Not as a whole file inline
 -- from the CLI: "<newline>$(cat …)" was refused as an EMPTY query when 242 was applied (see
 -- 242_lead_sms_consent_box.sql), and inside a double-quoted bash string `$fn$` / `$probe$`
@@ -91,7 +91,7 @@ alter table public.client_settings
   add column if not exists tax_lookup_enabled boolean not null default false;
 
 comment on column public.client_settings.tax_lookup_enabled is
-  'Migration 243. true = this tenant may make Avalara rate lookups (the verify button, the invoice-time check). false (default) = no path calls Avalara for it. Operator-set only; builders see it read-only.';
+  'Migration 244. true = this tenant may make Avalara rate lookups (the verify button, the invoice-time check). false (default) = no path calls Avalara for it. Operator-set only; builders see it read-only.';
 
 -- 2. The ledger.
 create table if not exists public.tax_lookups (
@@ -132,7 +132,7 @@ revoke all on public.tax_lookups from public;
 revoke all on public.tax_lookups from anon, authenticated;
 
 comment on table public.tax_lookups is
-  'Migration 243. One row per deliberate Avalara request (verify button, invoice-time check, operator ping), written before the request and closed after it. OUR count of calls, not Avalara''s. The 24h verify+invoice count per tenant is the spend cap (_shared/taxLookups.ts DAILY_TAX_LOOKUP_CAP). Service-role only.';
+  'Migration 244. One row per deliberate Avalara request (verify button, invoice-time check, operator ping), written before the request and closed after it. OUR count of calls, not Avalara''s. The 24h verify+invoice count per tenant is the spend cap (_shared/taxLookups.ts DAILY_TAX_LOOKUP_CAP). Service-role only.';
 comment on column public.tax_lookups.attempts is
   'HTTP requests the lookup took, retries included (a retried 5xx or 429 reads 2). One row per lookup; attempts is what Avalara may have counted.';
 
@@ -162,7 +162,7 @@ begin
    where client_id = p_client_id
   returning balance_cents into v_bal;
 
-  -- 243: meter_kind is recorded. usage_prices.kind for a metered debit; NULL for a top-up,
+  -- 244: meter_kind is recorded. usage_prices.kind for a metered debit; NULL for a top-up,
   -- grant or adjustment, and for every caller that does not pass it.
   insert into public.wallet_transactions
     (client_id, kind, amount_cents, balance_after_cents, meter_kind, state, idempotency_key,
@@ -245,7 +245,7 @@ revoke execute on function public.claim_tax_lookup(text, text, integer, integer,
 grant execute on function public.claim_tax_lookup(text, text, integer, integer, text, text, uuid, boolean, text, text) to service_role;
 
 comment on function public.claim_tax_lookup(text, text, integer, integer, text, text, uuid, boolean, text, text) is
-  'Migration 243. The paid-lookup spend cap, atomic: under a per-tenant advisory lock, counts verify+invoice rows in 24h against p_daily_cap and (kind verify) verify rows in 60s against p_minute_cap, and writes the in-flight tax_lookups row only when under both. Returns {"id"} or {"refused":"daily_cap"|"rate_limited"}. Service-role only (_shared/taxLookups.ts claimLookup).';
+  'Migration 244. The paid-lookup spend cap, atomic: under a per-tenant advisory lock, counts verify+invoice rows in 24h against p_daily_cap and (kind verify) verify rows in 60s against p_minute_cap, and writes the in-flight tax_lookups row only when under both. Returns {"id"} or {"refused":"daily_cap"|"rate_limited"}. Service-role only (_shared/taxLookups.ts claimLookup).';
 
 -- 5. The probe. Everything it writes is undone by the ROLLBACK_PROBE exception; any other
 --    exception aborts the whole file.
@@ -263,18 +263,18 @@ begin
     from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
    where ns.nspname = 'public' and p.proname = 'wallet_credit';
   if n <> 1 then
-    raise exception '243 probe: % wallet_credit overloads — exactly one, or PostgREST calls are ambiguous', n;
+    raise exception '244 probe: % wallet_credit overloads — exactly one, or PostgREST calls are ambiguous', n;
   end if;
   if has_function_privilege('anon', sig, 'execute') or has_function_privilege('authenticated', sig, 'execute') then
-    raise exception '243 probe: a browser role can execute wallet_credit';
+    raise exception '244 probe: a browser role can execute wallet_credit';
   end if;
   if not has_function_privilege('service_role', sig, 'execute') then
-    raise exception '243 probe: service_role cannot execute wallet_credit';
+    raise exception '244 probe: service_role cannot execute wallet_credit';
   end if;
   if has_table_privilege('anon', 'public.tax_lookups', 'select')
      or has_table_privilege('authenticated', 'public.tax_lookups', 'select')
      or has_table_privilege('authenticated', 'public.tax_lookups', 'insert') then
-    raise exception '243 probe: tax_lookups is reachable by a browser role';
+    raise exception '244 probe: tax_lookups is reachable by a browser role';
   end if;
   -- The edge functions write it as service_role, which keeps its grant through this project's
   -- default privileges (rate_buckets reads the same way live). If that ever stops being true,
@@ -282,127 +282,127 @@ begin
   if not (has_table_privilege('service_role', 'public.tax_lookups', 'select')
           and has_table_privilege('service_role', 'public.tax_lookups', 'insert')
           and has_table_privilege('service_role', 'public.tax_lookups', 'update')) then
-    raise exception '243 probe: service_role cannot read and write tax_lookups';
+    raise exception '244 probe: service_role cannot read and write tax_lookups';
   end if;
   if has_function_privilege('anon', claim_sig, 'execute') or has_function_privilege('authenticated', claim_sig, 'execute') then
-    raise exception '243 probe: a browser role can execute claim_tax_lookup';
+    raise exception '244 probe: a browser role can execute claim_tax_lookup';
   end if;
   if not has_function_privilege('service_role', claim_sig, 'execute') then
-    raise exception '243 probe: service_role cannot execute claim_tax_lookup';
+    raise exception '244 probe: service_role cannot execute claim_tax_lookup';
   end if;
   select count(*) into n
     from pg_proc p join pg_namespace ns on ns.oid = p.pronamespace
    where ns.nspname = 'public' and p.proname = 'claim_tax_lookup'
      and p.prosecdef and array_to_string(p.proconfig, ',') like 'search_path=%';
   if n <> 1 then
-    raise exception '243 probe: claim_tax_lookup is not one SECURITY DEFINER function with a pinned search_path (% found)', n;
+    raise exception '244 probe: claim_tax_lookup is not one SECURITY DEFINER function with a pinned search_path (% found)', n;
   end if;
 
   begin
     -- An eight-argument call — every caller deployed today — still posts, with no meter kind.
-    v_bal := public.wallet_credit('probe-243-tenant', 0::bigint, 'adjustment', 'probe', null, '243 probe', 'probe-243-old', null);
+    v_bal := public.wallet_credit('probe-244-tenant', 0::bigint, 'adjustment', 'probe', null, '244 probe', 'probe-244-old', null);
     select meter_kind into v_kind from public.wallet_transactions
-     where client_id = 'probe-243-tenant' and idempotency_key = 'probe-243-old';
+     where client_id = 'probe-244-tenant' and idempotency_key = 'probe-244-old';
     if not found or v_kind is not null then
-      raise exception '243 probe: an eight-argument wallet_credit did not post, or posted a meter kind';
+      raise exception '244 probe: an eight-argument wallet_credit did not post, or posted a meter kind';
     end if;
 
     -- The new argument lands in meter_kind, and a replay of the key is still a no-op.
-    v_bal := public.wallet_credit('probe-243-tenant', -10::bigint, 'debit', 'probe', null, '243 probe', 'probe-243-new', null, 'tax_lookup');
-    v_bal := public.wallet_credit('probe-243-tenant', -10::bigint, 'debit', 'probe', null, '243 probe', 'probe-243-new', null, 'tax_lookup');
+    v_bal := public.wallet_credit('probe-244-tenant', -10::bigint, 'debit', 'probe', null, '244 probe', 'probe-244-new', null, 'tax_lookup');
+    v_bal := public.wallet_credit('probe-244-tenant', -10::bigint, 'debit', 'probe', null, '244 probe', 'probe-244-new', null, 'tax_lookup');
     select meter_kind into v_kind from public.wallet_transactions
-     where client_id = 'probe-243-tenant' and idempotency_key = 'probe-243-new';
+     where client_id = 'probe-244-tenant' and idempotency_key = 'probe-244-new';
     if v_kind is distinct from 'tax_lookup' then
-      raise exception '243 probe: p_meter_kind was not recorded (got %)', v_kind;
+      raise exception '244 probe: p_meter_kind was not recorded (got %)', v_kind;
     end if;
-    select count(*) into n from public.wallet_transactions where client_id = 'probe-243-tenant';
+    select count(*) into n from public.wallet_transactions where client_id = 'probe-244-tenant';
     if n <> 2 or v_bal <> -10 then
-      raise exception '243 probe: a replayed key posted twice (% rows, balance %)', n, v_bal;
+      raise exception '244 probe: a replayed key posted twice (% rows, balance %)', n, v_bal;
     end if;
 
     -- The ledger: an in-flight row is accepted; an outcome with no finish time, or an unknown
     -- outcome, is refused.
-    insert into public.tax_lookups (client_id, kind) values ('probe-243-tenant', 'verify');
+    insert into public.tax_lookups (client_id, kind) values ('probe-244-tenant', 'verify');
     begin
-      insert into public.tax_lookups (client_id, kind, outcome) values ('probe-243-tenant', 'verify', 'ok');
-      raise exception '243 probe: an outcome without finished_at was accepted';
+      insert into public.tax_lookups (client_id, kind, outcome) values ('probe-244-tenant', 'verify', 'ok');
+      raise exception '244 probe: an outcome without finished_at was accepted';
     exception when check_violation then null;
     end;
     begin
       insert into public.tax_lookups (client_id, kind, outcome, finished_at)
-      values ('probe-243-tenant', 'verify', 'approximately fine', now());
-      raise exception '243 probe: an unknown outcome was accepted';
+      values ('probe-244-tenant', 'verify', 'approximately fine', now());
+      raise exception '244 probe: an unknown outcome was accepted';
     exception when check_violation then null;
     end;
 
     -- The claim. Under the cap it writes the row and returns its id; at the cap it writes
     -- nothing and says why. A ping row spends no allowance. (A parallel burst cannot be staged
     -- inside one transaction; the advisory lock is what serialises it.)
-    v_claim := public.claim_tax_lookup('probe-243-claims', 'verify', 2, 5, 'SS-PROBE243QA', null, null, true, 'MO', '63090');
+    v_claim := public.claim_tax_lookup('probe-244-claims', 'verify', 2, 5, 'SS-PROBE243QA', null, null, true, 'MO', '63090');
     if v_claim->>'id' is null then
-      raise exception '243 probe: a claim under the cap was not written (got %)', v_claim;
+      raise exception '244 probe: a claim under the cap was not written (got %)', v_claim;
     end if;
     select count(*) into n from public.tax_lookups
-     where id = (v_claim->>'id')::uuid and client_id = 'probe-243-claims' and kind = 'verify'
+     where id = (v_claim->>'id')::uuid and client_id = 'probe-244-claims' and kind = 'verify'
        and short_code = 'SS-PROBE243QA' and operator and region = 'MO' and postal_code = '63090' and outcome is null;
     if n <> 1 then
-      raise exception '243 probe: the claimed row does not carry what was claimed';
+      raise exception '244 probe: the claimed row does not carry what was claimed';
     end if;
-    v_claim := public.claim_tax_lookup('probe-243-claims', 'invoice', 2);
+    v_claim := public.claim_tax_lookup('probe-244-claims', 'invoice', 2);
     if v_claim->>'id' is null then
-      raise exception '243 probe: a second claim under the cap was not written (got %)', v_claim;
+      raise exception '244 probe: a second claim under the cap was not written (got %)', v_claim;
     end if;
-    v_claim := public.claim_tax_lookup('probe-243-claims', 'verify', 2, 5);
+    v_claim := public.claim_tax_lookup('probe-244-claims', 'verify', 2, 5);
     if v_claim is distinct from '{"refused": "daily_cap"}'::jsonb then
-      raise exception '243 probe: a claim at the daily cap was not refused as daily_cap (got %)', v_claim;
+      raise exception '244 probe: a claim at the daily cap was not refused as daily_cap (got %)', v_claim;
     end if;
-    select count(*) into n from public.tax_lookups where client_id = 'probe-243-claims';
+    select count(*) into n from public.tax_lookups where client_id = 'probe-244-claims';
     if n <> 2 then
-      raise exception '243 probe: a refused claim wrote a row (% rows)', n;
+      raise exception '244 probe: a refused claim wrote a row (% rows)', n;
     end if;
-    insert into public.tax_lookups (client_id, kind) values ('probe-243-claims', 'ping');
-    v_claim := public.claim_tax_lookup('probe-243-claims', 'invoice', 3);
+    insert into public.tax_lookups (client_id, kind) values ('probe-244-claims', 'ping');
+    v_claim := public.claim_tax_lookup('probe-244-claims', 'invoice', 3);
     if v_claim->>'id' is null then
-      raise exception '243 probe: a ping row was counted against the daily cap (got %)', v_claim;
+      raise exception '244 probe: a ping row was counted against the daily cap (got %)', v_claim;
     end if;
 
     -- The per-minute limit is the Verify button's, and only the Verify button's.
-    v_claim := public.claim_tax_lookup('probe-243-burst', 'verify', 100, 1);
+    v_claim := public.claim_tax_lookup('probe-244-burst', 'verify', 100, 1);
     if v_claim->>'id' is null then
-      raise exception '243 probe: a first verify claim was not written (got %)', v_claim;
+      raise exception '244 probe: a first verify claim was not written (got %)', v_claim;
     end if;
-    v_claim := public.claim_tax_lookup('probe-243-burst', 'verify', 100, 1);
+    v_claim := public.claim_tax_lookup('probe-244-burst', 'verify', 100, 1);
     if v_claim is distinct from '{"refused": "rate_limited"}'::jsonb then
-      raise exception '243 probe: a verify claim over the per-minute cap was not refused as rate_limited (got %)', v_claim;
+      raise exception '244 probe: a verify claim over the per-minute cap was not refused as rate_limited (got %)', v_claim;
     end if;
-    v_claim := public.claim_tax_lookup('probe-243-burst', 'invoice', 100, 1);
+    v_claim := public.claim_tax_lookup('probe-244-burst', 'invoice', 100, 1);
     if v_claim->>'id' is null then
-      raise exception '243 probe: the per-minute cap refused an invoice claim (got %)', v_claim;
+      raise exception '244 probe: the per-minute cap refused an invoice claim (got %)', v_claim;
     end if;
 
     -- A malformed claim raises (the caller refuses), never writes.
     v_raised := false;
     begin
-      v_claim := public.claim_tax_lookup('probe-243-claims', 'ping', 100);
+      v_claim := public.claim_tax_lookup('probe-244-claims', 'ping', 100);
     exception when raise_exception then v_raised := true;
     end;
     if not v_raised then
-      raise exception '243 probe: a ping claim was accepted';
+      raise exception '244 probe: a ping claim was accepted';
     end if;
     v_raised := false;
     begin
-      v_claim := public.claim_tax_lookup('probe-243-claims', 'verify', null);
+      v_claim := public.claim_tax_lookup('probe-244-claims', 'verify', null);
     exception when raise_exception then v_raised := true;
     end;
     if not v_raised then
-      raise exception '243 probe: a claim with no daily cap was accepted';
+      raise exception '244 probe: a claim with no daily cap was accepted';
     end if;
 
     raise exception 'ROLLBACK_PROBE';
   exception
     when others then
       if sqlerrm = 'ROLLBACK_PROBE' then
-        raise notice '243: one wallet_credit, service-role only; eight-argument calls still post; p_meter_kind is recorded; replays are no-ops; tax_lookups is service-role only and refuses a half-closed row; claim_tax_lookup is service-role only, writes under the caps and refuses at them';
+        raise notice '244: one wallet_credit, service-role only; eight-argument calls still post; p_meter_kind is recorded; replays are no-ops; tax_lookups is service-role only and refuses a half-closed row; claim_tax_lookup is service-role only, writes under the caps and refuses at them';
       else
         raise;
       end if;

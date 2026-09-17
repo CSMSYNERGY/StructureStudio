@@ -8,7 +8,7 @@
 //      chain below is for quotes nobody has signed;
 //   1. a VERIFIED rate already on the quote (tax.source "avalara"), carried over — carryDecision;
 //   2. the rate of the quote's sales location (designs.sales_location_id → builder_locations,
-//      migration 244), when that location is this tenant's, active, and carries a rate;
+//      migration 245), when that location is this tenant's, active, and carries a rate;
 //   3. when the quote has NO location and a signed-in staff member is issuing it for the FIRST
 //      time: their home lot's rate (client_users.location_id, migration 234) — and that lot is
 //      then recorded as the quote's location, so the next resubmit, by anyone, lands on the same

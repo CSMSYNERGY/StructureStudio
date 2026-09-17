@@ -1,4 +1,4 @@
-// The Avalara call ledger (migration 243): one `tax_lookups` row per deliberate lookup.
+// The Avalara call ledger (migration 244): one `tax_lookups` row per deliberate lookup.
 //
 // WHY A LEDGER WHEN THE WALLET ALREADY RECORDS CHARGES. The wallet cannot count calls. A
 // charge is skipped while the meter is disarmed, priced at zero or the tenant is exempt, and an
@@ -54,7 +54,7 @@ export type TaxLookupOutcome = "ok" | "not_configured" | AvalaraFailure;
 const CAPPED_KINDS: TaxLookupKind[] = ["verify", "invoice"];
 const KINDS: TaxLookupKind[] = ["verify", "invoice", "ping"];
 
-// Column-length CHECKs in migration 243. Clipped here rather than refused there: a long short
+// Column-length CHECKs in migration 244. Clipped here rather than refused there: a long short
 // code must not be the reason a staff member cannot verify a rate.
 const MAX_CODE = 64;
 const MAX_REGION = 16;
@@ -83,7 +83,7 @@ export interface NewTaxLookup {
   postalCode?: string | null;
 }
 
-/** A row's columns as migration 243's CHECKs accept them: free text clipped, a non-UUID actor
+/** A row's columns as migration 244's CHECKs accept them: free text clipped, a non-UUID actor
  *  dropped to null. Shared by the insert and the claim, so neither can write what the other
  *  would refuse. Null for a row with no tenant or no known kind. */
 function lookupColumns(row: NewTaxLookup) {
@@ -125,7 +125,7 @@ export type LookupClaim =
   | { ok: false; refused: "daily_cap" | "rate_limited" | "ledger_unavailable" };
 
 /**
- * The cap and the in-flight row, atomically (claim_tax_lookup, migration 243). A verify claim
+ * The cap and the in-flight row, atomically (claim_tax_lookup, migration 244). A verify claim
  * also carries the per-minute cap; an invoice claim never does. FAILS CLOSED: anything but a
  * well-formed id or a known refusal is `ledger_unavailable`, and the caller refuses the lookup.
  */
@@ -229,7 +229,7 @@ export async function finishLookup(
  * The `client_id` an operator's credential ping is recorded under. A ping checks the PLATFORM's
  * credentials and belongs to no builder, so it is not filed under anybody's tenant — not even the
  * operator's own, which is a real builder account whose usage query should read only its own
- * calls. The column is text with no foreign key (deliberately, migration 243), so a fixed value
+ * calls. The column is text with no foreign key (deliberately, migration 244), so a fixed value
  * is allowed; the leading underscore is one no tenant slug can have (slugs are
  * `^[a-z0-9][a-z0-9-]*$`), so it can never collide with a tenant created later. Pings are not in
  * the capped kinds either way.

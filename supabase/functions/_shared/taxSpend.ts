@@ -80,7 +80,7 @@ export function parseVerifyTax(
 }
 
 /**
- * May this tenant make a lookup at all? The per-tenant switch (migration 243), then StructureStudio
+ * May this tenant make a lookup at all? The per-tenant switch (migration 244), then StructureStudio
  * paperwork (a CRM-mode tenant has no quote of ours to stamp), then platform credentials. All
  * three are `lookup_disabled`: to the person pressing, each means the same thing — not here, not
  * now — and the sentence says which.

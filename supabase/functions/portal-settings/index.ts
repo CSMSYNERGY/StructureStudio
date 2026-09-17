@@ -199,7 +199,7 @@ const GATES: GateTable = {
   verify_save_ghl:     { area: "settings_crm", level: "edit" },
   list_ghl_pipelines:  { area: "settings_crm", level: "view" },
 
-  // ── Sales tax (migrations 243-244) ───────────────────────────────────────
+  // ── Sales tax (migrations 244-245) ───────────────────────────────────────
   // The SAME area as the company rate (ss_tax_rate is saved through `save`, on this card's
   // area), so whoever may set the company rate sets the per-location ones — and nobody else:
   // not settings_branding, which owns the lot list and is granted so somebody can change a
@@ -5002,11 +5002,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const counts: Record<string, number> = {};
     for (const u of units.data ?? []) { if (u.location_id) counts[u.location_id] = (counts[u.location_id] || 0) + 1; }
     let locations = (locs.data ?? []).map((l: any) => ({ ...l, buildings: counts[l.id] || 0 }));
-    // TAX FIELDS (migration 244), ADDITIVE, and only for a caller who can read settings_crm —
+    // TAX FIELDS (migration 245), ADDITIVE, and only for a caller who can read settings_crm —
     // the area that owns the rates. This action is also the Inventory tab's lot picker, reached
     // on inventory:view alone, and a person holding only that has no business with the rates.
     // Its own read, and TOLERANT: this list is the Settings card and the Inventory picker, so a
-    // deploy ahead of 244 must lose the tax fields, not the lots (the `status` fallback-select
+    // deploy ahead of 245 must lose the tax fields, not the lots (the `status` fallback-select
     // precedent). A failure is logged and the fields are simply left off.
     if (canRead("settings_crm") && locations.length) {
       const taxRes = await admin.from("builder_locations").select("id, state, zip, tax_rate, tax_label")
@@ -5062,7 +5062,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!id) return json({ error: "id is required." }, 400);
     // Units at this location keep existing — their location_id FK is ON DELETE SET NULL,
     // so they show "no location" rather than blocking the delete or vanishing. Quotes sold from
-    // it lose their sales_location_id the same way (migration 244): an issued, unsigned one
+    // it lose their sales_location_id the same way (migration 245): an issued, unsigned one
     // falls to the company rate on its next re-stamp (a verified rate is kept), and a signed
     // order keeps its agreed tax (see save_location_tax below).
     const { error, count } = await admin.from("builder_locations").delete({ count: "exact" })
@@ -5072,7 +5072,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     return json({ ok: true });
   }
 
-  // ── Sales tax settings (migrations 243-244) ─────────────────────────────────
+  // ── Sales tax settings (migrations 244-245) ─────────────────────────────────
   // One read for the tax card: who issues the paperwork, the company rate, each location's
   // local rate, and whether verified lookups are switched on for this tenant. `configured` says
   // only whether the platform holds Avalara credentials — a boolean, never the credentials or
@@ -7947,7 +7947,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     };
   };
 
-  // ── set_design_sales_location: which lot a quote was sold from (migration 244) ──────
+  // ── set_design_sales_location: which lot a quote was sold from (migration 245) ──────
   //
   // Staff pick it; a shopper never does (this function requires a signed-in member). The
   // location decides the quote's FREE default rate (_shared/taxChain.ts), so picking one on an
@@ -7960,7 +7960,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
   //   - otherwise the chain without the home lot (clearing the location means "no lot", and
   //     borrowing the rep's own lot would put one straight back): the location's rate, else the
   //     company rate, else refuse. allowLookup stays FALSE — this can never make a paid call.
-  // The location must be this tenant's and active; the composite foreign key (244) enforces the
+  // The location must be this tenant's and active; the composite foreign key (245) enforces the
   // tenant again in the database.
   if (action === "set_design_sales_location") {
     const parsed = parseSetSalesLocation(payload);
@@ -10541,7 +10541,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // on this lookup's ledger row and posted only when a rate came back — the `tax_invoice`
         // meter is disarmed, so today it is a no-op.
         //
-        // The switch is read on its own, never folded into cur0's select: if migration 243 is
+        // The switch is read on its own, never folded into cur0's select: if migration 244 is
         // not applied yet, an unknown column there would null cur0 and send an SS tenant down the
         // CRM branch. Here it only means the check is skipped.
         let taxCheck: InvoiceTaxCheck = { status: "skipped", reason: "lookup_disabled" };
