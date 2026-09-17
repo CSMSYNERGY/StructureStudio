@@ -7834,13 +7834,22 @@ function buildShed3DModel(THREE, p) {
       // The rake trim along the porch roof's side edge.
       pg.add(part(onSlope(trimMat, dWall, dEnd, s * (side + SIDE_OV - 0.04), 0.08, 0.28, -0.06), "rake"));
     }
-    // The board and the roof's dark drip edge above it, both the roof's full width, which closes the
+    // The board and the dark trim face in front of it, both the roof's full width, which closes the
     // corners past the cheeks and rake trims.
+    //
+    // DARK OVER A THIN WOOD STRIP. On the building the porch roof's front edge is a trim-colour
+    // fascia about 0.45 ft tall with only a strip of wood under it (vd-t8, walk-6, walk-7). The
+    // first cut drew a 0.16 ft drip over the whole wood board, so the most visible line of the porch
+    // read as a bright double beam with the header under it. The drip now runs from the roof's edge
+    // down to FASCIA_WOOD above the board's bottom. The board stays wood behind it, so only that
+    // strip of it shows.
     const board = box(woodMat, 2 * (side + SIDE_OV), boardH, FAS_T);
     board.position.set(0, yTop(dEnd - FAS_T / 2) - PR_T / cosA - boardH / 2, dEnd - FAS_T / 2);
     pg.add(part(board, "board"));
-    const drip = box(trimMat, 2 * (side + SIDE_OV), 0.16, 0.05);
-    drip.position.set(0, yTop(dEnd) - 0.06, dEnd + 0.025);
+    const FASCIA_WOOD = 0.15, dripTop = yTop(dEnd) + 0.02;
+    const dripH = Math.max(0.16, dripTop - (boardBot + FASCIA_WOOD));
+    const drip = box(trimMat, 2 * (side + SIDE_OV), dripH, 0.05);
+    drip.position.set(0, dripTop - dripH / 2, dEnd + 0.025);
     pg.add(part(drip, "drip"));
     // The ledger on the wall under the rafters: 0.04 ft proud of any casing (casings face at
     // trimFace), its ends buried in the corner boards.
