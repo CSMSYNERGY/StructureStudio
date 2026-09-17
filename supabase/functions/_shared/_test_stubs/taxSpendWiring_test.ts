@@ -19,6 +19,9 @@
 //   8. the accept promote losing its compare-and-swap, or a re-price caught there refused AFTER the
 //      order, the signature image or the emails — the old lines frozen beside the new quote, or a
 //      withdrawn acceptance that something already refers to.
+//   9. push_to_invoice's rep attestation, the OTHER writer of accepted_at and accepted_snapshot,
+//      promoting without the compare-and-swap, or refusing a re-price after the order, the invoice
+//      number or the email; and a customer who won the race billed from the push's stale read.
 // Same technique as locationTaxWiring_test: read the source, so a drift fails the push. If an
 // anchor moves, re-point it — do not delete the test.
 
@@ -250,4 +253,44 @@ Deno.test("customer-accept: the promote is a compare-and-swap, and a re-price ca
   const withdrawal = acceptQuote.slice(withdraw, refuse);
   assert(/\.eq\("id", acceptanceId\)/.test(withdrawal), "the withdrawal is not keyed on this request's own acceptance row");
   assert((acceptQuote.match(/\.delete\(\)/g) ?? []).length === 1, "accept_quote deletes something other than its own withdrawn acceptance");
+});
+
+Deno.test("push_to_invoice: the rep attestation promotes with the same compare-and-swap, and withdraws its own row on a miss", () => {
+  const read = SS_INVOICE.slice(at(SS_INVOICE, 'const { data: d, error: dErr } = await admin.from("designs")', "send_invoice"),
+    at(SS_INVOICE, ".maybeSingle();", "send_invoice", at(SS_INVOICE, 'const { data: d, error: dErr }', "send_invoice")));
+  assert(/\.select\("[^"]*[ "]updated_at(?=[,"])[^"]*"\)/.test(read), "send_invoice's design read no longer selects updated_at — the attestation has nothing to swap against");
+
+  const attest = SS_INVOICE.slice(at(SS_INVOICE, "if (pushToInvoice && dStatus", "send_invoice"));
+  const idDecl = at(attest, "const acceptanceId = crypto.randomUUID();", "push_to_invoice");
+  const insert = at(attest, 'from("design_acceptances").insert(', "push_to_invoice");
+  assert(idDecl < insert && /id: acceptanceId,/.test(attest.slice(insert, insert + 200)), "the rep acceptance is no longer inserted under the id its withdrawal deletes");
+
+  const promote = at(attest, 'from("designs").update(patch)', "push_to_invoice");
+  const swap = attest.slice(promote, at(attest, '.select("short_code")', "push_to_invoice", promote));
+  assert(/\.is\("accepted_at", null\)/.test(swap), "the attestation promote no longer requires accepted_at to still be null");
+  assert(/\.eq\("updated_at", casUpdatedAt\)/.test(swap), "the attestation promote is no longer a compare-and-swap on updated_at");
+  assert(attest.includes('let casUpdatedAt: string | null = typeof d.updated_at === "string" ? d.updated_at : null;'), "the swap no longer starts from the updated_at the design was read with");
+  const attestOnly = attest.slice(0, at(attest, 'if (dStatus !== "accepted" && !d.accepted_at)', "push_to_invoice"));
+  assert((attestOnly.match(/from\("designs"\)\.update\(/g) ?? []).length === 1, "the attestation writes the design somewhere other than the guarded promote");
+
+  const miss = at(attest, "promoteMiss(d.estimate_lines, now)", "push_to_invoice");
+  const withdraw = at(attest, 'from("design_acceptances").delete()', "push_to_invoice");
+  const refuse = at(attest, "return missRefusal;", "push_to_invoice");
+  assert(insert < promote && promote < miss && miss < withdraw && withdraw < refuse, "promote, miss, withdrawal and refusal are out of order");
+  assert(/\.eq\("id", acceptanceId\)/.test(attest.slice(withdraw, refuse)), "the withdrawal is not keyed on this request's own acceptance row");
+  assert(/reason: "repriced"/.test(attest.slice(miss, withdraw)), "a re-price caught at the promote no longer answers reason repriced");
+
+  // Everything a withdrawn acceptance must not already be referred to by comes after the refusal.
+  for (const [needle, label] of [
+    ['from("orders").upsert(', "the order"], ['.rpc("allocate_ss_invoice_number"', "the invoice number"],
+    ['from("invoice_sends").insert(', "the invoice claim"], ["sendTenantEmail(", "an email"],
+  ] as const) {
+    assert(at(attest, needle, "push_to_invoice") > refuse, `${label} comes before a re-price can refuse`);
+  }
+
+  // A customer who won the race is billed from THEIR frozen snapshot, not the push's read.
+  const racedAt = at(attest, "if (!attested) {", "push_to_invoice");
+  const raced = attest.slice(racedAt, at(attest, "} else {", "push_to_invoice", racedAt));
+  assert(/select\("status, accepted_at, accepted_snapshot"\)/.test(raced), "the raced branch no longer re-reads the customer's snapshot");
+  assert(/agreedLines = agreedBaseline\(d\)\.lines;/.test(raced), "the raced branch no longer re-derives the agreed lines it bills from");
 });

@@ -21,7 +21,9 @@
 // words that the customer has not been sent the new total. A re-stamp that leaves the total
 // where it was sends nothing.
 //
-// Importer: portal-settings only. Derive it before a deploy rather than trusting this line:
+// Importers: portal-settings and submit-estimate (isAgreedDesign, for its persist guard), plus
+// taxSpend.ts and quoteWriteRace.ts, which bundle it into their own importers. Derive them before
+// a deploy rather than trusting this line, and follow the two _shared importers' own importers:
 //     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
 //       | xargs -0 -I{} perl -0777 -ne 'print "$ARGV\n" if m{import[^;]*?from\s+"[^"]*locationTax\.ts"}s' {}
 
@@ -231,6 +233,7 @@ export const RESEND_NOT_SENT = {
   pdf: "The quote PDF couldn't be rebuilt, so the updated quote wasn't emailed and the customer hasn't been sent the new total. Resend it once the PDF rebuilds, or let them know the total changed.",
   noEmail: "The customer has no email address on this quote, so they haven't been sent the new total. Let them know the total changed.",
   failed: "The updated quote couldn't be emailed, so the customer hasn't been sent the new total. Resend it, or let them know the total changed.",
+  moved: "The quote changed again while it was being updated, so it wasn't emailed from here and the customer hasn't been sent the new total. Reload it to see the current total before telling them.",
 } as const;
 
 /**
@@ -244,13 +247,21 @@ export const RESEND_NOT_SENT = {
  * rebuilds. A quote with no number cannot be emailed at all (resend_quote_email refuses it), so
  * that case is named on its own rather than blamed on the PDF. The reasons are RESEND_NOT_SENT's
  * sentences; a send that was attempted and did not land is restampSendOutcome's to word.
+ *
+ * `movedOn` (review, 2026-09-17): after the PDF was rebuilt, the design's lines were no longer
+ * the ones the re-stamp wrote. Another writer (a resubmit) re-priced the quote after this one,
+ * so the total this re-stamp would email is already out of date, and the document was rebuilt
+ * from the newer lines (quoteWriteRace.ts). The newer writer tells the customer its own total;
+ * this one sends nothing and tells the rep to reload.
  */
 export function restampResend(input: {
   resend: boolean;
   quoteNumber: unknown;
   quotePdfUrl: string | null;
+  movedOn?: boolean;
 }): { send: true } | { send: false; reason: string | null } {
   if (!input.resend) return { send: false, reason: null };
+  if (input.movedOn) return { send: false, reason: RESEND_NOT_SENT.moved };
   if (!input.quoteNumber) return { send: false, reason: RESEND_NOT_SENT.noNumber };
   if (!input.quotePdfUrl) return { send: false, reason: RESEND_NOT_SENT.pdf };
   return { send: true };

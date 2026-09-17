@@ -29,6 +29,9 @@ import {
 import { chargeTaxCalculation, taxLookupIdem } from "../_shared/taxMeter.ts";
 // draft → sent is this function's job since migration 241; save_design no longer promotes.
 import { promoteIssuedDesign } from "../_shared/designPromotion.ts";
+// The rule this function's SS persist and portal-settings' tax re-stamp both follow (2026-09-17).
+import { quotePdfStale, SUBMIT_RACE_REFUSAL, submitPersistMiss } from "../_shared/quoteWriteRace.ts";
+import { isAgreedDesign } from "../_shared/locationTax.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -274,7 +277,8 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     // status (241, 2026-09-15): save_design no longer promotes, so a first submit arrives as a
     // draft and the ISSUED steps below mark it sent. Read here only to skip that write for a
     // design already past draft; the write itself re-checks draft in its WHERE.
-    .select("client_id, status, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
+    // updated_at (2026-09-17) is the SS persist's compare-and-swap token (see "PERSIST" in 9-ALT).
+    .select("client_id, status, updated_at, ghl_contact_id, ghl_estimate_id, ghl_estimate_number, ghl_opportunity_id, ss_quote_number, accepted_at, estimate_lines, accepted_snapshot")
     .eq("short_code", designId)
     .single();
   if (designErr || !existingDesign) {
@@ -2753,45 +2757,54 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     const view3dImg = tenantStorageUrl(view3dImageUrl);
     const skippedSheets: string[] = [];
 
-    let quotePdfUrl: string | null = null;
-    try {
-      const pdfBytes = await buildQuotePdf({
-        business: {
-          name: businessName,
-          phone: businessPhone || null,
-          website: businessWebsite || null,
-          address: businessAddress,
-        },
-        estimateNumber: ssQuoteNumber,
-        dateIso: today,
-        lines: estimateLines.lines.map((l) => ({ ...l, desc: deHtml(l.desc) })),
-        discount: estimateLines.discount,
-        // The two-pool totals block and the per-discount rows (migration 148). Both read the
-        // object just stamped above, so the printed figures ARE the persisted ones.
-        tax: (estimateLines as Record<string, any>).tax,
-        discountRows: (estimateLines as Record<string, any>).discounts?.rows ?? null,
-        quoteTerms: quoteTerms || null,
-        planPdfUrl: planUrl,
-        onSheetSkipped: (r) => skippedSheets.push(r),
-      });
-      // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
-      // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
-      // upsert: one quote document per design, replaced on every resubmit.
-      const pdfPath = `${clientId}/${designId}-quote.pdf`;
-      const up = await supabase.storage.from("floor-plans")
-        .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
-      if (up.error) {
-        console.warn("SS quote PDF upload failed:", up.error.message);
-      } else {
+    // THE QUOTE PDF, built from a snapshot and uploaded to its fixed path. Declared here, CALLED
+    // BELOW THE PERSIST (review, 2026-09-17): the document is uploaded only after the write it
+    // prints, never before. See "PERSIST" below for why the order is the fix.
+    // deno-lint-ignore no-explicit-any
+    const writeQuotePdf = async (snap: any): Promise<string | null> => {
+      // Which sheets THIS document is missing: a rebuild reports its own, not the first build's too.
+      skippedSheets.length = 0;
+      try {
+        const pdfBytes = await buildQuotePdf({
+          business: {
+            name: businessName,
+            phone: businessPhone || null,
+            website: businessWebsite || null,
+            address: businessAddress,
+          },
+          estimateNumber: ssQuoteNumber,
+          dateIso: today,
+          // deno-lint-ignore no-explicit-any
+          lines: (Array.isArray(snap?.lines) ? snap.lines : []).map((l: any) => ({ ...l, desc: deHtml(l.desc) })),
+          discount: snap?.discount,
+          // The two-pool totals block and the per-discount rows (migration 148). Both read the
+          // snapshot handed in, which is the one persisted, so the printed figures ARE the stored ones.
+          tax: snap?.tax,
+          discountRows: snap?.discounts?.rows ?? null,
+          quoteTerms: quoteTerms || null,
+          planPdfUrl: planUrl,
+          onSheetSkipped: (r) => skippedSheets.push(r),
+        });
+        // Service-role upload, so the bucket's anon path-shape policy ({clientId}/SS-….pdf) does
+        // not apply — same reasoning as the formal estimate PDF's `-estimate.pdf` sibling.
+        // upsert: one quote document per design, replaced on every resubmit.
+        const pdfPath = `${clientId}/${designId}-quote.pdf`;
+        const up = await supabase.storage.from("floor-plans")
+          .upload(pdfPath, pdfBytes, { contentType: "application/pdf", upsert: true });
+        if (up.error) {
+          console.warn("SS quote PDF upload failed:", up.error.message);
+          return null;
+        }
         const { data: pub } = supabase.storage.from("floor-plans").getPublicUrl(pdfPath);
-        quotePdfUrl = pub?.publicUrl || null;
+        return pub?.publicUrl || null;
+      } catch (e) {
+        // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
+        // is no document at all. Still not fatal to the submission: the design, the contact and
+        // the opportunity are real and the rep can resubmit. Reported honestly below.
+        console.warn("SS quote PDF generation failed:", (e as Error).message);
+        return null;
       }
-    } catch (e) {
-      // Unlike the plan sheets (which degrade inside buildQuotePdf), a failure HERE means there
-      // is no document at all. Still not fatal to the submission: the design, the contact and
-      // the opportunity are real and the rep can resubmit. Reported honestly below.
-      console.warn("SS quote PDF generation failed:", (e as Error).message);
-    }
+    };
 
     // ── THE CHANGE ORDER (migration 126). A resubmit AFTER the customer signed is a change
     // to an agreed order, and it needs their acknowledgment — e-signature or the rep's
@@ -2961,8 +2974,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
     }
 
     // ── ISSUED: draft → sent (migration 241, 2026-09-15) ────────────────────────────────────
-    // Every refusal on this path is behind us and the quote number, lines and document exist,
-    // so this is where the design becomes a sent quote: BEFORE the email, so a customer never
+    // Every refusal on this path is behind us but the persist's race refusals below, and the quote
+    // number and lines exist (the document is built after the persist, 2026-09-17), so this is
+    // where the design becomes a sent quote: BEFORE the email, so a customer never
     // holds a quote whose design still reads draft (customer-quotes hides drafts and offers
     // Accept only on a sent one). save_design used to promote on the browser's save, before
     // any of the refusals above had run, and a refused Get Quote stayed 'sent'. Not earlier
@@ -2985,6 +2999,132 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           message: `draft -> sent failed for an issued SS quote: ${promoted.error}`,
           context: { designId: String(designId), issuedBy: "structurestudio", ssQuoteNumber },
         });
+      }
+    }
+
+    // ── PERSIST, BEFORE THE DOCUMENT AND THE EMAIL (review, 2026-09-17) ─────────────────────
+    //
+    // The lines, the total, the number and the ids reach the row FIRST, as a compare-and-swap,
+    // and only then is the PDF uploaded and the customer emailed. This used to run last and
+    // unguarded, after both. A portal re-stamp of this quote's tax (the Verify button, a
+    // sales-location change) that landed while this submit was running was then overwritten by
+    // the older tax, a verified rate the builder paid for dropped with nobody told. And because
+    // both writers upload the PDF to the same path, whichever upload landed last decided what the
+    // document printed, so the quote page and the acceptance could freeze one total while the PDF
+    // printed another.
+    //
+    // The rule both writers follow now, and why it is enough, is in _shared/quoteWriteRace.ts: a
+    // guarded write, then the upload, then a re-read that rebuilds the document from the stored
+    // lines when they moved. The guard swaps on the updated_at step 2 read. On a miss,
+    // submitPersistMiss decides from a fresh read:
+    //   retaxed: another writer re-priced the tax after step 2. Refuse, BEFORE anything is
+    //     uploaded or emailed. The re-stamp, its document and its email stand together, and the
+    //     next submit starts from the new tax (a verified rate carries, taxChain.ts);
+    //   accepted: the customer agreed after step 2. This submit priced a quote, not an amendment,
+    //     and must not overwrite a signed order's lines. Refuse; the next submit raises the change
+    //     order;
+    //   retry: the tax is the one step 2 read, or this submit's own draft promote wrote it. An
+    //     unrelated write moved updated_at. Swap against the new value, a bounded number of times;
+    //   gone, or retries spent: the failed-persist story below (logged, a warning, not fatal).
+    // Only a quote nobody has agreed to is guarded: a re-stamp refuses an agreed one outright, so
+    // the signed-order path (the change order above) keeps its unguarded persist.
+    //
+    // There is no GHL estimate id or number to write, and the two GHL ids that DO exist are written
+    // exactly as the GHL path does. ss_quote_sent_at and the document link are the email's and the
+    // upload's to record, so they are stamped after both, below.
+    let persistErr: { message: string } | null = null;
+    // estimate_lines as the database stored this write, for the document check below.
+    let persistedLines: unknown = null;
+    const guardPersist = !isAgreedDesign(existingDesign);
+    {
+      // Four, not three: a first issue always spends one, because its own draft promote above
+      // moved updated_at after step 2 read it.
+      const PERSIST_ATTEMPTS = 4;
+      let casUpdatedAt: string | null = typeof existingDesign.updated_at === "string" ? existingDesign.updated_at : null;
+      for (let attempt = 1; attempt <= PERSIST_ATTEMPTS; attempt++) {
+        let write = supabase
+          .from("designs")
+          .update({
+            ghl_contact_id: contactId,
+            ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
+            estimate_lines: estimateLines,
+            // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
+            total_cents: designTotalCents(estimateLines),
+            ss_quote_number: ssQuoteNumber,
+            ...(planImg ? { plan_image_url: planImg } : {}),
+            ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("short_code", designId);
+        if (guardPersist) write = casUpdatedAt ? write.eq("updated_at", casUpdatedAt) : write.is("updated_at", null);
+        const { data: wrote, error: writeErr } = await write.select("estimate_lines");
+        if (writeErr) {
+          persistErr = writeErr;
+          break;
+        }
+        if (Array.isArray(wrote) && wrote.length === 1) {
+          persistedLines = wrote[0].estimate_lines;
+          break;
+        }
+        // The unguarded write never reported a row it did not find, and still does not.
+        if (!guardPersist) break;
+
+        const { data: now, error: nowErr } = await supabase.from("designs")
+          .select("estimate_lines, accepted_at, status, updated_at")
+          .eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        const miss = nowErr
+          ? null
+          : submitPersistMiss({ readTax: storedTax, stampedTax: (estimateLines as Record<string, unknown>).tax, now });
+        if (miss?.kind === "retry" && attempt < PERSIST_ATTEMPTS) {
+          casUpdatedAt = miss.updatedAt;
+          continue;
+        }
+        if (miss?.kind === "retaxed" || miss?.kind === "accepted") return json(SUBMIT_RACE_REFUSAL[miss.kind], 409);
+        persistErr = {
+          message: nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "gone" ? "the design is gone" : "the design kept changing",
+        };
+        break;
+      }
+    }
+    // A failed persist is worth surfacing: the number has been consumed and the customer is about
+    // to be sent the document, so silence here would leave nothing to reconcile against.
+    // Durable log + a warning in the response, not just the console — the runtime console
+    // stream is unreliable on this project (see CLAUDE.md), and a silent ok:true leaves the
+    // allocated quote number diverged from what the row stores.
+    if (persistErr) {
+      console.warn("SS quote persist failed:", persistErr.message);
+      logEdgeError({
+        fn: "submit-estimate",
+        req,
+        clientId,
+        code: "ss_quote_persist_failed",
+        message: `SS quote persist failed: ${persistErr.message}`,
+        context: { designId: String(designId), ssQuoteNumber },
+      }).catch(() => {});
+    }
+
+    // ── THE DOCUMENT, AFTER THE WRITE IT PRINTS (2026-09-17) ────────────────────────────────
+    // Built from the lines just persisted. Then, on a quote nobody has agreed to, the check that
+    // makes the order above enough: re-read the stored lines, and when another writer moved them
+    // after this persist (a re-stamp whose own document may have uploaded BEFORE this one), print
+    // the stored lines instead. Two rebuilds at most. The quote email names the total the
+    // document prints, so the two never disagree.
+    let quotePdfUrl = await writeQuotePdf(estimateLines);
+    let printedTotal = ssTotal;
+    if (guardPersist && quotePdfUrl && persistedLines) {
+      let printed: unknown = persistedLines;
+      for (let pass = 1; pass <= 2; pass++) {
+        const { data: after, error: afterErr } = await supabase.from("designs").select("estimate_lines")
+          .eq("client_id", clientId).eq("short_code", designId).maybeSingle();
+        if (afterErr || !after || !quotePdfStale(printed, after.estimate_lines)) break;
+        const rebuilt = await writeQuotePdf(after.estimate_lines);
+        if (!rebuilt) {
+          // Whichever upload landed last stands, and it may not match the row. Link nothing.
+          quotePdfUrl = null;
+          break;
+        }
+        printed = after.estimate_lines;
+        printedTotal = totalFromSnapshot(after.estimate_lines) ?? printedTotal;
       }
     }
 
@@ -3040,8 +3180,9 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
           phone: businessPhone || null,
           website: businessWebsite || null,
           estimateNumber: ssQuoteNumber,
-          // Tax-inclusive, matching the quote PDF's Total row and the customer portal.
-          total: ssTotal,
+          // Tax-inclusive, matching the quote PDF's Total row and the customer portal: the total
+          // of the lines the document prints (the document check above).
+          total: printedTotal,
           styleLabel,
           sizeLabel: size,
           estimateUrl: myQuotesUrl(clientId, req),
@@ -3064,43 +3205,27 @@ Deno.serve(withErrorLog("submit-estimate", async (req: Request) => {
       emailReason = "no recipient";
     }
 
-    // Persist. ss_quote_sent_at is stamped ONLY when the customer was actually emailed, so
-    // "numbered but never sent" stays visible and recoverable — the same distinction
-    // invoice_sends draws between 'created' and 'sent'. There is no GHL estimate id or number
-    // to write, and the two GHL ids that DO exist are written exactly as the GHL path does.
-    const { error: persistErr } = await supabase
-      .from("designs")
-      .update({
-        ghl_contact_id: contactId,
-        ghl_opportunity_id: opportunityId || existingDesign.ghl_opportunity_id || null,
-        estimate_lines: estimateLines,
-        // The pipeline card’s dollar value (206). Same arithmetic as orders.total_cents.
-        total_cents: designTotalCents(estimateLines),
-        ss_quote_number: ssQuoteNumber,
+    // What the upload and the email decided. ss_quote_sent_at is stamped ONLY when the customer was
+    // actually emailed, so "numbered but never sent" stays visible and recoverable — the same
+    // distinction invoice_sends draws between 'created' and 'sent'. No money rides in this write:
+    // the persist above carried it, so nothing here can race a re-stamp's total.
+    {
+      const stamp: Record<string, unknown> = {
         ...(quotePdfUrl ? { ss_quote_pdf_url: quotePdfUrl } : {}),
-        ...(planImg ? { plan_image_url: planImg } : {}),
-        ...(view3dImg ? { view3d_image_url: view3dImg } : {}),
         // ss_quote_sent_at means the QUOTE email landed; a change-order email is a
         // different document and must not masquerade as the quote having been sent.
         ...(emailed && !changeOrder ? { ss_quote_sent_at: new Date().toISOString() } : {}),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("short_code", designId);
-    // A failed persist is worth surfacing: the number has been consumed and the customer may
-    // already hold the document, so silence here would leave nothing to reconcile against.
-    // Durable log + a warning in the response, not just the console — the runtime console
-    // stream is unreliable on this project (see CLAUDE.md), and a silent ok:true leaves the
-    // allocated quote number diverged from what the row stores.
-    if (persistErr) {
-      console.warn("SS quote persist failed:", persistErr.message);
-      logEdgeError({
-        fn: "submit-estimate",
-        req,
-        clientId,
-        code: "ss_quote_persist_failed",
-        message: `SS quote persist failed after issue/email: ${persistErr.message}`,
-        context: { designId: String(designId), ssQuoteNumber, emailed },
-      }).catch(() => {});
+      };
+      if (Object.keys(stamp).length) {
+        const { error: stampErr } = await supabase.from("designs").update(stamp).eq("short_code", designId);
+        if (stampErr) {
+          logEdgeError({
+            fn: "submit-estimate", req, clientId, code: "ss_quote_stamp_failed",
+            message: `SS quote sent/document stamp failed: ${stampErr.message}`,
+            context: { designId: String(designId), ssQuoteNumber, emailed },
+          }).catch(() => {});
+        }
+      }
     }
 
     // ── THE HOME LOT BECOMES THE QUOTE'S LOCATION (tax chain link 3, 2026-09-17) ───────────

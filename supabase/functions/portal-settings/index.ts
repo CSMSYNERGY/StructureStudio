@@ -47,6 +47,11 @@ import {
   chargeLookup, invoiceTaxCheck, invoiceTaxCheckPlan, type InvoiceTaxCheck, lookupSwitchRefusal, paidLookup,
   parseVerifyTax, quoteSentRefusal, verifiedTax, verifyLookupRefusal, verifyQuoteRefusal,
 } from "../_shared/taxSpend.ts";
+// Why a guarded acceptance promote matched no row. customer-accept's, shared so push_to_invoice's
+// rep attestation answers a re-price that lands mid-promote exactly the way a customer's does.
+import { promoteMiss } from "../_shared/acceptTotal.ts";
+// The rule both writers of an issued quote follow (restampQuoteTax here, submit-estimate's persist).
+import { quotePdfStale } from "../_shared/quoteWriteRace.ts";
 import { feeFor, normalizeRules } from "../_shared/deliveryFee.ts";
 import { isConfigured as deliveryDistanceConfigured } from "../_shared/deliveryDistance.ts";
 import { quoteDelivery } from "../_shared/deliveryQuote.ts";
@@ -7804,6 +7809,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *      and a slow PDF or email must not stand between the two). Awaited, but it cannot
    *      refuse: the quote is already written, and a throw is swallowed;
    *   6. regenerate the quote PDF, best-effort (regenerateQuotePdf's own contract);
+   *   6b. re-read the lines, and when a later writer has moved them, print the stored ones and
+   *      send nothing (quoteWriteRace.ts: the document always ends up printing the final row);
    *   7. when the customer holds the quote and its total moved, email it again through
    *      sendQuoteEmail, but only when step 6 rebuilt the PDF (restampResend). The email
    *      links the PDF's fixed path, so a failed rebuild would send the new total next to a
@@ -7814,12 +7821,14 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
    *      tell.
    * It never looks anything up and never charges: pricing is the caller's business.
    *
-   * KNOWN WINDOW, NOT CLOSED HERE: submit-estimate reads sales_location_id, spends seconds
-   * on the PDF and the email, then persists estimate_lines + total_cents with no guard. A
-   * re-stamp that lands inside that window is overwritten by the older submit's tax, while
-   * sales_location_id keeps the new lot. The compare-and-swap below only catches a submit
-   * that writes FIRST. The next submit re-prices from the recorded lot. A persist-time guard
-   * belongs in submit-estimate, and it has to act before the email goes out, not after.
+   * THE RESUBMIT WINDOW IS CLOSED FROM BOTH SIDES (review, 2026-09-17). submit-estimate's
+   * persist used to be unguarded and to follow its own PDF upload and email, so a re-stamp that
+   * landed while a resubmit was running was overwritten by the older tax (a verified rate paid
+   * for and silently dropped), and whichever PDF uploaded last decided what the document printed.
+   * The persist is now a compare-and-swap that refuses the resubmit, before it uploads or emails
+   * anything, when the stored tax is not the one it priced from; the compare-and-swap below
+   * catches a resubmit that persisted first; and each side uploads only after its own write and
+   * then checks the stored lines (6b). quoteWriteRace.ts has the rule and why it is enough.
    */
   const restampQuoteTax = async (
     // deno-lint-ignore no-explicit-any
@@ -7882,7 +7891,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .update({ ...(opts.alsoSet ?? {}), estimate_lines: plan.snap, total_cents: plan.totalCents, updated_at: new Date().toISOString() })
       .eq("client_id", clientId).eq("short_code", shortCode).is("accepted_at", null);
     write = fresh.updated_at ? write.eq("updated_at", fresh.updated_at) : write.is("updated_at", null);
-    const { data: wrote, error: writeErr } = await write.select("short_code");
+    // estimate_lines comes back as the database stored it: step 6b compares it with a fresh read.
+    const { data: wrote, error: writeErr } = await write.select("short_code, estimate_lines");
     if (writeErr) return { ok: false, response: dbFail(req, clientId, opts.where, writeErr) };
     if (!Array.isArray(wrote) || wrote.length !== 1) return { ok: false, response: changedUnderneath() };
 
@@ -7900,8 +7910,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       })
       : null;
 
+    // 6b. THE DOCUMENT FOLLOWS THE ROW (review, 2026-09-17; the rule is quoteWriteRace.ts's). The
+    // PDF path is shared with submit-estimate, and a resubmit that persisted after this write can
+    // have uploaded its PDF BEFORE the regenerate above, which then replaced it with lines the
+    // quote no longer has. So re-read the lines after uploading, and when they are not the ones
+    // printed, print the stored ones. That resubmit emails the customer its own total, so this
+    // re-stamp's total, already out of date, is not sent (restampResend's movedOn).
+    let movedOn = false;
+    if (quotePdfUrl) {
+      let printed: unknown = wrote[0].estimate_lines;
+      for (let pass = 1; pass <= 2; pass++) {
+        const { data: after, error: afterErr } = await admin.from("designs")
+          .select("estimate_lines, ss_quote_number, image_url")
+          .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+        if (afterErr || !after || !quotePdfStale(printed, after.estimate_lines)) break;
+        movedOn = true;
+        const rebuilt = await regenerateQuotePdf(admin, req, clientId, shortCode, {
+          quoteNumber: String(after.ss_quote_number ?? fresh.ss_quote_number), snap: after.estimate_lines, planUrl: after.image_url,
+        });
+        if (!rebuilt) break;
+        printed = after.estimate_lines;
+      }
+    }
+
     let resent = false;
-    const gate = restampResend({ resend: plan.resend, quoteNumber: fresh.ss_quote_number, quotePdfUrl });
+    const gate = restampResend({ resend: plan.resend, quoteNumber: fresh.ss_quote_number, quotePdfUrl, movedOn });
     let resendReason: string | null = gate.send ? null : gate.reason;
     if (gate.send) {
       const sent = await sendQuoteEmail(shortCode);
@@ -9726,7 +9759,8 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // are untouched on the ordinary send_invoice path. That is a deliberate narrowing
           // of the 2026-08-07 rule "no dead PII reads on the invoice path": the read is not
           // dead here, it is the evidence. Nothing below logs any of the three.
-          .select("short_code, status, accepted_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, accepted_snapshot, selections, paint_colors, contact, inventory_unit_id")
+          // updated_at is the attestation's compare-and-swap token (see its promote below).
+          .select("short_code, status, accepted_at, updated_at, ss_quote_number, ss_quote_pdf_url, image_url, estimate_lines, accepted_snapshot, selections, paint_colors, contact, inventory_unit_id")
           .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
         if (dErr) return dbFail(req, clientId, "find that design", dErr);
         if (!d) return json({ error: "Design not found." }, 404);
@@ -9759,7 +9793,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         // every design without an open change order matched exactly — so this changes nothing
         // on the ordinary path. The push_to_invoice attestation below deliberately keeps
         // reading `d.estimate_lines`: it is PERFORMING the acceptance, not billing one.
-        const agreedLines = agreedBaseline(d).lines;
+        // `let`: when a customer's acceptance wins the race with a push, the attestation below
+        // re-reads THEIR frozen snapshot and bills that instead of this read.
+        let agreedLines = agreedBaseline(d).lines;
 
         // AMENDMENTS (2026-08-27). A manual change order moves the TOTAL without touching
         // estimate_lines, so a document built from the snapshot alone bills the pre-change
@@ -9990,8 +10026,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             ` on the customer's behalf. The customer did not accept this quote electronically;` +
             ` their agreement is recorded when they sign the invoice.`;
 
+          // Named, so a promote that loses the race below can withdraw exactly this row.
+          const acceptanceId = crypto.randomUUID();
           const { error: attErr } = await admin.from("design_acceptances").insert({
-            id: crypto.randomUUID(),
+            id: acceptanceId,
             client_id: clientId,
             short_code: shortCode,
             subject: "quote",
@@ -10022,15 +10060,46 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           // saw — overwriting real customer evidence with a rep's. So take none of the writes
           // below; just re-read what they wrote so the gate sees it, and invoice it.
           if (!attested) {
+            // THEIR snapshot, not this read (review, 2026-09-17). customer-accept froze the lines
+            // it read, and a re-price (Verify, a sales-location change) that landed after `d` was
+            // read and before the customer's read is in their snapshot and not in `d`. Billing
+            // agreedLines from `d` would invoice the pre-re-price total beside an agreement and
+            // an order that say otherwise. So the snapshot comes back with the flags, and the
+            // agreed lines follow it. No snapshot yet (their promote has not landed, or it was
+            // withdrawn as a re-price) leaves accepted_at null, and the gate below refuses.
             const { data: fresh } = await admin.from("designs")
-              .select("status, accepted_at").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+              .select("status, accepted_at, accepted_snapshot").eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
             d.accepted_at = fresh?.accepted_at ?? d.accepted_at;
             dStatus = String(fresh?.status || dStatus);
+            if (fresh?.accepted_snapshot) {
+              d.accepted_snapshot = fresh.accepted_snapshot;
+              agreedLines = agreedBaseline(d).lines;
+            }
             audit("push_to_invoice_raced", null, `short_code=${shortCode} — accepted concurrently, kept their acceptance`);
           } else {
 
             // Promote the design. accepted_snapshot (153) is the frozen agreement every later
             // change order diffs against — the single most important write in this block.
+            //
+            // A COMPARE-AND-SWAP, the same one customer-accept promotes with (review,
+            // 2026-09-17). `d` was read before the version read, the attester lookup and the
+            // insert above, and a rep's re-price can land in between: restampQuoteTax finds no
+            // acceptance and no order yet, writes new lines and emails the customer the new
+            // total. The promote used to be unguarded, so it then froze the OLD lines as the
+            // agreement, filled the order from them and invoiced them. Now it swaps on the
+            // updated_at `d` was read with (designs_set_updated_at bumps it on every update)
+            // with accepted_at still null, which is the guard restampQuoteTax writes with, so
+            // whichever of the two lands second matches no row. On a miss, promoteMiss (the
+            // customer-accept one) reads why:
+            //   repriced: the total is not the one attested. Withdraw the acceptance just
+            //     recorded and refuse, naming the current total. Nothing refers to that row yet:
+            //     the order, the invoice number, the PDF and the email all come later;
+            //   retry: the total is the one attested. An unrelated write moved updated_at, or a
+            //     re-stamp changed words but not money. Swap against the new value, a bounded
+            //     number of times;
+            //   stop, or retries spent: withdraw and refuse too. Left behind, a rep acceptance
+            //     with no promote reads as agreement to every re-price (refuseIfAgreed) and
+            //     answers the customer's own Accept with "already accepted".
             {
               const patch: Record<string, unknown> = {
                 accepted_at: attestedAtIso,
@@ -10042,12 +10111,56 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 },
               };
               if (dStatus === "sent" || dStatus === "") patch.status = "accepted";
-              const { error: promErr } = await admin.from("designs").update(patch)
-                .eq("client_id", clientId).eq("short_code", shortCode);
-              // Not best-effort: without accepted_at the gate below refuses, and without the
-              // snapshot the change-order baseline is missing — which is the bug this whole
-              // block exists to prevent. Refuse before anything irreversible happens.
-              if (promErr) return dbFail(req, clientId, "record the acceptance", promErr);
+              const PROMOTE_ATTEMPTS = 3;
+              let casUpdatedAt: string | null = typeof d.updated_at === "string" ? d.updated_at : null;
+              let missRefusal: Response | null = null;
+              for (let attempt = 1; attempt <= PROMOTE_ATTEMPTS; attempt++) {
+                let promote = admin.from("designs").update(patch)
+                  .eq("client_id", clientId).eq("short_code", shortCode).is("accepted_at", null);
+                promote = casUpdatedAt ? promote.eq("updated_at", casUpdatedAt) : promote.is("updated_at", null);
+                const { data: promoted, error: promErr } = await promote.select("short_code");
+                // Not best-effort: without accepted_at the gate below refuses, and without the
+                // snapshot the change-order baseline is missing — which is the bug this whole
+                // block exists to prevent. Refuse before anything irreversible happens.
+                if (promErr) return dbFail(req, clientId, "record the acceptance", promErr);
+                if (Array.isArray(promoted) && promoted.length === 1) break;
+
+                const { data: now, error: nowErr } = await admin.from("designs")
+                  .select("estimate_lines, accepted_at, updated_at")
+                  .eq("client_id", clientId).eq("short_code", shortCode).maybeSingle();
+                const miss = nowErr ? null : promoteMiss(d.estimate_lines, now);
+                if (miss?.kind === "retry" && attempt < PROMOTE_ATTEMPTS) {
+                  casUpdatedAt = miss.updatedAt;
+                  continue;
+                }
+                if (miss?.kind === "repriced") {
+                  const cents = miss.body.totalCents;
+                  missRefusal = json({
+                    error: `This quote's total changed${cents == null ? "" : ` to ${money(cents / 100)}`} while the invoice was being issued, so nothing was issued. Check the quote, then push it to an invoice again.`,
+                    reason: "repriced",
+                    totalCents: cents,
+                  }, 409);
+                  audit("push_to_invoice_repriced", null, `short_code=${shortCode}`);
+                } else {
+                  missRefusal = json({
+                    error: "This quote changed while the invoice was being issued, so nothing was issued. Reload it and try again.",
+                    reason: "changed",
+                  }, 409);
+                  const why = nowErr ? `re-read failed: ${nowErr.message}` : miss?.kind === "stop" ? miss.why : "the design kept changing";
+                  logEdgeError({ fn: "portal-settings", req, clientId, code: 500, message: `push_to_invoice promote did not land: ${why}`, context: { shortCode, attempt } }).catch(() => {});
+                }
+                break;
+              }
+              if (missRefusal) {
+                const { error: withdrawErr } = await admin.from("design_acceptances").delete()
+                  .eq("id", acceptanceId).eq("client_id", clientId);
+                if (withdrawErr) {
+                  // The rep acceptance stands for a promote that never happened. Support removes
+                  // it by hand; this is the only trace.
+                  logEdgeError({ fn: "portal-settings", req, clientId, code: "attest_withdraw_failed", message: `push_to_invoice acceptance withdraw failed: ${withdrawErr.message}`, context: { shortCode, acceptanceId } }).catch(() => {});
+                }
+                return missRefusal;
+              }
             }
 
             // The order row. The designs_ensure_order trigger fires on the status change where

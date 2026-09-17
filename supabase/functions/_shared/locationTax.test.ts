@@ -277,6 +277,16 @@ Deno.test("restampResend: a quote with no number is never blamed on the PDF", ()
   assert(!out.send && typeof out.reason === "string" && !/PDF/.test(out.reason), JSON.stringify(out));
 });
 
+Deno.test("restampResend: a quote another writer re-priced after this one is not emailed from here", () => {
+  // The rebuilt PDF prints the newer lines, and the total this re-stamp would name is stale.
+  const out = restampResend({ resend: true, quoteNumber: "Q-1001", quotePdfUrl: PDF, movedOn: true });
+  assertEquals(out, { send: false, reason: RESEND_NOT_SENT.moved });
+  assertEquals(restampResend({ resend: false, quoteNumber: "Q-1001", quotePdfUrl: PDF, movedOn: true }), { send: false, reason: null },
+    "nothing was going out anyway, so there is nothing to explain");
+  assertEquals(restampResend({ resend: true, quoteNumber: "Q-1001", quotePdfUrl: PDF, movedOn: false }), { send: true },
+    "movedOn false is today's answer");
+});
+
 // ── restampSendOutcome: what the rep is told after a re-send was attempted ─────────────────
 
 Deno.test("restampSendOutcome: a landed email is resent with nothing to say", () => {

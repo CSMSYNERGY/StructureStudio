@@ -17,7 +17,11 @@
 // the read and the design's promote is the second half of the race, and promoteMiss below is
 // how customer-accept closes it (review, 2026-09-17).
 //
-// Importer: customer-accept only. Derive it before a deploy rather than trusting this line:
+// promoteMiss has a second caller: portal-settings' push_to_invoice, whose rep attestation is the
+// other writer of accepted_at and accepted_snapshot, and promotes with the same compare-and-swap.
+//
+// Importers: customer-accept and portal-settings. Derive them before a deploy rather than trusting
+// this line:
 //     find supabase/functions -name '*.ts' ! -name '*.test.ts' ! -path '*_test_stubs*' -print0 \
 //       | xargs -0 -I{} perl -0777 -ne 'print "$ARGV\n" if m{import[^;]*?from\s+"[^"]*acceptTotal\.ts"}s' {}
 
