@@ -15,6 +15,7 @@ import {
   resendConfigured, ResendApiError, ResendNotConfigured, type RsDomain,
 } from "../_shared/resend.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { isPlaceholderRecipient } from "../_shared/placeholderRecipient.ts";
 import { sendTenantSms } from "../_shared/smsSend.ts";
 import { changeOrderEmail, estimateEmail, invoiceEmail, testEmail } from "../_shared/emailTemplates.ts";
 import { invoiceUrl } from "../_shared/ghlLinks.ts";
@@ -8544,6 +8545,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         }, 409);
       }
     }
+    // ── ANOTHER KIND OF CHANGE ORDER IS ALREADY LIVE ON THIS ORDER (2026-09-17) ──
+    // change_orders_one_live (211) allows one live CO per design and is SOURCE-BLIND, but the
+    // adoption lookup further down reads only 'design_edit' rows. A manual CO waiting on the
+    // customer was therefore invisible here: the handler priced the change, REWROTE THE DESIGN
+    // ROW, then hit the index on the insert, answering a 500 and leaving the order revised with
+    // no change order recorded. Neither order screen locks these dropdowns for a manual CO.
+    // Refused before any write and before the dry-run preview, so the rep hears it the moment
+    // they touch a dropdown and nothing has moved. A live design_edit CO is not refused: this
+    // handler adopts it below, which is the intended path.
+    {
+      const { data: liveCo, error: liveErr } = await admin.from("change_orders")
+        .select("co_no, status, source")
+        .eq("client_id", clientId).eq("short_code", shortCode)
+        .in("status", ["draft", "pending_ack"])
+        .limit(1).maybeSingle();
+      if (liveErr) return dbFail(req, clientId, "check this order's change orders", liveErr);
+      if (liveCo && String(liveCo.source) !== "design_edit") {
+        return json({
+          error: String(liveCo.status) === "draft"
+            ? `CO-${liveCo.co_no} is still open — finish it or void it under Change orders before changing the building.`
+            : `CO-${liveCo.co_no} is still waiting on the customer — record their verbal OK or void it under Change orders before changing the building.`,
+          reason: "co_pending",
+        }, 409);
+      }
+    }
     // deno-lint-ignore no-explicit-any
     const snap: any = d.estimate_lines;
     if (!snap || !Array.isArray(snap.lines)) {
@@ -8869,6 +8895,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
             snapshot_before: { estimateLines: snap, selections: sel, paintColors: pc },
           })
           .select("id, co_no").maybeSingle();
+        if (coErr && String(coErr.code) === "23505") {
+          // RACE BACKSTOP for the co_pending refusal above: another change order went live on
+          // this order between that check and this insert (a second tab, a double submit).
+          // Same refusal shape as the check. The design row HAS been written by now, so an
+          // explicit info row keeps that visible — this function does not log 4xx on its own.
+          await logEdgeError({
+            fn: "portal-settings", req, clientId, severity: "info", code: "co_pending_race",
+            message: "stage_order_attribute_change: another change order went live before the insert",
+            context: { shortCode, designWritten: true },
+          });
+          return json({
+            error: "Another change order was opened on this order at the same moment — reload the order and check Change orders before changing the building again.",
+            reason: "co_pending",
+          }, 409);
+        }
         if (coErr) return dbFail(req, clientId, "raise the change order", coErr);
         changeOrderId = coRow?.id ?? null; coNo = coRow?.co_no ?? null;
       }
@@ -9225,8 +9266,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               return json({ error: `Invoice ${prior.invoice_number} is complete, but this design has no email address — print the invoice PDF instead.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 400);
             }
             const { data: cs2 } = await admin.from("client_settings")
-              .select("business_name, business_phone, business_website, business_logo_url, quote_terms")
+              .select("business_name, business_phone, business_website, business_logo_url, quote_terms, beta_mode, beta_email")
               .eq("client_id", clientId).maybeSingle();
+            // A PLACEHOLDER ADDRESS (example.com, .test, ...) can never receive this, and the
+            // provider's rejection used to come back here as a 502 fault row reading only
+            // "(failed)". Decided from the address, before any send: the provider's 422 is a
+            // request-shape error, not a recipient verdict, so it cannot tell this apart from
+            // a real code fault. Paper-first, like the first send: the invoice stands, 200
+            // sent:false, same shape as the success return below so every caller (including
+            // the designer's navigation off orderId) keeps working. Skipped while beta mode
+            // redirects the send to the tenant's test inbox — that address is the real one.
+            // No address in the log row.
+            const betaRedirect2 = cs2?.beta_mode === true && String(cs2?.beta_email ?? "").trim() !== "";
+            if (!betaRedirect2 && isPlaceholderRecipient(to2)) {
+              await logEdgeError({
+                fn: "portal-settings", req, clientId, severity: "info", code: "invoice_email_placeholder",
+                message: "Invoice email retry skipped: the customer's email is a placeholder address",
+                context: { shortCode, invoiceNumber: prior.invoice_number },
+              });
+              return json({
+                ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url,
+                issuedBy: "structurestudio", sent: false, attested: false, quoteNumber: d.ss_quote_number,
+                ...(await loadOrderRef()),
+                emailReason: "the customer's email is a placeholder address — update it on the design, then send again",
+              });
+            }
             const amend2 = await loadAmendments();
             const out2 = await sendTenantEmail(admin, clientId, {
               kind: "invoice", shortCode, to: to2,
@@ -9246,7 +9310,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
                 .eq("client_id", clientId).eq("short_code", shortCode);
               return json({ ok: true, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, issuedBy: "structurestudio", sent: true, attested: false, quoteNumber: d.ss_quote_number, ...(await loadOrderRef()) });
             }
-            return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out (${out2.reason || "failed"}). Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
+            // A real send failure stays a 502 fault. The reason is a sentence, never the bare
+            // status ("failed") and never the provider's raw string — that stays in
+            // email_sends.error for triage.
+            const why2 = out2.reason === "not_active"
+              ? "email sending isn't switched on for this account yet"
+              : "the email service didn't accept the send";
+            return json({ error: `Invoice ${prior.invoice_number} exists but the email still didn't go out: ${why2}. Print the invoice PDF or fix email sending in Settings → Email.`, invoiceNumber: prior.invoice_number, invoicePdfUrl: prior.invoice_pdf_url, sent: false }, 502);
           }
           return json({ error: "This design was already invoiced." }, 400);
         }
