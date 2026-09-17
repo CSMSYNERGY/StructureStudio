@@ -7,6 +7,7 @@ import { AUTH_PORTAL_URL } from "../_shared/authPortalUrl.ts";
 import { paidThroughOf } from "../_shared/billingPeriods.ts";
 import { pingAvalara } from "../_shared/salesTax.ts";
 import { finishLookup, insertLookup, PING_CLIENT_ID, pingResponse } from "../_shared/taxLookups.ts";
+import { syncTaxCodes } from "../_shared/taxCodeSync.ts";
 
 // Operator (super-admin) catalog tool, used by the standalone admin.html page.
 // Gated by the shared ADMIN_PASSWORD edge-function secret (same secret as
@@ -896,6 +897,24 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
           }).catch(() => {});
         }
         return json(pingResponse(ping));
+      }
+
+      // ── Avalara tax code sync (migration 246, 2026-09-17) ─────────────────────────────────
+      // Fill the platform catalog (avalara_tax_codes) that every builder's Tax tab searches, from
+      // Avalara's ListTaxCodes. Pressed on purpose by an operator; nothing automatic calls it.
+      // Like avalara_ping, deliberately NOT in READ_ONLY_ACTIONS: it writes the catalog and makes
+      // up to ten authenticated Avalara requests, so it needs can_write. It is not a rate lookup
+      // and never touches a tenant's tax_lookup_enabled switch or the lookup ledger's cap. The
+      // paging, the write rules (refused credentials write nothing, a partial sync deactivates
+      // nothing) and the operator's sentences are in _shared/taxCodeSync.ts. The answer is counts
+      // only — no credentials, no account ids, no Avalara body.
+      case "avalara_sync_tax_codes": {
+        const out = await syncTaxCodes(sb);
+        if (!out.ok) {
+          const { status, ok: _ok, ...body } = out;
+          return json(body, status);
+        }
+        return json(out);
       }
 
       case "set_feature_grants": {

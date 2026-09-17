@@ -189,14 +189,22 @@ export function isConfigured(): boolean {
   return !!(accountId && licenseKey);
 }
 
-/** The headers every Avalara request carries. Basic auth is base64(accountId:licenseKey). */
-function requestHeaders(): Record<string, string> {
+/** The headers every Avalara request carries. Basic auth is base64(accountId:licenseKey).
+ *  Exported for taxCodeSync.ts (the operator's tax code sync), so the credentials are read and
+ *  encoded in exactly one place. It builds headers and nothing else: whether a request may be
+ *  made at all is each caller's gate — resolveRate's allowLookup here, the operator action there. */
+export function avalaraHeaders(): Record<string, string> {
   const { accountId, licenseKey } = creds();
   return {
     Authorization: `Basic ${btoa(`${accountId}:${licenseKey}`)}`,
     Accept: "application/json",
     "X-Avalara-Client": AVALARA_CLIENT_HEADER,
   };
+}
+
+/** An API path on the configured base (AVALARA_API_BASE, read at call time like the rest). */
+export function avalaraUrl(path: string): string {
+  return `${creds().base}${path}`;
 }
 
 /**
@@ -242,6 +250,14 @@ async function errorCodes(res: Response): Promise<string[]> {
   }
 }
 
+/** Which kind of refusal a 401/403 is: a missing entitlement (right key, wrong plan — a phone
+ *  call to Avalara) or a rejected key (a new secret). Reads the body. Shared with taxCodeSync.ts
+ *  so both paths name the same fix for the same answer. */
+export async function avalaraAuthFailure(res: Response): Promise<"subscription" | "credentials_rejected"> {
+  const codes = await errorCodes(res);
+  return codes.some((c) => SUBSCRIPTION_CODES.has(c)) ? "subscription" : "credentials_rejected";
+}
+
 const failed = (failure: AvalaraFailure, httpStatus: number | null, attempts: number): AvalaraResult =>
   ({ ok: false, rate: null, jurisdiction: null, httpStatus, attempts, failure });
 
@@ -270,7 +286,7 @@ async function avalaraRate(addr: TaxAddress): Promise<AvalaraResult> {
     country: "US",
   });
   const url = `${creds().base}/api/v2/taxrates/byaddress?${qs}`;
-  const headers = requestHeaders();
+  const headers = avalaraHeaders();
 
   let last: AvalaraResult = failed("network", null, 0);
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
@@ -296,8 +312,7 @@ async function avalaraRate(addr: TaxAddress): Promise<AvalaraResult> {
     }
 
     if (status === 401 || status === 403) {
-      const codes = await errorCodes(res);
-      return failed(codes.some((c) => SUBSCRIPTION_CODES.has(c)) ? "subscription" : "credentials_rejected", status, attempt);
+      return failed(await avalaraAuthFailure(res), status, attempt);
     }
     await discard(res);
     if (status === 429) {
@@ -375,7 +390,7 @@ export async function pingAvalara(): Promise<AvalaraPing> {
   if (!isConfigured()) return { configured: false, authenticated: false, authenticationType: null, httpStatus: null };
   try {
     const res = await fetch(`${creds().base}/api/v2/utilities/ping`, {
-      headers: requestHeaders(),
+      headers: avalaraHeaders(),
       signal: AbortSignal.timeout(PING_TIMEOUT_MS),
     });
     let body: { authenticated?: unknown; authenticationType?: unknown } | null = null;

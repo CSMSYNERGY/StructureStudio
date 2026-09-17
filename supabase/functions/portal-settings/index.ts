@@ -37,6 +37,10 @@ import {
 } from "../_shared/taxChain.ts";
 import { countLookups24h, DAILY_TAX_LOOKUP_CAP } from "../_shared/taxLookups.ts";
 import {
+  COMMON_CODES, headingsView, mergeCodeLists, orderCodes, parseAssignmentsPayload, planAssignments, searchQuery,
+  TAX_CODE_SEARCH_LIMIT, TAX_HEADING_GROUPS, taxCodeView, visibleAssignments,
+} from "../_shared/taxCodes.ts";
+import {
   isAgreedDesign, isVerifiedTax, LOCATION_TAX_COLUMNS, locationTaxReady, locationTaxView, parseSaveLocationTax,
   parseSetSalesLocation, quoteInCustomerHands, ratePct, RESTAMP_DESIGN_COLUMNS, restampPlan, restampResend,
   restampSendOutcome,
@@ -215,6 +219,13 @@ const GATES: GateTable = {
   // can spend a cent; a button that bills the builder's allowance belongs to whoever may set the
   // builder's tax rates. The branch adds the row scope (refuseUnlessDesignVisible) on top.
   verify_tax:        { area: "settings_crm", level: "edit" },
+  // Tax codes (migration 246): the Avalara code on each building style and option heading
+  // (Settings → Company → Tax). The same area as the rates, for the same reason, and no new area.
+  // Saved only — no quote reads the mapping yet. The search reads the platform catalog, never
+  // Avalara, so it spends nothing.
+  tax_codes_get:     { area: "settings_crm", level: "view" },
+  tax_codes_search:  { area: "settings_crm", level: "view" },
+  tax_codes_save:    { area: "settings_crm", level: "edit" },
 
   // ── QuickBooks ───────────────────────────────────────────────────────────
   // Same two-question split as Real-Time Pricing above: these gates answer "may this person
@@ -5147,6 +5158,157 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     if (!saved) return json({ error: "Location not found.", reason: "location_not_found" }, 404);
     await audit("portal_save_location_tax", 1, `location=${locationId} rate=${rate ?? "none"}${label !== undefined ? " label" : ""}`);
     return json({ ok: true, location: locationTaxView(saved) });
+  }
+
+  // ── Tax codes (migration 246, 2026-09-17) ───────────────────────────────────────────────────
+  // Settings → Company → Tax: which Avalara tax code each building style and option heading
+  // falls under, chosen by the builder (or their accountant) so the codes match how they file.
+  // SAVED ONLY: no quote, PDF, acceptance, QuickBooks push or change order reads the mapping yet —
+  // per-line tax by code is a later stage, and the card says so. The codes come from the platform
+  // catalog (avalara_tax_codes), which an operator fills from Avalara (admin-catalog
+  // avalara_sync_tax_codes); nothing here calls Avalara. Headings, starter codes, parsing and the
+  // save plan are _shared/taxCodes.ts.
+  //
+  // tax_codes_get's answer, and tax_codes_save's: a save hands back what the database now holds,
+  // not an echo of what was sent. `hint` rides on the common codes (the picker's empty-box list)
+  // and `headingGroups` names the heading groups in order — both additive to the brief's shape.
+  const taxCodesResponse = async (): Promise<Response> => {
+    const [csRes, stylesRes, storedRes, countRes, syncRes] = await Promise.all([
+      admin.from("client_settings").select("invoice_in_ghl, tax_lookup_enabled").eq("client_id", clientId).maybeSingle(),
+      admin.from("building_styles").select("id, label, active, sort_order").eq("client_id", clientId)
+        .order("active", { ascending: false }).order("sort_order").order("label"),
+      admin.from("tax_code_assignments").select("target_type, target_key, tax_code").eq("client_id", clientId),
+      admin.from("avalara_tax_codes").select("code", { count: "exact", head: true }),
+      admin.from("avalara_tax_codes").select("synced_at").not("synced_at", "is", null)
+        .order("synced_at", { ascending: false }).limit(1).maybeSingle(),
+    ]);
+    if (csRes.error) return dbFail(req, clientId, "load your tax settings", csRes.error);
+    if (stylesRes.error) return dbFail(req, clientId, "load your building styles", stylesRes.error);
+    if (storedRes.error) return dbFail(req, clientId, "load your tax codes", storedRes.error);
+    if (countRes.error) return dbFail(req, clientId, "load the tax code list", countRes.error);
+    if (syncRes.error) return dbFail(req, clientId, "load the tax code list", syncRes.error);
+
+    // deno-lint-ignore no-explicit-any
+    const styles = (stylesRes.data ?? []).map((s: any) => ({ id: String(s.id).toLowerCase(), label: s.label ?? "", active: s.active === true }));
+    const assignments = visibleAssignments(storedRes.data ?? [], new Set(styles.map((s) => s.id)));
+    // Every assigned code's details (an inactive one included, so the card can say it needs
+    // changing) plus the common codes the picker opens on.
+    const wanted = [...new Set([...COMMON_CODES.map((c) => c.code), ...assignments.map((a) => a.code)])];
+    const codesRes = await admin.from("avalara_tax_codes").select("code, description, type_id, is_active").in("code", wanted);
+    if (codesRes.error) return dbFail(req, clientId, "load the tax code list", codesRes.error);
+
+    return json({
+      ok: true,
+      // Same readings as tax_settings: a row predating either column is CRM mode / lookups off.
+      ssMode: csRes.data?.invoice_in_ghl === false,
+      lookupEnabled: csRes.data?.tax_lookup_enabled === true,
+      headings: headingsView(),
+      headingGroups: TAX_HEADING_GROUPS,
+      styles,
+      assignments,
+      codes: orderCodes((codesRes.data ?? []).map(taxCodeView)),
+      catalog: { count: countRes.count ?? 0, syncedAt: syncRes.data?.synced_at ?? null },
+    });
+  };
+
+  if (action === "tax_codes_get") return await taxCodesResponse();
+
+  // The picker's type-ahead, over the stored catalog. Active codes only; the codes Avalara marks
+  // not applicable to North America are left out unless `includeAll`. An empty box lists the
+  // common codes first. Two queries rather than one `or=` filter: typed text inside an or-filter
+  // string would need PostgREST's quoting rules for commas, dots and parentheses, while a plain
+  // ilike filter takes the value as it is (searchQuery escapes the pattern characters).
+  if (action === "tax_codes_search") {
+    const q = searchQuery(payload?.q);
+    const includeAll = payload?.includeAll === true;
+    const columns = "code, description, type_id, is_active";
+    const active = () => {
+      const b = admin.from("avalara_tax_codes").select(columns).eq("is_active", true);
+      return includeAll ? b : b.eq("north_america", true);
+    };
+    const [firstRes, secondRes] = await Promise.all(q
+      ? [
+        active().ilike("code", `${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
+        active().ilike("description", `%${q}%`).order("code").limit(TAX_CODE_SEARCH_LIMIT),
+      ]
+      : [
+        active().in("code", COMMON_CODES.map((c) => c.code)),
+        active().order("code").limit(TAX_CODE_SEARCH_LIMIT),
+      ]);
+    if (firstRes.error) return dbFail(req, clientId, "search the tax codes", firstRes.error);
+    if (secondRes.error) return dbFail(req, clientId, "search the tax codes", secondRes.error);
+    const first = (firstRes.data ?? []).map(taxCodeView);
+    const second = (secondRes.data ?? []).map(taxCodeView);
+    return json({ ok: true, codes: mergeCodeLists(q ? first : orderCodes(first), second) });
+  }
+
+  // Replace the tenant's whole mapping with exactly the payload's. Validated in full BEFORE any
+  // write: the shape (parseAssignmentsPayload), every code present and active in the catalog,
+  // every style this tenant's. Then new or changed targets are upserted and targets no longer
+  // covered are deleted — upsert first, so a failure between the two leaves an old assignment
+  // behind rather than losing one the builder kept. Unchanged targets are not rewritten, so
+  // updated_by keeps naming whoever last changed each one (an operator's own id in view-as, whose
+  // write is also on the operator_tax_codes_save audit row above).
+  if (action === "tax_codes_save") {
+    const parsed = parseAssignmentsPayload(payload);
+    if (!parsed.ok) return json({ error: parsed.error, reason: parsed.reason }, parsed.status);
+    const rows = parsed.rows;
+
+    const codes = [...new Set(rows.map((r) => r.code))];
+    if (codes.length) {
+      const { data, error } = await admin.from("avalara_tax_codes").select("code, is_active").in("code", codes);
+      if (error) return dbFail(req, clientId, "check those tax codes", error);
+      // deno-lint-ignore no-explicit-any
+      const active = new Map((data ?? []).map((c: any) => [String(c.code), c.is_active === true]));
+      for (const code of codes) {
+        if (active.get(code) === true) continue;
+        return json({
+          error: active.has(code)
+            ? `Tax code ${code} is no longer active in Avalara's list — pick another code for that row.`
+            : `Tax code ${code} isn't in the Avalara tax code list — pick a code from the list.`,
+          reason: "unknown_code",
+        }, 400);
+      }
+    }
+
+    const styleIds = [...new Set(rows.flatMap((r) => r.targets.filter((t) => t.type === "style").map((t) => t.key)))];
+    if (styleIds.length) {
+      const { data, error } = await admin.from("building_styles").select("id").eq("client_id", clientId).in("id", styleIds);
+      if (error) return dbFail(req, clientId, "check your building styles", error);
+      // deno-lint-ignore no-explicit-any
+      const mine = new Set((data ?? []).map((s: any) => String(s.id).toLowerCase()));
+      if (styleIds.some((id) => !mine.has(id))) {
+        return json({
+          error: "One of those buildings is no longer one of your building styles — reload the page and try again.",
+          reason: "unknown_style",
+        }, 400);
+      }
+    }
+
+    const { data: stored, error: storedErr } = await admin.from("tax_code_assignments")
+      .select("target_type, target_key, tax_code").eq("client_id", clientId);
+    if (storedErr) return dbFail(req, clientId, "load your tax codes", storedErr);
+    const plan = planAssignments(stored ?? [], rows);
+
+    if (plan.upserts.length) {
+      const now = new Date().toISOString();
+      const { error } = await admin.from("tax_code_assignments").upsert(
+        plan.upserts.map((u) => ({ client_id: clientId, ...u, updated_at: now, updated_by: userId ?? null })),
+        { onConflict: "client_id,target_type,target_key" },
+      );
+      if (error) return dbFail(req, clientId, "save your tax codes", error);
+    }
+    for (const [type, keys] of [["style", plan.deleteStyles], ["heading", plan.deleteHeadings]] as const) {
+      if (!keys.length) continue;
+      const { error } = await admin.from("tax_code_assignments").delete()
+        .eq("client_id", clientId).eq("target_type", type).in("target_key", keys);
+      if (error) return dbFail(req, clientId, "remove the tax codes you unticked", error);
+    }
+
+    const removed = plan.deleteStyles.length + plan.deleteHeadings.length;
+    await audit("portal_tax_codes_save", plan.upserts.length + removed,
+      `codes=${codes.join(",").slice(0, 400)} changed=${plan.upserts.length} removed=${removed} unchanged=${plan.unchanged}`);
+    return await taxCodesResponse();
   }
 
   // ── Serial sequence starting number ──────────────────────────────────────────
