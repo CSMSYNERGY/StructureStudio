@@ -7048,6 +7048,9 @@ function buildShed3DModel(THREE, p) {
     lslab.position.set((u0 + u1) / 2 + ux * OV / 2,
                        (y0 + y1) / 2 + uy * OV / 2 + D3.ROOF_T / 2,
                        L / 2);
+    // userData.ssLeanTo on every member: the projecting porch's clearance scan below measures a
+    // lean-to by what hangs over the porch, not by its box.
+    lslab.userData.ssLeanTo = true;
     rg.add(lslab);
     // Posts at the free edge. Two is what a shed lot actually builds under 12 ft; longer
     // runs get a third rather than an unsupported header.
@@ -7057,10 +7060,12 @@ function buildShed3DModel(THREE, p) {
       const t = nPost === 1 ? 0.5 : i / (nPost - 1);
       const post = box(trimMat, 0.3, y1, 0.3);
       post.position.set(u1, y1 / 2, inset + t * (L - 2 * inset));
+      post.userData.ssLeanTo = true;
       rg.add(post);
     }
     const hdr = box(trimMat, 0.35, 0.5, L);     // header tying the posts together
     hdr.position.set(u1, y1 - 0.25, L / 2);
+    hdr.userData.ssLeanTo = true;
     rg.add(hdr);
   }
 
@@ -7742,16 +7747,46 @@ function buildShed3DModel(THREE, p) {
     // slab. Read off the meshes themselves (rg is untransformed here), so there is no second copy of
     // the eave arithmetic. Conservative: the box around a sloped rake reports its lowest corner,
     // which can cost a deep overhang a few inches of porch height it did not need to lose.
+    //
+    // ⚠️ A LEAN-TO IS MEASURED, NOT BOXED. Its slab runs the building's length plus both overhangs, so
+    // on any overhang past 0.155 ft its box passes the wall face, and the box starts at the eave wall,
+    // inside the porch's width. That box's lowest corner is the lean-to's free edge, 8 to 10 ft out
+    // to the side, and reading it dropped the porch roof 1 to 3 ft: pitch 0.05, short posts, a false
+    // "short" warning and a plate band grown into a tall dark slab. Only the lean-to's inner strip is
+    // over the porch, so a lean-to member counts by the lowest point of its triangles clipped to the
+    // porch's footprint. The main roof keeps its box: there it costs 0 to 0.31 ft, measured.
     const g0 = d3PorchGeom(S, H, D, trimFace, Infinity);
     const reach = g0.side + g0.sizes.SIDE_OV;
+    const zFace = atZero ? -(g0.dWall + 0.005) : L + g0.dWall + 0.005;
+    const overPorch = [(v) => v.x + reach, (v) => reach - v.x, (v) => (atZero ? zFace - v.z : v.z - zFace)];
+    const lowestOverPorch = (o) => {
+      const pos = o.geometry.attributes.position, idx = o.geometry.index;
+      const n = idx ? idx.count : pos.count;
+      let lo = Infinity;
+      for (let t = 0; t + 2 < n; t += 3) {
+        let poly = [0, 1, 2].map((k) => new THREE.Vector3().fromBufferAttribute(pos, idx ? idx.getX(t + k) : t + k).applyMatrix4(o.matrixWorld));
+        for (const f of overPorch) {
+          const next = [];
+          poly.forEach((a, i) => {
+            const b = poly[(i + 1) % poly.length], fa = f(a), fb = f(b);
+            if (fa >= 0) next.push(a);
+            if ((fa >= 0) !== (fb >= 0)) next.push(a.clone().lerp(b, fa / (fa - fb)));
+          });
+          poly = next;
+          if (!poly.length) break;
+        }
+        poly.forEach((v) => { lo = Math.min(lo, v.y); });
+      }
+      return lo;
+    };
     let capY = Infinity;
     const bb = new THREE.Box3();
     rg.children.forEach((o) => {
       if (!o.isMesh || (o.userData && o.userData.ssPorch)) return;
-      bb.setFromObject(o);
+      bb.setFromObject(o);                                     // also brings o.matrixWorld up to date
       const past = atZero ? -bb.min.z : bb.max.z - L;
       if (past <= g0.dWall + 0.005 || bb.max.x < -reach || bb.min.x > reach) return;
-      capY = Math.min(capY, bb.min.y - 0.03);
+      capY = Math.min(capY, (o.userData && o.userData.ssLeanTo ? lowestOverPorch(o) : bb.min.y) - 0.03);
     });
     const geom = d3PorchGeom(S, H, D, trimFace, capY);
     const { POST, HDR_H, HDR_D, RAF_W, RAF_D, PR_T, SHEATH, SIDE_OV, CHEEK_T, FAS_T } = geom.sizes;

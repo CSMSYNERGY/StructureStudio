@@ -10,7 +10,7 @@
 //   2. the deck's top is the floor (y 0) and it projects D; the roof sheet reaches D + 0.25..0.45
 //      and stays under H - 0.15
 //   3. tuck-under: no main-roof mesh reaching into the porch's width past the wall face sits
-//      below the porch roof's top
+//      below the porch roof's top (a lean-to by the part of it over the porch, not by its box)
 //   4. posts: model.porch.posts of them (3 at 16 ft, 4 on a 20 ft shed wall), all at D, measured
 //      postH tall, 6'8" clear or pitch 0.05 flagged short; the header sits on them, under the roof
 //      sheet, its ends inside the cheeks
@@ -29,7 +29,9 @@
 //      porch's building (none on its porch end), and neither kind of porch group there. Where the
 //      main roof pushes the porch roof lower, the band on the porch's end reaches down to it (H)
 //  12. porchOutFt 0 draws no porch; look-inside hides the porch roof and keeps the deck
-//  13. zero page errors
+//  13. a lean-to on either long side leaves the porch exactly as the same building builds it without
+//      one: high edge, pitch, posts and the band on the porch's end (cases I and J against I0)
+//  14. zero page errors
 //
 // The porch groups and bands are found by userData.ssPorch, and every member inside them by
 // userData.ssPorchPart, never by size or draw order: a 16x24's porch sheet is as big as a main roof
@@ -52,6 +54,8 @@ const COLORS = { body: "#eeebe0", trim: "#686c70", roof: "#5f6266" };
 const GAMBREL = { type: "gambrel", pitch: 1.2, ridgeOffset: 0, overhang: 0.15, kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1, eave: "fascia" };
 // A recessed porch with a king-post truss, as gableProbe's porch fixture has it.
 const RECESSED = { type: "gable", pitch: 0.42, overhang: 0.8, eave: "fascia", ridgeOffset: 0, porchEnd: "front", porchTruss: true, porchDepthFt: 6 };
+// The building cases I0, I and J share; I and J add a lean-to.
+const LEAN_BASE = { type: "gable", pitch: 0.4, overhang: 0.5, eave: "fascia", porchOutFt: 6.5, porchEnd: "front", plateBand: true };
 
 const CASES = [
   { id: "A", label: "Harness Barn", size: "16x24", H: 9, posts: 3, metal: true, wood: "#c4965a", place: true, bands: 2, bandUnderEdge: true,
@@ -73,6 +77,16 @@ const CASES = [
   // porch's end must come down to meet it, or bare siding shows between the two.
   { id: "H", label: "Harness Deep Rake", size: "12x16", H: 8, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2, bandDrops: true,
     d3: { roof: { type: "gable", pitch: 0.33, overhang: 1, eave: "fascia", porchOutFt: 6, plateBand: true }, siding: "panel", colors: COLORS, wallHeightFt: 8, roofMaterial: "metal" } },
+  // A LEAN-TO beside the porch. On a 0.5 ft overhang the lean-to's slab runs past the gable wall and
+  // its box starts at the eave wall, inside the porch's width, so a box-based clearance scan read its
+  // free edge, 8 to 10 ft out to the side, as hanging over the porch. Only its inner strip is. The
+  // porch must build exactly as it does on the same building without a lean-to (I0).
+  { id: "I0", label: "Harness Porch Gable", size: "16x24", H: 9, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2,
+    d3: { roof: LEAN_BASE, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "I", label: "Harness Lean-To Left", size: "16x24", H: 9, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2, sameAs: "I0",
+    d3: { roof: { ...LEAN_BASE, leanToWidthFt: 8, leanToDropFt: 1.5, leanToSide: "left" }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
+  { id: "J", label: "Harness Lean-To Right", size: "16x24", H: 9, posts: 3, metal: true, wood: WOOD_FALLBACK, bands: 2, sameAs: "I0",
+    d3: { roof: { ...LEAN_BASE, leanToWidthFt: 10, leanToDropFt: 3, leanToSide: "right" }, siding: "panel", colors: COLORS, wallHeightFt: 9, roofMaterial: "metal" } },
 ];
 
 const configFor = (c) => {
@@ -267,13 +281,46 @@ async function measure(page, W, L) {
       });
       out.slabSharesRoofMat = !!mainMat && slab.material === mainMat;
       // Tuck-under: every main-roof mesh (bands included) past the wall face inside the porch's width.
+      // A lean-to (userData.ssLeanTo) counts by its lowest point OVER that footprint: its triangles
+      // clipped to the porch sheet's width and to more than 0.16 ft out. Its box spans the whole slope
+      // down to the free edge, which is nowhere near the porch.
+      const acrossOf = (v) => ((P.wall === "south" || P.wall === "north") ? v.x : v.z);
+      const lowestOver = (q) => {
+        const pos = q.geometry.attributes.position, idx = q.geometry.index, n = idx ? idx.count : pos.count;
+        const inside = [(v) => acrossOf(v) - out.slab.across[0], (v) => out.slab.across[1] - acrossOf(v), (v) => dOf(v) - 0.16];
+        let lo = Infinity;
+        for (let t = 0; t + 2 < n; t += 3) {
+          let poly = [0, 1, 2].map((k) => new V().fromBufferAttribute(pos, idx ? idx.getX(t + k) : t + k).applyMatrix4(q.matrixWorld));
+          for (const f of inside) {
+            const next = [];
+            poly.forEach((a, i) => {
+              const b = poly[(i + 1) % poly.length], fa = f(a), fb = f(b);
+              if (fa >= 0) next.push(a);
+              if ((fa >= 0) !== (fb >= 0)) next.push(a.clone().lerp(b, fa / (fa - fb)));
+            });
+            poly = next;
+            if (!poly.length) break;
+          }
+          poly.forEach((v) => { lo = Math.min(lo, v.y); });
+        }
+        return lo;
+      };
       const clash = [];
+      out.leanTo = { n: 0, boxOver: false, lowestOver: null };
       M.roofGroup.traverse((q) => {
         if (!q.isMesh || under(q, pg)) return;
+        const lean = !!(q.userData && q.userData.ssLeanTo);
+        if (lean) out.leanTo.n++;
         const b = bbOf(q), o = outDist(b), a = across(b);
         if (o <= 0.16 || a[1] < out.slab.across[0] || a[0] > out.slab.across[1]) return;
         if (b.mn[1] < 1) return;                   // corner boards stand on the ground beside the wall
-        if (b.mn[1] < out.slab.top - 0.005) clash.push({ geom: q.geometry.type, minY: +b.mn[1].toFixed(3), out: +o.toFixed(3) });
+        let lowY = b.mn[1];
+        if (lean) {
+          lowY = lowestOver(q);
+          if (b.mn[1] < out.slab.top - 0.005) out.leanTo.boxOver = true;
+          out.leanTo.lowestOver = Math.min(out.leanTo.lowestOver == null ? Infinity : out.leanTo.lowestOver, lowY);
+        }
+        if (lowY < out.slab.top - 0.005) clash.push({ geom: q.geometry.type, minY: +lowY.toFixed(3), out: +o.toFixed(3), leanTo: lean });
       });
       out.clash = clash;
     }
@@ -326,7 +373,8 @@ async function shot(page, path, eye, at) {
   await page.screenshot({ path, clip });
 }
 
-async function runCase(ctx, c, ok, shots) {
+// seen: what each finished case built, for the cases that must build the same porch (sameAs).
+async function runCase(ctx, c, ok, shots, seen) {
   const [W, L] = c.size.split("x").map(Number);
   const config = configFor(c);
   const page = await ctx.newPage();
@@ -414,6 +462,19 @@ async function runCase(ctx, c, ok, shots) {
         ok(`${tag}: ...and all of it below the ceiling`, m.floods.length === 1 && m.floods[0].topY < P.ceilWall, `top ${f3(m.floods[0] && m.floods[0].topY)} ceilWall ${f3(P.ceilWall)}`);
       }
       if (c.bandUnderEdge) ok(`${tag}: with a plate band the porch roof meets the wall at exactly H - 0.2`, Math.abs(P.yHigh - (c.H - 0.2)) < 1e-9, f3(P.yHigh));
+      const porchEndBand = m.bands.filter((b) => b.porchEnd);
+      seen[c.id] = { yHigh: P.yHigh, pitch: P.pitch, postH: P.postH, posts: P.posts, short: P.short, bandBot: porchEndBand.length === 1 ? porchEndBand[0].minY : null };
+      if (c.sameAs) {
+        const ref = seen[c.sameAs];
+        ok(`${tag}: the lean-to's members are tagged userData.ssLeanTo`, m.leanTo.n >= 3, `tagged ${m.leanTo.n}`);
+        ok(`${tag}: ...and its box reaches over the porch below the porch roof's top (what this case tests)`, m.leanTo.boxOver === true, `lowest point over the porch ${f3(m.leanTo.lowestOver)} slab top ${f3(m.slab.top)}`);
+        ok(`${tag}: the porch builds exactly as without the lean-to (${c.sameAs}): high edge, pitch, post height, posts, short`,
+          !!ref && Math.abs(P.yHigh - ref.yHigh) < 1e-9 && Math.abs(P.pitch - ref.pitch) < 1e-9 && Math.abs(P.postH - ref.postH) < 1e-9 && P.posts === ref.posts && P.short === ref.short,
+          ref ? `yHigh ${f3(P.yHigh)}/${f3(ref.yHigh)} pitch ${f3(P.pitch)}/${f3(ref.pitch)} postH ${f3(P.postH)}/${f3(ref.postH)} posts ${P.posts}/${ref.posts} short ${P.short}/${ref.short}` : `${c.sameAs} did not measure`);
+        ok(`${tag}: ...and the band on the porch's end comes down no further than without it`,
+          !!ref && ref.bandBot != null && seen[c.id].bandBot != null && Math.abs(seen[c.id].bandBot - ref.bandBot) < 0.005,
+          ref ? `bottom ${f3(seen[c.id].bandBot)} without ${f3(ref.bandBot)}` : `${c.sameAs} did not measure`);
+      }
       const out = { south: [0, 1], north: [0, -1], east: [1, 0], west: [-1, 0] }[P.wall];
       const eye = [out[0] * (W / 2 + P.D + 14) + out[1] * 9, c.H + 3, out[1] * (L / 2 + P.D + 14) - out[0] * 9];
       await shot(page, `${shots}/${c.id}-porch.png`, eye, [out[0] * (W / 2 + P.D / 2), c.H * 0.45, out[1] * (L / 2 + P.D / 2)]);
@@ -446,11 +507,14 @@ export async function main() {
   const { ok, failed } = reporter();
   const shots = shotsDir("porchProbe");
   const only = (process.env.SS_CASES || "").split(",").map((s) => s.trim()).filter(Boolean);
+  // A case compared with another (sameAs) brings that one along, ahead of it in CASES.
+  CASES.forEach((c) => { if (c.sameAs && only.includes(c.id) && !only.includes(c.sameAs)) only.push(c.sameAs); });
+  const seen = {};
   const { browser, ctx } = await launch({ width: 1280, height: 900 });
   try {
     for (const c of CASES) {
       if (only.length && !only.includes(c.id)) continue;
-      await runCase(ctx, c, ok, shots);
+      await runCase(ctx, c, ok, shots, seen);
     }
   } finally {
     await browser.close();
