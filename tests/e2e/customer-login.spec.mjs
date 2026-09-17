@@ -16,8 +16,10 @@
 //   PW_BASE_URL=http://localhost:8126 npx playwright test tests/e2e/customer-login.spec.mjs
 //
 // PW_SHOTS=<dir> also saves screenshots of each state (for Carolyn's review).
-import { test, expect } from "@playwright/test";
-import { CLIENT, watchConsole, revealTool } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+// stubBackend's page.route still matches log_error first, so logRows() below sees what it always did.
+import { test, CLIENT, watchConsole, revealTool } from "./helpers.mjs";
 
 // 555-01xx is reserved for fiction, so even a stub that leaked could never reach a person.
 const PHONE10 = "5550104477";

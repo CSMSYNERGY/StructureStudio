@@ -1,8 +1,9 @@
 // Every portal route renders for a signed-in test owner: no "Loading..." stall, no white
 // screen, no console errors we own. Gated routes may show their upgrade card - that is a
 // render, not a failure. Needs PW_MAGIC_TOKEN (see playwright.config.mjs).
-import { test, expect } from "@playwright/test";
-import { loginWithMagicToken, watchConsole } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+import { test, guardLogError, loginWithMagicToken, watchConsole } from "./helpers.mjs";
 
 const ROUTES = [
   "/portal/designer", "/portal/contacts", "/portal/designs", "/portal/designs/list", "/portal/designs/pipeline",
@@ -47,13 +48,18 @@ const ROUTES = [
 
 test.describe("portal routes", () => {
   test.describe.configure({ mode: "serial" });
-  let page, errors;
+  let page, errors, logs;
 
-  test.beforeAll(async ({ browser }) => {
+  // browser.newPage() makes its own context, which the fixture's log_error guard never sees, so
+  // it is guarded here and checked after every test (a boot_* call fails the test it happened in).
+  test.beforeAll(async ({ browser }, testInfo) => {
     page = await browser.newPage();
+    logs = await guardLogError(page.context());
     errors = watchConsole(page);
     await loginWithMagicToken(page);
+    await logs.finish(testInfo);
   });
+  test.afterEach(async ({}, testInfo) => { await logs.finish(testInfo); });
   test.afterAll(async () => { await page.close(); });
 
   for (const route of ROUTES) {

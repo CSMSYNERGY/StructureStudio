@@ -1,8 +1,9 @@
 // Customer quotes page: renders its sign-in form for a tenant and refuses a forged token
 // cleanly. Sending a real code is deliberately NOT part of the smoke suite (it texts/emails
 // a person); the OTP path is checked by hand.
-import { test, expect } from "@playwright/test";
-import { CLIENT, watchConsole } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+import { test, CLIENT, watchConsole } from "./helpers.mjs";
 
 // /my-quotes is a pretty URL the Workers host resolves. A local `python -m http.server` has no
 // such rewrite and answers 404 — every test here then fails exactly like a broken page. Locally:

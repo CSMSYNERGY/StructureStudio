@@ -1,9 +1,95 @@
 // Shared helpers for the smoke suite. Test tenants only - never point these at a paying
 // builder's account: the public designer writes captured_leads / draft designs the moment
 // the gate is passed or Details opens.
-import { expect } from "@playwright/test";
+import { test as base, expect } from "@playwright/test";
 
 export const SUPABASE_URL = "https://jzeamjbhdrsbygdnphbm.supabase.co";
+
+// ── log_error NEVER LEAVES THE SUITE ─────────────────────────────────────────────────────────
+// WHY. Every page logs to the ONE Supabase project that beta and production share, and this
+// suite drives beta. Runs of it filed hundreds of app_errors rows against the test tenant, 4 of
+// them boot_component_missing that read exactly like a live outage. log_error cannot tell them
+// apart (the page URL is a real https beta URL; migration 243 only demotes data:, file: and
+// loopback pages), so the suite answers log_error itself.
+//
+// Per BrowserContext:
+//  1. An init script points every log_error fetch at the page's OWN origin
+//     (/__e2e/rest/v1/rpc/log_error). The product sends these with keepalive, and a keepalive
+//     request from a document that is going away cannot be held by page.route or context.route
+//     when it is cross-origin: context.route lets it straight through to the live project (see
+//     customer-login.spec's save_design redirect). Same-origin, a miss can only reach the static
+//     host, never the database. Body and headers are the product's own.
+//  2. context.route answers it 204 locally. A page.route that matches first still wins (page routes
+//     run before context routes), so customer-login's stubBackend keeps recording and answering its
+//     own log_error calls.
+//  3. A context "request" listener records every body, including the ones a page.route answered.
+// finish(testInfo) attaches the bodies to the report and THROWS when one carries a boot_* code:
+// the page failed to load, so the run fails loudly instead of filing a row.
+//
+// The `test` exported below does this for the `context` (and so the `page`) fixture. A context the
+// test makes itself (browser.newContext / browser.newPage) needs guardLogError(context) and a
+// finish(testInfo) of its own.
+const LOG_ERROR_URL = /\/rest\/v1\/rpc\/log_error(?:[?#]|$)/;
+const LOG_ERROR_ATTACHMENT = "log_error calls (answered locally, never filed)";
+const guards = new WeakMap();
+
+export async function guardLogError(context) {
+  if (guards.has(context)) return guards.get(context);
+  const rows = [];
+  const guard = {
+    rows,
+    attachmentName: LOG_ERROR_ATTACHMENT,
+    // Takes the rows recorded so far, so a page shared across tests (portal-routes) can call it
+    // once per test.
+    async finish(testInfo) {
+      const batch = rows.splice(0, rows.length);
+      if (!batch.length) return;
+      await testInfo.attach(LOG_ERROR_ATTACHMENT, { body: JSON.stringify(batch, null, 2), contentType: "application/json" });
+      const boot = batch.filter((r) => /^boot_/.test(String((r.body && r.body.p_code) || "")));
+      if (boot.length) {
+        throw new Error("The page reported a boot failure: "
+          + boot.map((r) => `${r.body.p_code} (${r.body.p_message})`).join("; ")
+          + `. The log_error bodies are attached as "${LOG_ERROR_ATTACHMENT}"; nothing was filed in app_errors.`);
+      }
+    },
+  };
+  guards.set(context, guard);
+
+  await context.addInitScript(() => {
+    const realFetch = window.fetch;
+    window.fetch = function (input, init) {
+      const href = typeof input === "string" ? input : (input instanceof URL ? input.href : "");
+      if (/^https?:$/.test(location.protocol) && /^https?:\/\/[^/]+\/rest\/v1\/rpc\/log_error(?:[?#]|$)/.test(href)) {
+        return realFetch.call(window, "/__e2e/rest/v1/rpc/log_error", init);
+      }
+      return realFetch.apply(window, arguments);
+    };
+  });
+  context.on("request", (req) => {
+    if (req.method() !== "POST" || !LOG_ERROR_URL.test(req.url())) return;
+    let body = null;
+    try { body = req.postDataJSON(); } catch (_e) { body = req.postData(); }
+    rows.push({ at: new Date().toISOString(), url: req.url(), body });
+  });
+  const cors = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "authorization, x-client-info, apikey, content-type, prefer",
+    "access-control-allow-methods": "POST, OPTIONS",
+  };
+  await context.route(LOG_ERROR_URL, (route) => route.fulfill(route.request().method() === "OPTIONS"
+    ? { status: 200, headers: cors, body: "ok" }
+    : { status: 204, headers: cors })
+    .catch(() => { /* the page closed while the call was in flight */ }));
+  return guard;
+}
+
+export const test = base.extend({
+  context: async ({ context }, use, testInfo) => {
+    const guard = await guardLogError(context);
+    await use(context);
+    await guard.finish(testInfo);
+  },
+});
 // The public anon key is deliberately baked into every page (RLS makes it browser-safe); the
 // suite reads it off the served index.html so it never has to be duplicated here.
 export async function anonKey(page) {

@@ -1,8 +1,9 @@
 // Public designer smoke on a TEST tenant: boot, one placement of each wall item, the
 // collision refusals, and the window-overlap rule. Real mouse clicks (the app snaps by the
 // click's client coordinates, so a synthetic click with the wrong CTM lands elsewhere).
-import { test, expect } from "@playwright/test";
-import { CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool } from "./helpers.mjs";
+import { expect } from "@playwright/test";
+// `test` comes from helpers: it answers log_error locally for every page and fails on a boot_* call.
+import { test, guardLogError, CLIENT, SUPABASE_URL, bypassGate, watchConsole, designerItems, planPoint, revealTool } from "./helpers.mjs";
 
 async function arm(page, label) {
   // revealTool opens the option tab the tool lives on (section 03 is tabbed since 2026-09-16).
@@ -162,15 +163,21 @@ test("a door dropped onto an existing window is refused", async ({ page }) => {
   expect(east.length, "no second opening on the window's spot").toBe(1);
 });
 
-test("designer on a phone viewport has no horizontal scroll", async ({ browser }) => {
+test("designer on a phone viewport has no horizontal scroll", async ({ browser }, testInfo) => {
   const ctx = await browser.newContext({ viewport: { width: 375, height: 812 }, isMobile: true, hasTouch: true });
-  const page = await ctx.newPage();
-  await bypassGate(page, CLIENT);
-  await page.goto(`/?client=${CLIENT}`);
-  await page.waitForFunction(() => window.__ssAppBooted === true);
-  const dims = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
-  expect(dims.sw, `scrollWidth ${dims.sw} vs clientWidth ${dims.cw}`).toBeLessThanOrEqual(dims.cw + 1);
-  await ctx.close();
+  // Its own context, so the fixture's log_error guard does not reach it: guard it here.
+  const logs = await guardLogError(ctx);
+  try {
+    const page = await ctx.newPage();
+    await bypassGate(page, CLIENT);
+    await page.goto(`/?client=${CLIENT}`);
+    await page.waitForFunction(() => window.__ssAppBooted === true);
+    const dims = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    expect(dims.sw, `scrollWidth ${dims.sw} vs clientWidth ${dims.cw}`).toBeLessThanOrEqual(dims.cw + 1);
+  } finally {
+    await ctx.close();
+    await logs.finish(testInfo);
+  }
 });
 
 // ── SELECTION MUST SURVIVE THE CLICK THAT MAKES IT ───────────────────────────────────────
