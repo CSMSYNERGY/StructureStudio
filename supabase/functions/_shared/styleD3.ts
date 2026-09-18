@@ -415,6 +415,12 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "windows": "<how many windows and roughly where, or 'none'>",
     "vents": "<gable vents, ridge vent, or none>",
     "confidence": "high" | "medium" | "low"
+  },
+  "frameMap": {
+    "front": { "frame": <1-based index of the image that looks most square-on at the gable end the door is on>, "azimuthDeg": <where you were standing for that image, to the nearest 45 degrees> },
+    "side": { "frame": <the image most square-on to a long side>, "azimuthDeg": <as above> },
+    "eaveCorner": { "frame": <the image where the roof edge along a long side reads most clearly against the sky>, "azimuthDeg": <as above> },
+    "corner": { "frame": <an image showing one gable end and one long side at once, three-quarters on>, "azimuthDeg": <as above> }
   }
 }
 
@@ -451,6 +457,10 @@ DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its 
 FOUNDATION: look at the very bottom of the building. "skids" means it is raised on runners, with a visible shadow gap underneath and often blocks or shims between the runners and the ground — the normal look for a building that gets delivered on a trailer. "slab" means the walls meet the ground with no gap. Omit if the bottom is never visible.
 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
+
+FRAME MAP: which image goes with which view of the building. Number the images in the order you were given them, starting at 1, and name the ONE image that best shows each of the four views in frameMap. Count only the walk-around frames and never one of the builder's own photographs, which were taken separately and are not part of the lap. The same image may serve two views. A view you have no good image for should be LEFT OUT: naming an image that does not show it is worse than saying nothing, because that image is about to be put beside a drawing of that view and the builder asked to say whether the two match.
+
+AZIMUTH: for each image you name, where the camera was standing, as an angle around the building to the nearest 45 degrees. 0 is square in front of the gable end the door is on. Going from there around the building toward its RIGHT side, 90 is square to the right-hand long side, 180 is square at the far gable end, and 270 is square to the left-hand long side. Right and left are as seen from outside facing the doors, the same way leanToSide and dormerOffsetU are read. Answer 0, 45, 90, 135, 180, 225, 270 or 315 and nothing in between -- this is a coarse note of where you stood, not a survey.
 
 Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range.`;
 
@@ -831,6 +841,80 @@ export function parseObservedNotes(text: string): ObservedNotes | null {
     const p = out.porch.toLowerCase();
     if ((OBSERVED_PORCH_KINDS as readonly string[]).includes(p)) out.porch = p;
     else delete out.porch;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// ─── Which frame goes with which view (2026-09-19) ────────────────────────────────────────────────────────
+// The free second pass renders the drafted model from a few camera positions and puts each
+// render beside the builder's own frame of that view. Something has to decide which frame goes
+// with which render, and the FIRST pass is the only thing in the system that has looked at every
+// frame in walk order. So it is asked, in the same reply, at no extra call.
+//
+// ⚠️ THE INDICES ARE INTO THE ARRAY THIS REQUEST WAS GIVEN, which is not the style's stored
+// list of frames. `calGenerateSet` keeps at most `CAL_PHOTO_MAX - photos.length` frames and
+// STRIDES through them, so a lap of eight sent beside eight photographs is walk-1, 3, 5, 7 —
+// four images — and positions 5..12 of what the model saw are the builder's staged photographs,
+// not walk frames at all. Reading "frame 5" as the fifth frame of the lap would caption a
+// photograph as a walk-around view, or pair a render with a frame a quarter of the way further
+// round the building. The prompt says "the order you were given them" and this parses it that
+// way; `videoCount` is how many of those leading images were walk frames.
+//
+// OUT OF RANGE IS DROPPED, NOT CLAMPED, and the two are not the same safety. Clamping a 9 to an
+// 8 does stop a photograph being captioned as a frame, but it does it by substituting a pairing
+// the model never made: the builder is shown frame 8 beside a render matched to whatever image 9
+// was, with nothing on screen saying so. A missing viewpoint is an honest gap the compare step
+// already has to handle (up to four, at least one); a fabricated one is a wrong answer wearing a
+// confident label.
+//
+// BOTH HALVES OR NEITHER. A frame with no azimuth is a frame there is no angle to render
+// against; an azimuth with no frame is a camera aimed at nothing to compare with. The pair is
+// the unit, so half an answer drops the whole viewpoint here rather than leaving the caller to
+// find the missing half at render time.
+//
+// NOT part of `observed` — that block is builder-facing prose with its own 240-char caps, and
+// this is a handful of small integers — and NEVER stored in `d3`: sanitizeD3Spec rebuilds from
+// known keys, so a `frameMap` in a model reply is dropped on the way to the column and
+// production's older renderer cannot see it. No additive-key rule is touched.
+export const FRAME_MAP_VIEWPOINTS = ["front", "side", "eaveCorner", "corner"] as const;
+export type FrameMapViewpoint = typeof FRAME_MAP_VIEWPOINTS[number];
+export type FramePick = { frame: number; azimuthDeg: number };
+export type FrameMap = Partial<Record<FrameMapViewpoint, FramePick>>;
+
+// One lap either side of 0 is accepted and normalised: a model that answers -45 or 405 means 315
+// and 45, and refusing those throws away a right answer over its phrasing. Anything further out
+// is not an angle with a lap counted twice, it is junk — and `4000 % 360` is 40, a perfectly
+// plausible-looking answer manufactured out of nothing, which is the failure worth refusing.
+const AZIMUTH_LAP = 360;
+
+export function parseFrameMap(text: string, videoCount: number): FrameMap | null {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  let parsed: any;
+  try { parsed = JSON.parse(m[0]); } catch { return null; }
+  const raw = parsed?.frameMap;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const src = raw as Record<string, unknown>;
+  // `num` rather than a bare Math.floor: `Math.floor(NaN) < 1` is FALSE, so a junk count would
+  // leave the bound as NaN and every comparison against it false — which reads as "accept any
+  // positive integer", the exact opposite of a bound. No walk frames means nothing here can
+  // point anywhere, so bail rather than build an empty object: the caller's check stays one
+  // truthiness test, as it is for parseObservedNotes.
+  const bound = Math.floor(num(videoCount) ?? 0);
+  if (bound < 1) return null;
+  const out: FrameMap = {};
+  for (const k of FRAME_MAP_VIEWPOINTS) {
+    const v = src[k];
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const pick = v as Record<string, unknown>;
+    const frame = num(pick.frame);
+    // AN INTEGER, not "something that rounds to one": 2.5 is not an index, it is a model hedging
+    // between two frames, and rounding it would pick one of them on its behalf.
+    if (frame === null || !Number.isInteger(frame) || frame < 1 || frame > bound) continue;
+    const az = num(pick.azimuthDeg);
+    if (az === null || az < -AZIMUTH_LAP || az > 2 * AZIMUTH_LAP) continue;
+    const norm = ((az % AZIMUTH_LAP) + AZIMUTH_LAP) % AZIMUTH_LAP;
+    out[k] = { frame, azimuthDeg: (Math.round(norm / 45) * 45) % AZIMUTH_LAP };
   }
   return Object.keys(out).length ? out : null;
 }

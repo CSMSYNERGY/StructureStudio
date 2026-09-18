@@ -23,6 +23,7 @@ import {
   SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG, modelReplyText,
   foldOverhangInches, porchAgreementWarning, draftPorchKind, OBSERVED_PORCH_KINDS,
   videoShapePrompt, parseKnownDims, applyKnownDims, knownDimsNote,
+  parseFrameMap, FRAME_MAP_VIEWPOINTS,
 } from "./styleD3.ts";
 import type { KnownDims } from "./styleD3.ts";
 
@@ -1411,4 +1412,217 @@ Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall heigh
   }
   assertEquals(r.d3.wallHeightFt, 9, "the wall height is the one thing that stays, because d3 already has that key");
   assertEquals(Object.keys(r.d3.roof).sort(), ["overhang", "pitch", "type"], "and the roof carries only roof keys");
+});
+
+
+// ─── which frame goes with which view (2026-09-19) ────────────────────────────
+// EVERY TEST BELOW IS ULTIMATELY ABOUT ONE THING: an index means a position in the array THIS
+// REQUEST SENT, and nothing else. `calGenerateSet` keeps at most `12 - photos.length` frames out
+// of the lap and strides through them, so a walk of eight beside eight photographs is sent as
+// walk-1, 3, 5, 7 followed by the builder's own pictures. "Frame 5" therefore means the fifth
+// IMAGE, which on that set is a staged photograph and not a walk frame at all. Reading it as
+// "the fifth frame of the lap" is the failure this parse exists to make impossible, and it is a
+// silent one: the builder is simply shown the wrong picture beside a drawing and asked whether
+// they match.
+
+Deno.test("both shape-first prompts ask which image goes with which view; the photo path does not", () => {
+  for (const [name, p] of [
+    ["videoShapePrompt", VIDEO_SHAPE_PROMPT],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4)],
+    ["videoShapePrompt(dims)", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(p.includes('"frameMap"'), `${name}: the schema carries a frameMap`);
+    assert(p.includes("FRAME MAP:"), `${name}: and a paragraph saying how to fill it`);
+    assert(p.includes("AZIMUTH:"), `${name}: and one saying what the angle means`);
+    for (const k of FRAME_MAP_VIEWPOINTS) {
+      assert(p.includes(`"${k}"`), `${name}: the schema names the ${k} viewpoint`);
+    }
+    assert(p.includes('"azimuthDeg"'), `${name}: every viewpoint carries an angle`);
+  }
+  // Out of scope, and pinned by a NEGATIVE so nobody later has to fight a test to fix the photo
+  // path properly. The scan card replaces the AI's roof with a measured one and there is no
+  // walk order in four staged photographs to index into.
+  assert(!SPEC_PROMPT.includes("frameMap"), "SPEC_PROMPT is untouched");
+  assert(!SPEC_PROMPT.includes("azimuthDeg"), "SPEC_PROMPT asks for no angles");
+});
+
+Deno.test("⚠️ the prompt numbers the IMAGES IT WAS GIVEN, not the frames of the lap", () => {
+  // The sentence is the whole contract between the model and parseFrameMap. If it ever says
+  // "frame 3 of the video" instead, every index shifts on any set where the stride dropped a
+  // frame, and nothing downstream can tell.
+  const p = combinedShapePrompt(8, 4);
+  assert(p.includes("Number the images in the order you were given them, starting at 1"),
+    "the prompt states the numbering it is going to be parsed against");
+  assert(p.includes("never one of the builder's own photographs"),
+    "and forbids naming a staged photograph");
+  assert(p.includes("LEFT OUT"), "a view with no good image is omitted rather than guessed at");
+});
+
+Deno.test("the azimuth convention is the one the rest of the prompt already uses", () => {
+  // `leanToSide` and `dormerOffsetU` have said "as seen from outside facing the doors" since
+  // they shipped. A second, silently different handedness would mirror every compare render.
+  const p = VIDEO_SHAPE_PROMPT;
+  assert(p.includes("as seen from outside facing the doors"), "right and left are defined once");
+  assert(p.includes("0 is square in front of the gable end the door is on"), "and 0 has a datum");
+  assert(p.includes("0, 45, 90, 135, 180, 225, 270 or 315"), "the eight answers are spelled out");
+});
+
+Deno.test("⚠️ the splice does not eat the frame map", () => {
+  // Same class as the known-dimensions paragraph: combinedShapePrompt replaces everything above
+  // the first blank line, and a combined set is exactly the set where the indices matter most,
+  // because it is the only one that carries photographs the model must not name.
+  const p = combinedShapePrompt(8, 4);
+  assert(p.indexOf("FRAME MAP:") > p.indexOf("The FIRST 8 images are frames"),
+    "the frame map sits inside the inherited body");
+  assert(p.includes("How to read it:"), "and the rest of the body is still there");
+});
+
+const fmReply = (frameMap: unknown, extra = "") =>
+  `{"roof":{"type":"gable","pitch":0.42},"colors":{}${extra},"frameMap":${JSON.stringify(frameMap)}}`;
+
+Deno.test("parseFrameMap reads four viewpoints out of a clean reply", () => {
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 3, azimuthDeg: 90 },
+    eaveCorner: { frame: 2, azimuthDeg: 135 },
+    corner: { frame: 4, azimuthDeg: 315 },
+  }), 4);
+  assertEquals(r, {
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 3, azimuthDeg: 90 },
+    eaveCorner: { frame: 2, azimuthDeg: 135 },
+    corner: { frame: 4, azimuthDeg: 315 },
+  });
+});
+
+Deno.test("⚠️ AN INDEX PAST THE WALK FRAMES IS DROPPED, so a photograph is never captioned as a walk view", () => {
+  // The real set this defends: eight frames and eight photographs go in as four strided frames
+  // (walk-1, 3, 5, 7) followed by eight pictures, so videoCount is 4 and images 5..12 are the
+  // builder's own. A model naming image 6 has named a photograph.
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 6, azimuthDeg: 90 },
+    corner: { frame: 12, azimuthDeg: 225 },
+  }), 4);
+  assertEquals(r, { front: { frame: 1, azimuthDeg: 0 } }, "only the real frame survives");
+  // DROPPED, not clamped, and the distinction is the point. A 6 clamped to 4 would show the
+  // builder frame 4 beside a render aimed at whatever image 6 was, with nothing saying so: a
+  // pairing the model never made, wearing the label of one it did.
+  assert(!(r && "side" in r), "a photograph is not retargeted onto the nearest frame");
+  assert(!(r && "corner" in r), "and neither is one past the end of the whole set");
+  // Zero is not an index either: the prompt says 1-based, and a 0 is a model using a different
+  // convention, which is exactly when an off-by-one must not be silently absorbed.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 0, azimuthDeg: 0 } }), 4), null);
+  assertEquals(parseFrameMap(fmReply({ front: { frame: -2, azimuthDeg: 0 } }), 4), null);
+});
+
+Deno.test("parseFrameMap: half an answer drops the whole viewpoint", () => {
+  // The pair is the unit. A frame with no azimuth is a frame there is no camera angle to render
+  // against; an azimuth with no frame is a camera aimed at nothing to compare with. Returning
+  // half would push the discovery to render time, where the only thing to do about it is drop it.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 2 } }), 4), null, "no angle, no pair");
+  assertEquals(parseFrameMap(fmReply({ side: { azimuthDeg: 90 } }), 4), null, "no frame, no pair");
+  // The older design's shape - a bare index - is not half an answer, it is the wrong shape, and
+  // it drops for the same reason rather than being read as a frame with an unknown angle.
+  assertEquals(parseFrameMap(fmReply({ front: 2 }), 4), null, "a bare index is not a pick");
+  // ...and a good viewpoint beside a half-answered one still comes through.
+  assertEquals(
+    parseFrameMap(fmReply({ front: { frame: 2 }, side: { frame: 3, azimuthDeg: 90 } }), 4),
+    { side: { frame: 3, azimuthDeg: 90 } },
+    "one bad viewpoint does not take the others with it",
+  );
+});
+
+Deno.test("parseFrameMap: an index is an integer, never something that rounds to one", () => {
+  // 2.5 is a model hedging between two frames. Rounding it would pick one on its behalf and
+  // hand the builder a confident pairing built out of a hesitation.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 2.5, azimuthDeg: 0 } }), 4), null);
+  assertEquals(parseFrameMap(fmReply({ front: { frame: "2", azimuthDeg: 0 } }), 4),
+    { front: { frame: 2, azimuthDeg: 0 } }, "a numeric string is still an integer");
+  assertEquals(parseFrameMap(fmReply({ front: { frame: "two", azimuthDeg: 0 } }), 4), null);
+});
+
+Deno.test("parseFrameMap: the angle rounds to the nearest 45 and wraps a lap either way", () => {
+  const az = (v: unknown) => {
+    const r = parseFrameMap(fmReply({ front: { frame: 1, azimuthDeg: v } }), 4);
+    return r?.front?.azimuthDeg ?? null;
+  };
+  assertEquals(az(0), 0);
+  assertEquals(az(20), 0, "20 is nearer 0 than 45");
+  assertEquals(az(30), 45, "30 is nearer 45 than 0");
+  assertEquals(az(112), 90);
+  assertEquals(az(350), 0, "and the top of the lap comes back round to 0, never 360");
+  // A model that answers -45 or 405 means 315 and 45. Refusing those would throw away a right
+  // answer over its phrasing.
+  assertEquals(az(-45), 315);
+  assertEquals(az(405), 45);
+  assertEquals(az(-360), 0);
+  // Further out than one lap either side is not an angle, it is junk - and `4000 % 360` is 40,
+  // which would round to a perfectly plausible 45 manufactured out of nothing.
+  assertEquals(az(4000), null);
+  assertEquals(az(-1000), null);
+  assertEquals(az("90"), 90, "a numeric string is still an angle");
+  assertEquals(az("north"), null);
+  assertEquals(az(null), null);
+});
+
+Deno.test("parseFrameMap: unknown viewpoints and unknown keys are dropped", () => {
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0, confidence: "high", note: "the door end" },
+    roofView: { frame: 2, azimuthDeg: 90 },
+    eavecorner: { frame: 3, azimuthDeg: 90 },
+  }), 4);
+  assertEquals(r, { front: { frame: 1, azimuthDeg: 0 } }, "known keys only, and only their two fields");
+});
+
+Deno.test("⚠️ parseFrameMap: no walk frames means no map, and junk never becomes a bound", () => {
+  const good = { front: { frame: 1, azimuthDeg: 0 } };
+  assertEquals(parseFrameMap(fmReply(good), 0), null, "a set with no walk frames maps nothing");
+  // THE ONE THAT WOULD HAVE BEEN INVISIBLE. `Math.floor(NaN) < 1` is FALSE, so a junk count left
+  // unguarded would make every comparison against the bound false - which reads as "accept any
+  // positive integer", the exact opposite of a bound.
+  assertEquals(parseFrameMap(fmReply(good), NaN as number), null, "NaN is not a permissive bound");
+  assertEquals(parseFrameMap(fmReply(good), undefined as unknown as number), null);
+  assertEquals(parseFrameMap(fmReply(good), -3), null);
+  assertEquals(parseFrameMap(fmReply(good), 1.9), { front: { frame: 1, azimuthDeg: 0 } }, "a fractional bound floors");
+});
+
+Deno.test("parseFrameMap: junk in, null out, never a throw", () => {
+  for (const bad of ["", "no json here", "{", "{}", '{"frameMap":null}', '{"frameMap":[]}',
+                     '{"frameMap":"front"}', '{"frameMap":{}}', '{"frameMap":{"front":null}}',
+                     '{"frameMap":{"front":[1,0]}}',
+                     // JSON.parse makes `__proto__` an OWN property rather than a setter call,
+                     // so it lands in the object - and is never read, because only the four
+                     // known viewpoints are.
+                     '{"frameMap":{"__proto__":{"frame":1,"azimuthDeg":0}}}']) {
+    assertEquals(parseFrameMap(bad, 8), null, `junk: ${bad}`);
+  }
+});
+
+Deno.test("⚠️ a frameMap in the reply NEVER reaches the stored spec", () => {
+  // sanitizeD3Spec rebuilds from known keys, so this is already true - and it has to STAY true,
+  // because production's older renderer reads `building_styles.d3` and has never heard of a
+  // frame map. Pinned here rather than assumed, with the same reason width and length are.
+  const reply = fmReply({ front: { frame: 1, azimuthDeg: 0 } });
+  const r = parseModelSpec(reply);
+  assert(r.ok, "the reply still parses to a spec");
+  if (!r.ok) return;
+  assert(!JSON.stringify(r.d3).includes("frameMap"), "no frame map in the spec");
+  assert(!JSON.stringify(r.d3).includes("azimuthDeg"), "and no angles either");
+  // And the same reply still yields the map, read separately. One model call, two readings.
+  assertEquals(parseFrameMap(reply, 4), { front: { frame: 1, azimuthDeg: 0 } });
+});
+
+Deno.test("parseFrameMap and parseObservedNotes read the same reply without disturbing each other", () => {
+  const reply = fmReply(
+    { side: { frame: 2, azimuthDeg: 90 } },
+    ',"observed":{"porch":"none","confidence":"high"}',
+  );
+  assertEquals(parseObservedNotes(reply), { porch: "none", confidence: "high" });
+  assertEquals(parseFrameMap(reply, 4), { side: { frame: 2, azimuthDeg: 90 } });
+  // The map is NOT in observed and must not drift into it: that block is builder-facing prose
+  // with 240-char caps, and this is a handful of integers nobody should ever be shown.
+  const notes = parseObservedNotes(reply);
+  assert(notes && !("frameMap" in notes), "the map stays out of the notes");
 });

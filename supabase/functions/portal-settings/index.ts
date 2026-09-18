@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -3877,6 +3877,26 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), knownDimsNote(dims))
       : null;
 
+    // ── WHICH FRAME GOES WITH WHICH VIEW (2026-09-19) ────────────────────────────
+    // Read out of the same reply, at no extra call. Nothing here is stored and nothing reaches
+    // the spec — sanitizeD3Spec drops it — so an older browser that ignores the field behaves
+    // exactly as it does today.
+    //
+    // ⚠️ THE BOUND IS HOW MANY WALK FRAMES WERE SENT, not how many images were. On `combined`
+    // the browser says so and the trailing images are the builder's own photographs, which must
+    // never come back captioned as a walk-around view. On `video` every image in the set IS a
+    // frame — that is the prompt's opening sentence — so the bound is the whole array, which
+    // also keeps the legacy onDraftFromVideo caller working: it sends no videoCount at all, and
+    // taking `videoCount` there would bound every index to zero and drop the whole map.
+    const walkFrames = combined ? videoCount : photoUrls.length;
+    const frameMap = shapeFirst ? parseFrameMap(text, walkFrames) : null;
+    // The token for the free follow-up check, and only where a check can happen. The row id is a
+    // uuid, so it is unguessable, and the claim that spends it is scoped to this client_id as
+    // well — handing it to the browser that just paid for the row gives away nothing it does not
+    // already own. A photos generation gets null rather than a token for an action that would
+    // refuse it: a capability for something that cannot happen is an invitation to a 409.
+    const checkId = shapeFirst ? (ledgerRow?.id ?? null) : null;
+
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the
     // builder then presses Save it exists NOWHERE ELSE — so on 2026-09-10/11 three generations
@@ -3889,12 +3909,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // sanitised — sanitizeD3Spec is a whitelist rebuild capped at 4KB, parseObservedNotes keeps
     // known keys at 240 chars each — so nothing unbounded reaches the table.
     if (ledgerRow?.id) {
-      const { error: logErr } = await admin.from("ai_style_calls").update({
+      const recorded = {
         drafted: drafted.d3,
         observed: observedNotes,
         frames: photoUrls.length,
         video_count: videoCount,
-      }).eq("id", ledgerRow.id);
+      };
+      // ⚠️ `dims` IS GUARDED, because its column arrives in a migration this code must not
+      // depend on having been applied. PostgREST refuses the WHOLE statement when one key names
+      // a column it cannot find (PGRST204), so adding `dims` to the object above would mean that
+      // between this deploy and 247 landing, every generation ALSO lost `drafted`, `observed`
+      // and `frames` — the exact blind spot 226 was written to close, reopened by a diagnostics
+      // field. The write is attempted with dims and retried without on any failure, and the two
+      // failures carry different codes so "247 is not applied yet" is a query and not a guess.
+      //
+      // With no dims the payload and the round-trip count are byte-identical to yesterday, which
+      // is what every production request gets: its browser has never heard of dims.
+      const write = (row: Record<string, unknown>) => admin.from("ai_style_calls").update(row).eq("id", ledgerRow.id);
+      let { error: logErr } = await write(dims ? { ...recorded, dims } : recorded);
+      if (logErr && dims) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_style_dims_write_failed",
+          message: `Could not record dims on the generation - retrying without them; migration 247 may not be applied: ${logErr.message}`,
+        });
+        ({ error: logErr } = await write(recorded));
+      }
       if (logErr) {
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_style_result_log_failed",
@@ -3911,7 +3950,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // a source that has no dims prompt, and the parsed numbers otherwise. Same reason `frames`
     // is echoed — a caller that has to infer what the server did from what it sent is a caller
     // that will one day infer it wrong. An older browser ignores the field.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims });
+    //
+    // `frameMap` and `checkId` are the two the free self-check needs and nothing else reads yet:
+    // which of the images it just sent goes with which view, and the token for the follow-up
+    // request. Both are null on a photos generation and both are simply ignored by a browser
+    // that has never heard of them, which is every production browser.
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;
