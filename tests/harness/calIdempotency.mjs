@@ -174,12 +174,20 @@ async function main() {
 
   // Open a style and wait for ITS saved frames to be the ones on screen — by URL, not by count,
   // because both styles' laps are eight views long.
+  //
+  // THEN CONFIRM THE WALL HEIGHT, because since 2026-09-19 Generate is also gated on the
+  // dimensions card (tests/harness/calDims.mjs is what tests that gate). Both styles here have
+  // sizes of their own, so the width and the length pre-fill; the wall height pre-fills from
+  // C.wallHeightFt and has to be touched. One click, and this harness is back to measuring the
+  // one thing it is about — which key goes out with which press.
   const openStyle = async (label, key) => {
     await page.getByRole("button", { name: label, exact: true }).first().click();
     await page.waitForFunction((want) => {
       const got = Array.from(document.querySelectorAll('img[alt^="View "]')).map((i) => i.getAttribute("src"));
       return got.length === want.length && got.every((u, i) => u === want[i]);
     }, STYLES.find((s) => s.key === key).d3_video_frames, { timeout: 20000 });
+    await page.locator("input.ssc-dim-in").nth(2).click();
+    await page.waitForTimeout(150);
     return genUnlocks();
   };
 

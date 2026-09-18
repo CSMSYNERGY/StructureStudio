@@ -1593,7 +1593,7 @@ function Dashboard({ session }) {
        A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
        path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
        frames and only `dropped` says so. */
-    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey) => {
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
@@ -1618,10 +1618,28 @@ function Dashboard({ session }) {
       // rather than minted here on purpose: only the designer knows where one press ends and the
       // next begins, and a key minted per CALL would be a key that never dedupes anything.
       // Absent (an older caller) sends nothing, which is exactly today's behaviour.
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined } });
+      //
+      // THE BUILDER'S OWN MEASUREMENTS, REQUIRED HERE AS WELL AS IN THE DESIGNER'S GATE
+      // (2026-09-19). Same posture as the videoCount refusal above and for the same reason: this
+      // is the line that spends money. A generation with no ruler costs $20 for a draft whose
+      // wall height came out of the middle of a range - 7, in 74 % of every recorded generation,
+      // on buildings measuring 9 - and nothing afterwards can tell you that is what happened.
+      //
+      // MISSING is what is refused here; OUT OF BAND is the server's to refuse, because it
+      // answers 400 before the ledger row and the wallet hold and its bands are the ones that
+      // actually bind. Two copies of the bands would be two things to drift.
+      const d = (dims && typeof dims === "object") ? dims : null;
+      if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
+        throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
-      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
+      // `dims` ECHOED BACK AS THE SERVER USED THEM, not as they were sent. The designer says so
+      // in the success line, which is the only thing that proves the numbers reached the model
+      // rather than merely sitting in a form. An older function echoes nothing and the clause
+      // disappears, which is itself the right news.
+      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null, dims: data.dims || null };
     },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and

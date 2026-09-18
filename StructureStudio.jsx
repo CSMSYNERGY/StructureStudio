@@ -13737,6 +13737,26 @@ const CAL_PHOTO_MAX = 12;
 // sides; below that the walk stops being a walk and the video prompt's "consecutive frames are
 // adjacent viewpoints" stops being true of what was actually sent.
 const CAL_VIDEO_MIN = 4;
+// The bands the DIMENSIONS card accepts, and they are the server's own (parseKnownDims in
+// _shared/styleD3.ts). Kept in step by hand, and the direction of any future drift matters:
+// looser here than the server means a builder is answered 400 for nothing, which is ugly but
+// honest; TIGHTER here means a browser refusing a generation the server would have run, which
+// is a feature that looks broken. Never tighten these alone.
+const CAL_DIM_BANDS = { widthFt: [4, 60], lengthFt: [4, 100], wallHeightFt: [3, 20] };
+// The eave, in inches, as chips. `null` is "read it off the video" and is where this starts:
+// it is the only value that means "the model should answer this", and it is not the same thing
+// as 0, which is a flush eave and a real measurement.
+const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, "2 in"], [6, "6 in"], [12, "12 in"], [16, "16 in"]];
+// ⚠️ THIS SURFACE HAS NO SSD_CSS. That stylesheet is injected by SSDesignerFrame, which the
+// `calibrationOnly` early return never renders, and importing it here would be worse than
+// useless: it sets --ssd-sticky-top and `position:sticky` rules that assume the designer's own
+// scroll container. So the one rule this card genuinely cannot express inline gets its own
+// sheet, under its own `ssc-` prefix (grep says nothing else in either twin uses it).
+//
+// The rule is the iOS zoom: Safari zooms the page on focusing an input whose font-size is under
+// 16px, and every other field on this panel spreads S.sel's inline fontSize 13. An inline style
+// beats a class, so these three inputs deliberately drop it and take their size from here.
+const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim-in{font-size:16px}}";
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
 // ⚠️ THREE LANES, AND THIS HAS NOW BEEN WRONG IN BOTH DIRECTIONS. The history is short and worth
@@ -13758,9 +13778,9 @@ const CAL_VIDEO_MIN = 4;
 // The lesson is not a number. It is that this choice depends on which resource is scarce, and
 // moving the upload off the edge function changed the answer. Measure before changing it again.
 //
-// The multitasking Ahsan actually asked for is untouched by this: step 1 and step 2 have
-// separate busy flags and separate pools, so a video and a batch of images still upload at the
-// same time. That was never the lane count.
+// The multitasking Ahsan actually asked for is untouched by this: the video step and the
+// photos step have separate busy flags and separate pools, so a video and a batch of images
+// still upload at the same time. That was never the lane count.
 //
 // ORDER IS PRESERVED because results are written to their own index rather than pushed. That is
 // load-bearing for the video: VIDEO_SHAPE_PROMPT tells the model the frames are in walk order,
@@ -15106,7 +15126,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     onBlur: () => { setCalFocus(null); setCalDraft(""); },
   });
   const [adminCalBusy, setAdminCalBusy] = useState(false);
-  // STEP 2 HAS ITS OWN BUSY FLAG, and that is the whole point of it (2026-09-10). `adminCalBusy`
+  // THE PHOTOS STEP HAS ITS OWN BUSY FLAG, and that is the whole point of it (2026-09-10).
+  // (It was "step 2" until the dimensions card took that number on 2026-09-19; naming the step
+  // rather than numbering it is what stops this comment rotting again.) `adminCalBusy`
   // means "a spec-level operation is running" - a generation, a save, a scan draft - and the
   // video path used to raise it too. So uploading a walk-around greyed out the image picker
   // beside it, and a builder who had just started an 8-frame upload could do nothing but wait.
@@ -15121,6 +15143,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the one metered AI call and not eight uploads; `observed` is what the video showed
   // about doors, windows and vents, which the spec has no field for.
   const [adminCalVideo, setAdminCalVideo] = useState({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+  // THE THREE NUMBERS THE BUILDER MEASURED (2026-09-19). Wall height came back 7 in 74 % of
+  // every recorded generation and never once above 8, on buildings measuring 9 -- because a
+  // phone at chest height has no datum in frame and answers the middle of whatever range it
+  // was given. The builder knows the number; asking is cheaper and more accurate than any
+  // amount of prompt.
+  //
+  // ONLY TWO OF THE THREE LIVE HERE. The wall height IS `spec.wallHeightFt`, the same slice the
+  // "Wall height (ft)" field further down already edits, so it is read from there and written
+  // back through calSet -- one number with two views, rather than two numbers that can disagree
+  // about the same wall. `wallPrefilled` records whether the style had one when the editor
+  // opened, and `wallSeen` whether the builder has since put a finger on it: a pre-filled 8 that
+  // is really a 9 is exactly the error this card exists to end, so it has to be looked at.
+  //
+  // `overhangIn` null means "read it off the video" and is NOT 0. 0 is a flush eave, which is a
+  // measurement; null is the absence of one.
+  //
+  // Up here with the other adminCal* state on purpose, and this is not filing: the last hook in
+  // this component sits above a `calibrationOnly` early return, and a useState added down beside
+  // its handlers is React #310 on the operator path. This file has shipped that.
+  const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, wallPrefilled: false, wallSeen: false });
   // ONE PRESS IS ONE HOLD IS ONE CHARGE, EVEN AFTER A TIMEOUT (2026-09-18). calibrate_style_ai
   // has always read `idempotencyKey` off the body and handed it to wallet_hold, whose
   // `wallet_tx_idem` unique index is the thing that stops a second $20 hold for one intent - and
@@ -17286,13 +17328,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // footprint. Only ever called from the calibrationOnly surface: in the full designer this
   // same panel sits over a customer's plan, and moving their style/size would clear it.
   const calSetSize = (label) => setSel((p) => ({ ...p, style: adminCal.styleValue, size: label }));
-  // The size closest to the middle of the list by floor area — a fairer test of a roof pitch
+  // THIS STYLE'S OWN sizes, with no fallback of any kind. The dimensions card pre-fills from
+  // this and never from `C.defaultSizes`: a tenant-wide default set is not a statement about
+  // the building in front of the builder, and a width pre-filled from one would be a guess
+  // wearing a measurement's clothes on the one field the whole change exists to make true.
+  // An empty list is the honest answer and the card says so in words.
+  const calOwnSizes = (styleValue) => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === styleValue);
+    return (st && Array.isArray(st.sizes) && st.sizes.length) ? st.sizes : [];
+  };
+  // The size closest to the middle of a list by floor area — a fairer test of a roof pitch
   // or a gambrel knee than the component's 10x12 default, which is the smallest thing anyone
   // sells. Median rather than mean so one 14x40 in the list cannot drag the pick to the end.
-  const calMidSize = (styleValue) => {
-    const st = ((C && C.buildingStyles) || []).find((x) => x.value === styleValue);
-    const labels = st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []);
-    const sized = labels
+  //
+  // Split out from calMidSize (2026-09-19) because the two callers need DIFFERENT LISTS and the
+  // difference is the whole point: the preview may sit on the tenant's default set, the
+  // dimensions card may not. One copy of the median, two lists.
+  const calMidOf = (labels) => {
+    const sized = (labels || [])
       .map((l) => (typeof l === "string" ? l : (l && l.label)))
       .filter(Boolean)
       .map((label) => ({ label, p: parseSize(label) }))
@@ -17300,12 +17353,30 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       .sort((a, b) => (a.p.w * a.p.h) - (b.p.w * b.p.h));
     return sized.length ? sized[Math.floor((sized.length - 1) / 2)].label : "";
   };
+  const calMidSize = (styleValue) => {
+    const st = ((C && C.buildingStyles) || []).find((x) => x.value === styleValue);
+    return calMidOf(st && Array.isArray(st.sizes) && st.sizes.length ? st.sizes : ((C && C.defaultSizes) || []));
+  };
   const openCalEditor = (s) => {
     setAdminCalMsg(null);
     setAdminCalPreview(false);
+    const spec = d3ResolveStyleSpec(s, s.value, C.wallHeightFt);
+    // Seed the dimensions card from THIS STYLE and nothing else (see calOwnSizes). A style with
+    // no sizes of its own leaves width and length blank, which is the truth, and the card tells
+    // the builder to type the building they filmed. The wall height comes off the resolved spec
+    // and is marked PRE-FILLED when there is one, which is what makes the card ask for a finger
+    // on it before the money button unlocks.
+    const ownMid = parseSize(calMidOf(calOwnSizes(s.value)));
+    setAdminCalDims({
+      widthFt: ownMid ? ownMid.w : "",
+      lengthFt: ownMid ? ownMid.h : "",
+      overhangIn: null,
+      wallPrefilled: Number(spec.wallHeightFt) > 0,
+      wallSeen: false,
+    });
     setAdminCal({
       styleValue: s.value,
-      spec: d3ResolveStyleSpec(s, s.value, C.wallHeightFt),
+      spec,
       // s.d3Photos is empty as of migration 093: these are a builder's photos of their own
       // REAL buildings, and get_config is the call the anonymous customer page makes, so they
       // are no longer in that payload. The portal re-fetches them over its authenticated
@@ -17665,9 +17736,100 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // array is at most twelve short strings, so there is nothing to memoise anyway.
   const calVideoFrames = (adminCalVideo.urls || []).filter(Boolean);
   const calVideoReady = calVideoFrames.length > 0;
-  // A COUNT, and since 2026-09-16 not a gate at all. It drives the step 2 badge, the hint lines
+  // A COUNT, and since 2026-09-16 not a gate at all. It drives the photos badge, the hint lines
   // and the success message; nothing refuses a generation over it.
   const calPhotoCount = adminCal ? adminCal.photos.filter(Boolean).length : 0;
+
+  // ─── STEP 2: the size, which is the one thing a video cannot show ─────────────────────
+  // Two of the three numbers are this card's own state; the wall height IS spec.wallHeightFt
+  // (see adminCalDims). Read here, in one place, so the gate, the warnings, the preview button
+  // and the request body can never disagree about what was typed.
+  //
+  // WIDTH IS THE GABLE END. The renderer reads it that way, the prompt states it that way, and
+  // the field label says so rather than leaving a builder to guess which number is which.
+  const calDimW = Number(adminCalDims.widthFt);
+  const calDimL = Number(adminCalDims.lengthFt);
+  const calDimH = Number(adminCal && adminCal.spec && adminCal.spec.wallHeightFt) || 0;
+  const calDimInBand = (key, n) => isFinite(n) && n > 0 && n >= CAL_DIM_BANDS[key][0] && n <= CAL_DIM_BANDS[key][1];
+  // Named in the order they are asked for, so the gate line reads like the card looks.
+  const calDimsMissing = [
+    calDimInBand("widthFt", calDimW) ? null : "width",
+    calDimInBand("lengthFt", calDimL) ? null : "length",
+    calDimInBand("wallHeightFt", calDimH) ? null : "wall height",
+  ].filter(Boolean);
+  // NO TICK BOX IN FRONT OF THE MONEY BUTTON. A confirmation checkbox is friction with no
+  // measured benefit — it gets ticked, not read. Touching the field is the confirmation, and it
+  // is the act a builder would perform anyway if the number were wrong.
+  //
+  // TWO READINGS OF THE SAME STATE, and the difference is what the builder is looking at.
+  // `needsLook` is the truth about the FIELD and drives its amber from the moment the card opens:
+  // a pre-filled 7 styled like a finished answer is the thing that gets generated with. The
+  // `unconfirmed` version is the GATE's, and it waits until nothing else is missing so the line
+  // under the button asks for one thing at a time rather than listing everything at once.
+  const calWallNeedsLook = Boolean(adminCal) && adminCalDims.wallPrefilled && !adminCalDims.wallSeen && calDimInBand("wallHeightFt", calDimH);
+  const calWallUnconfirmed = calWallNeedsLook && !calDimsMissing.length;
+  const calDimsReady = Boolean(adminCal) && !calDimsMissing.length && !calWallNeedsLook;
+  // WARN, NEVER REFUSE (brief S2-D). Every one of these is usually a typo and is sometimes the
+  // building: a builder calibrating against a real shed on their own lot may well have filmed a
+  // size their catalog does not sell yet, and refusing that would be refusing the truth.
+  const calDimWarnings = [];
+  if (adminCal) {
+    const own = calOwnSizes(adminCal.styleValue)
+      .map((l) => parseSize(typeof l === "string" ? l : (l && l.label)))
+      .filter(Boolean);
+    if (own.length && calDimInBand("widthFt", calDimW) && !own.some((p) => p.w === Math.round(calDimW))) {
+      calDimWarnings.push(`This style has no ${calDimW} ft wide size in your catalog. That is fine — we read the building you filmed, not the price list — but check the width and the length are the right way round.`);
+    }
+    // The commonest way to hand the model a building turned ninety degrees.
+    if (calDimInBand("widthFt", calDimW) && calDimInBand("lengthFt", calDimL) && calDimL < calDimW) {
+      calDimWarnings.push("The length is shorter than the width. Width is the GABLE END — the short end, the one with the roof triangle and usually the door — so these may be the wrong way round.");
+    }
+    // Metres typed into a feet box: 16 ft is 4.9 m, so a metres width beside a feet wall height
+    // reads as a very tall, very narrow shed. Deliberately NOT half the width, which the brief
+    // suggested: a 16 ft lofted barn with 9 ft walls is an ordinary building and would trip it,
+    // and a warning that fires on the common case is a warning nobody reads.
+    if (calDimInBand("widthFt", calDimW) && calDimH > 0 && calDimH > calDimW * 0.75) {
+      calDimWarnings.push(`A ${calDimH} ft wall on a ${calDimW} ft wide building is unusual — check you have not typed metres in one of the boxes.`);
+    }
+  }
+  // ⚠️ parseSize's regex is INTEGERS ONLY — /(\d+)\s*[x×✕]\s*(\d+)/ — and it is NOT anchored, so
+  // "12.5x16" matches "5x16" further along the string and the preview would render a 5 ft
+  // building with no error anywhere. The preview label is therefore rounded to whole feet and
+  // always states the size it is showing. Only the PREVIEW rounds: the numbers that go on the
+  // wire are exactly what was typed.
+  const calDimPreviewLabel = (calDimInBand("widthFt", calDimW) && calDimInBand("lengthFt", calDimL))
+    ? `${Math.round(calDimW)}x${Math.round(calDimL)}` : "";
+  // Three fields, two slices. Routing them through one setter is what keeps this card's gate and
+  // the panel below reading the same wall.
+  const calSetDim = (key, v) => {
+    if (key === "wallHeightFt") { calSet({ wallHeightFt: v === "" ? 0 : v }); return; }
+    setAdminCalDims((p) => ({ ...p, [key]: v }));
+  };
+  // calNumProps with two additions, and both are about a REQUIRED field rather than an optional
+  // one. Clearing has to be possible: calNumProps commits only a parseable number, so a builder
+  // who selects-all and deletes would watch the old value snap back on blur with no way to say
+  // "I do not know this yet". And focusing the wall height is what marks it confirmed. The
+  // half-typed "4." that used to commit a 0 and eat the decimal point is unchanged.
+  const calDimProps = (key, current) => {
+    const base = calNumProps("caldim-" + key, (current === 0 || current === "") ? "" : current, (n) => calSetDim(key, n));
+    return {
+      ...base,
+      onFocus: (e) => {
+        if (key === "wallHeightFt") setAdminCalDims((p) => (p.wallSeen ? p : { ...p, wallSeen: true }));
+        base.onFocus(e);
+      },
+      onBlur: (e) => { if (e.target.value === "") calSetDim(key, ""); base.onBlur(e); },
+    };
+  };
+  // WHAT GOES ON THE WIRE, built from the gate's own numbers so the two cannot disagree about
+  // what "ready" meant. `overhangIn` rides ONLY when a chip was pressed: null is "read it off
+  // the video", and sending a 0 for it would tell the server the builder measured a flush eave.
+  const calDimsPayload = () => {
+    if (!calDimsReady) return null;
+    const d = { widthFt: calDimW, lengthFt: calDimL, wallHeightFt: calDimH };
+    if (adminCalDims.overhangIn != null) d.overhangIn = adminCalDims.overhangIn;
+    return d;
+  };
   // VIDEO REQUIRED, PHOTOS OPTIONAL (2026-09-16). Ahsan: "make video compulsory and images
   // optional to generate the 3d model". The gate has changed direction three times, and the
   // history is kept because each change overturned the one before:
@@ -17682,14 +17844,18 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // ⚠️ WHAT THIS GIVES UP, said plainly because nothing else records it: a builder can now
   // generate from the walk-around ALONE, which is the input Carolyn restored the photos to
   // improve. A lap covers every side, so the result is a rougher read and not a wrong one. The
-  // step 2 copy still says why photos help. If drafts start coming back vaguer (pitch and eave
+  // photos copy still says why photos help. If drafts start coming back vaguer (pitch and eave
   // are what a moving phone blurs), check `ai_style_calls.source` for the runs in question
   // first: a walk-around read on its own is logged as "video", one with photos as "combined".
   //
   // A locked style is in the gate on purpose. `save_style_d3` answers 409 for one, so
   // generating against it would spend $20 on a spec that cannot be saved — the worst possible
   // order for a paid action.
-  const calCanGenerate = Boolean(adminCal) && calVideoReady && scan.status !== "locked";
+  //
+  // THE SIZE JOINED THE GATE ON 2026-09-19 (Ahsan: the three dimension fields are required).
+  // It is the one input the video genuinely cannot carry, and a generation without it spends
+  // $20 on a shape measured against a scale the model invented.
+  const calCanGenerate = Boolean(adminCal) && calVideoReady && calDimsReady && scan.status !== "locked";
 
   // ─── What one generation is allowed to read ───────────────────────────────────────────
   // The two sources are held apart in state — walk-around frames in adminCalVideo.urls, the
@@ -17748,13 +17914,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calGenerateWhy = !adminCal ? ""
     : (adminCalVideo.busy || adminCalPhotos.busy) ? "Still uploading — the button unlocks when the upload finishes."
     : scan.status === "locked" ? "This style's 3D setup is locked. Unlock it above before generating."
-    : (!calVideoReady && !calPhotoCount) ? "Add a walk-around video in step 1 — it is the one thing a generation needs. Photos in step 2 are optional."
+    : (!calVideoReady && !calPhotoCount) ? "Add a walk-around video in step 1 — it is the one thing a generation needs. Photos in step 3 are optional."
     : !calVideoReady ? `Add a walk-around video in step 1 — a generation needs one. ${calPhotosWithWalk === calPhotoCount
       ? `Your ${calPhotoCount} image${calPhotoCount === 1 ? "" : "s"} will be read alongside it.`
       : `${calPhotosWithWalk} of your ${calPhotoCount} images will be read alongside it, since the walk-around keeps at least ${CAL_VIDEO_MIN} of the ${CAL_PHOTO_MAX} views.`}`
+    // VIDEO FIRST, THEN THE SIZE. Both are required, and a builder with neither should be sent
+    // to film before they are sent to measure: the video is the long errand.
+    : calDimsMissing.length ? `Type the building's ${calDimsMissing.length === 1 ? calDimsMissing[0] : `${calDimsMissing.slice(0, -1).join(", ")} and ${calDimsMissing[calDimsMissing.length - 1]}`} in step 2 — the video cannot show us how big it is, and everything else is measured against those numbers.`
+    : calWallUnconfirmed ? "Check the wall height in step 2. We filled it in from this style's own settings, and it is the number a video gets wrong most often — tap it to confirm it matches the building you filmed."
     : (calGenerateReady && calGenerateReady.urls.length > calGenerateReady.videoCount)
-      ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos.`
-    : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views. Photos in step 2 are optional.`;
+      ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos, measured against your ${calDimW} × ${calDimL} ft.`
+    : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views, measured against your ${calDimW} × ${calDimL} ft. Photos in step 3 are optional.`;
 
   // ─── Generate the shape from the video, plus the photos when there are any ────────────
   // The button Carolyn asked for at 09-04 17:00: "once they have changed it, there will be a,
@@ -17786,6 +17956,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // THE SECOND CHECK, and it reads the SET, not the gate: no walk-around frames in what would
     // be sent means no generation, so a later edit to calCanGenerate cannot reopen photos-only.
     if (!urls.length || !videoCount) { setAdminCalMsg({ ok: false, msg: "Add a walk-around video first. Photos are optional." }); return; }
+    // THE THIRD CHECK, and it reads the NUMBERS rather than the gate, for the same reason the
+    // one above reads the set: a later edit to calCanGenerate must not be able to reopen a
+    // generation with no ruler. Before the key is minted, so a press the gate turns away never
+    // burns one.
+    const dims = calDimsPayload();
+    if (!dims) { setAdminCalMsg({ ok: false, msg: calGenerateWhy }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
     // THE KEY FOR THIS INTENT (see calIdemRef): minted on the first press, reused by every retry
     // of it, dropped the moment a draft lands. Minted HERE rather than above, after both
@@ -17799,7 +17975,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       : crypto.randomUUID();
     calIdemRef.current = { styleValue: adminCal.styleValue, key: idem };
     try {
-      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem);
+      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem, dims);
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
       // is a different generation and has to mint its own key - reusing this one would refuse it.
       calIdemRef.current = null;
@@ -17817,12 +17993,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       setAdminCalVideo((p) => ({ ...p, observed: (res && res.observed) || p.observed, read: used }));
       // A walk-around on its own says so rather than "and 0 of your own photos", and the colour
       // sentence stops crediting photos that were never sent (2026-09-16).
+      // The ruler comes from the SERVER'S ECHO, not from local state. That is the only thing
+      // that proves the numbers reached the model rather than merely sitting in a form: an
+      // older function that has never heard of dims echoes nothing and this clause disappears,
+      // which is exactly the news a builder would want at that moment.
+      const ruler = (res && res.dims && res.dims.widthFt)
+        ? ` Measured against your ${res.dims.widthFt} × ${res.dims.lengthFt} ft with ${res.dims.wallHeightFt} ft walls.`
+        : "";
       setAdminCalMsg({
         ok: true,
         msg: `Read ${used} view${used === 1 ? "" : "s"}`
           + (fromPhotos ? ` — ${videoCount} from your walk-around and ${fromPhotos} of your own photos` : " from your walk-around")
           + (back ? `. ${back} more were held back; twelve views is the most one generation reads` : "")
-          + `. Colours are set where the views show them clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
+          + `.${ruler} Colours are set where the views show them clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
       });
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });
@@ -17856,7 +18039,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // the success line below replaces the whole list rather than appending to it, so the only
     // thing this preserves is the state that was already true.
     // NO setAdminCalBusy HERE ANY MORE. This is the fix Ahsan asked for: the shared flag greys
-    // out step 2's picker, so staging a video made the images unclickable for the whole upload.
+    // out the photos picker, so staging a video made the images unclickable for the whole upload.
     // adminCalVideo.busy already stops a second video, and calGenerate checks BOTH flags, so
     // nothing that mattered was being protected.
     setAdminCalVideo((p) => ({ ...p, busy: true, step: "Opening the video…", err: null, observed: null, read: 0 }));
@@ -19373,9 +19556,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   builder could watch eight frames upload and then receive a 500. Uploading
                   frames does not touch the AI, so there is nothing left to fail.
 
-                  THE ONE REQUIRED STEP since 2026-09-16 (Ahsan: "make video compulsory and
-                  images optional to generate the 3d model"), which is why its badge reads
-                  "required" and step 2's reads "optional". ── */}
+                  REQUIRED since 2026-09-16 (Ahsan: "make video compulsory and images optional
+                  to generate the 3d model"), which is why its badge reads "required" and the
+                  photos step's reads "optional". It stopped being the ONLY required step on
+                  2026-09-19, when the size joined it — see step 2. ── */}
               {setup3d && setup3d.onUploadPhoto && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -19388,7 +19572,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     Film one slow lap of a real building — phone sideways, whole building in frame, about 30 to 60 seconds.
                     We cut a few still frames out of it and read the roof shape, pitch, overhang and wall height off them.
                     <b> The video stays on your phone</b> — only the still frames are sent.
-                    {" "}Nothing is read yet: the shape is drafted once, when you press <b>Generate</b> in step 2.
+                    {" "}Nothing is read yet: the shape is drafted once, when you press <b>Generate</b> in step 3.
                   </p>
                   <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                     <label style={{ ...S.btn("#92400E", "#FFF"), fontSize: 12, cursor: adminCalVideo.busy || scan.status === "locked" ? "default" : "pointer", opacity: scan.status === "locked" ? 0.5 : 1, marginBottom: 0 }}>
@@ -19430,7 +19614,126 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   )}
                 </div>
               )}
-              {/* ── STEP 2: the builder's own photos (OPTIONAL since 2026-09-16), and the one
+              {/* ── STEP 2: THE SIZE OF THE BUILDING THAT WAS FILMED (2026-09-19). Required,
+                  all three, and it is Ahsan's call: "the three dimension fields are required".
+
+                  WHY THIS CARD EXISTS AT ALL. Wall height came back 7 in 74 % of every recorded
+                  generation and was never once above 8, on buildings whose walls measure 9 —
+                  and 1.0 ft came back for the overhang in 53 % of them, on a building whose
+                  eave measures 0.15 ft. Zero variance at a wrong value is the signature of a
+                  default, not of a measurement. A phone at chest height has no datum in frame:
+                  no roof plane, no level line, and the only scale is a door whose height it has
+                  to guess first. The builder knows all three numbers. Asking is cheaper, more
+                  accurate and faster than any amount of prompt.
+
+                  WHAT IT IS NOT. It does not store a width or a length anywhere. One style
+                  sells at up to 21 sizes and the renderer takes its width from the customer's
+                  pick, so a width saved on the style would be a second, lying answer to a
+                  question the catalog already answers. These are the ruler for ONE reading. The
+                  wall height is the exception and it is not an exception really: `wallHeightFt`
+                  is an existing d3 key that already means exactly this, so the field below and
+                  this one edit the same slice.
+
+                  NEVER PRE-FILLED FROM `C.defaultSizes`. A tenant-wide default set says nothing
+                  about the building in front of this builder, and the blocking case is real: a
+                  style with no sizes of its own also has no "Preview on" picker, so a pre-filled
+                  guess would be compared against a preview whose size is nowhere on screen. With
+                  no sizes the fields start BLANK and the card says why in words.
+
+                  ⚠️ NO SSD_CSS ON THIS SURFACE. See SSC_CAL_CSS at module scope. ── */}
+              {/* `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
+                  photographs this card in each of its states, and locating it by its heading
+                  text would make a reworded heading look like a broken harness. */}
+              <div data-ssc-card="dims" style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
+                <style>{SSC_CAL_CSS}</style>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📏 Step 2 — The size of the building you filmed</span>
+                  {calDimsReady
+                    ? <span style={{ fontSize: 11, fontWeight: 700, color: "#047857", background: "#ECFDF5", borderRadius: 5, padding: "2px 6px" }}>✓ {calDimW} × {calDimL} ft, {calDimH} ft walls</span>
+                    : <span style={{ fontSize: 11, fontWeight: 700, color: "#B45309", background: "#FFFBEB", border: "1px solid #FDE68A", borderRadius: 5, padding: "2px 6px" }}>required</span>}
+                </div>
+                <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
+                  A video shows us the <b>shape</b>. It cannot show us the <b>size</b> — there is nothing in the frame to
+                  measure against, so we would be guessing, and a guess here bends every other number. Type the three
+                  measurements off the building you filmed and they become the ruler everything else is read against.
+                  {" "}<b>Width is the gable end</b> — the short end with the roof triangle.
+                  {adminCal && !calOwnSizes(adminCal.styleValue).length
+                    ? <><br /><b>This style has no sizes set up yet</b>, so there is nothing to start you off — type the size of the building you filmed.</>
+                    : null}
+                </p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 8 }}>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the gable end
+                    {/* fontSize dropped from S.sel on purpose: an inline size beats the class, and
+                        the class is what carries the 16px that stops iOS zooming on every tap. */}
+                    <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
+                      {...calDimProps("widthFt", adminCalDims.widthFt)}
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: calDimInBand("widthFt", calDimW) ? "#CBD5E1" : "#F59E0B" }} />
+                  </label>
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — down the side
+                    <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
+                      {...calDimProps("lengthFt", adminCalDims.lengthFt)}
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: calDimInBand("lengthFt", calDimL) ? "#CBD5E1" : "#F59E0B" }} />
+                  </label>
+                  {/* THE SAME SLICE AS THE "Wall height (ft)" FIELD FURTHER DOWN, said out loud
+                      right under the box so nobody edits one and wonders why the other moved.
+                      The label is deliberately NOT "Wall height (ft) — at the eave": that reads
+                      the same to a person and is ambiguous to a locator, and it broke
+                      tests/harness/porchPanel.mjs, which reaches the field below by
+                      /^Wall height \(ft\)/. Putting the qualifier before the unit is clearer
+                      anyway -- the eave is where a builder has to hold the tape. */}
+                  <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft)
+                    <input className="ssc-dim-in" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
+                      {...calDimProps("wallHeightFt", calDimH)}
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: calWallNeedsLook ? "#FFFBEB" : "#FFF" }} />
+                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: calWallNeedsLook ? "#B45309" : "#94A3B8" }}>
+                      {calWallNeedsLook
+                        ? "From this style's settings — tap to confirm it matches what you filmed."
+                        : "The same wall height as the field further down."}
+                    </span>
+                  </label>
+                </div>
+                {/* THE EAVE, OPTIONAL. Chips and not a box: the answers that matter are far apart
+                    (flush against 16 in) and a builder who has to type a number into an empty
+                    field will either skip it or guess. "Read it from the video" is where this
+                    starts and it is a real answer — the prompt asks in inches now and names the
+                    flush case, so the model has a fair chance at it. 0 is NOT that: 0 is a flush
+                    eave the builder looked at and measured. */}
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#92400E" }}>How far does the roof stick out past the wall?</span>
+                  {CAL_OVERHANG_CHIPS.map(([v, lbl]) => (
+                    <button key={"cal-oh-" + String(v)} type="button" onClick={() => setAdminCalDims((p) => ({ ...p, overhangIn: v }))}
+                      style={{ ...S.btn(adminCalDims.overhangIn === v ? "#92400E" : "#FFF", adminCalDims.overhangIn === v ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", fontSize: 11, padding: "3px 8px" }}>
+                      {lbl}
+                    </button>
+                  ))}
+                  <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>optional</span>
+                </div>
+                {/* WARNINGS, NOT REFUSALS. Amber and readable, and the button stays live under
+                    them: a builder calibrating against a real building on their own lot may well
+                    have filmed a size their catalog does not sell yet. */}
+                {calDimWarnings.map((w, i) => (
+                  <div key={"cal-dim-warn-" + i} style={{ marginBottom: 6, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>⚠ {w}</div>
+                ))}
+                {/* ALWAYS NAME THE PREVIEWED SIZE, even where there is no picker to change it
+                    with (brief S2-D). A style with no sizes has no "Preview on" control at all,
+                    so without this line the builder compares their building against a 3D of
+                    completely unknown size — which is how a good draft reads as a wrong one.
+                    calibrationOnly, exactly like calSetSize: over the full designer this panel
+                    sits above a customer's plan and moving the size would clear it. */}
+                {calibrationOnly && (
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11.5, color: "#92400E", fontWeight: 600 }}>
+                    <span>{sel.size ? <>The 3D preview is showing a <b>{sel.size}</b>.</> : <>The 3D preview has no size set yet.</>}</span>
+                    {calDimPreviewLabel && calDimPreviewLabel !== sel.size && (
+                      <button type="button" onClick={() => calSetSize(calDimPreviewLabel)}
+                        title="Render the preview at the size you typed, whether or not this style sells it"
+                        style={{ ...S.btn("#FFF", "#0E7490"), border: "1px solid #A5F3FC", fontSize: 11.5, padding: "3px 8px" }}>
+                        Show it on {Math.round(calDimW)} × {Math.round(calDimL)} (the one you filmed)
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* ── STEP 3: the builder's own photos (OPTIONAL since 2026-09-16), and the one
                   button that spends money. ──
                   Carolyn 2026-09-04 @16:05: "we put a thing in here that says, you know, front
                   side, left side, right side. And it tells them to get a photo of that." A
@@ -19443,7 +19746,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   needs the portal's authenticated callbacks. ── */}
               <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 Step 2 — Photos of the same building</span>
+                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 Step 3 — Photos of the same building</span>
                   {/* "optional" in GREY, not the amber "N of 4 added" it replaced (2026-09-16):
                       amber on this surface means something is still missing, and nothing is. */}
                   {calPhotoCount > 0
@@ -19529,7 +19832,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       : `Pick several at once, up to ${CAL_PHOTO_MAX}.`}
                   </span>
                 </div>
-                {/* Step 2's own error line. It used to share adminCalMsg with the video path and
+                {/* Step 3's own error line. It used to share adminCalMsg with the video path and
                     the generation, so two concurrent uploads overwrote each other's news. */}
                 {adminCalPhotos.err && <div style={{ marginBottom: 8, fontSize: 11.5, color: "#DC2626", fontWeight: 600 }}>{adminCalPhotos.err}</div>}
                 {calPhotoCount > 0 && (
@@ -19554,7 +19857,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     2026-09-10, because the steps it belongs to — film, photograph, generate —
                     read top to bottom in one place. Its gate is Ahsan's of 2026-09-16: "make
                     video compulsory and images optional to generate the 3d model", which
-                    replaced the 09-10 "both a video and four images". It still sits in step 2's
+                    replaced the 09-10 "both a video and four images". It still sits in step 3's
                     card, so a builder with a walk-around and no photos reads past an optional
                     step to reach it; the badge and the line underneath both say it is optional.
 
@@ -19575,7 +19878,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         ? (calPhotoCount
                           ? "Read this building's shape from every view above — the walk-around frames and your own photos together"
                           : "Read this building's shape from the walk-around frames above")
-                        : "Add a walk-around video first — photos are optional"}
+                        /* The gate's OWN words, so a disabled button and the tooltip on it
+                           cannot say different things about what is missing. The hard-coded
+                           string named only the video, which stopped being the whole answer
+                           when the size joined the gate on 2026-09-19. */
+                        : calGenerateWhy}
                       style={{ ...S.btn(adminCalBusy || !calCanGenerate ? "#9CA3AF" : "#7C3AED", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : (calCanGenerate ? "pointer" : "not-allowed") }}>
                       {adminCalBusy ? "Working…" : "✨ Generate the 3D model"}
                     </button>
