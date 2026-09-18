@@ -22,7 +22,9 @@ import {
   sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT,
   SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG, modelReplyText,
   foldOverhangInches, porchAgreementWarning, draftPorchKind, OBSERVED_PORCH_KINDS,
+  videoShapePrompt, parseKnownDims, applyKnownDims, knownDimsNote,
 } from "./styleD3.ts";
+import type { KnownDims } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -1122,4 +1124,291 @@ Deno.test("two warnings compose without eating each other, and the model's note 
   // caller pass every check it has without testing each one first.
   assertEquals(flagObservedNotes(observed, null, pw)!.roofNote, `${pw} The model's own reading: ${"y".repeat(240)}`);
   assertEquals(flagObservedNotes(observed, null, null), observed, "no warnings at all leaves the notes alone, by reference");
+});
+
+// ─── the builder's three numbers, on the wire (2026-09-19) ───────────────────────────────
+// Wall height came back 7 in 74 % of every recorded generation and never once above 8, against
+// a measured 9. A ground-level phone has no datum to measure a wall against, so the builder is
+// asked instead, and the prompt drops the field rather than asking for a number it already has.
+//
+// EVERY TEST BELOW IS ULTIMATELY ABOUT ONE PROPERTY: with no dims, nothing changed. Production
+// runs an older browser bundle that cannot send them, against this same function, so "byte-
+// identical when absent" is not tidiness — it is the only thing standing between a beta feature
+// and every production builder's paid generation.
+
+const DIMS: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+
+Deno.test("videoShapePrompt(null) IS the constant, which is what proves production is untouched", () => {
+  // ⚠️ THE LOAD-BEARING ONE. `VIDEO_SHAPE_PROMPT` is now derived from this function rather than
+  // written beside it, so the no-dims path cannot drift from the string that has been in
+  // production since August: there is nothing to keep in step, only this identity to hold.
+  assertEquals(videoShapePrompt(null), VIDEO_SHAPE_PROMPT);
+  assertEquals(videoShapePrompt(undefined), VIDEO_SHAPE_PROMPT, "an omitted argument is the same as a null one");
+  assertEquals(videoShapePrompt(), VIDEO_SHAPE_PROMPT, "and so is no argument at all");
+  // Reference identity, not merely equal content: the function returns the base, it does not
+  // rebuild it. A rebuild would pass assertEquals and still be a second copy to get wrong.
+  assert(videoShapePrompt(null) === VIDEO_SHAPE_PROMPT, "the no-dims prompt is the same string object");
+});
+
+Deno.test("a two-argument combinedShapePrompt is byte-identical to what shipped", () => {
+  // The four shapes the existing suite already pins by content. Here they are pinned by
+  // EQUALITY against the explicit-null call, so the new third parameter cannot change what an
+  // old caller gets, and against the no-dims body, which is what "byte-identical" means.
+  for (const [v, p] of [[8, 4], [1, 1], [8, 0], [0, 4]] as const) {
+    assertEquals(combinedShapePrompt(v, p), combinedShapePrompt(v, p, null), `combinedShapePrompt(${v}, ${p})`);
+    assertEquals(combinedShapePrompt(v, p), combinedShapePrompt(v, p, undefined), `combinedShapePrompt(${v}, ${p}) undefined`);
+  }
+  // And the body really is the no-dims body, verbatim from the first blank line on.
+  const tail = VIDEO_SHAPE_PROMPT.slice(VIDEO_SHAPE_PROMPT.indexOf("\n\n"));
+  assert(combinedShapePrompt(8, 4).endsWith(tail), "the combined prompt carries the unchanged body");
+  assertEquals(combinedShapePrompt(0, 4), VIDEO_SHAPE_PROMPT, "no walk still means the video prompt, untouched");
+});
+
+Deno.test("the dims prompt states all three numbers as facts and calls them the ruler", () => {
+  for (const [name, p] of [
+    ["videoShapePrompt", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(p.includes("16 ft wide across the gable end"), `${name} states the width`);
+    assert(p.includes("24 ft long down the side"), `${name} states the length`);
+    assert(p.includes("wall is 9 ft high at the eave"), `${name} states the wall height`);
+    assert(p.includes("facts, not estimates"), `${name} says they are not to be second-guessed`);
+    assert(p.includes("they are your ruler"), `${name} names them as the scale`);
+    assert(p.includes("never against a scale of your own"), `${name} forbids substituting one`);
+  }
+  // Trailing zeros off: "9" and not "9.0". A model reconciling "9.00 ft" against a frame is being
+  // handed false precision it did not ask for.
+  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }).includes("16.5 ft long"), "a real fraction survives");
+  assert(!videoShapePrompt(DIMS).includes("16.0 ft"), "a whole number reads as a whole number");
+});
+
+Deno.test("⚠️ the splice does not eat the known-dimensions paragraph", () => {
+  // The sibling of "the FALSE opening sentence is gone, not merely preceded", and the same
+  // class of invisible failure. combinedShapePrompt replaces everything up to the first blank
+  // line; a ruler written ABOVE that line would vanish on every combined generation, and the
+  // prompt that went out would still read perfectly well and still return a parseable spec.
+  // The only symptom would be a wall height nobody could explain.
+  const p = combinedShapePrompt(8, 4, DIMS);
+  assert(p.includes("KNOWN DIMENSIONS, MEASURED BY THE BUILDER."), "the ruler survives the splice");
+  assert(p.startsWith("These images are all of ONE portable building"), "and the combined opening still leads");
+  assert(p.indexOf("KNOWN DIMENSIONS") > p.indexOf("The FIRST 8 images are frames"), "the ruler sits inside the inherited body");
+  assert(p.includes("How to read it:") && p.includes('"observed"'), "and the rest of the body is still there");
+});
+
+Deno.test("⚠️ the dims prompt does not ask for a wall height it already knows", () => {
+  // A number that is known must not also be estimated. If either replacement silently became a
+  // no-op — a reword of the schema line or of the WALL HEIGHT paragraph would do it — the model
+  // would be told the wall is 9 ft in one paragraph and asked to guess it in the next.
+  for (const [name, p] of [
+    ["videoShapePrompt", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(!p.includes("wallHeightFt"), `${name}: the key is gone from the schema entirely`);
+    assert(!p.includes("typically 6-10"), `${name}: and so is the range that invited a midpoint`);
+    assert(!p.includes("WALL HEIGHT: the wall at the eave, not at the peak."), `${name}: the estimate paragraph is replaced`);
+    assert(p.includes("Do not estimate it, do not report it"), `${name}: and replaced by a refusal to estimate`);
+    assert(p.includes("do not bend the other numbers to fit some other wall height"), `${name}: nor to work backwards from it`);
+  }
+  // The NO-DIMS prompt still asks, because nothing told it. Pinned here rather than trusted:
+  // a replacement applied to the base by accident would break production, not beta.
+  assert(VIDEO_SHAPE_PROMPT.includes('"wallHeightFt"'), "with no dims the model is still asked");
+  assert(VIDEO_SHAPE_PROMPT.includes("WALL HEIGHT: the wall at the eave, not at the peak."), "and still told where to measure");
+});
+
+Deno.test("the gambrel ratios are word-for-word the same with dims as without", () => {
+  // Brief section 2.1, reversing the dims design: the ratios measurably WORK (0.78 / 0.70 / 1.00
+  // against a truth of 0.72 / 0.72 / 1.00, in 3 of 3) and a mistyped width would silently corrupt
+  // anything converted from them. So dims add a ruler and change nothing about how the roof is
+  // asked for. Deliberately NOT folded into the existing "every prompt says kneeU is measured
+  // from the CENTRELINE" loop: that loop guards a real shipped defect and is not the place to
+  // hang a fourth prompt off.
+  const withDims = videoShapePrompt(DIMS), without = VIDEO_SHAPE_PROMPT;
+  for (const marker of ['"kneeU"', '"kneeRise"', '"ridgeRise"', "GAMBREL NUMBERS", "CENTRELINE", "0.7-0.85"]) {
+    assert(withDims.includes(marker), `the dims prompt still carries ${marker}`);
+  }
+  const line = (p: string, k: string) => p.split("\n").find((l) => l.includes(k)) ?? "";
+  for (const k of ['"kneeU"', '"kneeRise"', '"ridgeRise"', '"pitch"', '"overhangIn"']) {
+    assertEquals(line(withDims, k), line(without, k), `the ${k} line is unchanged by dims`);
+  }
+  const para = (p: string) => p.split("\n").find((l) => l.startsWith("GAMBREL NUMBERS")) ?? "";
+  assertEquals(para(withDims), para(without), "the whole GAMBREL NUMBERS paragraph is unchanged");
+});
+
+// ─── parseKnownDims: absent is not an error, and an error is not absent ───────────────────
+
+Deno.test("parseKnownDims: absent means null, and null is not a refusal", () => {
+  for (const raw of [undefined, null, {}]) {
+    const r = parseKnownDims(raw);
+    assert(r.ok, `${JSON.stringify(raw) ?? "undefined"} is not an error`);
+    if (r.ok) assertEquals(r.dims, null, "and it carries no dims");
+  }
+});
+
+Deno.test("parseKnownDims: three good numbers come back as three good numbers", () => {
+  const r = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  assert(r.ok, "a plain set parses");
+  if (r.ok) assertEquals(r.dims, { widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  // Numeric strings, because an <input type="number"> hands its value over as text and a
+  // caller that stringifies its own state is not doing anything wrong.
+  const s = parseKnownDims({ widthFt: "16", lengthFt: "24", wallHeightFt: "9.5" });
+  assert(s.ok, "numeric strings parse");
+  if (s.ok) assertEquals(s.dims, { widthFt: 16, lengthFt: 24, wallHeightFt: 9.5 });
+});
+
+Deno.test("⚠️ parseKnownDims: OUT OF BAND IS A REFUSAL, NOT AN ABSENCE", () => {
+  // THE WHOLE SAFETY PROPERTY, and the reason the return type carries three outcomes. If a bad
+  // number collapsed to `null`, a mistyped 140 ft width would read as "this builder sent no
+  // dimensions": the ledger row would be written, $20 would be held, and the draft would come
+  // back read against a scale nobody stated and nobody could see afterwards. A refusal is
+  // answered 400 before either of those happens.
+  const bad: [string, unknown][] = [
+    ["a width past any building anyone hauls", { widthFt: 140, lengthFt: 24, wallHeightFt: 9 }],
+    ["a width under any building at all", { widthFt: 0, lengthFt: 24, wallHeightFt: 9 }],
+    ["a length past the band", { widthFt: 16, lengthFt: 400, wallHeightFt: 9 }],
+    ["a wall height in inches", { widthFt: 16, lengthFt: 24, wallHeightFt: 108 }],
+    ["a wall height the sanitiser would silently DROP", { widthFt: 16, lengthFt: 24, wallHeightFt: 30 }],
+    ["a negative", { widthFt: -16, lengthFt: 24, wallHeightFt: 9 }],
+  ];
+  for (const [why, raw] of bad) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `${why} must be refused, never read as absent`);
+    if (!r.ok) assert(r.error.length > 10 && /Check what you typed/.test(r.error), `${why}: the builder is told what to do`);
+  }
+  // A 30 ft wall is the sharp case. sanitizeD3Spec accepts 3..20 and DROPS anything outside, so
+  // letting a 30 through would mean a prompt that states a 30 ft wall and a spec that keeps
+  // whatever the style had. Refused instead, which is why the band here is the sanitiser's own
+  // accept band and not its 5..14 clamp.
+  const thirty = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 30 });
+  assert(!thirty.ok && thirty.error.includes("wall height"), "the refusal names the field");
+});
+
+Deno.test("parseKnownDims: a missing number is refused by name, and junk never throws", () => {
+  for (const [key, raw] of [
+    ["width", { lengthFt: 24, wallHeightFt: 9 }],
+    ["length", { widthFt: 16, wallHeightFt: 9 }],
+    ["wall height", { widthFt: 16, lengthFt: 24 }],
+  ] as const) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `a set missing the ${key} is refused`);
+    if (!r.ok) assert(r.error.includes(key), `and the message names it: ${r.error}`);
+  }
+  // Junk of every shape. None of these may throw: this runs inside a function that has to
+  // ANSWER a caller, and a throw here would be a 500 on a typo.
+  for (
+    const raw of ["16x24", 16, true, [16, 24, 9], { widthFt: {}, lengthFt: [], wallHeightFt: null },
+      { widthFt: "wide", lengthFt: "long", wallHeightFt: "tall" }, { widthFt: NaN, lengthFt: 24, wallHeightFt: 9 },
+      { widthFt: Infinity, lengthFt: 24, wallHeightFt: 9 }]
+  ) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `${JSON.stringify(raw)} is refused rather than accepted`);
+  }
+});
+
+Deno.test("parseKnownDims: the overhang is optional, and absent is not zero", () => {
+  const none = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  assert(none.ok && none.dims && !("overhangIn" in none.dims), "no chip pressed means no key");
+  // ⚠️ 0 IS A REAL ANSWER — the flush eave the inches rewrite exists to make sayable — so it must
+  // survive as 0 and never be mistaken for "the builder did not say".
+  const flush = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 0 });
+  assert(flush.ok && flush.dims && flush.dims.overhangIn === 0, "a flush eave is an answer");
+  // The three ways a form says "nothing here".
+  for (const v of [null, undefined, ""]) {
+    const r = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: v });
+    assert(r.ok && r.dims && !("overhangIn" in r.dims), `${JSON.stringify(v)} means "read it off the video"`);
+  }
+  const deep = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 16 });
+  assert(deep.ok && deep.dims && deep.dims.overhangIn === 16, "16 inches rides along");
+  const wild = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 96 });
+  assert(!wild.ok, "an eight-foot eave is a typo, not an eave");
+});
+
+// ─── applyKnownDims: the builder's numbers over the model's ───────────────────────────────
+
+Deno.test("applyKnownDims with no dims is the identity, BY REFERENCE", () => {
+  // Deep-equal would pass on a rebuilt copy, and a rebuilt copy is a second place for a key to
+  // be lost. The no-dims path returns what it was given.
+  const spec = { roof: { type: "gable", pitch: 0.42, overhang: 0.5 }, colors: { body: "#fff" }, wallHeightFt: 7 };
+  assert(applyKnownDims(spec, null) === spec, "null dims returns the same object");
+  assert(applyKnownDims(spec, undefined) === spec, "absent dims returns the same object");
+  assert(applyKnownDims(spec) === spec, "no argument at all returns the same object");
+  assertEquals(applyKnownDims(spec, null), spec);
+  // Junk in, junk back out untouched: sanitizeD3Spec is the thing that judges a spec.
+  for (const junk of [null, undefined, "spec", 5, []]) assertEquals(applyKnownDims(junk, DIMS), junk);
+});
+
+Deno.test("⚠️ the builder's 9 beats the model's 7, which is the whole point", () => {
+  // 7 is what the model answered in 74 % of every recorded generation, on buildings measuring 9.
+  const reply = `{"roof":{"type":"gambrel","pitch":0.5,"kneeU":0.75,"kneeRise":0.72,"ridgeRise":1.03},"colors":{},"wallHeightFt":7}`;
+  const withOut = parseModelSpec(reply);
+  assert(withOut.ok && withOut.d3.wallHeightFt === 7, "without dims the model's answer stands");
+  const withDims = parseModelSpec(reply, DIMS);
+  assert(withDims.ok, "with dims it still parses");
+  if (withDims.ok) {
+    assertEquals(withDims.d3.wallHeightFt, 9, "the tape measure wins");
+    // Nothing else moved. The ratios are the model's job and stay the model's job (section 2.1).
+    assertEquals(withDims.d3.roof.kneeU, 0.75);
+    assertEquals(withDims.d3.roof.ridgeRise, 1.03);
+  }
+  // A model that says nothing about the wall still gets the builder's number, because the dims
+  // prompt does not ask and a reply with no wallHeightFt is the EXPECTED reply.
+  const silent = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42},"colors":{}}`, DIMS);
+  assert(silent.ok && silent.d3.wallHeightFt === 9, "the expected silent reply still gets the wall");
+});
+
+Deno.test("a dims wall height outside 5-14 hits the EXISTING clamp, not a second one", () => {
+  // One clamp, not two. `sanitizeD3Spec` has drawn walls at 5..14 since before any of this, and
+  // writing the builder's number in BEFORE it is what keeps that the only place the bound lives.
+  const tall = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 16 });
+  assert(tall.ok && tall.d3.wallHeightFt === 14, "16 is drawn at 14");
+  const short = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 4 });
+  assert(short.ok && short.d3.wallHeightFt === 5, "4 is drawn at 5");
+  // And the builder is TOLD, because a silent clamp on a number they measured is the worst kind:
+  // they typed it, the preview disagrees, and nothing on screen connects the two.
+  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("drawn at 14"), "the note names what was drawn");
+  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("you gave 16 ft"), "and what was typed");
+  assertEquals(knownDimsNote(DIMS), null, "a wall inside the band is silent");
+  assertEquals(knownDimsNote(null), null, "and no dims at all is silent");
+  assertEquals(knownDimsNote(undefined), null);
+});
+
+Deno.test("⚠️ the builder's overhang is converted ONCE, not twice", () => {
+  // The trap this commit was warned about. The MODEL's `overhangIn` is consumed by
+  // foldOverhangInches one step earlier; `dims.overhangIn` is a different number from a
+  // different source. Dividing whatever is already sitting in `overhang` by 12 a second time
+  // would put a 16 in eave at 0.11 ft, which reads as flush — the exact defect the inches
+  // rewrite exists to end.
+  const reply = `{"roof":{"type":"gable","pitch":0.42,"overhangIn":16},"colors":{}}`;
+  const modelOnly = parseModelSpec(reply, DIMS);
+  assert(modelOnly.ok, "the model's inches parse with dims present");
+  if (modelOnly.ok) {
+    assertEquals(Math.round((modelOnly.d3.roof.overhang as number) * 1000) / 1000, 1.333, "16 in is 1.333 ft, converted once");
+    assert(!("overhangIn" in modelOnly.d3.roof), "and the inches key is never stored");
+  }
+  // The builder measured it, so the builder wins — same posture as the wall height above.
+  const builder = parseModelSpec(reply, { ...DIMS, overhangIn: 2 });
+  assert(builder.ok && Math.abs((builder.d3.roof.overhang as number) - 2 / 12) < 1e-9, "the chip beats the model's read");
+  // A flush chip is 0 ft and reaches the spec as 0, not as "absent".
+  const flush = parseModelSpec(reply, { ...DIMS, overhangIn: 0 });
+  assert(flush.ok && flush.d3.roof.overhang === 0, "flush means 0, and 0 is stored");
+  // No chip pressed leaves the model's read exactly alone.
+  const readIt = parseModelSpec(reply, DIMS);
+  assert(readIt.ok && (readIt.d3.roof.overhang as number) > 1, "'read it off the video' does not overwrite the reading");
+});
+
+Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall height", () => {
+  // Width and length are the ruler for ONE reading, not properties of a style: one style sells
+  // at up to 21 sizes and the renderer takes its width from the customer's pick. They must never
+  // reach `building_styles.d3`, where they would be a second, lying answer.
+  const r = parseModelSpec(
+    `{"roof":{"type":"gable","pitch":0.42,"overhangIn":6},"colors":{},"widthFt":99,"lengthFt":99}`,
+    { ...DIMS, overhangIn: 6 },
+  );
+  assert(r.ok, "it parses");
+  if (!r.ok) return;
+  const flat = JSON.stringify(r.d3);
+  for (const key of ["widthFt", "lengthFt", "overhangIn", "sizeFt"]) {
+    assert(!flat.includes(key), `${key} must not reach the stored spec`);
+  }
+  assertEquals(r.d3.wallHeightFt, 9, "the wall height is the one thing that stays, because d3 already has that key");
+  assertEquals(Object.keys(r.d3.roof).sort(), ["overhang", "pitch", "type"], "and the roof carries only roof keys");
 });

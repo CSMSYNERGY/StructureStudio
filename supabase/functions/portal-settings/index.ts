@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, porchAgreementWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -3487,6 +3487,21 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // have the prompt describe two photographs that are not there.
     const videoCount = Math.max(0, Math.min(photoUrls.length, Math.floor(Number(payload.videoCount) || 0)));
     if (photoUrls.length === 0) return json({ error: "At least one photo URL is required." }, 400);
+    // ── THE BUILDER'S OWN MEASUREMENTS (2026-09-19) ────────────────────────────────────────
+    // Parsed HERE, beside the other input check and BEFORE the ledger row and the wallet hold,
+    // because a refusal after either of those costs a daily-cap slot or $20 for a typo. Absent
+    // is not an error: production runs an older browser bundle that has never heard of `dims`
+    // and every one of its requests lands on `{ ok: true, dims: null }`, which is byte-identical
+    // behaviour to yesterday all the way down to the prompt object.
+    const dimsRead = parseKnownDims(payload.dims);
+    if (!dimsRead.ok) return json({ error: dimsRead.error }, 400);
+    // shapeFirst ONLY, and this is a real restriction rather than a tidy-up. SPEC_PROMPT has no
+    // dims variant and is out of scope (brief section 8): the photo path feeds the scan card,
+    // which replaces the AI's roof with a MEASURED one. Handing it dims would mean writing a
+    // wall height into a spec whose roof is about to be overwritten anyway, and the echo below
+    // reports what was USED, so a photos-source caller that sent dims is told plainly that they
+    // were not.
+    const dims = shapeFirst ? dimsRead.dims : null;
     // ⚠️ TRUNCATION IS THE FAILURE MODE THAT LOOKS LIKE A BAD MODEL. sanitizePhotoUrls slices
     // SILENTLY, so an over-cap request returns HTTP 200, a full-price ledger row, and a spec
     // drafted from part of the set — and the builder concludes the AI reads sheds badly. The
@@ -3730,7 +3745,11 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
               // first sentence claims every image is a consecutive frame of one lap - false the
               // moment a builder's own photos are appended, and false in a way that changes how
               // the model reconciles the views it is shown.
-              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount) : (fromVideo ? VIDEO_SHAPE_PROMPT : SPEC_PROMPT) },
+              // `dims` rides on both shape-first prompts and on neither of them when it is null:
+              // videoShapePrompt(null) IS the old VIDEO_SHAPE_PROMPT constant and a two-argument
+              // combinedShapePrompt is byte-identical to what shipped, so a request without dims
+              // sends exactly the string it sent before this line changed.
+              { type: "text", text: combined ? combinedShapePrompt(videoCount, photoUrls.length - videoCount, dims) : (fromVideo ? videoShapePrompt(dims) : SPEC_PROMPT) },
             ],
           }],
         }),
@@ -3781,7 +3800,9 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       filedAtReturnSite.add(refused);
       return refused;
     }
-    const drafted = parseModelSpec(text);
+    // The builder's numbers go over the model's INSIDE parseModelSpec, between the inches fold
+    // and the sanitiser — see its header for why that is the only position that works.
+    const drafted = parseModelSpec(text, dims);
     if (!drafted.ok) {
       // The model answered unusably. The builder got nothing, so charging for our own
       // parse failure buys a support ticket and teaches them not to trust the feature.
@@ -3847,9 +3868,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     //
     // This reaches PRODUCTION's older browser bundle with no frontend change, which is the
     // whole reason the warning rides in `roofNote` rather than in a new response field.
+    //
+    // knownDimsNote joins them on the same day as dims themselves. It is silent unless a wall
+    // height the BUILDER typed had to be clamped to what the renderer can draw — the one way
+    // their own measurement can still lose, and the one the preview cannot explain by itself.
     const observedRead = shapeFirst ? parseObservedNotes(text) : null;
     const observedNotes = shapeFirst
-      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead))
+      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead), knownDimsNote(dims))
       : null;
 
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
@@ -3881,7 +3906,12 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // `frames` makes a silent truncation visible; `observed` is the builder-facing note
     // about doors, windows and vents, which the spec has no field for; `balanceCents` lets
     // the panel show the new balance without a second round trip.
-    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents });
+    //
+    // `dims` is ECHOED AS USED, not as sent: null when none arrived, null when they arrived on
+    // a source that has no dims prompt, and the parsed numbers otherwise. Same reason `frames`
+    // is echoed — a caller that has to infer what the server did from what it sent is a caller
+    // that will one day infer it wrong. An older browser ignores the field.
+    return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;

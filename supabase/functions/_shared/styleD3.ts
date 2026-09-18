@@ -371,7 +371,11 @@ Colors are the dominant UNPAINTED material colors. Estimate conservatively and u
 // drops it, which is what we want — it is a note for the builder about what the video
 // actually showed (doors, windows, vents), not geometry. The renderer has no field for any
 // of it, so pretending otherwise in the spec would be a lie the sanitiser would catch.
-export const VIDEO_SHAPE_PROMPT = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed or barn). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
+//
+// ⚠️ THE BASE, not the export. `videoShapePrompt(dims)` below is what callers use, and
+// `VIDEO_SHAPE_PROMPT` is literally `videoShapePrompt(null)` — see that function's header for
+// why the no-dims prompt has to remain the same string object it always was.
+const VIDEO_SHAPE_BASE = `These images are frames from ONE continuous walk-around video of ONE portable building (a shed or barn). They are in walk order, so consecutive frames are adjacent viewpoints of the same building.
 
 Your job is the SHAPE of that building. Its size, its colours and its materials are settings the customer picks later — do not spend effort on them.
 
@@ -450,6 +454,210 @@ Ignore every OTHER building in the frames. On a sales lot the subject is usually
 
 Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range.`;
 
+// ─── The three numbers the builder measured (2026-09-19) ──────────────────────────────────
+// Wall height came back 7 in 74 % of every recorded generation and was never once above 8, on
+// buildings whose walls measure 9. That is not a model reading a wall badly; it is a model with
+// no ruler being asked for a length. A phone at chest height sees no roof plane and no datum,
+// and the only scale in the frame is a door it has to guess the height of first.
+//
+// So the builder is asked instead. Width, length and wall height are typed in before Generate
+// and travel with the request; the prompt states them as facts and drops `wallHeightFt` from the
+// schema entirely, because a number that is known must not also be estimated.
+//
+// WHAT THIS IS NOT. It is NOT a new stored field: nothing here reaches `building_styles.d3`
+// except `wallHeightFt`, which is an existing d3 key that already means exactly this. Width and
+// length stay out of the column deliberately — one style sells at up to 21 sizes and the
+// renderer takes its width from the customer's pick, so a width on the style would be a second,
+// lying answer to a question the catalog already answers. They are the ruler for this one
+// reading and they belong on the ledger row, nowhere else.
+export type KnownDims = {
+  widthFt: number;
+  lengthFt: number;
+  wallHeightFt: number;
+  // The eave, in inches, ONLY when the builder measured it. Absent means "read it off the
+  // video", which is the chip the panel defaults to — so absent here is never "0 inches".
+  overhangIn?: number;
+};
+
+// The bands, and why each one is where it is.
+//
+// These are REFUSALS, not clamps, and that is the whole point of parsing before the ledger row:
+// a number outside them is a typo or a different unit, and the two costly ways to be wrong are
+// to spend $20 telling the model a lie, or to state it in the prompt and then have the sanitiser
+// silently drop it so the spec keeps a value the prompt contradicted.
+//
+// WALL HEIGHT's band is `sanitizeD3Spec`'s OWN accept band (3..20), not its 5..14 clamp, and the
+// gap between the two is deliberate: inside 3..20 the existing clamp does the whole job, exactly
+// as it already does for a model-drafted wall, so there is one clamp rather than two that can
+// drift apart. Outside it the sanitiser would DROP the value — the prompt would say 30 ft and
+// the spec would quietly keep the style's old wall — so it is refused here, before any cost.
+const DIM_BANDS: Record<string, [number, number]> = {
+  widthFt: [4, 60],        // a 4 ft dog kennel to a 60 ft post-frame span
+  lengthFt: [4, 100],
+  wallHeightFt: [3, 20],
+  overhangIn: [0, 36],     // the range the prompt itself states, and /12 lands inside CLAMPS.overhang
+};
+// Builder's words for the refusal message. This string is shown to whoever pressed Generate.
+const DIM_WORDS: Record<string, string> = {
+  widthFt: "width",
+  lengthFt: "length",
+  wallHeightFt: "wall height",
+  overhangIn: "overhang",
+};
+const DIM_UNITS: Record<string, string> = {
+  widthFt: "feet", lengthFt: "feet", wallHeightFt: "feet", overhangIn: "inches",
+};
+
+// ABSENT IS NOT AN ERROR AND AN ERROR IS NOT ABSENT — the distinction is the whole safety
+// property, which is why the return type carries three outcomes and not two.
+//
+//   { ok: true,  dims: null }  no dims were sent. Every existing caller, and production's older
+//                              browser bundle, land here and behave exactly as they do today.
+//   { ok: true,  dims }        three good numbers. The prompt gets a ruler.
+//   { ok: false, error }       something was sent and it is not usable. The caller answers 400
+//                              BEFORE the ledger row and before the wallet hold.
+//
+// Collapsing the third case into `null` is the tempting version and it is the dangerous one: a
+// mistyped 140 ft width would silently become "no dims", the builder would be charged, and the
+// draft would come back read against a scale nobody stated. Junk NEVER throws — this runs on an
+// unauthenticated-shaped payload inside a function that must answer, not crash.
+export function parseKnownDims(raw: unknown): { ok: true; dims: KnownDims | null } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, dims: null };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, error: "The building's dimensions were sent in a shape we cannot read." };
+  }
+  const src = raw as Record<string, unknown>;
+  // An EMPTY object is "no dims", not a refusal: a caller that always sends the key and leaves it
+  // blank is describing the same state as one that omits it.
+  if (Object.keys(src).length === 0) return { ok: true, dims: null };
+  const out: Record<string, number> = {};
+  for (const key of ["widthFt", "lengthFt", "wallHeightFt"]) {
+    const n = num(src[key]);
+    if (n === null) {
+      return { ok: false, error: `Type the building's ${DIM_WORDS[key]} before generating — all three measurements are needed.` };
+    }
+    const [lo, hi] = DIM_BANDS[key];
+    if (n < lo || n > hi) {
+      return { ok: false, error: `A ${DIM_WORDS[key]} of ${n} ${DIM_UNITS[key]} does not look right — it has to be between ${lo} and ${hi}. Check what you typed.` };
+    }
+    out[key] = n;
+  }
+  // OPTIONAL, and absent has to survive as absent: "read it off the video" is a real answer and
+  // it is the chip the panel starts on. Only null/undefined means absent, never 0 — a flush eave
+  // IS 0, which is the answer this whole change exists to make sayable.
+  if (src.overhangIn !== undefined && src.overhangIn !== null && src.overhangIn !== "") {
+    const n = num(src.overhangIn);
+    if (n === null) return { ok: false, error: "The overhang has to be a number of inches, or left for us to read off the video." };
+    const [lo, hi] = DIM_BANDS.overhangIn;
+    if (n < lo || n > hi) {
+      return { ok: false, error: `An overhang of ${n} inches does not look right — it has to be between ${lo} and ${hi}. Check what you typed.` };
+    }
+    out.overhangIn = n;
+  }
+  return { ok: true, dims: out as unknown as KnownDims };
+}
+
+// Feet with the trailing zeros off: 9 rather than 9.0, 8.5 rather than 8.50. The prompt reads
+// like a builder wrote it or it reads like a form dump, and a model reconciling "8.50 ft" against
+// a frame is being given false precision.
+const dimFt = (n: number): string => String(Math.round(n * 100) / 100);
+
+// THE PROMPT WITH A RULER IN IT.
+//
+// `videoShapePrompt(null)` IS `VIDEO_SHAPE_PROMPT` — the same string, asserted by a test whose
+// only job is to say so. That identity is what makes this commit deployable while production runs
+// an older browser bundle that cannot send dims: production's requests carry no `dims`, so they
+// take this branch and get byte-for-byte the prompt they got yesterday. Nothing about the no-dims
+// path is re-derived, re-templated or re-worded here; it is returned.
+//
+// WHERE THE BLOCK GOES, and it is not cosmetic: immediately after the FIRST BLANK LINE, inside
+// the body `combinedShapePrompt` inherits. That function replaces everything up to the first
+// blank line and keeps the rest, so a preamble placed above it would be eaten on every combined
+// generation — silently, with a prompt that still reads perfectly well. A test pins it.
+//
+// The wall height is removed from the schema by REPLACEMENT of two exact strings rather than by a
+// regex over the shape. If a future edit rewords either one, the replacement becomes a no-op and
+// the dims prompt would both state the wall as a fact and ask for it as a guess. That is the one
+// failure here that is invisible from the outside, so it is the one the tests assert hardest:
+// they check the dims variant does not contain `wallHeightFt` at all.
+const WALL_HEIGHT_SCHEMA_LINE = `  "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6 ft 8 in, use it for scale>,\n`;
+const WALL_HEIGHT_PARAGRAPH = `WALL HEIGHT: the wall at the eave, not at the peak.`;
+
+export function videoShapePrompt(dims?: KnownDims | null): string {
+  if (!dims) return VIDEO_SHAPE_BASE;
+  const known = `KNOWN DIMENSIONS, MEASURED BY THE BUILDER. This building is ${dimFt(dims.widthFt)} ft wide across the gable end, ${dimFt(dims.lengthFt)} ft long down the side, and its wall is ${dimFt(dims.wallHeightFt)} ft high at the eave. Those three are facts, not estimates, and they are your ruler: read every proportion you report against them and never against a scale of your own. Where one of them already answers a question, do not re-estimate it from a door, a person or a typical building.`;
+  const cut = VIDEO_SHAPE_BASE.indexOf("\n\n");
+  // Defensive only: the base opens with a paragraph and a blank line, and has since it was
+  // written. Returning the base unchanged is the safe direction if that ever stops being true —
+  // a prompt with no ruler is the behaviour we have today, not a new failure.
+  if (cut < 0) return VIDEO_SHAPE_BASE;
+  const withKnown = `${VIDEO_SHAPE_BASE.slice(0, cut)}\n\n${known}${VIDEO_SHAPE_BASE.slice(cut)}`;
+  return withKnown
+    .replace(WALL_HEIGHT_SCHEMA_LINE, "")
+    .replace(
+      WALL_HEIGHT_PARAGRAPH,
+      "WALL HEIGHT: already known — the builder measured it and it is stated above. Do not estimate it, do not report it, and do not bend the other numbers to fit some other wall height.",
+    );
+}
+
+// The constant every existing caller and every existing test still imports. Same name, same
+// value, and now derived from the one function rather than sitting beside it, so the two cannot
+// drift: there is nothing to keep in step.
+export const VIDEO_SHAPE_PROMPT = videoShapePrompt(null);
+
+// ─── The builder's numbers over the model's (2026-09-19) ──────────────────────────────────
+// Runs between `foldOverhangInches` and `sanitizeD3Spec`, which is the only position that works:
+// after the model's own `overhangIn` has already become feet, and before the clamps.
+//
+// ⚠️ IT DOES NOT CONVERT THE MODEL'S `overhangIn`. That key is consumed by `foldOverhangInches`
+// one step earlier and is gone by the time this sees the spec. `dims.overhangIn` is a DIFFERENT
+// number — the builder's own measurement off the chips — and converting it here is not a second
+// conversion of the first. Dividing whatever is found in `overhang` by 12 again would put a 16 in
+// eave at 0.11 ft, which reads as flush and is the exact defect the inches rewrite exists to end.
+//
+// PURE, and the identity with no dims: it returns its input BY REFERENCE, which is what makes
+// "production is untouched" a fact about object identity rather than a claim about deep equality.
+//
+// Nothing is deleted, because by here there is nothing left to delete: `wallHeightFt` is
+// OVERWRITTEN (the model was not asked for one, but a model that volunteers one must not win over
+// a tape measure) and `overhangIn` is already gone. Width and length are not written at all —
+// they are the ruler for this reading, not properties of the style.
+export function applyKnownDims(raw: unknown, dims?: KnownDims | null): unknown {
+  if (!dims) return raw;
+  // `Array.isArray` is not decoration: an array is `typeof "object"`, so without it a model reply
+  // of `[]` would spread into `{ wallHeightFt: 9 }` — a spec-shaped object built out of something
+  // that was never a spec. sanitizeD3Spec refuses both, but one of them refuses with "the 3D spec
+  // needs a roof object" over a value this function invented.
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const src = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src, wallHeightFt: dims.wallHeightFt };
+  if (dims.overhangIn !== undefined && dims.overhangIn !== null) {
+    const roofSrc = (src.roof && typeof src.roof === "object") ? src.roof as Record<string, unknown> : null;
+    // No roof object means the reply is unusable anyway and sanitizeD3Spec is about to say so.
+    // Inventing one here would turn "the model returned nothing" into a spec with an eave on it.
+    if (roofSrc) out.roof = { ...roofSrc, overhang: dims.overhangIn / 12 };
+  }
+  return out;
+}
+
+// The one thing a builder's own number can still lose to, said out loud.
+//
+// `sanitizeD3Spec` clamps a wall to 5..14 ft because that is what the renderer can draw. Inside
+// parseKnownDims's 3..20 band there is room to type a 16 that comes back as a 14, and a silent
+// clamp on a number the builder MEASURED is the worst kind: they typed it, they can see the
+// preview is wrong, and nothing on screen connects the two. Composed into `roofNote` beside the
+// gambrel and porch warnings, so it reaches production's older panel with no browser change.
+//
+// Only the wall height can clamp. Width and length are never stored, and `overhangIn`'s 0..36
+// band divides into exactly CLAMPS.overhang's 0..3 ft.
+export function knownDimsNote(dims?: KnownDims | null): string | null {
+  if (!dims) return null;
+  const h = dims.wallHeightFt;
+  const drawn = Math.min(14, Math.max(5, h));
+  if (drawn === h) return null;
+  return `Check the wall height before saving: you gave ${dimFt(h)} ft, and the 3D can only draw a wall between 5 and 14 ft, so it has been drawn at ${dimFt(drawn)} ft.`;
+}
+
 // A combined set is NOT what VIDEO_SHAPE_PROMPT describes, and saying so matters. That prompt
 // opens by asserting every image is a consecutive frame of one lap; a combined generation appends
 // the builder's own staged photographs, which are neither consecutive nor in walk order. Sending
@@ -462,13 +670,20 @@ Where the frames genuinely do not settle something, say so in observed and OMIT 
 // identical and a second copy of that spec is a second thing to keep in step. Split on the blank
 // line rather than matching the sentence: a wording change to the first paragraph would otherwise
 // silently turn this into a no-op that still returns a valid-looking prompt.
-export function combinedShapePrompt(videoCount: number, photoCount: number): string {
+//
+// `dims` (2026-09-19) is passed straight through to videoShapePrompt and never handled here. That
+// is why the known-dimensions block sits AFTER the first blank line: this function keeps exactly
+// the part of the body that starts there, so the ruler survives the splice for free and there is
+// no second copy of it to write. A TWO-ARGUMENT CALL IS BYTE-IDENTICAL TO TODAY, which is what
+// lets this deploy while production's browser bundle has never heard of dims.
+export function combinedShapePrompt(videoCount: number, photoCount: number, dims?: KnownDims | null): string {
   const v = Math.max(0, Math.floor(videoCount || 0));
   const p = Math.max(0, Math.floor(photoCount || 0));
-  if (!v) return VIDEO_SHAPE_PROMPT;
-  const cut = VIDEO_SHAPE_PROMPT.indexOf("\n\n");
-  if (cut < 0) return VIDEO_SHAPE_PROMPT;
-  const rest = VIDEO_SHAPE_PROMPT.slice(cut);
+  const base = videoShapePrompt(dims);
+  if (!v) return base;
+  const cut = base.indexOf("\n\n");
+  if (cut < 0) return base;
+  const rest = base.slice(cut);
   const frames = v === 1 ? "image is a frame" : "images are frames";
   const shots = p === 1 ? "image is a photograph" : "images are photographs";
   const tail = p
@@ -515,12 +730,19 @@ export function foldOverhangInches(raw: unknown): unknown {
 
 // Tolerant parse of a model reply: pull the first {...} out of whatever wrapping the
 // model chose, then hold it to the same rules a hand-typed spec must satisfy.
-export function parseModelSpec(text: string): { ok: true; d3: D3Spec } | { ok: false; error: string } {
+//
+// THE ORDER OF THE THREE STEPS IS THE CONTRACT. `foldOverhangInches` turns the MODEL's inches
+// into the stored feet key; `applyKnownDims` then puts the BUILDER's own numbers over the top;
+// `sanitizeD3Spec` clamps whatever survives. Swapping the first two would let the model's eave
+// beat a measured one, and moving either after the sanitiser would mean a second set of clamps.
+// With no `dims` the middle step is the identity by reference, so an old caller's spec is the
+// same object it has always been.
+export function parseModelSpec(text: string, dims?: KnownDims | null): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   const m = String(text || "").match(/\{[\s\S]*\}/);
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
-  return sanitizeD3Spec(foldOverhangInches(parsed));
+  return sanitizeD3Spec(applyKnownDims(foldOverhangInches(parsed), dims));
 }
 
 // ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
