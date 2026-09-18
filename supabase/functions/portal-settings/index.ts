@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, parseFrameMap, gambrelRoofWarning, porchAgreementWarning, knownDimsNote, flagObservedNotes, parseKnownDims, SPEC_PROMPT, videoShapePrompt, combinedShapePrompt, parseSelfCheckRenders, selfCheckPairs, selfCheckPairLabel, selfCheckPrompt, parseSelfCheck, applySelfCheck } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -144,6 +144,11 @@ const GATES: GateTable = {
   // them here instead of letting that surface as "the 3D calibration button is broken".
   save_style_d3:             { area: "settings_structures", level: "edit" },
   calibrate_style_ai:        { area: "settings_structures", level: "edit" },
+  // The FREE second pass over a generation this same person just paid for. Same area and the
+  // same level on purpose: it reads one of their own ledger rows and hands back a corrected
+  // shape for the style they are editing, so anyone who may not edit structures has no business
+  // here either. Free does not mean ungated.
+  calibrate_style_check:     { area: "settings_structures", level: "edit" },
   upload_style_photo:        { area: "settings_structures", level: "edit" },
   style_photo_upload_url:    { area: "settings_structures", level: "edit" },
   save_style_media:          { area: "settings_structures", level: "edit" },
@@ -3962,6 +3967,330 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // request. Both are null on a photos generation and both are simply ignored by a browser
     // that has never heard of them, which is every production browser.
     return json({ ok: true, d3: drafted.d3, frames: photoUrls.length, dropped: droppedCount, observed: observedNotes, balanceCents, dims, frameMap, checkId });
+  }
+
+  // ── THE FREE SECOND PASS (2026-09-19) ──────────────────────────────────────────────────
+  // The builder pressed Generate once, was held once and charged once, and has their draft.
+  // This is what happens next: the browser renders that draft from a few camera angles, puts
+  // each render beside the builder's own frame of the same view, and asks the model where its
+  // own draft does not match the building. Free, and single-use.
+  //
+  // ⚠️ THE MONEY LADDER IS NOT TOUCHED HERE. No cap check, no ledger insert, no wallet_hold, no
+  // wallet_capture. One press is one hold is one charge, and this action exists on the other
+  // side of that sentence: it spends about four cents of our own Anthropic budget on a draft
+  // that has already been paid for, and it cannot be made to spend it twice.
+  //
+  // WHAT MAKES IT SINGLE-USE is one statement: a conditional UPDATE that sets `self_check_at`
+  // only while it is still null and returns the row it touched. No row back means the check has
+  // already run, the row is not this tenant's, it is not this style's, or it is older than the
+  // window — all four answered with a 409 before any model call. `returning` rather than
+  // read-then-write, because two presses landing together would both pass a read.
+  //
+  // THE CLAIM IS WRITTEN BEFORE THE MODEL CALL, deliberately. A transient failure therefore
+  // BURNS the check rather than opening a retry loop: there is no path in this function that
+  // calls the model twice for one generation. The builder keeps the draft either way, which is
+  // what makes burning it the cheap direction.
+  //
+  // ⛔ NOTHING THE CALLER SENDS BECOMES AN INPUT TO THE MODEL EXCEPT THE RENDER BYTES. The draft
+  // and the builder's measurements are read back off the claimed row; the frames are the style's
+  // own stored URLs. Handing the browser those inputs would turn one $20 generation into a free
+  // vision call on any twelve images on the internet with caller-written text spliced into the
+  // prompt — `sanitizePhotoUrls` accepts any https URL and is not bucket-scoped.
+  if (action === "calibrate_style_check") {
+    const t0 = Date.now();
+    const styleValue = String(payload.styleValue ?? "").trim();
+    const checkId = String(payload.checkId ?? "").trim();
+    if (!styleValue) return json({ error: "styleValue is required." }, 400);
+    // Shape-checked here rather than left to Postgres: `.eq("id", "not-a-uuid")` comes back as
+    // 22P02 from the driver, which would read as a database fault in app_errors and answer 500
+    // to what is plainly a bad request.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(checkId)) {
+      return json({ error: "checkId is required." }, 400);
+    }
+    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!apiKey) return json({ error: "AI drafting isn't configured yet (ANTHROPIC_API_KEY is unset)." }, 500);
+
+    // A CHECK THAT DOES NOT RUN IS NOT AN ERROR. The builder has their draft; the only thing
+    // they lose is a free second opinion, so every one of these answers 200 with a verdict the
+    // panel can render as one quiet line. A 4xx here would make the panel show a failed
+    // generation, which is the one thing that never happened.
+    const skipped = (reason: string, note: string) =>
+      json({ ok: true, verdict: "skipped", reason, note, changed: [], checked: {}, d3: null, renders: 0 });
+
+    // BEST-EFFORT, like the 226 write above and for the same reason: the builder has already
+    // been charged and already holds their draft, and a diagnostics failure must never be the
+    // thing that takes either away. No missing-column guard, unlike the `dims` write: all eight
+    // columns arrive in migration 247 together and `self_check_at` is the CLAIM, so without 247
+    // this action refuses before it ever reaches here.
+    // deno-lint-ignore no-explicit-any
+    const recordSelfCheck = async (id: string, row: Record<string, any>) => {
+      const { error } = await admin.from("ai_style_calls").update(row).eq("id", id);
+      if (error) {
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "ai_selfcheck_log_failed",
+          message: `Could not record the self-check result: ${error.message}`,
+        });
+      }
+    };
+
+    // THE CHECK FAILED AND THE GENERATION DID NOT. Every one of these paths ends with the
+    // builder holding the first draft, told that the CHECK could not run — never that their
+    // $20 generation failed. One coded row each, so "how often does the second call time out?"
+    // is a query rather than a feeling, and the claim stays spent, which is what stops a failing
+    // check becoming a retry loop against our own API key.
+    const failedCheck = async (code: string, message: string, context: Record<string, unknown>) => {
+      await logEdgeError({ fn: "portal-settings", req, clientId, code, message, context });
+      await recordSelfCheck(checkId, {
+        self_check_verdict: "failed",
+        self_check_renders: Number(context.renders ?? 0),
+        self_check_ms: Date.now() - t0,
+        ...(context.tokens ? { self_check_tokens: context.tokens } : {}),
+      });
+      return json({
+        ok: true, verdict: "failed", reason: code, changed: [], checked: {}, d3: null,
+        renders: Number(context.renders ?? 0),
+        note: "We couldn't finish checking the draft against your video - review it yourself before saving.",
+      });
+    };
+
+    // The array of images the FIRST call was given, re-sent so the frame indices mean something.
+    // ⚠️ POSITIONS ARE ALL THAT IS TAKEN FROM IT. Length-capped, never filtered: dropping a junk
+    // entry would close the gap and shift every index after it, so a render aimed at image 6
+    // would be paired with image 7 and look exactly like a right answer. Nothing in this array
+    // reaches the model unless the STYLE itself stores it (selfCheckPairs, below).
+    const sentUrls: string[] = (Array.isArray(payload.photoUrls) ? payload.photoUrls : [])
+      .slice(0, 12)
+      .map((u: unknown) => (typeof u === "string" ? u.trim() : ""));
+    // Said plainly rather than left to surface as "the front render names image 1, which was not
+    // in this generation" four lines down — which is true, and describes the wrong fault.
+    if (!sentUrls.length) return json({ error: "photoUrls (the same set the generation read) is required." }, 400);
+
+    // Refused, not truncated, and refused BEFORE the claim: a render over the cap is a fault in
+    // the browser half of this feature, and burning the tenant's one check on it would hide the
+    // fault behind a 409 the next time anyone looked. Nothing here reaches the model, so a
+    // caller that keeps sending bad renders keeps getting 400s and spends nothing.
+    const rendersRead = parseSelfCheckRenders(payload.renders, sentUrls.length);
+    if (!rendersRead.ok) return json({ error: rendersRead.error }, 400);
+
+    // ── THE KILL SWITCH, before the claim ────────────────────────────────────────────────
+    // One Supabase project serves beta AND production and the promotion workflow is disabled,
+    // so an edge deploy is live for every production builder the moment it lands. This is the
+    // way to stop a bad check that is not a rollback and does not need a deploy. NULL = on.
+    //
+    // It FAILS CLOSED, which is the opposite of the daily-cap read in calibrate_style_ai above,
+    // and the inversion is deliberate: that read guards money and must not paywall a paying
+    // tenant, while this one is an emergency stop, and a stop that a transient database blip
+    // defeats is not a stop. The cost of honouring it too often is one free improvement
+    // skipped on a draft the builder already holds. Checked before the claim, so turning the
+    // switch back on leaves every unclaimed row still checkable.
+    const { data: swRow, error: swErr } = await admin.from("client_settings")
+      .select("ai_style_self_check").eq("client_id", clientId).maybeSingle();
+    if (swErr) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_selfcheck_switch_unreadable",
+        message: `Could not read ai_style_self_check, skipping the check: ${swErr.message}`,
+      });
+      return skipped("switch_unreadable", "The check could not run just now - review the draft yourself.");
+    }
+    if (swRow?.ai_style_self_check === false) {
+      return skipped("off", "The check is switched off for this account - review the draft yourself.");
+    }
+
+    // ── WHICH FRAMES MAY BE SHOWN ────────────────────────────────────────────────────────
+    // The style's OWN two lists, and nothing else. This is the whitelist that turns "the caller
+    // sends image URLs" into "the caller picks from images it already uploaded to this style".
+    const found = await findStyleFor3D(styleValue, "");
+    if (found.err) return found.err;
+    const ownFrames = [...mediaList(found.style!.d3_video_frames), ...mediaList(found.style!.d3_photos)];
+    const pairs = selfCheckPairs(sentUrls, ownFrames, rendersRead.renders);
+    // Every render lost its frame. Comparing our own drawings with nothing is not a check, and
+    // the model would answer anyway — so this stops here, before the claim, because the reason
+    // is about the style's stored media rather than about this generation.
+    if (!pairs.length) {
+      return skipped("no_frames", "The check could not line your video frames up with the 3D - review the draft yourself.");
+    }
+
+    // ── THE CLAIM ────────────────────────────────────────────────────────────────────────
+    // One statement does all of it: proves the row is this tenant's and this style's, proves it
+    // is recent, proves no check has run on it, marks it used, and hands back the two things the
+    // check needs. Scoping on `style_key` as well as `client_id` costs nothing and stops a
+    // caller pairing one generation's draft with another style's frames — both its own, so not
+    // a breach, but a comparison of two different buildings presented as one.
+    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const { data: claimed, error: claimErr } = await admin.from("ai_style_calls")
+      .update({ self_check_at: new Date().toISOString() })
+      .eq("id", checkId).eq("client_id", clientId).eq("style_key", styleValue)
+      .is("self_check_at", null).gt("called_at", since)
+      .select("drafted, dims").maybeSingle();
+    if (claimErr) {
+      // The likeliest cause by far is that migration 247 has not been applied: `self_check_at`
+      // is the claim, so without the column this action cannot run at all — which is the safe
+      // failure, and the reason nothing below needs its own missing-column guard.
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_selfcheck_claim_failed",
+        message: `Could not claim the check for this generation; migration 247 may not be applied: ${claimErr.message}`,
+      });
+      return skipped("unavailable", "The check could not run just now - review the draft yourself.");
+    }
+    if (!claimed) {
+      return json({
+        error: "That generation has already been checked, or it is too old to check now.",
+        code: "check_unavailable",
+      }, 409);
+    }
+
+    // ── THE RULER ────────────────────────────────────────────────────────────────────────
+    // Read off the ROW, never off the request. Every measuring instruction in the check prompt
+    // reads a length as a fraction of a wall of known height, so a check run without one would
+    // measure the eave against a wall the model itself guessed — which the baseline says comes
+    // back 7 ft on a 9 ft building in 74 % of generations. It would be wrong in the same
+    // direction every time and would sound just as certain. Refusing is the honest answer.
+    //
+    // The claim has already been spent by the time we get here, and that is correct: a row with
+    // no dims will never grow any, so leaving it claimable would only invite the same refusal
+    // again. `self_check_verdict = 'skipped'` in the table means exactly this and nothing else.
+    const rowDims = parseKnownDims(claimed.dims);
+    const dims = rowDims.ok ? rowDims.dims : null;
+    const draftRead = sanitizeD3Spec(claimed.drafted);
+    if (!dims || !draftRead.ok) {
+      const why = !dims
+        ? "the generation recorded no measurements"
+        : `the recorded draft could not be read back (${draftRead.ok ? "" : draftRead.error})`;
+      // TWO SEVERITIES, because these are two different events wearing one code. A row with no
+      // dims is the product correctly declining — `info`, the same posture every other refusal
+      // takes, and it must never sit in the fault queue. A row whose `drafted` will not go back
+      // through the sanitiser that produced it is a genuine fault and belongs there.
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_selfcheck_row_unusable",
+        severity: dims ? "error" : "info",
+        message: `Self-check skipped: ${why}.`,
+        context: { checkId, hasDims: !!dims, hasDraft: draftRead.ok },
+      });
+      await recordSelfCheck(checkId, { self_check_verdict: "skipped", self_check_renders: 0, self_check_ms: Date.now() - t0 });
+      return skipped("row_unusable", "The check could not run on this generation - review the draft yourself.");
+    }
+
+    // ── THE SECOND CALL ──────────────────────────────────────────────────────────────────
+    // The builder's frame first and our render second, one pair per viewpoint, with a line
+    // naming which is which. Reality before our attempt at it.
+    //
+    // 45 s, not the 110 s call 1 gets, and the difference is the point: the builder already has
+    // their draft, so a slow check is worth abandoning, and 110 + 5 + 110 is not a wait anyone
+    // should be asked to sit through.
+    //
+    // max_tokens 4000 rather than call 1's 8000. The answer is bounded at six fields by the
+    // prompt and again by the cap, so the room is all for thinking — and the ceiling that
+    // actually bites here is the clock, which more thinking only brings nearer. If
+    // `self_check_tokens` ever shows replies stopping at max_tokens, this is the number to move.
+    const content: unknown[] = [{
+      type: "text",
+      text: selfCheckPrompt({ dims, draft: draftRead.d3, viewpoints: pairs.map((p) => p.viewpoint) }),
+    }];
+    for (const p of pairs) {
+      content.push({ type: "text", text: selfCheckPairLabel(p.viewpoint) });
+      content.push({ type: "image", source: { type: "url", url: p.frameUrl } });
+      content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
+    }
+    const checkSignal = AbortSignal.timeout(45_000);
+    let checkRes: Response;
+    let checkBody = "";
+    try {
+      checkRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+        signal: checkSignal,
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          max_tokens: 4000,
+          thinking: { type: "adaptive" },
+          output_config: { effort: "medium" },
+          messages: [{ role: "user", content }],
+        }),
+      });
+      checkBody = await checkRes.text();
+    } catch (e) {
+      return await failedCheck(
+        checkSignal.aborted ? "ai_selfcheck_timeout" : "ai_selfcheck_unreachable",
+        checkSignal.aborted
+          ? "The self-check did not answer within 45 seconds."
+          : `Could not reach the AI service for the self-check: ${e instanceof Error ? e.message : String(e)}`,
+        { elapsedMs: Date.now() - t0, renders: pairs.length },
+      );
+    }
+    if (!checkRes.ok) {
+      return await failedCheck("ai_selfcheck_upstream", `The self-check call returned ${checkRes.status}: ${checkBody.slice(0, 300)}`, {
+        status: checkRes.status, elapsedMs: Date.now() - t0, renders: pairs.length,
+      });
+    }
+    // deno-lint-ignore no-explicit-any
+    let checkData: any = null;
+    try { checkData = JSON.parse(checkBody); } catch { checkData = null; }
+    const checkReply = modelReplyText(checkData);
+    const usage = checkData?.usage ?? null;
+    const tokens = { input: Number(usage?.input_tokens ?? 0), output: Number(usage?.output_tokens ?? 0) };
+    if (checkReply.stopReason === "refusal") {
+      return await failedCheck("ai_selfcheck_refused", "The model declined to compare these images.", {
+        elapsedMs: Date.now() - t0, renders: pairs.length, tokens,
+      });
+    }
+    const read = parseSelfCheck(checkReply.text);
+    if (!read) {
+      return await failedCheck(
+        checkReply.stopReason === "max_tokens" ? "ai_selfcheck_truncated" : "ai_selfcheck_unparseable",
+        checkReply.stopReason === "max_tokens"
+          ? "The self-check ran out of room before finishing its answer."
+          : "The self-check reply did not parse.",
+        { stopReason: checkReply.stopReason, blockTypes: checkReply.blockTypes, elapsedMs: Date.now() - t0, renders: pairs.length, tokens },
+      );
+    }
+
+    // ── THE GATES ────────────────────────────────────────────────────────────────────────
+    // Allow-list, six-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
+    // applySelfCheck so they are testable without a network. `drafted` is NOT touched by any of
+    // it: the first pass stays on the row or "did the check help?" stops being answerable.
+    const applied = applySelfCheck(draftRead.d3, read);
+    if (!applied.ok) {
+      return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
+    }
+    // What the model asked for and did not get. An `info` row, not an error: dropping these IS
+    // the product working. It is here because "is the check trying to repaint buildings?" should
+    // be one query rather than a hunch, and because a model that has started ignoring the rules
+    // is something to see early.
+    if (applied.dropped.length) {
+      await logEdgeError({
+        fn: "portal-settings", req, clientId, code: "ai_selfcheck_field_dropped", severity: "info",
+        message: `The self-check proposed ${applied.dropped.length} change(s) that were not applied.`,
+        context: { checkId, verdict: applied.verdict, dropped: applied.dropped.slice(0, 20) },
+      });
+    }
+
+    const elapsedMs = Date.now() - t0;
+    // `self_check_after` is written ONLY when something actually moved. A null there means the
+    // draft stands, so diffing `drafted` against it stays the one query that answers what the
+    // check changes across every tenant, with no rows that differ from `drafted` by nothing.
+    await recordSelfCheck(checkId, {
+      self_check_verdict: applied.verdict,
+      self_check_changed: applied.changed,
+      self_check_tokens: tokens,
+      self_check_renders: pairs.length,
+      self_check_ms: elapsedMs,
+      ...(applied.verdict === "corrections" ? { self_check_after: applied.d3 } : {}),
+    });
+
+    // The raw `corrections` object is deliberately NOT echoed. `d3` is the merged spec after all
+    // three gates and `changed` is what actually moved, with `from` and `to` read off the two
+    // specs rather than off the model's own account of them — a browser handed the raw object
+    // would have its own fourth chance to apply something the gates just refused.
+    return json({
+      ok: true,
+      verdict: applied.verdict,
+      d3: applied.verdict === "corrections" ? applied.d3 : null,
+      changed: applied.changed,
+      checked: read.checked,
+      note: read.note,
+      renders: pairs.length,
+      ms: elapsedMs,
+    });
   }
 
   // Reorder this tenant's building styles. `orderedIds` is the desired top-to-bottom order;

@@ -24,8 +24,10 @@ import {
   foldOverhangInches, porchAgreementWarning, draftPorchKind, OBSERVED_PORCH_KINDS,
   videoShapePrompt, parseKnownDims, applyKnownDims, knownDimsNote,
   parseFrameMap, FRAME_MAP_VIEWPOINTS,
+  parseSelfCheckRenders, selfCheckPairs, selfCheckPrompt, selfCheckPairLabel, parseSelfCheck, applySelfCheck,
+  SELF_CHECK_ALLOW, SELF_CHECK_MAX_FIELDS, SELF_CHECK_VIEWPOINTS,
 } from "./styleD3.ts";
-import type { KnownDims } from "./styleD3.ts";
+import type { D3Spec, KnownDims } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -1625,4 +1627,521 @@ Deno.test("parseFrameMap and parseObservedNotes read the same reply without dist
   // with 240-char caps, and this is a handful of integers nobody should ever be shown.
   const notes = parseObservedNotes(reply);
   assert(notes && !("frameMap" in notes), "the map stays out of the notes");
+});
+
+// ─── THE FREE SECOND PASS (2026-09-19) ────────────────────────────────────────────────────
+// What this group pins, and why each one is here rather than left to a click-through:
+//
+//  * The second call is FREE and the first one cost $20, so every input it takes has to be
+//    something the server already knows. The two functions that decide what reaches the model
+//    (parseSelfCheckRenders, selfCheckPairs) are the whole of that boundary.
+//  * A correction is model output on its way into a renderer a customer is quoted against.
+//    Three gates stand between them and all three fail silently: an allow-list that lets one
+//    key through, a cap that counts the wrong list, a sanitiser that deletes rather than
+//    clamps. None of those would throw, and none would look wrong in a screenshot.
+//  * The measured A/B says a check that "corrects" an already-good draft scores BELOW not
+//    checking at all. So the tests that matter most are the ones about NOT changing things.
+
+const JPEG = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46]);
+const PNG = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+/** base64 of n bytes of valid-looking JPEG. */
+function jpegB64(n = JPEG.length): string {
+  const b = new Uint8Array(Math.max(JPEG.length, n));
+  b.set(JPEG);
+  let s = "";
+  for (const byte of b) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+function bytesB64(src: Uint8Array): string {
+  let s = "";
+  for (const byte of src) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+const frames = (n: number) => Array.from({ length: n }, (_, i) => `https://bucket.test/f${i + 1}.jpg`);
+const render = (viewpoint: string, frame: number, base64 = jpegB64()) => ({ viewpoint, frame, base64 });
+
+/** The fixture, through the same sanitiser the ledger row went through. Throwing here rather
+ *  than limping on with an empty spec: a broken fixture must look like a broken fixture. */
+function cleanSpec(raw: unknown): D3Spec {
+  const r = sanitizeD3Spec(raw);
+  if (!r.ok) throw new Error(`the fixture is not a valid spec: ${r.error}`);
+  return r.d3;
+}
+
+// A draft of the shape the ledger actually stores: sanitizeD3Spec's own output.
+const DRAFT = {
+  roof: { type: "gambrel", kneeU: 0.78, kneeRise: 0.7, ridgeRise: 1.0, overhang: 1.0, eave: "fascia", porchDepthFt: 6 },
+  siding: "lap",
+  colors: { body: "#8b6f4e", trim: "#e8e0d0", roof: "#2a2a2a" },
+  wallHeightFt: 9,
+};
+const CLEAN: D3Spec = cleanSpec(DRAFT);
+const CHECK_DIMS: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+
+function checkReply(body: Record<string, unknown>): string {
+  return `Here is my answer.\n${JSON.stringify(body)}`;
+}
+function readOf(body: Record<string, unknown>) {
+  const r = parseSelfCheck(checkReply(body));
+  assert(!!r, "the fixture reply has to parse");
+  return r!;
+}
+
+// ── THE RENDERS ───────────────────────────────────────────────────────────────────────────
+
+Deno.test("parseSelfCheckRenders takes four good JPEGs and strips a jpeg data: prefix", () => {
+  const r = parseSelfCheckRenders([
+    render("front", 1),
+    render("side", 2),
+    { viewpoint: "eaveCorner", frame: 3, base64: `data:image/jpeg;base64,${jpegB64()}` },
+    render("corner", 4),
+  ], 8);
+  assert(r.ok, "four renders is the designed maximum, not an error");
+  if (!r.ok) return;
+  assertEquals(r.renders.map((x) => x.viewpoint), ["front", "side", "eaveCorner", "corner"]);
+  assertEquals(r.renders[2].base64, jpegB64(), "the data: prefix is gone by the time this is a payload");
+  assertEquals(r.renders[0].bytes, JPEG.length);
+});
+
+Deno.test("⚠️ seven renders are REFUSED, not sliced to four", () => {
+  // Slicing would run the check on an arbitrary four of seven views and report a verdict as
+  // though it had seen what it was sent. The cap is a contract with the browser half, and a
+  // browser that breaks it should hear about it on the first press.
+  const many = ["front", "side", "eaveCorner", "corner", "front", "side", "corner"]
+    .map((v, i) => render(v, i + 1));
+  const r = parseSelfCheckRenders(many, 8);
+  assert(!r.ok, "seven is over the cap");
+  if (r.ok) return;
+  assert(r.error.includes("4"), `the refusal names the cap: ${r.error}`);
+  assert(r.error.includes("7"), `and what was sent: ${r.error}`);
+});
+
+Deno.test("a render over 400 KB is refused, and so is a set over 1.2 MB", () => {
+  const big = parseSelfCheckRenders([render("front", 1, jpegB64(400_001))], 4);
+  assert(!big.ok, "over the per-render cap");
+  if (!big.ok) assert(/KB/.test(big.error), big.error);
+
+  // Four at 390 KB each are individually fine and together are not.
+  const set = parseSelfCheckRenders(
+    ["front", "side", "eaveCorner", "corner"].map((v, i) => render(v, i + 1, jpegB64(390_000))),
+    4,
+  );
+  assert(!set.ok, "1.56 MB is over the total");
+  if (!set.ok) assert(/1200 KB/.test(set.error), set.error);
+});
+
+Deno.test("⚠️ 'image/jpeg only' is read off the BYTES, not off the caller's label", () => {
+  // A caller can write any media type it likes into a data: URL. The only thing that settles
+  // what the bytes are is the bytes, and Anthropic is told `media_type: "image/jpeg"` either
+  // way — so a PNG through here is a lie we would be repeating upstream.
+  const lying = parseSelfCheckRenders([{ viewpoint: "front", frame: 1, base64: bytesB64(PNG) }], 4);
+  assert(!lying.ok, "a PNG labelled as nothing at all is still a PNG");
+  if (!lying.ok) assertEquals(lying.error, "The front render is not a JPEG.");
+
+  const labelled = parseSelfCheckRenders(
+    [{ viewpoint: "front", frame: 1, base64: `data:image/png;base64,${bytesB64(PNG)}` }],
+    4,
+  );
+  assert(!labelled.ok, "and an honest PNG label is refused before the bytes are even read");
+});
+
+Deno.test("parseSelfCheckRenders: one per viewpoint, known viewpoints only, frames in range", () => {
+  const dup = parseSelfCheckRenders([render("side", 1), render("side", 2)], 4);
+  assert(!dup.ok && dup.error.includes("side"), "two renders of one view is a browser bug");
+
+  const unknown = parseSelfCheckRenders([render("back", 1)], 4);
+  assert(!unknown.ok && unknown.error.includes("back"), "an unknown viewpoint is refused by name");
+
+  for (const bad of [0, -1, 9, 2.5, null, "x"]) {
+    const r = parseSelfCheckRenders([{ viewpoint: "front", frame: bad, base64: jpegB64() }], 8);
+    assert(!r.ok, `frame ${String(bad)} is not an index into this generation`);
+  }
+  // A numeric string IS an index: `num` coerces it everywhere else in this file and a model or
+  // a JSON round trip that produces "2" means 2.
+  const str = parseSelfCheckRenders([{ viewpoint: "front", frame: "2", base64: jpegB64() }], 8);
+  assert(str.ok && str.renders[0].frame === 2, "a numeric string is still an index");
+});
+
+Deno.test("parseSelfCheckRenders: junk in, a refusal out, never a throw", () => {
+  for (const bad of [null, undefined, "renders", 3, [], [null], [[]], [{}],
+                     [{ viewpoint: "front" }],
+                     [{ viewpoint: "front", frame: 1, base64: "" }],
+                     [{ viewpoint: "front", frame: 1, base64: "not base64 at all !!!" }]]) {
+    const r = parseSelfCheckRenders(bad, 4);
+    assert(!r.ok, `junk: ${JSON.stringify(bad)}`);
+    if (!r.ok) assert(r.error.length > 0 && r.error.length < 200, "and the refusal is a sentence");
+  }
+});
+
+// ── WHICH FRAMES MAY BE SHOWN ─────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ a URL the style does not own never reaches the model, and the indices do NOT shift", () => {
+  // THE ONE THIS PAIR OF FUNCTIONS EXISTS FOR. sanitizePhotoUrls accepts ANY https URL up to
+  // 600 characters and is not bucket-scoped, so if the caller's array were the frame list, one
+  // $20 generation would buy a free vision call on any twelve images on the internet.
+  //
+  // And the second half is just as load-bearing: compacting the array to remove the intruder
+  // would renumber everything after it, so the `corner` render below would be paired with the
+  // WRONG frame while looking exactly like a right answer.
+  const own = frames(4);
+  const sent = [own[0], own[1], "https://evil.test/private.jpg", own[2], own[3]];
+  const renders = [render("front", 1), render("side", 3), render("corner", 4)];
+  const parsed = parseSelfCheckRenders(renders, sent.length);
+  assert(parsed.ok, "the renders themselves are fine");
+  if (!parsed.ok) return;
+  const pairs = selfCheckPairs(sent, own, parsed.renders);
+  assertEquals(pairs.map((p) => p.viewpoint), ["front", "corner"], "the intruder's viewpoint dropped whole");
+  assertEquals(pairs[0].frameUrl, own[0]);
+  assertEquals(pairs[1].frameUrl, own[2], "position 4 is still the style's third frame, not its fourth");
+  assert(!JSON.stringify(pairs).includes("evil.test"), "nothing of the caller's URL survives");
+});
+
+Deno.test("selfCheckPairs orders canonically and drops what it cannot pair", () => {
+  const own = frames(4);
+  const parsed = parseSelfCheckRenders([render("corner", 4), render("front", 1)], 4);
+  assert(parsed.ok, "two renders");
+  if (!parsed.ok) return;
+  // Canonical, not the caller's order: two runs of one generation put the same pictures in the
+  // same places, which is what makes two transcripts comparable.
+  assertEquals(selfCheckPairs(own, own, parsed.renders).map((p) => p.viewpoint), ["front", "corner"]);
+  // A style with nothing stored pairs nothing, which the caller reads as "skip the check".
+  assertEquals(selfCheckPairs(own, [], parsed.renders), []);
+  // And a frame index past the end of the array it was sent with cannot invent a pair.
+  assertEquals(selfCheckPairs(own.slice(0, 2), own, parsed.renders).map((p) => p.viewpoint), ["front"]);
+});
+
+// ── READING THE REPLY ─────────────────────────────────────────────────────────────────────
+
+Deno.test("parseSelfCheck reads a clean matches reply out of its wrapping", () => {
+  const r = parseSelfCheck(checkReply({
+    verdict: "matches", corrections: {}, changed: [],
+    checked: { overhang: "ok", porch: "ok", roofProfile: "unclear", eave: "unclear" },
+    note: "The draft already matches.",
+  }));
+  assertEquals(r, {
+    verdict: "matches", corrections: {}, changed: [],
+    checked: { overhang: "ok", porch: "ok", roofProfile: "unclear", eave: "unclear" },
+    note: "The draft already matches.",
+  });
+});
+
+Deno.test("⚠️ an empty object is NOT read as 'it matches'", () => {
+  // `{}` is what comes back when a model wrote prose and one stray brace. Reading it as a clean
+  // pass would inflate the single number this whole feature is judged on — how often the check
+  // leaves an already-good draft alone — and it would inflate it in the flattering direction.
+  assertEquals(parseSelfCheck("{}"), null);
+  assertEquals(parseSelfCheck("I compared them and they look the same to me."), null);
+  assertEquals(parseSelfCheck('{"thoughts":"the roof looks fine"}'), null);
+  // A reply carrying ANY of the four keys the prompt asks for is an answer, even a terse one.
+  assertEquals(parseSelfCheck('{"verdict":"matches"}')?.verdict, "matches");
+});
+
+Deno.test("parseSelfCheck: an unrecognised verdict is read off the answer, never invented", () => {
+  const withChanges = parseSelfCheck(checkReply({
+    verdict: "ok", corrections: { roof: { overhang: 0.2 } },
+    changed: [{ field: "roof.overhang", from: 1, to: 0.2, why: "the eave is flush" }],
+  }));
+  assertEquals(withChanges?.verdict, "corrections", "it handed back a change, whatever it called it");
+  const without = parseSelfCheck(checkReply({ verdict: "no_changes", corrections: {}, changed: [] }));
+  assertEquals(without?.verdict, "matches", "and nothing here can manufacture one");
+});
+
+Deno.test("parseSelfCheck holds the model's prose to the same caps as observed", () => {
+  const long = "x".repeat(400);
+  const r = parseSelfCheck(checkReply({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2 } },
+    changed: [{ field: `roof.overhang${"!".repeat(100)}`, from: 1, to: 0.2, why: `a\n\n  b ${long}` }],
+    checked: { overhang: "changed", porch: "probably fine", roofProfile: 3 },
+    note: `  ${long}  `,
+  }));
+  assertEquals(r?.changed[0].field.length, 60, "a field name is an identifier, not an essay");
+  assertEquals(r?.changed[0].why.slice(0, 4), "a b ", "whitespace collapsed, like every other model note");
+  assertEquals(r?.changed[0].why.length, 240);
+  assertEquals(r?.note.length, 240);
+  assertEquals(r?.checked, { overhang: "changed" }, "out-of-vocabulary answers are dropped, not guessed at");
+});
+
+Deno.test("parseSelfCheck: junk in, null out, never a throw", () => {
+  for (const bad of ["", "{", "[]", "null", '{"changed":"lots"}', '{"changed":[null,3,[]]}',
+                     '{"corrections":[],"verdict":"matches"}']) {
+    const r = parseSelfCheck(bad);
+    assert(r === null || (Array.isArray(r.changed) && typeof r.corrections === "object"), `junk: ${bad}`);
+  }
+  // A `changed` array of rubbish yields an answer with nothing in it, which is "matches".
+  assertEquals(parseSelfCheck('{"changed":[null,3,[]]}')?.verdict, "matches");
+});
+
+// ── THE THREE GATES ───────────────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ siding, colors, wallHeightFt and sizeFt are dropped even when they are in BOTH lists", () => {
+  // The builder MEASURED the wall and the size, and colours already score 96/100. A pass that
+  // re-guesses a typed fact is a regression dressed as a feature, and `siding` is the one the
+  // sanitiser would silently reset to plain on every check.
+  const read = readOf({
+    verdict: "corrections",
+    corrections: {
+      wallHeightFt: 7, sizeFt: "12x20", siding: "panel",
+      colors: { body: "#ff0000" },
+      roof: { overhang: 0.2 },
+    },
+    changed: [
+      { field: "wallHeightFt", from: 9, to: 7, why: "looks shorter" },
+      { field: "sizeFt", from: "16x24", to: "12x20", why: "looks smaller" },
+      { field: "siding", from: "lap", to: "panel", why: "looks flat" },
+      { field: "colors.body", from: "#8b6f4e", to: "#ff0000", why: "looks red" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "the eave is flush to the wall in frame 2" },
+    ],
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "the reply is usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "corrections");
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"], "one field got through, and it is the shape one");
+  assertEquals(r.d3.wallHeightFt, 9, "the builder's wall stands");
+  assertEquals(r.d3.siding, "lap", "and their cladding");
+  assertEquals(r.d3.colors.body, "#8b6f4e", "and their colours");
+  assertEquals(r.dropped.sort(), ["colors.body", "siding", "sizeFt", "wallHeightFt"]);
+});
+
+Deno.test("⚠️ seven changed fields is a re-draft: rejected_too_many, and NONE of them applied", () => {
+  const fields = ["roof.overhang", "roof.pitch", "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+                  "roof.eave", "roof.tailSpacingIn"];
+  const read = readOf({
+    verdict: "corrections",
+    corrections: {
+      roof: { overhang: 0.2, pitch: 0.5, kneeU: 0.7, kneeRise: 0.6, ridgeRise: 1.1, eave: "open", tailSpacingIn: 24 },
+    },
+    changed: fields.map((field) => ({ field, from: 0, to: 1, why: "different" })),
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "still a readable answer");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "rejected_too_many");
+  assertEquals(r.changed, [], "a check that rewrites everything did not check anything");
+  assertEquals(r.d3, CLEAN, "the draft comes back exactly as it went in");
+  // And SIX is fine, so the boundary is where it says it is.
+  const six = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2, pitch: 0.5, kneeU: 0.7, kneeRise: 0.6, ridgeRise: 1.1, eave: "open" } },
+    changed: fields.slice(0, 6).map((field) => ({ field, from: 0, to: 1, why: "different" })),
+  });
+  const r6 = applySelfCheck(DRAFT, six);
+  assert(r6.ok && r6.verdict === "corrections" && r6.changed.length === 6, "six is the cap, not the refusal");
+});
+
+Deno.test("the cap counts the model's own list, and one field named twice is one field", () => {
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2 } },
+    changed: Array.from({ length: 7 }, () => ({ field: "roof.overhang", from: 1, to: 0.2, why: "flush" })),
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok && r.verdict === "corrections", "repetition is not a re-draft");
+  if (!r.ok) return;
+  assertEquals(r.changed.length, 1);
+});
+
+Deno.test("BOTH lists or neither: a correction nobody declared, and a declaration with no correction", () => {
+  const read = readOf({
+    verdict: "corrections",
+    // `roof.pitch` is corrected but never declared; `roof.kneeU` is declared but never corrected.
+    corrections: { roof: { overhang: 0.2, pitch: 1.4 } },
+    changed: [
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+      { field: "roof.kneeU", from: 0.78, to: 0.6, why: "the bend is further in" },
+    ],
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"]);
+  assertEquals(r.d3.roof.pitch, undefined, "an undeclared correction changes nothing");
+  assertEquals(r.d3.roof.kneeU, 0.78, "and a declaration with nothing behind it changes nothing");
+  assertEquals(r.dropped, ["roof.kneeU"]);
+});
+
+Deno.test("⚠️ a recessed porch corrected to projecting, and back, without either key surviving the other", () => {
+  // S2-E. calDraftRoof only drops the opposite key when the incoming draft DECLARES one, and
+  // sanitizeD3Spec only ever drops in the projecting-wins direction — so without the rule run
+  // here, a correction that says "this porch is recessed" would be eaten by the sanitiser and
+  // the stale projecting porch would stand. Both directions, because only one of them is free.
+  const toProjecting = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6 } },
+    changed: [{ field: "roof.porchOutFt", from: 0, to: 6, why: "the deck and posts stand out past the end wall" }],
+  }));
+  assert(toProjecting.ok, "usable");
+  if (!toProjecting.ok) return;
+  assertEquals(toProjecting.d3.roof.porchOutFt, 6);
+  assertEquals(toProjecting.d3.roof.porchDepthFt, undefined, "the recess it replaced is gone");
+
+  const projecting = { ...DRAFT, roof: { ...DRAFT.roof, porchDepthFt: undefined, porchOutFt: 6, porchTruss: true } };
+  const toRecessed = applySelfCheck(projecting, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchDepthFt: 5 } },
+    changed: [{ field: "roof.porchDepthFt", from: 6, to: 5, why: "the end wall is set back under the main roof" }],
+  }));
+  assert(toRecessed.ok, "usable");
+  if (!toRecessed.ok) return;
+  assertEquals(toRecessed.d3.roof.porchDepthFt, 5, "the correction survived the sanitiser's projecting-wins rule");
+  assertEquals(toRecessed.d3.roof.porchOutFt, undefined, "and the projection it replaced is gone");
+});
+
+Deno.test("⚠️ what is REPORTED is what landed, not what was asked for", () => {
+  // The sanitiser clamps. A correction of 8 ft on a key clamped to 0..3 becomes 3, and telling
+  // the builder "1 ft -> 8 ft" over a model that now reads 3 ft is a lie in the one list they
+  // are meant to read line by line.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 8 } },
+    changed: [{ field: "roof.overhang", from: 1, to: 8, why: "a deep eave" }],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed, [{ field: "roof.overhang", from: 1, to: 3, why: "a deep eave" }]);
+  assertEquals(r.d3.roof.overhang, 3);
+});
+
+Deno.test("⚠️ a correction that changes nothing is not reported as a change", () => {
+  // The whole measured risk of this feature is a check that "corrects" a draft that was already
+  // right. A no-op that reached the panel as a line item would be exactly that, on paper.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 1.0, eave: "fascia" } },
+    changed: [
+      { field: "roof.overhang", from: 1, to: 1, why: "same" },
+      { field: "roof.eave", from: "fascia", to: "fascia", why: "same" },
+    ],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "matches", "nothing moved, so the draft matched");
+  assertEquals(r.changed, []);
+  assertEquals(r.dropped, ["roof.overhang", "roof.eave"]);
+});
+
+Deno.test("⚠️ a correction the sanitiser cannot read does not DELETE the value it was aimed at", () => {
+  // The sanitiser drops what it cannot draw, so `eave: "flat"` would leave the key absent — a
+  // deletion nobody asked for, reported to the builder as "fascia -> nothing". The declared
+  // field is taken back out and the spec rebuilt, so the draft's own value stands.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { eave: "flat" } },
+    changed: [{ field: "roof.eave", from: "fascia", to: "flat", why: "no rafter tails" }],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.eave, "fascia", "the draft's own value is still there");
+  assertEquals(r.changed, []);
+  assertEquals(r.verdict, "matches");
+  assertEquals(r.dropped, ["roof.eave"]);
+});
+
+Deno.test("an unknown roof type is dropped rather than taking the whole spec down with it", () => {
+  // sanitizeD3Spec REFUSES an unknown roof type instead of clamping it, and a refusal here would
+  // throw away a draft the builder has already paid for.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { type: "hip", overhang: 0.2 } },
+    changed: [
+      { field: "roof.type", from: "gambrel", to: "hip", why: "four slopes" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+    ],
+  }));
+  assert(r.ok, "the spec still builds");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.type, "gambrel");
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"], "the usable half still applied");
+  assert(r.dropped.includes("roof.type"), "and the unusable half is recorded as dropped");
+  // The three it CAN draw still go through.
+  const gable = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections", corrections: { roof: { type: "gable" } },
+    changed: [{ field: "roof.type", from: "gambrel", to: "gable", why: "one slope each side" }],
+  }));
+  assert(gable.ok && gable.d3.roof.type === "gable", "a real roof type is a real correction");
+});
+
+Deno.test("applySelfCheck never mutates the draft it was handed", () => {
+  const before = JSON.stringify(DRAFT);
+  applySelfCheck(DRAFT, readOf({
+    verdict: "corrections", corrections: { roof: { porchOutFt: 6, overhang: 0.2 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "posts" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+    ],
+  }));
+  assertEquals(JSON.stringify(DRAFT), before, "`drafted` on the ledger row keeps the first pass");
+});
+
+Deno.test("a matches reply leaves the draft alone and hands back no new spec", () => {
+  const r = applySelfCheck(DRAFT, readOf({ verdict: "matches", corrections: {}, changed: [] }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "matches");
+  assertEquals(r.changed, []);
+  assertEquals(r.dropped, []);
+  assertEquals(r.d3, CLEAN);
+});
+
+Deno.test("a draft that cannot be read back is a refusal, not a silent 'matches'", () => {
+  const r = applySelfCheck({ nope: true }, readOf({ verdict: "matches", corrections: {}, changed: [] }));
+  assert(!r.ok, "there is no verdict to give about a building nobody drafted");
+});
+
+// ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ the self-check prompt says three separate times that 'it matches' is a complete answer", () => {
+  // Variant G: a check that corrects an already-good draft scores 70.5 against the 74.3 of not
+  // checking at all. Permission to change nothing is the single most valuable thing in here.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes('"It matches" is a\ncorrect and expected answer'), "once in the opening");
+  assert(p.includes("a wrong correction is worse than no correction"), "once as the reason");
+  assert(p.includes('return "verdict": "matches" with "corrections": {} and\n    "changed": []'), "once in the rules");
+  assert(p.includes("That is a complete, correct answer. Stop there."), "and told to stop");
+  assert(p.includes('"unclear" is better than a guess'), "with unclear as the way out");
+});
+
+Deno.test("the self-check prompt states the builder's three measurements and forbids changing them", () => {
+  const p = selfCheckPrompt({ dims: { widthFt: 16, lengthFt: 24, wallHeightFt: 9 }, draft: CLEAN, viewpoints: ["front", "eaveCorner"] });
+  assert(p.includes("building size: 16 ft wide by 24 ft long"), "the size, as typed");
+  assert(p.includes("wall height at the eave: 9 ft"), "the wall, as typed");
+  assert(p.includes("They are facts, not your estimates"), "stated as facts");
+  assert(p.includes("Never return wallHeightFt, sizeFt, colors or siding."), "and out of bounds to change");
+  assert(p.includes("You cannot change wallHeightFt - it is measured."), "said again where the wall is discussed");
+  // The draft rides in the prompt, so the model is checking the thing that was rendered.
+  assert(p.includes('"kneeU": 0.78'), "the draft itself is in there");
+  assert(p.includes("currently 1 ft"), "with the eave it is being asked about");
+});
+
+Deno.test("⚠️ the prompt names only the viewpoints actually sent", () => {
+  // The numbered steps say "the close-up viewpoint" and "the side viewpoint". With three of the
+  // four sent, a model hunting for the missing one will read some other image as it — which is
+  // the one way this check answers confidently about a picture it never saw.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: ["eaveCorner", "front"] });
+  assert(p.includes("front (head-on at the end the door is on), eaveCorner (the close-up"), "canonical order, not the caller's");
+  assert(!p.includes("side (square to a long wall),"), "a view that was not sent is not listed");
+  assert(p.includes("never read one view as though it were another"), "and the instruction is explicit");
+  // The label each pair is introduced with uses the same words.
+  assert(selfCheckPairLabel("eaveCorner").includes("the close-up of the roof edge against the sky"), "the pair label uses the same words as the list");
+  assert(selfCheckPairLabel("side").includes("The builder's own frame comes first"), "and says which image is which");
+});
+
+Deno.test("the prompt's field cap is the one the server enforces", () => {
+  // Two numbers that have to agree and live 200 lines apart: the sentence the model reads and
+  // the constant applySelfCheck counts against.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes(`Change at most ${SELF_CHECK_MAX_FIELDS} fields.`), "the prompt states the cap");
+  assertEquals(SELF_CHECK_MAX_FIELDS, 6);
+});
+
+Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing else is", () => {
+  // A prompt that asks for a field the server then drops trains the model to waste its answer
+  // on it, and an allow-list entry no prompt mentions is a door nobody is watching.
+  const named = ["roof.overhang", "roof.porchOutFt", "roof.porchDepthFt", "roof.eave", "roof.type",
+                 "roofMaterial", "foundation", "gableVent"];
+  for (const f of named) assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is named in the prompt`);
+  for (const f of ["wallHeightFt", "sizeFt", "siding", "colors", "colors.body", "plateBand", "roof.plateBand"]) {
+    assert(!(SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} must never be applicable`);
+  }
 });

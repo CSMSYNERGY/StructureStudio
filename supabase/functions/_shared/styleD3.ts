@@ -1036,3 +1036,546 @@ export function flagObservedNotes(
   const own = observed?.roofNote ? ` The model's own reading: ${observed.roofNote}` : "";
   return { ...(observed || {}), roofNote: `${flags.join(" ")}${own}`, confidence: "low" };
 }
+
+// ─── THE FREE SECOND PASS (2026-09-19) ────────────────────────────────────────────────────
+// One press is one hold is one charge. The first call drafts a spec and the money ladder ends
+// there, exactly where it ends today. Then the browser renders that draft from a few camera
+// angles, puts each render beside the builder's own frame of the same view, and asks the model
+// one narrow question: where does YOUR DRAFT not match THEIR BUILDING? That second call is
+// FREE and it is single-use — a conditional claim on the ledger row that already paid.
+//
+// Everything below is the pure half: the prompt, the reading of the reply, and the three gates
+// a correction has to pass before it can touch a spec a customer will be quoted against. The
+// claim, the model call and the ledger writes live in portal-settings, because they are I/O.
+//
+// ⚠️ EVERY INPUT TO THE SECOND CALL COMES FROM THE SERVER'S OWN ROW, NOT FROM THE CALLER.
+// The draft is read back from `ai_style_calls.drafted`; the builder's measurements are read
+// back from `ai_style_calls.dims`; the frames are intersected against the style's own stored
+// lists. A design where the browser posts the draft JSON and the image URLs would be a free,
+// caller-controlled vision call with caller-controlled text spliced into the prompt — one $20
+// generation buying unlimited inference on any twelve images on the internet. The only thing
+// the caller supplies that reaches the model is the RENDER BYTES, and those are held to four
+// JPEGs it cannot make bigger than the cap.
+
+// The four the first pass labels, in the order the content array presents them. Reusing
+// FRAME_MAP_VIEWPOINTS rather than restating the list: the pairing is only meaningful if both
+// halves agree on the vocabulary, and two lists is one drift away from a render captioned as
+// the wrong view.
+export const SELF_CHECK_VIEWPOINTS = FRAME_MAP_VIEWPOINTS;
+
+// What a viewpoint IS, in the words the prompt's numbered steps use. The steps say "the
+// close-up viewpoint" and "the side viewpoint"; nothing else in the request would tell the
+// model which image that is, and a check that reads the eave off the wrong image is worse than
+// no check, because it answers confidently.
+const SELF_CHECK_VIEW_WORDS: Record<FrameMapViewpoint, string> = {
+  front: "head-on at the end the door is on",
+  side: "square to a long wall",
+  eaveCorner: "the close-up of the roof edge against the sky",
+  corner: "a three-quarter view",
+};
+
+// THE RENDER CAPS. `portal-settings` already caps `logoBase64` at 2 MB and `imageBase64` at
+// 3 MB; this is the same shape with a tighter number, because these are 896x672 JPEGs at
+// quality 0.80 and the measured size is 25-35 KB each. 400 KB is more than ten times what a
+// real one weighs, which leaves room for a slower device's encoder and none for a payload.
+export const SELF_CHECK_MAX_RENDERS = 4;
+export const SELF_CHECK_MAX_RENDER_BYTES = 400_000;
+export const SELF_CHECK_TOTAL_RENDER_BYTES = 1_200_000;
+
+// At most six fields. More than that is not a check, it is a second draft — and a second draft
+// is a second charge. Counted over what the model DECLARES in `changed`, not over what survives
+// the allow-list: the cap is reading the model's own statement of how much of the draft it
+// wants to rewrite, and a reply that wants to rewrite fifteen fields is not a reply to take
+// four corrections from. (Undeclared corrections cannot rewrite anything at all — see the
+// both-lists gate below — so counting them would refuse over fields that have no effect.)
+export const SELF_CHECK_MAX_FIELDS = 6;
+
+// ── WHAT A CORRECTION IS ALLOWED TO TOUCH ─────────────────────────────────────────────────
+// Dotted paths, matching the `changed[].field` the prompt asks for. Shape only.
+//
+// `wallHeightFt` and `sizeFt` are absent because the BUILDER MEASURED THEM. A pass that
+// re-guesses a typed fact is a regression dressed as a feature, and the whole reason the check
+// can read an eave at all is that it has a wall of known height to read it against.
+//
+// `colors` is absent because the render is drawn in the draft's own colours under a flat
+// hemisphere light, and comparing that with daylight invites confident nonsense. Colours are
+// already the strongest field in the baseline. Nothing to win, something to lose.
+//
+// `siding` is absent because no prompt in this pipeline asks about cladding AND sanitizeD3Spec
+// always emits the key, so letting it through would reset a builder's choice to plain on every
+// check — the exact defect applyDraftedShape was written to stop.
+export const SELF_CHECK_ALLOW = [
+  "roof.type", "roof.pitch", "roof.ridgeOffset", "roof.overhang",
+  "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+  "roof.eave", "roof.tailSpacingIn",
+  "roof.porchOutFt", "roof.porchDepthFt", "roof.porchEnd", "roof.porchTruss",
+  "roof.leanToWidthFt", "roof.leanToDropFt", "roof.leanToSide",
+  "roof.dormerWidthFt", "roof.dormerRiseFt", "roof.dormerOffsetU",
+  "gableVent", "foundation", "roofMaterial",
+] as const;
+
+const SELF_CHECK_CHECKED_KEYS = ["overhang", "porch", "roofProfile", "eave"] as const;
+const SELF_CHECK_CHECKED_WORDS = ["ok", "changed", "unclear"] as const;
+
+export type SelfCheckChange = { field: string; from: unknown; to: unknown; why: string };
+export type SelfCheckChecked = Partial<Record<typeof SELF_CHECK_CHECKED_KEYS[number], string>>;
+export type SelfCheckRead = {
+  verdict: "matches" | "corrections";
+  corrections: Record<string, unknown>;
+  changed: SelfCheckChange[];
+  checked: SelfCheckChecked;
+  note: string;
+};
+
+// ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
+// Built as a template because the draft and the builder's measurements are interpolated per
+// generation. The refusal path is kept VERBATIM and stated three separate times — "it matches"
+// is a complete and expected answer — because the measured A/B says a check that corrects an
+// already-good draft scores 70.5 against the 74.3 of not checking at all. The most valuable
+// thing this prompt does is give the model permission to change nothing.
+//
+// The dimensions are REQUIRED here, and that is a real restriction rather than a convenience:
+// every instruction in step 1 reads a length as a fraction of a wall whose height is known. A
+// check run against a wall the model itself guessed would measure the eave against a number
+// the baseline says is wrong in 74 % of generations, and would be wrong in the same direction
+// every time. The caller refuses the check rather than run it blind.
+export function selfCheckPrompt(opts: {
+  dims: KnownDims;
+  draft: D3Spec;
+  viewpoints: readonly FrameMapViewpoint[];
+}): string {
+  const { dims, draft } = opts;
+  const views = SELF_CHECK_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
+  const overhang = num((draft.roof ?? {})["overhang"]);
+  const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
+  const wall = dimFt(dims.wallHeightFt);
+  const present = views.length
+    ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
+    : "none";
+  return `You drafted a 3D spec for a portable building from a walk-around video. We rendered your
+draft and are showing you the result beside the builder's own frames. Your job now is
+narrow: find the places where YOUR DRAFT does not match THEIR BUILDING, and correct only
+those.
+
+This is a check, not a second draft. Most fields will already be right. "It matches" is a
+correct and expected answer, and it is the answer we expect most often. Do not change a
+field to show you are working - a wrong correction is worse than no correction, because it
+overwrites a number that was already good.
+
+THE BUILDER HAS MEASURED THESE. They are facts, not your estimates, and you must not change
+them or argue with them:
+  building size: ${dimFt(dims.widthFt)} ft wide by ${dimFt(dims.lengthFt)} ft long
+  wall height at the eave: ${wall} ft
+Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
+anything in a render can be measured against a wall you know the height of.
+
+YOUR DRAFT, as rendered:
+${JSON.stringify(draft, null, 2)}
+
+THE IMAGES. Each viewpoint gives you two images in a row: first the builder's own frame,
+then our render of your draft from the same angle. Compare them as SHAPES. Ignore the
+background, the grass, the sky, the lighting, the sharpness, the neighbouring buildings, and
+any door, window or vent - the render deliberately does not draw the openings, and their
+absence is not a mistake to report.
+
+THE VIEWPOINTS IN THIS REQUEST, in the order they appear below: ${present}. Those are the only
+ones here. Where a step below names a viewpoint you were not given, answer it from what you do
+have or mark it unclear - never read one view as though it were another.
+
+CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give a
+correction. These first three are the ones this pass gets wrong most often, so spend your
+effort here.
+
+1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+   viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
+   Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
+   were given, in the frame and in the render, and convert: a roof that projects a
+   twentieth of the wall's height on a ${wall} ft wall is about
+   ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
+   almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
+   because it is typical; report what this eave actually does.
+
+2. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
+   they are not interchangeable:
+     * RECESSED (porchDepthFt): the end wall is set BACK into the building, the main roof
+       carries straight over the gap, and nothing sticks out past the end of the roof.
+     * PROJECTING (porchOutFt): the end wall runs full height with the door in it, and a
+       deck with posts and its OWN lower roof stands OUT in front of that wall.
+   The side viewpoint settles it: if the porch roof sticks out past the end of the building,
+   it is projecting. If the end of the building is one flat plane, it is recessed. Getting
+   this wrong is the single most visible error on the whole building, so check it even when
+   the two pictures look broadly alike. If you change the kind, give the new key and leave
+   the other one out entirely.
+
+3. THE WALL, AS DRAWN (not the number). You cannot change wallHeightFt - it is measured. But
+   if the render's walls look plainly shorter or taller than the frame's at the same angle
+   while the roof matches, something else is absorbing the difference: say so in \`note\` and
+   check whether the gambrel rises below are carrying it.
+
+THEN THESE, only if the pictures disagree:
+4. ROOF PROFILE. For a gambrel: kneeU, kneeRise, ridgeRise, measured from the CENTRELINE and
+   the TOP OF THE WALL, each divided by the half-span. For a gable or shed: pitch. Check the
+   silhouette at the head-on viewpoint. If the render's roof and the frame's roof trace the
+   same outline, leave all of these alone.
+5. roof.eave - "open" (a sawtooth row of rafter tails with gaps of sky between them) or
+   "fascia" (one unbroken board). Only from a viewpoint that actually shows under the eave.
+6. roof.type, roofMaterial, foundation, gableVent - only if plainly wrong.
+
+RETURN ONLY this JSON object, no prose and no markdown fence:
+{
+  "verdict": "matches" | "corrections",
+  "corrections": { ... only the fields you are changing, in the same shape as the draft ... },
+  "changed": [
+    { "field": "roof.overhang", "from": 1.0, "to": 0.2,
+      "why": "<one sentence naming what in which image made you change it>" }
+  ],
+  "checked": {
+    "overhang": "ok" | "changed" | "unclear",
+    "porch": "ok" | "changed" | "unclear",
+    "roofProfile": "ok" | "changed" | "unclear",
+    "eave": "ok" | "changed" | "unclear"
+  },
+  "note": "<one sentence for the builder, or an empty string>"
+}
+
+RULES FOR THE ANSWER:
+  * If nothing needs changing, return "verdict": "matches" with "corrections": {} and
+    "changed": []. That is a complete, correct answer. Stop there.
+  * Every field in "corrections" must also appear in "changed". Anything not in both is
+    ignored.
+  * Never return wallHeightFt, sizeFt, colors or siding. They are not yours to change here.
+  * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
+    not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
+  * "unclear" is better than a guess. A field the frames genuinely do not settle should be
+    left alone and marked unclear, not corrected to a typical value.`;
+}
+
+// ── READING THE REPLY ─────────────────────────────────────────────────────────────────────
+// Tolerant of wrapping, strict about vocabulary, and NEVER invents a change. Returns null when
+// the reply carries none of the four keys this prompt asks for, which the caller records as a
+// failed check rather than as a silent pass.
+//
+// ⚠️ AN EMPTY OBJECT IS NOT "IT MATCHES". `{}` is what comes back when a model wrote prose and
+// one stray brace, and reading that as a clean pass would inflate the single statistic this
+// whole feature is judged on — how often the check leaves an already-good draft alone.
+// "matches" has to be something the model SAID.
+export function parseSelfCheck(text: string): SelfCheckRead | null {
+  const m = String(text || "").match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  // deno-lint-ignore no-explicit-any
+  let parsed: any;
+  try { parsed = JSON.parse(m[0]); } catch { return null; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const answered = ["verdict", "corrections", "changed", "checked"].some((k) => k in parsed);
+  if (!answered) return null;
+
+  const corrections = (parsed.corrections && typeof parsed.corrections === "object" && !Array.isArray(parsed.corrections))
+    ? parsed.corrections as Record<string, unknown>
+    : {};
+
+  const changed: SelfCheckChange[] = [];
+  if (Array.isArray(parsed.changed)) {
+    for (const entry of parsed.changed) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const e = entry as Record<string, unknown>;
+      const field = typeof e.field === "string" ? e.field.trim().slice(0, 60) : "";
+      if (!field) continue;
+      // The model's own sentence, held to the same 240 as every other piece of model prose in
+      // this file: it is shown to the builder beside the old and the new value.
+      const why = typeof e.why === "string" ? e.why.replace(/\s+/g, " ").trim().slice(0, 240) : "";
+      changed.push({ field, from: e.from ?? null, to: e.to ?? null, why });
+    }
+  }
+
+  const checked: SelfCheckChecked = {};
+  if (parsed.checked && typeof parsed.checked === "object" && !Array.isArray(parsed.checked)) {
+    const src = parsed.checked as Record<string, unknown>;
+    for (const k of SELF_CHECK_CHECKED_KEYS) {
+      const v = src[k];
+      if (typeof v === "string" && (SELF_CHECK_CHECKED_WORDS as readonly string[]).includes(v)) checked[k] = v;
+    }
+  }
+
+  const note = typeof parsed.note === "string" ? parsed.note.replace(/\s+/g, " ").trim().slice(0, 240) : "";
+  // An unrecognised verdict is READ OFF THE ANSWER rather than trusted or refused. A model that
+  // writes "ok" or "no_changes" while handing back three corrections has still handed back
+  // three corrections, and one that writes "corrections" while changing nothing has changed
+  // nothing. Neither reading can invent a change, because `changed` is the only source of one.
+  const verdict: "matches" | "corrections" =
+    parsed.verdict === "matches" ? "matches"
+      : parsed.verdict === "corrections" ? "corrections"
+        : (changed.length ? "corrections" : "matches");
+  return { verdict, corrections, changed, checked, note };
+}
+
+// ── THE THREE GATES ───────────────────────────────────────────────────────────────────────
+// A field is applied only if it appears in BOTH `corrections` and `changed[].field`, AND is on
+// the allow-list, AND survives sanitizeD3Spec. Three independent gates on model output heading
+// for a renderer a customer is quoted against.
+//
+// `from` and `to` are RECOMPUTED from the two specs rather than copied out of the reply. The
+// model's own `from` is its recollection of a number it was shown, and its `to` is what it
+// asked for rather than what landed: sanitizeD3Spec clamps, so an overhang corrected to 8 ft is
+// recorded as the 3 ft it actually became. A correction whose value comes out of the sanitiser
+// EQUAL to the draft's did not change anything, and is dropped rather than reported to the
+// builder as a change — the "What the check changed" list has to be true line by line.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead):
+  | { ok: false; error: string }
+  | {
+    ok: true;
+    verdict: "matches" | "corrections" | "rejected_too_many";
+    d3: D3Spec;
+    changed: SelfCheckChange[];
+    dropped: string[];
+  } {
+  const base = sanitizeD3Spec(draft);
+  // The draft came out of our own ledger row and went in through this same function, so this is
+  // unreachable in practice. It is a refusal rather than a fallback because the alternative —
+  // carrying on against a spec we could not read — would report a verdict about a building
+  // nobody drafted.
+  if (!base.ok) return { ok: false, error: `The recorded draft could not be read back: ${base.error}` };
+
+  // Deduplicated, in the order the model listed them. A model naming the same field twice is
+  // asking for one change, not two, and must not be pushed over the cap by its own repetition.
+  const declared: string[] = [];
+  for (const c of read.changed) if (!declared.includes(c.field)) declared.push(c.field);
+  if (declared.length > SELF_CHECK_MAX_FIELDS) {
+    return { ok: true, verdict: "rejected_too_many", d3: base.d3, changed: [], dropped: declared.slice() };
+  }
+
+  const allow = SELF_CHECK_ALLOW as readonly string[];
+  const dropped: string[] = [];
+  // The value the model wants at each allowed path. Read out of `corrections`, never out of the
+  // `to` in `changed`: that one is prose about the change, and the prompt says a field has to be
+  // in both to count.
+  const wanted = new Map<string, unknown>();
+  for (const field of declared) {
+    if (!allow.includes(field)) { dropped.push(field); continue; }
+    const dot = field.indexOf(".");
+    const src = read.corrections;
+    let value: unknown;
+    if (dot < 0) {
+      if (!(field in src)) { dropped.push(field); continue; }
+      value = src[field];
+    } else {
+      const head = field.slice(0, dot), tail = field.slice(dot + 1);
+      const inner = src[head];
+      if (!inner || typeof inner !== "object" || Array.isArray(inner) || !(tail in (inner as Record<string, unknown>))) {
+        dropped.push(field);
+        continue;
+      }
+      value = (inner as Record<string, unknown>)[tail];
+    }
+    wanted.set(field, value);
+  }
+
+  // `roof.type` is checked against the three the renderer can draw BEFORE it is applied, because
+  // it is the only correction that can make sanitizeD3Spec refuse the WHOLE spec rather than
+  // clamp one field — and a refusal here would throw away a draft the builder has already paid
+  // for.
+  for (const field of [...wanted.keys()]) {
+    if (field !== "roof.type") continue;
+    if ((D3_ROOF_TYPES as readonly string[]).includes(String(wanted.get(field)))) continue;
+    dropped.push(field);
+    wanted.delete(field);
+  }
+
+  // Build the merged spec and hold it to the sanitiser. Written as a function because it may run
+  // TWICE — see the destructive-correction pass below.
+  const build = () => {
+    const roof: Record<string, unknown> = { ...base.d3.roof };
+    const merged: Record<string, unknown> = { ...base.d3, roof };
+    for (const [field, value] of wanted) {
+      if (field.startsWith("roof.")) roof[field.slice(5)] = value;
+      else merged[field] = value;
+    }
+    // THE PORCH EXCLUSION, which is calDraftRoof's rule and has to run HERE rather than be left
+    // to the sanitiser. sanitizeD3Spec drops porchDepthFt when porchOutFt is above 0.5 — the
+    // projecting-wins direction — so a correction changing a PROJECTING porch to a RECESSED one
+    // would be thrown away by the sanitiser and the stale projecting porch would stand, which is
+    // the one correction on this whole list the baseline says matters most. The rule keys on the
+    // CORRECTION's values, exactly as calDraftRoof keys on the incoming draft's.
+    const out = num(wanted.get("roof.porchOutFt")) ?? 0;
+    const depth = num(wanted.get("roof.porchDepthFt")) ?? 0;
+    if (out > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
+    else if (depth > 0.5) delete roof.porchOutFt;
+    return sanitizeD3Spec(merged);
+  };
+
+  let finalSpec = build();
+  // Defensive: with roof.type guarded above, the only refusal left is the 4 KB ceiling, and a
+  // merge of a spec that already passed it cannot reach that. Keeping the draft and saying so is
+  // the honest answer if it ever happens — better than reporting "matches" over a spec we could
+  // not build.
+  if (!finalSpec.ok) return { ok: false, error: `The corrected spec could not be built: ${finalSpec.error}` };
+
+  // ⚠️ A CORRECTION THE SANITISER CANNOT READ MUST NOT DELETE THE VALUE IT WAS AIMED AT. The
+  // sanitiser's posture everywhere is "drop what we cannot draw" — `eave: "flat"`, `foundation:
+  // "piers"`, `roofMaterial: "tin"` are all simply not emitted — so writing one of them over a
+  // key the draft already had would leave the key ABSENT. That is not a correction, it is a
+  // deletion the model never asked for, and it would reach the builder as a real-looking
+  // "fascia -> nothing" line. Any declared field that vanished this way is taken back out and
+  // the spec is rebuilt once, so the draft's own value stands.
+  //
+  // Only DECLARED fields are restored. A key the porch exclusion removed on purpose is a side
+  // effect of a different field's correction and stays removed.
+  const destructive = [...wanted.keys()].filter((f) =>
+    readSpecPath(base.d3, f) !== undefined && readSpecPath((finalSpec as { d3: D3Spec }).d3, f) === undefined
+  );
+  if (destructive.length) {
+    for (const f of destructive) { wanted.delete(f); dropped.push(f); }
+    finalSpec = build();
+    if (!finalSpec.ok) return { ok: false, error: `The corrected spec could not be built: ${finalSpec.error}` };
+  }
+
+  // What ACTUALLY moved, read off the two sanitised specs. A field the sanitiser clamped back to
+  // where it started, or dropped outright, did not change.
+  const applied: SelfCheckChange[] = [];
+  for (const field of declared) {
+    if (!wanted.has(field)) continue;
+    const before = readSpecPath(base.d3, field);
+    const after = readSpecPath(finalSpec.d3, field);
+    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) { dropped.push(field); continue; }
+    const why = read.changed.find((c) => c.field === field)?.why ?? "";
+    applied.push({ field, from: before ?? null, to: after ?? null, why });
+  }
+  // Nothing survived the gates. "matches" is the design's own answer for that — the draft stands
+  // untouched, which is exactly what the builder sees — and `dropped` is what says the model
+  // tried. The final spec is only handed back when something moved, so a caller that applies it
+  // unconditionally still cannot re-merge a draft onto itself.
+  return {
+    ok: true,
+    verdict: applied.length ? "corrections" : "matches",
+    d3: applied.length ? finalSpec.d3 : base.d3,
+    changed: applied,
+    dropped,
+  };
+}
+
+// One level of dotting, which is all the allow-list has. Returns undefined for an absent key, so
+// "absent" and "null" stay distinguishable at the call site.
+function readSpecPath(spec: D3Spec, field: string): unknown {
+  const dot = field.indexOf(".");
+  const src = spec as unknown as Record<string, unknown>;
+  if (dot < 0) return src[field];
+  const inner = src[field.slice(0, dot)];
+  if (!inner || typeof inner !== "object") return undefined;
+  return (inner as Record<string, unknown>)[field.slice(dot + 1)];
+}
+
+// ── THE RENDERS ───────────────────────────────────────────────────────────────────────────
+// Four JPEGs at most, 400 KB each at most, 1.2 MB in total at most, and JPEG is proved from the
+// BYTES rather than believed from a header the caller wrote. Everything here REFUSES rather than
+// drops: a render that is the wrong size or the wrong type is a fault in the half of this
+// feature we ship alongside it, and silently comparing three views instead of four would hide
+// that while making the check quietly worse.
+//
+// `frame` is a 1-based index into the array of images the FIRST call was given, which is what
+// the first pass's frameMap indices mean. It is bounded here only by the length of that array;
+// whether the image at that position is one the style actually owns is settled by
+// selfCheckPairs, against the style's own stored lists.
+export type SelfCheckRender = { viewpoint: FrameMapViewpoint; frame: number; base64: string; bytes: number };
+
+const JPEG_DATA_PREFIX = /^data:image\/jpe?g;base64,/i;
+const ANY_DATA_PREFIX = /^data:/i;
+
+export function parseSelfCheckRenders(raw: unknown, frameCount: number):
+  { ok: true; renders: SelfCheckRender[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "The check needs at least one render." };
+  if (raw.length > SELF_CHECK_MAX_RENDERS) {
+    return { ok: false, error: `A check compares at most ${SELF_CHECK_MAX_RENDERS} views, and ${raw.length} were sent.` };
+  }
+  const bound = Math.floor(num(frameCount) ?? 0);
+  const renders: SelfCheckRender[] = [];
+  const seen = new Set<string>();
+  let total = 0;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: "A render was sent in a shape we cannot read." };
+    }
+    const e = entry as Record<string, unknown>;
+    const viewpoint = String(e.viewpoint ?? "");
+    if (!(SELF_CHECK_VIEWPOINTS as readonly string[]).includes(viewpoint)) {
+      return { ok: false, error: `"${viewpoint.slice(0, 40)}" is not a viewpoint this check knows.` };
+    }
+    // One render per viewpoint. Two renders labelled `side` would put two pictures of the same
+    // view in front of the model and leave a view it asked about missing, with nothing saying so.
+    if (seen.has(viewpoint)) return { ok: false, error: `Two renders were sent for the ${viewpoint} view.` };
+    seen.add(viewpoint);
+    const frame = num(e.frame);
+    if (frame === null || !Number.isInteger(frame) || frame < 1 || frame > bound) {
+      return { ok: false, error: `The ${viewpoint} render names image ${String(e.frame).slice(0, 20)}, which was not in this generation.` };
+    }
+    if (typeof e.base64 !== "string" || !e.base64.trim()) return { ok: false, error: `The ${viewpoint} render had no image data.` };
+    const head = e.base64.trim();
+    // A data: prefix is allowed only when it says JPEG. Any other prefix is refused rather than
+    // stripped: the bytes are sniffed below anyway, but a caller that believes it is sending a
+    // PNG has a bug worth hearing about now rather than at the next render-size change.
+    if (ANY_DATA_PREFIX.test(head) && !JPEG_DATA_PREFIX.test(head)) {
+      return { ok: false, error: `The ${viewpoint} render is not a JPEG.` };
+    }
+    const b64 = head.replace(JPEG_DATA_PREFIX, "");
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    } catch {
+      return { ok: false, error: `The ${viewpoint} render was not readable image data.` };
+    }
+    if (bytes.length > SELF_CHECK_MAX_RENDER_BYTES) {
+      return {
+        ok: false,
+        error: `The ${viewpoint} render is ${Math.round(bytes.length / 1000)} KB, over the ${Math.round(SELF_CHECK_MAX_RENDER_BYTES / 1000)} KB a check allows.`,
+      };
+    }
+    // JPEG's start-of-image marker. This is what makes "image/jpeg only" a fact about the
+    // payload rather than a claim about a string the caller chose.
+    if (bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8 || bytes[2] !== 0xFF) {
+      return { ok: false, error: `The ${viewpoint} render is not a JPEG.` };
+    }
+    total += bytes.length;
+    if (total > SELF_CHECK_TOTAL_RENDER_BYTES) {
+      return { ok: false, error: `Those renders come to more than the ${Math.round(SELF_CHECK_TOTAL_RENDER_BYTES / 1000)} KB a check allows.` };
+    }
+    renders.push({ viewpoint: viewpoint as FrameMapViewpoint, frame, base64: b64, bytes: bytes.length });
+  }
+  return { ok: true, renders };
+}
+
+// ── WHICH OF THE BUILDER'S FRAMES MAY BE SHOWN ────────────────────────────────────────────
+// The caller re-sends the same array of image URLs the first call was given, because the frame
+// indices only mean anything against that array. NOTHING IN IT IS TRUSTED EXCEPT ITS POSITIONS:
+// a URL only ever reaches the model if the STYLE ITSELF stores it, in `d3_video_frames` or
+// `d3_photos`. `sanitizePhotoUrls` accepts any https URL up to 600 characters and is not bucket
+// scoped, so taking the caller's list as the frame list would make this a free vision call on
+// any twelve images anywhere.
+//
+// ⚠️ THE ARRAY IS NEVER COMPACTED. Dropping a disallowed URL and closing the gap would shift
+// every index after it, and a render aimed at image 6 would be paired with image 7 — a wrong
+// pairing that looks exactly like a right one. Positions are held; a render whose position is
+// out of range or not allowed loses its frame and is dropped whole, because a render with no
+// frame beside it is our own drawing with nothing to compare it against.
+//
+// Ordered canonically rather than in the caller's order, so two runs of one generation put the
+// same pictures in the same places.
+export function selfCheckPairs(
+  sentUrls: readonly unknown[],
+  allowed: readonly string[],
+  renders: readonly SelfCheckRender[],
+): { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string }[] {
+  const ok = new Set(allowed.filter((u): u is string => typeof u === "string" && !!u));
+  const out: { viewpoint: FrameMapViewpoint; frameUrl: string; base64: string }[] = [];
+  for (const v of SELF_CHECK_VIEWPOINTS) {
+    const r = renders.find((x) => x.viewpoint === v);
+    if (!r) continue;
+    const url = sentUrls[r.frame - 1];
+    if (typeof url !== "string" || !ok.has(url)) continue;
+    out.push({ viewpoint: v, frameUrl: url, base64: r.base64 });
+  }
+  return out;
+}
+
+// The one line each pair is introduced with, so the model is never guessing which of two
+// adjacent images is the photograph and which is ours.
+export function selfCheckPairLabel(viewpoint: FrameMapViewpoint): string {
+  return `VIEWPOINT "${viewpoint}" - ${SELF_CHECK_VIEW_WORDS[viewpoint]}. The builder's own frame comes first, then our render of your draft from the same angle.`;
+}
