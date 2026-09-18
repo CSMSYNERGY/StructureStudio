@@ -1,0 +1,185 @@
+{
+ "name": "Lofted barn - gambrel, projecting porch",
+ "note": "One filmed building, 8 stored walk frames. Truth = the spec hand-measured off the head-on frame and saved at 19:19 on 2026-09-17; the three runs below fired at 19:48-19:51, AFTER 3c4a2ee (the gambrel prompt) and ec8e60e (the porchOutFt paragraph). The frames and the tenant that owns them are NOT in this file - see inputs below.",
+ "source": "video",
+ "video_count": 8,
+ "inputs": "local",
+ "truth": {
+  "roof": {
+   "type": "gambrel",
+   "kneeU": 0.72,
+   "kneeRise": 0.72,
+   "ridgeRise": 1,
+   "overhang": 0.15,
+   "porchOutFt": 6.5,
+   "porchEnd": "front",
+   "plateBand": true,
+   "eave": "fascia",
+   "pitch": 1.2,
+   "ridgeOffset": 0
+  },
+  "colors": {
+   "body": "#eeebe0",
+   "trim": "#686c70",
+   "roof": "#5f6266",
+   "wood": "#c4965a"
+  },
+  "siding": null,
+  "wallHeightFt": 9,
+  "roofMaterial": "metal",
+  "foundation": "skids"
+ },
+ "priors": {
+  "fresh style": {
+   "roof": {
+    "type": "gable",
+    "pitch": 0.4
+   },
+   "colors": {},
+   "siding": null
+  },
+  "already-correct (what actually happened)": {
+   "roof": {
+    "type": "gambrel",
+    "kneeU": 0.72,
+    "kneeRise": 0.72,
+    "ridgeRise": 1,
+    "overhang": 0.15,
+    "porchOutFt": 6.5,
+    "porchEnd": "front",
+    "plateBand": true,
+    "eave": "fascia",
+    "pitch": 1.2,
+    "ridgeOffset": 0
+   },
+   "colors": {
+    "body": "#eeebe0",
+    "trim": "#686c70",
+    "roof": "#5f6266",
+    "wood": "#c4965a"
+   },
+   "siding": null,
+   "wallHeightFt": 9,
+   "roofMaterial": "metal",
+   "foundation": "skids"
+  }
+ },
+ "runs": [
+  {
+   "n": 1,
+   "id": "f4029131-0cc6-4bec-a9c6-6279b9fcfca8",
+   "called_at": "2026-09-17T19:48:53.547056+00:00",
+   "source": "video",
+   "frames": 8,
+   "confidence": "high",
+   "drafted": {
+    "colors": {
+     "body": "#f0ece0",
+     "roof": "#5a5f63",
+     "trim": "#4a4a4a"
+    },
+    "foundation": "skids",
+    "roof": {
+     "eave": "fascia",
+     "kneeRise": 0.7,
+     "kneeU": 0.78,
+     "overhang": 1,
+     "pitch": 0.45,
+     "porchDepthFt": 6,
+     "porchEnd": "front",
+     "porchTruss": false,
+     "ridgeRise": 1,
+     "type": "gambrel"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "high",
+    "doors": "Single door on the gable end (front), under the porch overhang.",
+    "eave": "Continuous painted fascia board along the eave, no exposed rafter tails visible.",
+    "roofNote": "Clear gambrel barn roof with a steep lower slope and shallow upper slope meeting at a knee, visible clearly from gable-end frames.",
+    "vents": "none",
+    "windows": "Two windows flanking the front door, one small window in the upper gable dormer face, and two windows on each long side wall."
+   }
+  },
+  {
+   "n": 2,
+   "id": "f88a6ecf-f922-4b1a-9215-471df7c6006d",
+   "called_at": "2026-09-17T19:50:51.419144+00:00",
+   "source": "video",
+   "frames": 8,
+   "confidence": "medium",
+   "drafted": {
+    "colors": {
+     "body": "#e8e3d8",
+     "roof": "#5a5a5a",
+     "trim": "#4a4a4a"
+    },
+    "foundation": "skids",
+    "roof": {
+     "eave": "open",
+     "kneeRise": 0.7,
+     "kneeU": 0.78,
+     "overhang": 1,
+     "pitch": 0.6,
+     "ridgeRise": 1.05,
+     "tailSpacingIn": 24,
+     "type": "gambrel"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "medium",
+    "doors": "single door on the gable end, front-facing under the porch",
+    "eave": "open rafter tails visible along the underside of the roof edge, spaced roughly 24in on center",
+    "roofNote": "Classic barn-style gambrel roof with a steep lower slope and shallow upper slope meeting at a knee, clearly visible from the gable-end frames.",
+    "vents": "none observed",
+    "windows": "one small window in the upper gambrel gable triangle, two windows flanking the front door, two windows on each long side, one on the rear gable end"
+   }
+  },
+  {
+   "n": 3,
+   "id": "e29bebfb-1395-446c-9ac2-c5bfbfc6d613",
+   "called_at": "2026-09-17T19:51:02.159977+00:00",
+   "source": "video",
+   "frames": 8,
+   "confidence": "medium",
+   "drafted": {
+    "colors": {
+     "body": "#e8e2d0",
+     "roof": "#5a5a5a",
+     "trim": "#4a4a4a"
+    },
+    "foundation": "skids",
+    "roof": {
+     "eave": "fascia",
+     "kneeRise": 0.7,
+     "kneeU": 0.78,
+     "overhang": 1,
+     "pitch": 0.55,
+     "porchDepthFt": 6,
+     "porchEnd": "front",
+     "porchTruss": false,
+     "ridgeRise": 1,
+     "type": "gambrel"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "medium",
+    "doors": "Single door on the gable end (front), under the porch overhang.",
+    "eave": "Continuous painted fascia board along the eave, no exposed rafter tails visible.",
+    "roofNote": "Clear gambrel barn roof with a distinct steep lower slope and shallower upper slope meeting at a knee, visible from the gable-end views.",
+    "vents": "none observed",
+    "windows": "Two windows flanking the door on the front gable wall, one small window in the upper gambrel gable, and two windows on each long side wall."
+   }
+  }
+ ],
+ "truth_provenance": "measured"
+}

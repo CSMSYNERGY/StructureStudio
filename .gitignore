@@ -46,3 +46,9 @@ deno.lock
 # public download on every tenant site to serve one local harness.
 dev/scan-fixtures/walk-around-stub.mp4
 dev/scan-fixtures/big-photo.jpg
+
+# ⚠️ THIS REPOSITORY IS PUBLIC. A scoring corpus entry carries a measured truth, the priors
+# it is scored against and the drafts already recorded — none of which names anyone. The
+# tenant id, the style key and the pinned frame URLs that a LIVE or --replay scoring run
+# needs live beside it in <entry>.local.json, and those never leave the machine.
+dev/score-corpus/*.local.json
