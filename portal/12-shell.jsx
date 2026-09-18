@@ -1593,7 +1593,7 @@ function Dashboard({ session }) {
        A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
        path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
        frames and only `dropped` says so. */
-    onDraftFromCombined: async (photoUrls, styleValue, videoCount) => {
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
@@ -1612,7 +1612,13 @@ function Dashboard({ session }) {
       // function deploy is needed for any of this: the "video" source has been live since the
       // walk-around first shipped in August.
       const source = frames >= urls.length ? "video" : "combined";
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames } });
+      // ONE PRESS IS ONE HOLD IS ONE CHARGE (2026-09-18). The designer mints this key once per
+      // press and hands the same one back on every retry of that press; the server passes it to
+      // wallet_hold, whose `wallet_tx_idem` unique index refuses a second hold for it. Forwarded
+      // rather than minted here on purpose: only the designer knows where one press ends and the
+      // next begins, and a key minted per CALL would be a key that never dedupes anything.
+      // Absent (an older caller) sends nothing, which is exactly today's behaviour.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
       return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
@@ -1626,8 +1632,12 @@ function Dashboard({ session }) {
     // truncated, `observed` carries what the video showed about doors and vents), and the
     // photo caller wants a bare spec. One function returning two shapes is how the wrong
     // one gets read.
-    onDraftFromVideo: async (frameUrls, styleValue) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video" } });
+    onDraftFromVideo: async (frameUrls, styleValue, idempotencyKey) => {
+      // Same key, same reason as onDraftFromCombined above. Nothing calls this today - the
+      // Generate button goes through the combined handler - but it spends the same $20 through
+      // the same meter, and a paid path that cannot be deduplicated is one press away from
+      // mattering again.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video", idempotencyKey: idempotencyKey || undefined } });
       if (error) throw new Error(error.message || "Reading the video failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Reading the video failed");
       return { d3: data.d3, frames: data.frames || 0, observed: data.observed || null };

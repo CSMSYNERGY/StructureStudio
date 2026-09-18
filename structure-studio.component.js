@@ -15124,6 +15124,21 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the one metered AI call and not eight uploads; `observed` is what the video showed
   // about doors, windows and vents, which the spec has no field for.
   const [adminCalVideo, setAdminCalVideo] = useState({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+  // ONE PRESS IS ONE HOLD IS ONE CHARGE, EVEN AFTER A TIMEOUT (2026-09-18). calibrate_style_ai
+  // has always read `idempotencyKey` off the body and handed it to wallet_hold, whose
+  // `wallet_tx_idem` unique index is the thing that stops a second $20 hold for one intent - and
+  // until today this panel never sent one. A DOUBLE-press was caught anyway by the one-hold index
+  // (409 hold_in_flight); a press after the 110 s model timeout was NOT, because that path
+  // releases the hold, so the next press took a fresh one. One builder intent, two holds.
+  //
+  // So the key is minted once per PRESS and kept here for every retry of that press, until a
+  // draft lands. Scoped to the style it was minted for: carrying one building's key over to the
+  // next building would refuse THAT generation once the meter is armed, which is the opposite
+  // failure and just as expensive to a builder.
+  //
+  // A REF, not state: nothing renders from it, and a re-render between the press and the send
+  // must not be able to change what goes out.
+  const calIdemRef = useRef(null);   // { styleValue, key } | null
   // WHICH STYLE THE OPEN EDITOR IS FOR, readable from an async callback. openCalEditor fires an
   // unabortable read (portal-settings `catalog`) and the builder can click another style chip
   // while it is in flight, so a slow answer for style A can land on style B. The photo restore
@@ -17774,8 +17789,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // be sent means no generation, so a later edit to calCanGenerate cannot reopen photos-only.
     if (!urls.length || !videoCount) { setAdminCalMsg({ ok: false, msg: "Add a walk-around video first. Photos are optional." }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
+    // THE KEY FOR THIS INTENT (see calIdemRef): minted on the first press, reused by every retry
+    // of it, dropped the moment a draft lands. Minted HERE rather than above, after both
+    // refusals, so a press the gate turns away never burns one.
+    //
+    // `crypto.randomUUID()` bare, the way the portal already names uploaded objects: it is on
+    // every browser this app supports, and this surface only ever runs inside the portal over
+    // https, where a secure context is not in question.
+    const idem = (calIdemRef.current && calIdemRef.current.styleValue === adminCal.styleValue)
+      ? calIdemRef.current.key
+      : crypto.randomUUID();
+    calIdemRef.current = { styleValue: adminCal.styleValue, key: idem };
     try {
-      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount);
+      const res = await setup3d.onDraftFromCombined(urls, adminCal.styleValue, videoCount, idem);
+      // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
+      // is a different generation and has to mint its own key - reusing this one would refuse it.
+      calIdemRef.current = null;
       applyDraftedShape(res.d3);
       // THE SERVER SAYS WHAT IT READ. This used to guess from a local constant that had to be
       // kept in step with the edge function by hand, and a count that drifts is worse than no
