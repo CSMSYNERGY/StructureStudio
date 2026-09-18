@@ -3925,14 +3925,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // With no dims the payload and the round-trip count are byte-identical to yesterday, which
       // is what every production request gets: its browser has never heard of dims.
-      const write = (row: Record<string, unknown>) => admin.from("ai_style_calls").update(row).eq("id", ledgerRow.id);
-      let { error: logErr } = await write(dims ? { ...recorded, dims } : recorded);
+      //
+      // Written out twice rather than through a little `write(row)` helper, deliberately: that
+      // helper needed a TypeScript parameter annotation, and this block is LIFTED VERBATIM and
+      // RUN by aiLedgerDimsWiring_test, which parses it as plain JavaScript. A test that had to
+      // strip types out of the source first would be testing its own regex as much as the guard.
+      let { error: logErr } = await admin.from("ai_style_calls")
+        .update(dims ? { ...recorded, dims } : recorded).eq("id", ledgerRow.id);
       if (logErr && dims) {
         await logEdgeError({
           fn: "portal-settings", req, clientId, code: "ai_style_dims_write_failed",
           message: `Could not record dims on the generation - retrying without them; migration 247 may not be applied: ${logErr.message}`,
         });
-        ({ error: logErr } = await write(recorded));
+        ({ error: logErr } = await admin.from("ai_style_calls")
+          .update(recorded).eq("id", ledgerRow.id));
       }
       if (logErr) {
         await logEdgeError({
