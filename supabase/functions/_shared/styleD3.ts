@@ -381,7 +381,7 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
     "type": "shed" | "gable" | "gambrel",
     "pitch": <rise over run of one slope, e.g. 0.42 for 5:12>,
     "ridgeOffset": <-0.35..0.35, gable only: how far the ridge sits off the centreline toward one eave for a saltbox look, as a fraction of the building's FULL width, not of the half-span; 0 if centred>,
-    "overhang": <feet the roof projects past the wall, typically 0.3-1.5>,
+    "overhangIn": <inches the roof projects past the wall, 0 to 36; 0 means a flush eave>,
     "kneeU": <gambrel only, 0..1: how far the knee (where the steep lower slope meets the shallow upper one) sits out from the CENTRELINE under the ridge, as a fraction of the half-span -- NOT measured in from the eave. 1 would put the knee directly above the wall; a typical barn knee sits near the wall, about 0.7-0.85>,
     "kneeRise": <gambrel only, 0..1: height of the knee above the TOP OF THE WALL, as a fraction of the half-span>,
     "ridgeRise": <gambrel only, 0..1.5: height of the ridge above the TOP OF THE WALL, as a fraction of the half-span -- the same datum kneeRise uses, NOT measured up from the knee>,
@@ -402,9 +402,10 @@ Return ONLY a JSON object with this exact shape (no prose, no markdown fence):
   "foundation": "skids" | "slab",
   "roofMaterial": "shingle" | "metal",
   "colors": { "body": "#rrggbb", "trim": "#rrggbb", "roof": "#rrggbb" },
-  "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6.5 ft, use it for scale>,
+  "wallHeightFt": <wall height at the eave, typically 6-10; a door is about 6 ft 8 in, use it for scale>,
   "observed": {
     "roofNote": "<one sentence: how you read the roof, and any doubt about it>",
+    "porch": "projecting" | "recessed" | "none",
     "eave": "<how the eave is finished: exposed rafter tails, a plain fascia board, a boxed soffit, or unclear>",
     "doors": "<how many doors, on which face relative to the ridge (gable end or long side), single or double>",
     "windows": "<how many windows and roughly where, or 'none'>",
@@ -421,7 +422,7 @@ PITCH: find a frame looking straight at a gable end and read the slope of the ro
 
 GAMBREL NUMBERS, only for a gambrel, from that same frame straight at a gable end. Measure all three from the CENTRELINE under the ridge and the TOP OF THE WALL, and divide each by the distance from the centreline to the wall: kneeU is how far the knee sits out from the centreline, kneeRise is how high the knee sits above the wall, ridgeRise is how high the ridge sits above the wall. Example: a 12 ft wide barn with its knee 1.5 ft in from each wall and 4.3 ft above it, and the ridge 6.2 ft above the wall, is kneeU 0.75, kneeRise 0.72, ridgeRise 1.03. Check before you answer: kneeRise / (1 - kneeU) is the steepness of the lower slope and (ridgeRise - kneeRise) / kneeU is the upper; the lower must come out clearly larger, or you measured from the wrong point.
 
-OVERHANG: how far the roof edge stands out past the wall below it, in feet, judged against a door for scale. Some styles are sold on a deliberately wide eave, so this number carries the look — do not default it to a middle value if the frames show a wide one.
+OVERHANG: how far the roof edge stands out past the wall below it, in INCHES, judged against a door for scale. Read it from a frame looking along a long side, where the roof edge and the wall below it are both in view. 0 is a real answer and an ordinary one: a flush eave is the wall running straight up into the roof edge, with no shadow under it and nothing to see from below, and a building built that way is as common as one with a deep eave. 2 inches and 16 inches are both common answers and they look nothing alike, so give the one this building shows. Some styles are sold on a deliberately wide eave, so this number carries the look.
 
 WALL HEIGHT: the wall at the eave, not at the peak.
 
@@ -435,9 +436,11 @@ LEAN-TO: an open roofed section running along one LONG side, its outer edge carr
 
 PORCH TRUSS: with a porch, look at the TRIANGLE of gable wall directly above the porch opening. If heavy timber beams are fixed across it in a decorative pattern — typically an upright post running from the horizontal header up to the peak, with two diagonal braces angling up to meet it, so the triangle reads as a timber frame rather than as flat siding — set porchTruss true. It is usually raw or stained wood against a painted gable, so it stands out clearly. A plain gable above the porch, even one with a vent in it, is porchTruss false.
 
-PORCH: a covered area recessed into one GABLE END — the short end, the one with the triangle. The main roof does not change at all: the same ridge and the same two slopes simply carry on over the porch, and the outer corners are held up by posts instead of walls, usually with a decorative timber truss filling the gable above them. Look for the floor deck continuing past the front wall to the posts, and for the wall with the door standing BACK from the end of the roof rather than flush with it. Give porchDepthFt as how far the porch eats INTO the building's length — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. Say which end it opens at: "front" is the end you would walk up to, which is the end the door is on. If instead the end wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. Omit both keys if the building is enclosed to both ends, which is the common case.
+PORCH: a covered area recessed into one GABLE END — the short end, the one with the triangle. The main roof does not change at all: the same ridge and the same two slopes simply carry on over the porch, and the outer corners are held up by posts instead of walls, usually with a decorative timber truss filling the gable above them. Look for the wall with the door standing BACK from the end of the roof rather than flush with it, so the end of the building is open air under the same roof for the first few feet. Give porchDepthFt as how far the porch eats INTO the building's length — a 12x24 with an 8 ft porch is still a 12x24, with 16 ft of enclosed room and 8 ft of porch. Typical depths are 4 to 8 feet. Say which end it opens at: "front" is the end you would walk up to, which is the end the door is on. If instead the end wall runs full height with the door in it, and the porch stands in front of that wall under a separate lower roof, it is a PROJECTING PORCH, below, and porchDepthFt stays out. Omit both keys if the building is enclosed to both ends, which is the common case.
 
-PROJECTING PORCH: a porch built IN FRONT of one GABLE END instead of cut into it. The end wall runs full height from the floor to the top of the wall, with the door in it, and the main roof stops at that wall exactly as it would with no porch. In front of the wall stands a deck at floor level with posts along its outer edge, covered by its own separate roof: a low, nearly flat slope, usually about 2:12, that starts on the end wall just under the top of the wall and falls away over the posts. From the front you see TWO roof edges, the gable's and the porch's lower one below it; from the side the porch roof sticks out past the end of the building. Give porchOutFt as how far the posts stand out from the end wall, in feet, typically 4 to 8; a 12x24 with a 6 ft projecting porch is still a 12x24. Say which end with porchEnd, exactly as for a recessed porch. A porch is one kind or the other: if you give porchOutFt, leave porchDepthFt and porchTruss out.
+PROJECTING PORCH: a porch built IN FRONT of one GABLE END instead of cut into it. The end wall runs full height from the floor to the top of the wall, with the door in it, and the main roof stops at that wall exactly as it would with no porch. In front of the wall stands a deck at floor level with posts along its outer edge, covered by its own separate roof: a low, nearly flat slope, usually about 2:12, that starts on the end wall just under the top of the wall and falls away over the posts. From the front you see TWO roof edges, the gable's and the porch's lower one below it. Three things settle it from the ground, and all three survive a walk-around: the end wall runs UNBROKEN from the floor to the top of the wall, with nothing cut out of it; the porch ceiling is nearly level while the main roof above it slopes away to the ridge; and from the side the porch sticks out PAST the end of the building instead of sitting inside it. Give porchOutFt as how far the posts stand out from the end wall, in feet, typically 4 to 8; a 12x24 with a 6 ft projecting porch is still a 12x24. Say which end with porchEnd, exactly as for a recessed porch. A porch is one kind or the other: if you give porchOutFt, leave porchDepthFt and porchTruss out.
+
+PORCH DECISION, REQUIRED: observed.porch must carry one of exactly three answers on EVERY building — "projecting" for a porch standing out in front of a gable end under its own lower roof, "recessed" for one cut into a gable end under the main roof, "none" for a building closed to both ends. Answer it even when the answer is "none", and answer it even when you are unsure; say the doubt in observed.roofNote instead of leaving the key out. Naming a porch obliges you to give its field: "projecting" means porchOutFt, "recessed" means porchDepthFt and porchEnd. Do not report a porch here and leave its number out of the roof.
 
 DORMER: a small roofed box sitting ON one of the main roof slopes, breaking its line. Give its width, how far it stands above the slope, and how far ACROSS the roof it sits -- measured sideways from the ridge line toward one eave, as a fraction of the half-span, negative for the left side and positive for the right as seen from outside facing the doors. Omit all three keys if the roof is unbroken, which is the common case.
 
@@ -445,7 +448,7 @@ FOUNDATION: look at the very bottom of the building. "skids" means it is raised 
 
 Ignore every OTHER building in the frames. On a sales lot the subject is usually the one that stays roughly centred as the camera moves around it; neighbours drift past in the background and are often a different model entirely.
 
-Estimate conservatively. Where the frames genuinely do not settle something, use a typical value and set observed.confidence accordingly.`;
+Where the frames genuinely do not settle something, say so in observed and OMIT the key. Omitting a key leaves the builder's existing setting alone, which is better than a typical value they then have to find and undo. Do not fill a field with the middle of its stated range.`;
 
 // A combined set is NOT what VIDEO_SHAPE_PROMPT describes, and saying so matters. That prompt
 // opens by asserting every image is a consecutive frame of one lap; a combined generation appends
@@ -474,6 +477,42 @@ export function combinedShapePrompt(videoCount: number, photoCount: number): str
   return `These images are all of ONE portable building (a shed or barn), from two sources.\n\nThe FIRST ${v} ${frames} cut out of one continuous walk-around video, in walk order, so consecutive frames are adjacent viewpoints.${tail}${rest}`;
 }
 
+// ─── overhangIn: the prompt asks in inches, the renderer stores feet (2026-09-19) ─────────
+// The walk-around prompt used to ask for `overhang` in FEET, "typically 0.3-1.5". Exactly 1.0
+// came back in 53 % of every recorded generation and in 3 of 3 on a building whose eave
+// measures 0.15 ft — the top of the stated range, at zero variance. A range with a middle in
+// it is an invitation to answer the middle. Inches with a 0 floor removes the invitation:
+// 2 and 16 are different answers in a way 0.17 and 1.3 are not, and a flush eave finally has
+// an honest number to be rather than a small fraction that reads as a rounding error.
+//
+// THE CONVERSION LIVES HERE, not in the sanitiser, and that is the load-bearing choice.
+// `overhangIn` is a MODEL-REPLY key, never a stored one: giving it a CLAMPS entry and a place
+// in the numeric loop would make it a second, parallel way to persist an eave in
+// `building_styles.d3`, which the renderer — including production's older bundle — has never
+// heard of. Folded into the existing `overhang` before sanitizeD3Spec runs, the existing
+// 0..3 ft clamp does the whole job. No clamp moves, no new stored key, nothing top-level.
+//
+// Pure and shallow-copying. With no `overhangIn` anywhere it returns its input by reference,
+// which is what keeps a hand-typed spec and every older reply byte-identical. `overhangIn`
+// WINS over an `overhang` in the same reply, because inches is what this prompt now asks for;
+// a model that answers the old key alone is still understood, which is what lets this commit
+// deploy on its own without a browser release.
+export function foldOverhangInches(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const src = raw as Record<string, unknown>;
+  if (!src.roof || typeof src.roof !== "object") return raw;
+  const roofSrc = src.roof as Record<string, unknown>;
+  if (!("overhangIn" in roofSrc)) return raw;
+  const roof: Record<string, unknown> = { ...roofSrc };
+  delete roof.overhangIn;
+  const inches = num(roofSrc.overhangIn);
+  // Junk in the inches key drops it and leaves whatever `overhang` the reply carried, rather
+  // than writing a 0 the model never said. 0 ITSELF is a real answer — the flush eave the
+  // prompt now names — so the test is on null, never on truthiness.
+  if (inches !== null) roof.overhang = inches / 12;
+  return { ...src, roof };
+}
+
 // Tolerant parse of a model reply: pull the first {...} out of whatever wrapping the
 // model chose, then hold it to the same rules a hand-typed spec must satisfy.
 export function parseModelSpec(text: string): { ok: true; d3: D3Spec } | { ok: false; error: string } {
@@ -481,7 +520,7 @@ export function parseModelSpec(text: string): { ok: true; d3: D3Spec } | { ok: f
   if (!m) return { ok: false, error: "The model did not return a spec." };
   let parsed: unknown;
   try { parsed = JSON.parse(m[0]); } catch { return { ok: false, error: "The model returned malformed JSON." }; }
-  return sanitizeD3Spec(parsed);
+  return sanitizeD3Spec(foldOverhangInches(parsed));
 }
 
 // ─── Reading a Messages API reply (2026-09-17) ───────────────────────────────────────────
@@ -534,8 +573,18 @@ export function modelReplyText(data: unknown): ModelReply {
 // Rebuilt from known keys with hard caps for the same reason sanitizeD3Spec is: this is
 // model output on its way into someone's browser. Returning `null` rather than an empty
 // object when nothing survives keeps the caller's check to one truthiness test.
-const OBSERVED_KEYS = ["roofNote", "eave", "doors", "windows", "vents", "confidence"] as const;
+// `porch` (2026-09-19) is the one key here the server READS rather than merely passes on:
+// porchAgreementWarning checks it against the roof the same reply drafted. It is still prose
+// in the same sense as the rest — nothing is stored from it and sanitizeD3Spec drops the whole
+// block — but it is held to a three-word vocabulary, exactly as `confidence` is, so a model
+// that answers in a sentence cannot be mistaken for one that answered the question.
+const OBSERVED_KEYS = ["roofNote", "porch", "eave", "doors", "windows", "vents", "confidence"] as const;
 export type ObservedNotes = Partial<Record<typeof OBSERVED_KEYS[number], string>>;
+
+// The three answers the prompt forces observed.porch to, and the only three the agreement
+// check understands. Exported because the same vocabulary has to appear in the prompt test.
+export const OBSERVED_PORCH_KINDS = ["projecting", "recessed", "none"] as const;
+export type PorchKind = typeof OBSERVED_PORCH_KINDS[number];
 
 export function parseObservedNotes(text: string): ObservedNotes | null {
   const m = String(text || "").match(/\{[\s\S]*\}/);
@@ -553,6 +602,14 @@ export function parseObservedNotes(text: string): ObservedNotes | null {
     if (clean) out[k] = clean;
   }
   if (out.confidence && !["high", "medium", "low"].includes(out.confidence)) delete out.confidence;
+  // Out-of-vocabulary is DROPPED, never normalised. "a projecting porch on the front" is not an
+  // answer to a three-way question, and porchAgreementWarning has a separate sentence for "you
+  // did not answer" — turning a guess at the prose into an answer would silence that sentence.
+  if (out.porch) {
+    const p = out.porch.toLowerCase();
+    if ((OBSERVED_PORCH_KINDS as readonly string[]).includes(p)) out.porch = p;
+    else delete out.porch;
+  }
   return Object.keys(out).length ? out : null;
 }
 
@@ -598,6 +655,58 @@ export function gambrelRoofWarning(roof: Record<string, unknown> | null | undefi
   return "Check this roof before saving: the gambrel came back with its lower and upper slopes at almost the same angle, so it will look like a plain gable. A real gambrel has a steep lower slope and a shallow upper one. Compare the preview with the end of the building, then raise Knee rise or move the knee nearer the wall (Gambrel knee position, where 1 is right above the wall).";
 }
 
+// ─── the porch nobody reported (2026-09-19) ───────────────────────────────────────────────
+// `porchOutFt` came back 0 times in 19 recorded generations, on a lot where a deck and posts in
+// front of the gable end are ordinary; two of those replies said "recessed" and one said the
+// building had no porch at all. On 2026-09-17 run 2 the model wrote "under the porch" in its own
+// roofNote and handed back a roof with no porch key on it. Nothing caught that, because until
+// now the reply had no place to state a porch except the geometry it was failing to state.
+//
+// `observed.porch` is that place, and this is what reads it back. TWO different failures with
+// two different sentences, because they call for two different acts:
+//
+//   * "you did not answer" — the check could not be made. The builder should look, and that is
+//     all that can honestly be said.
+//   * "your answer contradicts your own numbers" — the draft is wrong one way or the other, for
+//     certain, and only the building settles which.
+//
+// Folding those into one line would send a builder with a perfectly good draft off to re-check
+// it, which is how a warning stops being read.
+//
+// FLAGGED, NEVER REPAIRED, for the same reason gambrelRoofWarning is (see above): there is no
+// safe guess about which half of a contradiction is the true one, and a refusal after the hold
+// is taken would throw away everything else the same reply got right.
+
+// What the DRAFT says, read the way the renderer reads it: the renderer tests the NUMBER, not
+// the key's presence, so a porch key sitting at 0 is not a porch. A key the model omitted is
+// not a porch here either — that is the same reading gambrelRoofWarning makes, and for the same
+// reason: the merge keeps the builder's stored value, which the server cannot see.
+export function draftPorchKind(roof: Record<string, unknown> | null | undefined): PorchKind {
+  if ((num(roof?.porchOutFt) ?? 0) > 0) return "projecting";
+  if ((num(roof?.porchDepthFt) ?? 0) > 0) return "recessed";
+  return "none";
+}
+
+// Builder's words, not the schema's. "porchOutFt" means nothing to someone holding a phone.
+const PORCH_IN_WORDS: Record<PorchKind, string> = {
+  projecting: "a porch standing out in front of one end, on its own posts",
+  recessed: "a porch cut into one end, under the main roof",
+  none: "no porch",
+};
+
+export function porchAgreementWarning(
+  roof: Record<string, unknown> | null | undefined,
+  observed: ObservedNotes | null | undefined,
+): string | null {
+  const drafted = draftPorchKind(roof);
+  const said = observed?.porch;
+  if (!said || !(OBSERVED_PORCH_KINDS as readonly string[]).includes(said)) {
+    return `Check the porch before saving: the video reading never said whether this building has a porch, so there was nothing to check the drawing against. It has been drawn with ${PORCH_IN_WORDS[drafted]}.`;
+  }
+  if (said === drafted) return null;
+  return `Check the porch before saving: the video reading says this building has ${PORCH_IN_WORDS[said as PorchKind]}, but it has been drawn with ${PORCH_IN_WORDS[drafted]}. One of those is wrong and only the building settles which — compare the end of the building with the preview, then set the porch below to match.`;
+}
+
 // Puts a roof warning where the builder already looks: `roofNote` in the "What the model saw"
 // panel, with confidence forced to "low", which that panel already renders in amber with
 // "check the roof numbers below against the building". No browser change is needed for the
@@ -605,9 +714,19 @@ export function gambrelRoofWarning(roof: Record<string, unknown> | null | undefi
 //
 // The warning goes FIRST and the model's own sentence is kept after it rather than replaced:
 // it is usually right about everything but the numbers, and it is what a builder compares.
-// Bounded like parseObservedNotes: the warning is ours and fixed, the model's part is <= 240.
-export function flagObservedNotes(observed: ObservedNotes | null, warning: string | null): ObservedNotes | null {
-  if (!warning) return observed;
+// Bounded like parseObservedNotes: the warnings are ours and fixed, the model's part is <= 240.
+//
+// SEVERAL WARNINGS COMPOSE (2026-09-19). A rest parameter rather than a second argument, so
+// every existing two-argument call still means exactly what it meant, and so a third check
+// later costs an argument rather than a rewrite. They are joined in the order given and NONE
+// replaces another: a roof that is both a flat gambrel and a contradicted porch has two things
+// wrong with it, and dropping either would send the builder to look at half the problem.
+export function flagObservedNotes(
+  observed: ObservedNotes | null,
+  ...warnings: (string | null | undefined)[]
+): ObservedNotes | null {
+  const flags = warnings.filter((w): w is string => typeof w === "string" && w.length > 0);
+  if (!flags.length) return observed;
   const own = observed?.roofNote ? ` The model's own reading: ${observed.roofNote}` : "";
-  return { ...(observed || {}), roofNote: `${warning}${own}`, confidence: "low" };
+  return { ...(observed || {}), roofNote: `${flags.join(" ")}${own}`, confidence: "low" };
 }

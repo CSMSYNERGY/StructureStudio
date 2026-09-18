@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, porchAgreementWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -3837,7 +3837,20 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // shapeFirst ONLY, on purpose. The photos source is the scan card's, and that card replaces
     // the AI's roof with the scan's MEASURED one (scanApplyMeasured) and never reads `observed`,
     // so a warning there would describe a roof nobody sees and pollute the flagged-draft query.
-    const observedNotes = shapeFirst ? flagObservedNotes(parseObservedNotes(text), gambrelRoofWarning(drafted.d3.roof)) : null;
+    //
+    // The PORCH check joins it on 2026-09-19 (see porchAgreementWarning). Same posture, same
+    // place, and deliberately the same call: the prompt now forces `observed.porch` to one of
+    // three words, so the reply can be checked against the roof it drafted in the same breath.
+    // Both warnings compose in `roofNote` — a draft can be wrong about the roof AND the porch,
+    // and the builder needs to be sent to look at both. Parsed ONCE into `observedRead`,
+    // because the agreement check reads the same notes that are about to be flagged.
+    //
+    // This reaches PRODUCTION's older browser bundle with no frontend change, which is the
+    // whole reason the warning rides in `roofNote` rather than in a new response field.
+    const observedRead = shapeFirst ? parseObservedNotes(text) : null;
+    const observedNotes = shapeFirst
+      ? flagObservedNotes(observedRead, gambrelRoofWarning(drafted.d3.roof), porchAgreementWarning(drafted.d3.roof, observedRead))
+      : null;
 
     // ── RECORD WHAT IT SAID, not just that it ran (226) ───────────────────────────────────
     // The drafted spec goes back to the browser and lands in an in-memory draft. Unless the

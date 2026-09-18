@@ -21,6 +21,7 @@
 import {
   sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT,
   SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG, modelReplyText,
+  foldOverhangInches, porchAgreementWarning, draftPorchKind, OBSERVED_PORCH_KINDS,
 } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
@@ -443,7 +444,10 @@ Deno.test("combinedShapePrompt: both counts are stated, and the body is carried 
   assert(p.includes('"roof": {'), "the JSON shape survives the splice");
   assert(p.includes("How to read it:"), "the reading instructions survive the splice");
   assert(p.includes('"observed"'), "the observed block survives the splice");
-  assert(p.includes("Estimate conservatively."), "the closing instruction survives the splice");
+  // The CLOSING instruction, whatever it currently says. It changed on 2026-09-19 — the old
+  // "use a typical value" was the mechanism behind every zero-variance wrong answer — and what
+  // this assertion is for is unchanged: the splice must not eat the last paragraph.
+  assert(p.includes("Do not fill a field with the middle of its stated range."), "the closing instruction survives the splice");
   assert(p.length > VIDEO_SHAPE_PROMPT.length - 400, "a splice that shortened the prompt by a lot ate something");
 });
 
@@ -867,4 +871,255 @@ Deno.test("only the walk-around prompt learned about the projecting porch", () =
   }
   // The JSON shape is still valid JSON-with-placeholders: the line before porchOutFt gained its comma.
   assert(VIDEO_SHAPE_PROMPT.includes("porch opening>,\n"), "porchTruss is no longer the last roof key");
+});
+
+// ─── the answers that never varied (2026-09-19) ───────────────────────────────────────────
+// Three findings off 19 recorded generations, one prompt paragraph behind each:
+//
+//   * `overhang` came back EXACTLY 1.0 in 53 % of them, and in 3 of 3 on a building whose eave
+//     measures 0.15 ft. 1.0 is the top of "typically 0.3-1.5". Zero variance at a wrong value
+//     is the signature of a default, not of a measurement.
+//   * `porchOutFt` came back 0 times in 19, on a lot where a deck and posts in front of the
+//     gable end are ordinary. Two replies said "recessed"; one said there was no porch at all.
+//   * The prompt ENDED by telling the model to default: "use a typical value". That one
+//     sentence explains every zero-variance answer at once, including wall height 7 (inside
+//     6-10) and porch depth 6 (the exact midpoint of 4-8).
+//
+// These tests pin the three paragraphs that changed and the two server halves that read them.
+// SPEC_PROMPT is deliberately NOT in this list: the photo path feeds the scan card, which
+// replaces the AI's roof with a measured one, and it is out of scope for this change.
+const SHAPE_FIRST = [
+  ["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT],
+  ["combinedShapePrompt", combinedShapePrompt(8, 4)],
+] as const;
+
+Deno.test("no prompt still offers a middle overhang to answer", () => {
+  // Across ALL THREE, including the photo path: the range whose top came back 53 % of the time.
+  for (const [name, p] of [["SPEC_PROMPT", SPEC_PROMPT], ...SHAPE_FIRST] as const) {
+    assert(!p.includes("typically 0.3-1.5"), `${name}: the range whose top was answered 53 % of the time is gone`);
+  }
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(!p.includes("use a typical value"), `${name}: the instruction to default is gone`);
+    assert(!p.includes('"overhang":'), `${name}: the feet key is not asked for any more`);
+  }
+});
+
+Deno.test("the overhang is asked in inches, with the flush case named and 0 an ordinary answer", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes('"overhangIn"'), `${name} must ask for overhangIn`);
+    const line = p.split("\n").find((l) => l.includes('"overhangIn"')) ?? "";
+    assert(line.includes("inches"), `${name}: the schema line must say inches`);
+    assert(line.includes("0 to 36"), `${name}: the schema line must give the 0 floor and a ceiling`);
+    assert(/OVERHANG:/.test(p), `${name} must still explain how to read it`);
+    assert(p.includes("in INCHES"), `${name}: the paragraph must say inches too, not only the schema line`);
+    // The flush eave named PHYSICALLY. "0" on its own is not a thing a model looks for; a wall
+    // with no shadow under the roof edge is.
+    assert(p.includes("the wall running straight up into the roof edge"), `${name} must describe a flush eave`);
+    assert(p.includes("no shadow under it"), `${name} must give the flush eave its giveaway`);
+    assert(p.includes("0 is a real answer"), `${name} must say 0 is an answer, not a failure to measure`);
+    assert(p.includes("as common as one with a deep eave"), `${name} must say flush is as ordinary as deep`);
+    assert(p.includes("2 inches and 16 inches are both common answers"), `${name} must say the two ends look nothing alike`);
+  }
+});
+
+Deno.test("the closing paragraph asks for an OMISSION, not a typical value", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes("say so in observed and OMIT the key"), `${name} must ask for the key to be left out`);
+    // Safe because absence already means "keep what is stored": three tests above pin it
+    // ("eave, tailSpacingIn and gableVent are omitted when absent", "a video reply that saw
+    // none of it", "a style that mentions neither stays byte-identical").
+    assert(p.includes("leaves the builder's existing setting alone"), `${name} must say why omitting is the better answer`);
+    assert(p.includes("Do not fill a field with the middle of its stated range"), `${name} must forbid the midpoint outright`);
+  }
+});
+
+Deno.test("both shape-first prompts force a three-way porch answer", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes('"porch": "projecting" | "recessed" | "none"'), `${name} must carry the porch key in observed`);
+    assert(/PORCH DECISION, REQUIRED:/.test(p), `${name} must say the answer is required`);
+    for (const kind of OBSERVED_PORCH_KINDS) {
+      assert(p.includes(`"${kind}"`), `${name} must name ${kind} as one of the three answers`);
+    }
+    // The two escapes a model takes when a question is merely asked rather than required.
+    assert(p.includes('Answer it even when the answer is "none"'), `${name} must close the "nothing to report" escape`);
+    assert(p.includes("answer it even when you are unsure"), `${name} must close the "I am not sure" escape`);
+    assert(p.includes("Naming a porch obliges you to give its field"), `${name} must tie the word to the number`);
+  }
+});
+
+Deno.test("the false-positive deck sentence is gone from the recessed porch", () => {
+  // "Look for the floor deck continuing past the front wall to the posts" described a
+  // PROJECTING porch exactly as well as a recessed one - a deck out to the posts is what a
+  // projecting porch IS - so it read as evidence for whichever kind the model reached first,
+  // and the recorded history reached "recessed" twice and "projecting" never. Not pinned by
+  // any test when it was cut. What replaces it are discriminators a GROUND-LEVEL walk can see.
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(!p.includes("floor deck continuing past the front wall"), `${name}: the ambiguous sentence is gone`);
+    assert(p.includes("the end wall runs UNBROKEN from the floor to the top of the wall"), `${name}: the unbroken end wall`);
+    assert(p.includes("the porch ceiling is nearly level"), `${name}: the porch ceiling against the main slope`);
+    assert(p.includes("sticks out PAST the end of the building"), `${name}: what it looks like from the side`);
+    // The recessed porch keeps the discriminator that is genuinely its own.
+    assert(p.includes("standing BACK from the end of the roof"), `${name}: the recessed porch's set-back wall survives`);
+  }
+});
+
+Deno.test("the door the wall is measured against is a real door", () => {
+  // 6.5 ft is not a door height anyone builds. A residential door is 6 ft 8 in, and it is the
+  // scale for everything else in a ground-level frame.
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes("a door is about 6 ft 8 in"), `${name} measures against a real door`);
+    assert(!p.includes("about 6.5 ft"), `${name}: the old anchor is gone`);
+  }
+});
+
+Deno.test("the photo-only path is untouched by any of this", () => {
+  // Out of scope, deliberately (brief section 8). The scan card replaces the AI's roof with a
+  // measured one and never reads `observed`, so nothing here would reach a builder.
+  assert(!SPEC_PROMPT.includes("overhangIn"), "SPEC_PROMPT still asks in feet");
+  assert(SPEC_PROMPT.includes('"overhang":'), "and still asks for the same key it always did");
+  assert(!SPEC_PROMPT.includes('"porch"'), "SPEC_PROMPT has no observed block to force a porch answer into");
+});
+
+// ─── overhangIn on the wire, feet in the column ───────────────────────────────────────────
+// The conversion is NOT in the sanitiser and must not drift into it: `overhangIn` is a
+// model-reply key, and a CLAMPS entry would make it a second way to persist an eave in a
+// column the production renderer reads.
+
+Deno.test("overhangIn folds to feet, and 0 survives as a flush eave", () => {
+  const r = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhangIn":6},"colors":{},"wallHeightFt":8}`);
+  assert(r.ok, "an inches reply parses");
+  if (r.ok) {
+    assertEquals(r.d3.roof.overhang, 0.5, "6 inches is half a foot");
+    assert(!("overhangIn" in r.d3.roof), "the inches key is never stored");
+  }
+  // ⚠️ THE ONE THE WHOLE CHANGE IS FOR. A flush eave is 0, and 0 must not be read as absent -
+  // absent means "keep the builder's setting", which is the opposite of what the model said.
+  const flush = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhangIn":0},"colors":{}}`);
+  assert(flush.ok, "a flush eave parses");
+  if (flush.ok) {
+    assert("overhang" in flush.d3.roof, "0 is an answer that reaches the spec, not a missing key");
+    assertEquals(flush.d3.roof.overhang, 0, "0 inches is a flush eave");
+  }
+  // The two answers the prompt says look nothing alike must not round together.
+  const at = (inches: number) => {
+    const s = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhangIn: inches } }));
+    return s.ok ? Math.round(Number(s.d3.roof.overhang) * 1000) / 1000 : null;
+  };
+  assertEquals(at(2), 0.167, "2 inches");
+  assertEquals(at(16), 1.333, "16 inches");
+  // Over the roof's EXISTING 0..3 ft clamp: clamped by the sanitiser, no new clamp added.
+  assertEquals(at(120), 3, "the existing feet clamp does the work, so no clamp had to move");
+  assertEquals(at(-4), 0, "the 0 floor is the existing one too");
+});
+
+Deno.test("foldOverhangInches is the identity without an overhangIn, which is what keeps old replies byte-identical", () => {
+  const spec = { roof: { type: "gable", pitch: 0.42, overhang: 1 }, colors: {}, wallHeightFt: 7 };
+  assert(foldOverhangInches(spec) === spec, "no inches key: returned by reference, so nothing can drift");
+  // A reply that still answers the OLD key alone is still understood. That is what lets this
+  // commit deploy on its own, ahead of any browser release.
+  const old = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhang":0.75},"colors":{}}`);
+  assert(old.ok, "a feet reply still parses");
+  if (old.ok) assertEquals(old.d3.roof.overhang, 0.75, "the feet key still works");
+  // Junk in the inches key drops it rather than writing a 0 the model never said.
+  const junk = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhang: 0.9, overhangIn: "a couple" } }));
+  assert(junk.ok, "junk does not fail the whole spec");
+  if (junk.ok) assertEquals(junk.d3.roof.overhang, 0.9, "the reply's own feet answer survives junk inches");
+  // Inches WIN over feet in the same reply, because inches is what the prompt now asks for.
+  const both = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhang: 1.0, overhangIn: 3 } }));
+  assert(both.ok, "both keys parse");
+  if (both.ok) assertEquals(both.d3.roof.overhang, 0.25, "the asked-for key wins");
+  // Never throws on a shape that is not a spec at all.
+  assertEquals(foldOverhangInches(null), null);
+  assertEquals(foldOverhangInches("nope"), "nope");
+  assertEquals(foldOverhangInches({ roof: 5 }), { roof: 5 });
+  assertEquals(foldOverhangInches({ roof: { type: "gable", overhangIn: null } }), { roof: { type: "gable" } });
+});
+
+Deno.test("observed.porch survives as one of three words and nothing else", () => {
+  const o = parseObservedNotes(`{"observed":{"porch":"projecting","roofNote":"Gambrel, deck out front."}}`);
+  assertEquals(o!.porch, "projecting");
+  assertEquals(parseObservedNotes(`{"observed":{"porch":"Recessed"}}`)!.porch, "recessed", "case is not a different answer");
+  // A sentence is NOT an answer to a three-way question. Dropped rather than guessed at, so the
+  // "you did not answer" warning still fires instead of being silenced by a reading of the prose.
+  const prose = parseObservedNotes(`{"observed":{"porch":"there is a porch on the front","doors":"one"}}`)!;
+  assert(!("porch" in prose), "prose is not an answer");
+  assertEquals(prose.doors, "one", "and the rest of the block still survives");
+  assertEquals(parseObservedNotes(`{"observed":{"porch":"maybe"}}`), null, "an out-of-vocabulary answer alone leaves nothing to say");
+  // And it is DROPPED by the sanitiser like the rest of `observed`: it is a note, not geometry.
+  const r = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"observed":{"porch":"none"}}`);
+  assert(r.ok, "the spec still parses");
+  if (r.ok) assert(!("porch" in (r.d3 as Record<string, unknown>)), "observed.porch never reaches the stored spec");
+});
+
+// ─── porchAgreementWarning ────────────────────────────────────────────────────────────────
+const PORCH_DRAFT = { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0, porchOutFt: 6, porchEnd: "front" };
+
+Deno.test("porchAgreementWarning: agreement is silent, all three ways", () => {
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, { porch: "projecting" }), null);
+  assertEquals(porchAgreementWarning({ type: "gable", porchDepthFt: 6, porchEnd: "front" }, { porch: "recessed" }), null);
+  assertEquals(porchAgreementWarning({ type: "gable", pitch: 0.42 }, { porch: "none" }), null);
+  // A porch key sitting at 0 is not a porch: the renderer tests the NUMBER, not the key, and
+  // this has to read the draft the way the renderer draws it or it will warn about nothing.
+  assertEquals(draftPorchKind({ type: "gable", porchOutFt: 0, porchDepthFt: 0 }), "none");
+  assertEquals(porchAgreementWarning({ type: "gable", porchOutFt: 0, porchDepthFt: 0 }, { porch: "none" }), null);
+  assertEquals(draftPorchKind(PORCH_DRAFT), "projecting");
+  assertEquals(draftPorchKind({ type: "gable", porchDepthFt: 4 }), "recessed");
+  assertEquals(draftPorchKind(null), "none");
+});
+
+Deno.test("porchAgreementWarning: the 09-17 run 2 case, where the notes said porch and the roof said nothing", () => {
+  // The real one. The reply wrote "under the porch" in its own roofNote and handed back a roof
+  // with no porch key at all. Nothing caught it, because until observed.porch existed there was
+  // nowhere for a reply to state a porch except the geometry it was failing to state.
+  const w = porchAgreementWarning(
+    { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0 },
+    { porch: "projecting", roofNote: "Gambrel roof, dark metal, deck under the porch at the front." },
+  );
+  assert(w, "a porch in words with no porch in the numbers is a contradiction");
+  assert(w!.includes("standing out in front of one end"), "it says what the reading claimed");
+  assert(w!.includes("no porch"), "and what was actually drawn");
+  assert(w!.includes("only the building settles which"), "and that neither side can be believed over the other");
+  assert(!w!.includes("porchOutFt"), "in the builder's words, not the schema's");
+});
+
+Deno.test("porchAgreementWarning: a drafted porch the reading denies, and the wrong KIND", () => {
+  const denied = porchAgreementWarning(PORCH_DRAFT, { porch: "none" });
+  assert(denied && denied.includes("no porch") && denied.includes("standing out in front"), "the other direction is caught too");
+  const kind = porchAgreementWarning(PORCH_DRAFT, { porch: "recessed" });
+  assert(kind && kind.includes("cut into one end") && kind.includes("standing out in front"), "recessed against projecting names both");
+});
+
+Deno.test("porchAgreementWarning: a missing answer is a DIFFERENT sentence from a contradiction", () => {
+  // Two failures, two acts. "Nothing could be checked" sends the builder to look; "these two
+  // disagree" tells them the draft is wrong for certain, one way or the other. One sentence for
+  // both would send a builder with a perfectly good draft off to re-check it, which is how a
+  // warning stops being read.
+  const silent = porchAgreementWarning(PORCH_DRAFT, { roofNote: "Gambrel." });
+  assert(silent, "no answer is still worth saying");
+  assert(silent!.includes("never said whether this building has a porch"), "it names the missing answer");
+  assert(!silent!.includes("One of those is wrong"), "a missing answer is not a contradiction");
+  assert(silent!.includes("standing out in front of one end"), "and it still says what was drawn");
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, null), silent, "no observed block at all reads the same way");
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, { porch: "maybe" } as never), silent, "an unparseable answer is no answer");
+  assertEquals(porchAgreementWarning(null, { porch: "none" }), null, "no roof and no porch reported is agreement, not a warning");
+});
+
+Deno.test("two warnings compose without eating each other, and the model's note stays capped at 240", () => {
+  // A draft can be wrong about the roof AND the porch. Dropping either warning would send the
+  // builder to look at half the problem, which is worse than sending them to look at all of it.
+  const roof = { type: "gambrel", kneeU: 0.55, kneeRise: 0.35, ridgeRise: 0.75, porchOutFt: 6 };
+  const observed = parseObservedNotes(JSON.stringify({ observed: { porch: "none", roofNote: "y".repeat(1000) } }))!;
+  const g = gambrelRoofWarning(roof)!, pw = porchAgreementWarning(roof, observed)!;
+  assert(g && pw, "this draft is wrong about both the roof and the porch");
+  const flagged = flagObservedNotes(observed, g, pw)!;
+  assert(flagged.roofNote!.startsWith(g), "the first warning leads");
+  assert(flagged.roofNote!.includes(pw), "and the second is not eaten by it");
+  assert(flagged.roofNote!.includes(`The model's own reading: ${"y".repeat(240)}`), "the model's own note still rides along, capped");
+  assertEquals(flagged.confidence, "low", "either warning turns the panel amber");
+  assertEquals(flagged.porch, "none", "the porch answer itself rides along untouched");
+  assert(flagged.roofNote!.length <= g.length + 1 + pw.length + 26 + 240, "two fixed warnings plus the model's 240 is the whole bound");
+  // A null among the warnings is skipped rather than joined as a gap, which is what lets the
+  // caller pass every check it has without testing each one first.
+  assertEquals(flagObservedNotes(observed, null, pw)!.roofNote, `${pw} The model's own reading: ${"y".repeat(240)}`);
+  assertEquals(flagObservedNotes(observed, null, null), observed, "no warnings at all leaves the notes alone, by reference");
 });
