@@ -383,7 +383,7 @@ export function clampEdges(draft) {
 // Its only effect here is to move wall height out of the score and into an assertion; the
 // width and length are recorded so a run's provenance is complete, and nothing scores them
 // (the renderer takes the size from the customer's pick, not from the style).
-export function scoreRun({ truth, prior, draft, source = "video", dims = null, observed = null }) {
+export function scoreRun({ truth, prior, draft, source = "video", dims = null, observed = null, provenance = "asserted" }) {
   const merged = mergeDraft(prior, draft, source);
   const dimsWall = dims && num(dims.wallHeightFt) !== null ? num(dims.wallHeightFt) : null;
   const ctx = {
@@ -457,7 +457,10 @@ export function scoreRun({ truth, prior, draft, source = "video", dims = null, o
   const mergedWall = num(merged.wallHeightFt) ?? R.WALL_H;
   const wallAssert = dimsWall == null ? null : {
     typed: dimsWall, got: mergedWall, ok: Math.abs(mergedWall - dimsWall) < 1e-9,
-    // Kept beside it so a builder typing the WRONG number is not read as the feature working.
+    // ⚠️ AND AGAINST THE TAPE, because `ok` on its own is only plumbing. It says the number
+    // that was typed is the number that ended up on screen, which a TYPO satisfies exactly as
+    // well as a measurement: typed 13 on a 9 ft building gives ok:true, MATCH 100 and "wall
+    // ASSERTED OK 13 vs 13" for a building four feet too tall. This is the half that knows.
     errVsTruth: round(mergedWall - (num(truth.wallHeightFt) ?? R.WALL_H)),
   };
 
@@ -467,7 +470,15 @@ export function scoreRun({ truth, prior, draft, source = "video", dims = null, o
   const hard = {
     roof: rows.find((r) => r.id === "roof.renders_as").score === 1,
     porchKind: rows.find((r) => r.id === "porch.kind").score === 1,
-    wall: wallAssert ? wallAssert.ok : Math.abs(wallRow.err) <= 0.5,
+    // ON A MEASURED TRUTH THE TAPE GATES TOO. Without this the +10 MATCH the dimensions card
+    // buys cannot be told apart from a mistyped number, and bar 5 of the brief ("exactly 9.0
+    // in 5/5") is unreachable through the instrument that is supposed to answer it — 9.0 is
+    // the measurement, not "whatever was typed". Where the truth is an accepted draft or was
+    // asserted from memory there is no tape to answer to, so the plumbing check is all there
+    // is and errVsTruth is printed rather than enforced.
+    wall: wallAssert
+      ? (wallAssert.ok && (provenance !== "measured" || Math.abs(wallAssert.errVsTruth) <= 0.5))
+      : Math.abs(wallRow.err) <= 0.5,
     overhang: Math.abs(rows.find((r) => r.id === "roof.overhang").err) <= 0.35,
   };
   const shape = agg((r) => r.group !== G.LOOK);
@@ -507,9 +518,11 @@ function spreadOf(results, i) {
 
 export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, runs }) {
   const source = entry.source || "video";
+  const provenance = entry.truth_provenance || "asserted";
   const results = runs.map((r) => scoreRun({
     truth: entry.truth, prior: priorSpec, draft: r.drafted,
     source: r.source || source, dims: r.dims || entry.dims || null, observed: r.observed || null,
+    provenance,
   }));
 
   // ⚠️ PROVENANCE IS PART OF THE SCORE, so it is printed beside it.
@@ -520,7 +533,7 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
   //                   the nineties whatever it does. Useful for spotting VARIANCE between
   //                   runs and nothing else.
   //   asserted        somebody typed it from memory. Weakest of the three.
-  const prov = entry.truth_provenance || "asserted";
+  const prov = provenance;
   console.log("");
   console.log(`━━ ${entry.name || basename(file)}  ·  prior = ${priorName}  ·  ${runs.length} run(s)  ·  truth: ${prov}${prov === "measured" ? "" : "  ⚠️ NOT A GATE"}`);
   if (entry.note) console.log(`   ${entry.note}`);
@@ -557,7 +570,14 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
   line("  porch agreement", (r) => r.agreement);
   line("  clamp edges", (r) => r.clamped.length);
   if (results.some((r) => r.wallAssert)) {
-    line("  wall ASSERTED", (r) => (r.wallAssert ? `${r.wallAssert.ok ? "OK" : "FAIL"} ${r.wallAssert.got} vs ${r.wallAssert.typed}` : "-"));
+    // ⚠️ errVsTruth IS PRINTED, not merely recorded. It was computed here from the first
+    // day with a comment saying it exists "so a builder typing the WRONG number is not read
+    // as the feature working" — and then nothing read it: not the table, not hard.wall, not
+    // pass. A reviewer looking at "wall ASSERTED OK 13 vs 13" beside "truth 9" six rows above
+    // had to do the subtraction themselves.
+    line("  wall ASSERTED", (r) => (r.wallAssert
+      ? `${r.wallAssert.ok ? "OK" : "FAIL"} ${r.wallAssert.got} vs ${r.wallAssert.typed} tape ${r.wallAssert.errVsTruth > 0 ? "+" : ""}${r.wallAssert.errVsTruth}`
+      : "-"));
   }
   line("PASS?", (r) => (r.pass ? "PASS" : "FAIL"));
   console.log("");
