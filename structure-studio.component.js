@@ -11177,6 +11177,14 @@ const SSD_CSS = [
   '.ssd-tile.is-on .ssd-tile-art{background:linear-gradient(var(--ss-tile-sel-top),var(--ss-tile-sel-bottom))}',
   '.ssd-strip-arrow{font-family:inherit;position:absolute;top:50%;transform:translateY(-50%);z-index:2;width:30px;height:30px;box-sizing:border-box;margin:0;padding:0;border-radius:50%;border:1px solid var(--ss-line);background:rgba(255,255,255,.96);box-shadow:0 2px 8px var(--ssd-primary-a18);color:var(--ss-ink);font-size:18px;font-weight:700;line-height:26px;cursor:pointer;transition:border-color .15s ease}',
   '.ssd-strip-arrow:hover{border-color:var(--ss-primary-line)}',
+  // The strip still scrolls sideways, but shows no scrollbar (Carolyn 2026-09-17: "the scroll bar never
+  // goes away"). Exactly the treatment .ssd-pb-full already uses: scrollbar-width for Firefox (set inline
+  // on the scroller in SSStyleStrip) and this rule for Chrome and Safari. The arrows and the edge fades
+  // are the overflow affordance and they are strictly better than a bar, because they appear ONLY when
+  // tiles are really hidden -- `edges` in SSStyleStrip measures scrollWidth against clientWidth, so with
+  // few enough styles to fit there is now nothing drawn along the bottom at all. On Windows the bar was
+  // laid out rather than overlaid, so this also gives the tiles back the ~15px it was eating.
+  '.ssd-frame [data-ss-style-strip]::-webkit-scrollbar{display:none}',
   // ── Section 02: size / roof / cladding cards, native selects and the colour select ──
   // One height token for the section's fields. 26px is the colour select's height before the redesign;
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
@@ -11516,12 +11524,22 @@ const SSD_CSS = [
   '.ssd-dt-head.is-toggle > *{position:relative;z-index:1}',
   '.ssd-dt-tog{font-family:inherit;flex:0 0 auto;margin:0;padding:2px 0;border:0;background:none;color:var(--ss-accent-text);font-size:11.5px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}',
   '.ssd-dt-tog:hover{text-decoration:underline}',
-  '.ssd-dt-lock{box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
-  '.ssd-dt-cta{font-family:inherit;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:2px;width:100%;min-height:48px;box-sizing:border-box;margin:0;padding:8px 18px;border:0;border-radius:4px;background:var(--ss-cta);color:var(--ss-on-cta);box-shadow:0 2px 8px var(--ss-accent-shadow);text-align:left;cursor:pointer;transition:box-shadow .15s ease}',
+  '.ssd-dt-lock{max-width:var(--ssd-invoice-max);margin-inline:auto;box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
+  '.ssd-dt-cta{font-family:inherit;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:2px;width:100%;max-width:var(--ssd-invoice-max);min-height:48px;box-sizing:border-box;margin:0;margin-inline:auto;padding:8px 18px;border:0;border-radius:4px;background:var(--ss-cta);color:var(--ss-on-cta);box-shadow:0 2px 8px var(--ss-accent-shadow);text-align:left;cursor:pointer;transition:box-shadow .15s ease}',
   '.ssd-dt-cta:hover{box-shadow:0 3px 12px var(--ss-accent-shadow)}',
   '.ssd-dt-cta-t{font-size:14.5px;font-weight:700;line-height:1.3}',
   '.ssd-dt-cta-s{margin-left:auto;font-size:13px;font-weight:700;line-height:1.3;text-align:right}',
-  '.ssd-dt{min-width:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface);overflow:hidden}',
+  // -- The invoice column (Carolyn 2026-09-17: the quote "stops reading like an invoice" at full width) --
+  // .ssd-dt-name is flex:1 1 150px and .ssd-dt-r is margin-left:auto, so the name grows to fill whatever
+  // it is given and the amount is pinned to the far right. On a 32" screen that puts a line's description
+  // and its money most of a screen apart with a river of white between them, which is the gap she is
+  // describing. Capping the card is what restores the proportions a printed invoice has.
+  // 960px is a WIDTH, not a threshold -- it has nothing to do with SS_DOCK_MIN_ROW_W, which is the same
+  // number by coincidence and is measured on the canvas row. One token, because the footer bar below
+  // takes the same value: capping only one of them leaves the two visibly mismatched.
+  // max-width and margin-inline only -- neither makes a stacking context over the plan <svg>.
+  '.ssd-frame{--ssd-invoice-max:960px}',
+  '.ssd-dt{max-width:var(--ssd-invoice-max);margin-inline:auto;min-width:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface);overflow:hidden}',
   // Every row draws a hairline above itself; the card clips the first one.
   '.ssd-dt-in{margin-top:-1px}',
   '.ssd-dt-row{display:flex;flex-wrap:wrap;align-items:center;column-gap:12px;row-gap:6px;min-width:0;padding:11px 14px;border-top:1px solid var(--ss-line-faint);background:var(--ss-panel)}',
@@ -11595,8 +11613,15 @@ const SSD_CSS = [
   // being a different width). On a phone that leaves too little room for both buttons on one line, so they stack.
   '.ssd-frame.is-embedded .ssd-main.ssd-foot{padding-bottom:72px}',
   '.ssd-frame.is-embedded .ssd-ft-btns{box-sizing:border-box;padding-right:128px}',
-  '.ssd-ft-err{margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
-  '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0}',
+  '.ssd-ft-err{max-width:var(--ssd-invoice-max);margin:0 0 12px;margin-inline:auto;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
+  // The footer's CONTENT takes the invoice cap so it lines up under the quote card; the bar itself
+  // (.ssd-main.ssd-foot, above) keeps its full-bleed panel and hairline, because the stepper rail runs
+  // alongside it and a narrowed band would break that line. Capping only the card left the hint and the
+  // buttons stretched across the full width under a 960px invoice, which is the mismatch this avoids.
+  // Safe for the Feedback-pill clearance below (.is-embedded .ssd-ft-btns padding-right:128px): centring
+  // inside a wider bar can only move the buttons AWAY from the pill's column, never toward it, and under
+  // 960px the cap does nothing at all.
+  '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0;max-width:var(--ssd-invoice-max);margin-inline:auto}',
   '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
   '.ssd-ft-hint strong{font-weight:700;color:var(--ss-ink)}',
   '.ssd-ft-btns{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:10px;min-width:0;max-width:100%}',
@@ -12205,7 +12230,7 @@ function SSStyleStrip({ styles, value, onPick, perRow, S, disabled }) {
         style={{ position: "relative", display: "grid", gridAutoFlow: "column",
           gridAutoColumns: `max(120px, calc((100% - ${(n - 1) * SS_STRIP_GAP}px) / ${n}))`,
           gap: SS_STRIP_GAP, overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory",
-          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "thin" }}>
+          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "none" }}>
         {styles.map((s) => {
           const active = value === s.value;
           // A keyboard user picks a tile like a button: Enter or Space. On a locked plan the fieldset's
@@ -21224,9 +21249,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           hundreds of SVG nodes otherwise re-render on every 3D-driven state
           change and make every pointer-math layout read pay for the whole
           tree. Both svgRef consumers (getSvgPt, scrollIntoView) null-guard,
-          and the PDF export draws from state, not this DOM. */}
+          and the PDF export draws from state, not this DOM.
+          data-ss-canvas-row on the row below is inert, and the only way to FIND that element from
+          outside React. It is the row SS_DOCK_MIN_ROW_W is measured on (canvasRowRef), so a check
+          that a width change has not pushed the docked 3D panel over its threshold has to be able
+          to read it -- without a marker it can only guess at an ancestor of the svg. Same
+          convention as data-ss-style-strip and data-ss-opt-tab; nothing in the app reads it. */}
       {!(show3D || adminCalPreview) && (
-      <div ref={canvasRowRef} style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 16 : 0, padding: "4px 0 0", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
+      <div ref={canvasRowRef} data-ss-canvas-row="" style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap: dock3D ? 16 : 0, padding: "4px 0 0", cursor: activeTool ? "crosshair" : dragging ? "grabbing" : "default" }}>
         {/* minWidth:0 is load-bearing: flex items default to min-width:auto and an
             SVG with height:auto has an intrinsic size, so without it this row
             overflows sideways instead of letting the plan shrink beside the panel. */}
