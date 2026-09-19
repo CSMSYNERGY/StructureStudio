@@ -329,8 +329,18 @@ try {
   ok("C: stored codes come back as two rows, common-code order", (await row(0).innerText()).includes("P0000000") && (await row(1).innerText()).includes("FR010000"));
   ok("C: the note is the plain note when SS mode and lookups are on", !/255, 251, 235/.test(await page.locator("[data-tax-note]").evaluate((el) => getComputedStyle(el).backgroundColor)));
   await row(1).getByRole("button", { name: "Change what it covers" }).click();
-  const doorsLabel = await row(1).locator("label").filter({ hasText: /^Doors/ }).innerText();
+  const doorsRow = row(1).locator("label").filter({ hasText: /^Doors/ });
+  const doorsLabel = await doorsRow.innerText();
   ok("C: Doors in the delivery row names the code it is under", doorsLabel.includes("under P0000000"), doorsLabel);
+  // Carolyn 2026-09-17 asked for taken items to grey out. DIMMED, NOT DISABLED: ticking one is
+  // the only one-click way to move it, and the move is asserted three lines below.
+  const doorsColor = await doorsRow.evaluate((el) => getComputedStyle(el).color);
+  ok("C: a taken item is greyed", /148, 163, 184/.test(doorsColor), doorsColor);
+  const doorsTitle = await doorsRow.getAttribute("title");
+  ok("C: …and its title says it moves rather than refuses", doorsTitle === "Currently under P0000000. Ticking this moves it here.", String(doorsTitle));
+  const freeColor = await row(1).locator("label").filter({ hasText: /^Foundation/ }).evaluate((el) => getComputedStyle(el).color);
+  ok("C: an item nothing else covers is NOT greyed", !/148, 163, 184/.test(freeColor), freeColor);
+  ok("C: the greyed checkbox is still enabled", await checkbox(row(1), "Doors").isEnabled());
   await checkbox(row(1), "Doors").check();
   await page.waitForTimeout(200);
   ok("C: Doors left the P0000000 row", !(await row(0).innerText()).includes("Doors"));
