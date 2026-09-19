@@ -3631,9 +3631,13 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       //
       // What was wrong was the sentence. Before 248, wallet_hold could not tell this apart from
       // a concurrent press and said "a 3D generation is already running - wait for it to
-      // finish", forever, for a generation that finished and was charged for. This says the
-      // true thing instead, and names the one act that recovers the draft: it is on the ledger
-      // row, so reopening the Designer reads it back.
+      // finish", forever, for a generation that finished and was charged for.
+      //
+      // ⚠️ AND THE DRAFT REALLY IS LOST, so the message must not pretend otherwise. It is on
+      // the ledger row, but nothing reads it back: openCalEditor seeds from building_styles.d3,
+      // which is only written on Save. So the honest answer is what it costs to try again, said
+      // before they press rather than after. (Recovering `drafted` from the row would be a new
+      // read action and a real improvement; it is not this fix.)
       //
       // No capture and no release: there is no live hold here, only a posted row.
       if (err === "hold_replayed") {
@@ -3644,7 +3648,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
           context: { shapeFirst, ledgerRow: ledgerRow?.id ?? null },
         });
         return json({
-          error: "This generation has already been paid for and finished - we just could not get the answer back to you. Close the Designer and open it again to pick it up; you have not been charged twice.",
+          error: "We already charged you for this generation and could not get the answer back to you, so the draft is gone. You have NOT been charged twice - this press took no money. Reload this page before pressing Generate again, or it will keep refusing; the next press will be a new charge.",
           code: "already_charged",
         }, 409);
       }

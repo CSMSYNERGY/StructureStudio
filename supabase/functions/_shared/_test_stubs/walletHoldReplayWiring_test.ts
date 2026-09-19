@@ -88,9 +88,14 @@ Deno.test("⚠️ a paid-and-lost press is told the truth, not that something is
   const i = SRC.indexOf(`if (err === "hold_replayed")`);
   assert(i > 0, "portal-settings handles the new code");
   const branch = SRC.slice(i, SRC.indexOf("\n      }", i));
-  assert(branch.includes("already been paid for and finished"), "it says the money was taken");
-  assert(branch.includes("you have not been charged twice"), "and that it was taken once");
-  assert(branch.includes("open it again to pick it up"), "and names the act that recovers the draft");
+  assert(branch.includes("We already charged you for this generation"), "it says the money was taken");
+  assert(branch.includes("NOT been charged twice"), "and that this press took none");
+  // ⚠️ IT MUST NOT PROMISE THE DRAFT BACK. It is on the ledger row, but openCalEditor seeds
+  // from building_styles.d3, which is only written on Save -- so nothing reads it back and a
+  // message saying "reopen the Designer to pick it up" would be false.
+  assert(branch.includes("the draft is gone"), "and does not pretend the draft can be recovered");
+  assert(branch.includes("Reload this page"), "and names what actually clears the stuck key");
+  assert(branch.includes("the next press will be a new charge"), "and what that costs, before they press it");
   assert(!/already running/.test(branch), "and never the concurrency sentence, which is the defect");
   assert(branch.includes(", 409)"), "still a refusal");
   assert(branch.includes(`code: "already_charged"`), "with a code a browser can branch on");
