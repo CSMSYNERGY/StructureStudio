@@ -4086,9 +4086,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     const { data: swRow, error: swErr } = await admin.from("client_settings")
       .select("ai_style_self_check").eq("client_id", clientId).maybeSingle();
     if (swErr) {
+      // ⚠️ THIS IS THE ROW A DEPLOY-BEFORE-247 PRODUCES, not the claim's. Migration 247 adds
+      // `client_settings.ai_style_self_check` in the same file as the eight ai_style_calls
+      // columns, and this select is the FIRST statement in this action to reach the database --
+      // so with 247 unapplied PostgREST refuses it here and the claim below is never issued.
+      // The migration is therefore named in this message, where it will be read, as well as in
+      // the claim's. Anything watching for a bad deploy should grep
+      // `code like 'ai_selfcheck%'` rather than any one of them.
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_switch_unreadable",
-        message: `Could not read ai_style_self_check, skipping the check: ${swErr.message}`,
+        message: `Could not read ai_style_self_check, skipping the check; migration 247 may not be applied: ${swErr.message}`,
       });
       return skipped("switch_unreadable", "The check could not run just now - review the draft yourself.");
     }
@@ -4123,12 +4130,16 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       .is("self_check_at", null).gt("called_at", since)
       .select("drafted, dims").maybeSingle();
     if (claimErr) {
-      // The likeliest cause by far is that migration 247 has not been applied: `self_check_at`
-      // is the claim, so without the column this action cannot run at all — which is the safe
-      // failure, and the reason nothing below needs its own missing-column guard.
+      // A transient database fault: a dropped connection, a statement timeout, a permission
+      // change. NOT the 247 tell, despite what this comment used to say — the kill-switch read
+      // above names a column 247 adds and runs first, so an unapplied migration never reaches
+      // this statement. The paid path says it too, earlier and on every generation, in
+      // `ai_style_dims_write_failed`. Either way the failure is safe: without the column this
+      // action cannot run at all, which is why nothing below needs its own missing-column
+      // guard.
       await logEdgeError({
         fn: "portal-settings", req, clientId, code: "ai_selfcheck_claim_failed",
-        message: `Could not claim the check for this generation; migration 247 may not be applied: ${claimErr.message}`,
+        message: `Could not claim the check for this generation: ${claimErr.message}`,
       });
       return skipped("unavailable", "The check could not run just now - review the draft yourself.");
     }

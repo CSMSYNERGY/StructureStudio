@@ -70,6 +70,31 @@ assert(
 assertEquals(BLOCK.split(".update(").length - 1, 1, "exactly one write: a second would be a second claim");
 assert(BLOCK.includes("409"), "no row back is a refusal, not a silent skip");
 
+// ── AND WHICH ROW A DEPLOY-BEFORE-247 ACTUALLY PRODUCES ───────────────────────────────────
+// Migration 247 adds `client_settings.ai_style_self_check` in the same file as the eight
+// ai_style_calls columns, and the kill-switch read is the FIRST statement in this action to
+// reach the database. So with 247 unapplied PostgREST refuses THERE, this claim is never
+// issued, and `ai_selfcheck_claim_failed` cannot be the signal however plausible it reads --
+// which is what the code comment, this test's own next case and the handover all used to say.
+// Both halves are pinned: the ordering, and that the row which DOES fire names the migration.
+const SWITCH = '.select("ai_style_self_check")';
+assert(SRC.includes(SWITCH), "the kill switch is still read from client_settings");
+assertEquals(SRC.split(SWITCH).length - 1, 1, "and there is exactly one such read to reason about");
+assert(SRC.indexOf(SWITCH) < i, "it is read BEFORE the claim, which is what makes it the 247 tell");
+const near = (code: string) => {
+  const at = SRC.indexOf(`code: "${code}"`);
+  assert(at > 0, `${code} is still logged somewhere`);
+  return SRC.slice(at, at + 400);
+};
+assert(
+  near("ai_selfcheck_switch_unreadable").includes("migration 247 may not be applied"),
+  "so the switch-unreadable row has to name migration 247 -- it is the one an operator will see",
+);
+assert(
+  !near("ai_selfcheck_claim_failed").includes("migration 247"),
+  "and the claim's row must NOT name it: that row can only ever be a transient database fault",
+);
+
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
 
@@ -220,13 +245,18 @@ Deno.test("⚠️ another tenant's generation refuses, and so does another style
 });
 
 Deno.test("⚠️ a claim that ERRORS skips the check rather than running it unclaimed", async () => {
-  // The likeliest cause is migration 247 not being applied: `self_check_at` IS the claim, so
-  // without the column the action cannot run at all. That is the safe failure, and it is why
-  // nothing further down needs its own missing-column guard — but only if the handler stops
-  // here instead of carrying on to the model call.
+  // A transient database fault — a dropped connection, a statement timeout, a permission
+  // change. What matters is that the handler STOPS here rather than carrying on to the model
+  // call with the row unclaimed, which would be a second free vision call on one ledger row.
+  //
+  // NOT an unapplied migration 247, which this case used to claim and used to seed itself
+  // with. The kill-switch read above the claim names `client_settings.ai_style_self_check`,
+  // which 247 adds in the same file, and it is the first statement in the action to reach the
+  // database — so a missing 247 is refused there and never reaches this statement at all. The
+  // injected failure below is a plain connection fault for that reason.
   const r = await runClaim({
     rows: [freshRow()],
-    fail: "column ai_style_calls.self_check_at does not exist",
+    fail: "canceling statement due to statement timeout",
   });
   assert(!r.fellThrough, "it does not reach the model");
   assertEquals(r.skipped, "unavailable", "and it answers as a skipped check, not a failed generation");
