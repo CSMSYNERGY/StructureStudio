@@ -96,6 +96,10 @@ const checkCalls = [];
 // Flipped by the script to steer what the stubbed second call answers.
 let checkReply = null;
 let checkStatus = 200;
+// The sibling of the 409: no reply at all. A network failure and the browser's own 60 s abort
+// both raise FunctionsFetchError, whose `.context` is an Error rather than a Response — so the
+// body-reading path throws and the vendor's fixed string is all that is left.
+let checkAbort = false;
 let draftOverhang = 1.0;
 // Steered by the script for the no-pairs case: a first pass that produced no usable labels,
 // which is the state the warning banner exists for and the one where it had no way out.
@@ -195,6 +199,7 @@ async function main() {
       }
       if (a === "calibrate_style_check") {
         checkCalls.push(body);
+        if (checkAbort) return route.abort();
         return json(route, checkReply, checkStatus);
       }
       if (a === "save_style_d3") return json(route, { ok: true });
@@ -699,6 +704,25 @@ async function main() {
     after409.includes("We couldn't run our own check this time") && after409.includes("You were charged once, as usual"));
   r.ok("the raw supabase-js wording never reaches the builder",
     !/non-2xx status code/i.test(after409));
+
+  // ── AND NEITHER DOES THE SIBLING CASE, WHICH HAS NO BODY TO READ ──────────────────────
+  // A dropped connection, or the 60 s client abort, raises FunctionsFetchError: `.context` is
+  // the underlying Error and not a Response, so reading the body throws and `error.message` is
+  // the vendor's own fixed string. The panel renders `note` verbatim under its friendly line,
+  // so "Failed to send a request to the Edge Function" was landing on the screen a builder
+  // reaches after spending $20. Same rule as the 409 above, applied to the case with nothing
+  // to read.
+  checkAbort = true;
+  await press();
+  checkAbort = false;
+  const afterAbort = await text();
+  r.ok("⚠️ AN UNREACHABLE CHECK STILL LEAVES THE BUILDER THEIR DRAFT AND THEIR PAIRS",
+    (await page.evaluate(() => document.querySelectorAll("[data-ssc-pair]").length)) === 3);
+  r.ok("and it says the CHECK could not run",
+    afterAbort.includes("We couldn't run our own check this time") && afterAbort.includes("You were charged once, as usual"));
+  r.ok("⚠️ AND THE VENDOR'S OWN SENTENCE NEVER REACHES THE SCREEN",
+    !/Failed to send a request to the Edge Function/i.test(afterAbort),
+    (afterAbort.match(/[^\n]*Edge Function[^\n]*/) || ["none"])[0]);
 
   // ── 8: 375 px ─────────────────────────────────────────────────────────────────────────
   await page.setViewportSize({ width: 375, height: 900 });

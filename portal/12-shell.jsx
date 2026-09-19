@@ -1676,10 +1676,24 @@ function Dashboard({ session }) {
       // FunctionsHttpError whose response has to be read for it, so a caller that only looked
       // at error.message would report "Edge Function returned a non-2xx status code" to a
       // builder for what is usually "that generation has already been checked".
+      //
+      // ⚠️ AND THE SIBLING CASE, which has no body to read at all. A network failure or the
+      // 60 s abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
+      // not a Response — so `.json()` throws, `said` stays empty, and `error.message` is the
+      // vendor's own fixed string, "Failed to send a request to the Edge Function". The panel
+      // renders `note` verbatim under its friendly line, so that sentence landed on the screen
+      // a builder reaches after spending $20. The 409 branch three lines up exists precisely so
+      // vendor wording never gets there; this is the same rule applied to its sibling.
+      //
+      // Matched against the class strings rather than sniffed from the error name: supabase-js
+      // has exactly three and all three are jargon a builder cannot act on. FunctionsRelayError
+      // DOES carry a Response, but a relay body has no `error` key, so it leaks the same way.
       if (error) {
         let said = "";
         try { said = ((await error.context.json()) || {}).error || ""; } catch (_e) { said = ""; }
-        return { ok: false, verdict: "failed", reason: "unreachable", note: said || error.message || "The check could not run.", changed: [], d3: null };
+        const vendor = /^(Failed to send a request to the Edge Function|Relay Error invoking the Edge Function|Edge Function returned a non-2xx status code)$/;
+        const mine = error.message && !vendor.test(error.message) ? error.message : "";
+        return { ok: false, verdict: "failed", reason: "unreachable", note: said || mine, changed: [], d3: null };
       }
       if (!data || !data.ok) {
         return { ok: false, verdict: "failed", reason: "refused", note: (data && data.error) || "The check could not run.", changed: [], d3: null };
