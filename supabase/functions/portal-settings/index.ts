@@ -3800,6 +3800,19 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return failed;
     }
 
+    // ── HOW THE OVERHANG IS FRAMED: NOT ASKED FOR, AND NOT WRITTEN DOWN EITHER ─────────
+    // Neither prompt mentions overhangStyle, and that is the point rather than an oversight.
+    // The walk-around camera never leaves the ground (VIDEO_SHAPE_PROMPT says so in its own
+    // second numbered point), so the roof is only ever a silhouette — and a notched tail is an
+    // UNDERSIDE distinction, the one thing that viewpoint cannot show. Ask for it and the model
+    // answers anyway, from nothing.
+    //
+    // A first cut derived it from the overhang HERE and set it on the sanitised spec. That is
+    // deleted: the overhang the model DID read off the silhouette is already stored, and
+    // d3OverhangStyle derives the framing from it in the renderer every time it draws. Writing
+    // the derived answer into the draft would freeze it, after which a builder correcting the
+    // overhang in the calibration panel would no longer re-frame the eave.
+
     // ── CAPTURE ────────────────────────────────────────────────────────────────────
     // Token usage was previously PARSED AND DISCARDED. Storing it is what makes "do tell
     // me how much it does use" (Carolyn, 2026-08-24) answerable from one query instead of
