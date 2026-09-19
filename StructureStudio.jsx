@@ -8649,22 +8649,30 @@ const SS_SHOT = { W: 896, H: 672, Q: 0.8, EYE_FT: 5.3, FOV: 60, EAVE_FOV: 38, MA
 // scale, and the design rejected a tighter crop (20.7 % of pixels moved, and meaningless to
 // read) for having nothing in frame but roof.
 const SS_EAVE_FRAME_WALLS = 1.27;
-// How far off the wall's own normal the eave camera stands, and this number was MEASURED on
-// this repo's own renderer rather than chosen. Flat on, the roof edge is a horizontal line
-// with no depth and an inch of overhang is an inch of line; from an angle it is a ledge.
+// How far off the wall's own normal the eave camera stands, and this number was MEASURED
+// rather than chosen. Flat on, the roof edge is a horizontal line with no depth and an inch
+// of overhang is an inch of line; from an angle it is a visible ledge.
 //
-// Method: one 16 x 24 gambrel with 9 ft walls, rendered at 896 x 672, overhang moved from
-// 0.15 to 1.0 ft with every other field held. Percentage of pixels that moved:
+// Method: one 16 x 24 gambrel with 9 ft walls, overhang moved from 0.15 to 1.0 ft and every
+// other field held, rendered THROUGH THIS FUNCTION at 896 x 672 and the changed pixels
+// counted. tests/harness/calSelfCheck.mjs re-takes the middle column of this table on every
+// run and fails if the eave camera stops being the best place to see the eave.
 //
-//     front  1.43 · side 2.30 · corner 1.05        <- the wide views, where it is not checkable
-//     eave at yaw 0 4.64 · 10 4.91 · 15 5.17 · 20 5.27 · 25 5.21 · 30 5.18 · 48.6 3.26
+//     yaw       0     10     20     30    48.6      | the wide views, for scale
+//     eave  10.39  10.92  13.42  15.09   14.78      | front 9.09 · side 6.46 · corner n/a
 //
-// Two findings. The plateau is broad, so this is not a knife edge. And the design's own
-// camera sat 48.6 degrees off the wall, which measures WORSE than any of 10..30 — the eave
-// starts disappearing behind its own foreshortening — as well as being half a right angle
-// away from the frame it is about to be shown beside. 20 is the measured peak and the
-// closest to the builder's own angle of the values that tie with it.
-const SS_EAVE_YAW_DEG = 20;
+// ⚠️ MEASURED TWICE, ON TWO RENDERERS, WITH DIFFERENT ANSWERS — worth recording because the
+// first one nearly shipped. A scratch probe through the docked panel (sky dome, shadow map,
+// its own lighting) put the peak at 20 and called 48.6 markedly worse; the numbers above,
+// taken through the off-screen path that actually ships, put the peak at 30 with 48.6 close
+// behind. The shapes disagree and the reason is not established. Believe the one that goes
+// in the request.
+//
+// 30, then: the measured best, and still inside the band where a pair reads as a fair
+// comparison — which matters because this render is about to be shown beside the builder's
+// own frame of the same wall and they are going to be asked whether the two match. The
+// design's own camera sat at 48.6, half a right angle away, for no measurable gain.
+const SS_EAVE_YAW_DEG = 30;
 // The four the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS holds.
 // Order matters: it is the order the pairs are shown in and the order the request is built in.
 const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner"];
