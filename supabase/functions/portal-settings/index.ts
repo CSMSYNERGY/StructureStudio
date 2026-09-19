@@ -9041,7 +9041,7 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
 
     let pdfUrl = inv.invoice_pdf_url as string | null;
     try {
-      const pdfBytes = await buildQuotePdf({
+      let pdfBytes = await buildQuotePdf({
         docKind: "invoice",
         business: {
           name: String(csRes.data?.business_name ?? "").trim() || clientId,
@@ -9060,6 +9060,55 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         quoteTerms: csRes.data?.quote_terms ?? null,
         planPdfUrl: planUrl,
       });
+
+      // ── RE-APPEND THE ACCEPTANCE CERTIFICATE ───────────────────────────────────────
+      // This upload overwrites the SAME storage path customer-accept countersigned, so
+      // without this the first reissue after a signature silently replaces the signed
+      // invoice with an unsigned one — and a change order is the ordinary trigger, since
+      // the CO ack path never rebuilds the document itself and this action is the remedy
+      // it points at. The quote twin (regenerateQuotePdf) has always done this; the
+      // invoice is the document customers actually sign, so it matters more here.
+      // The LATEST revision is the one the rebuilt figures reflect: migration 213 writes
+      // one design_acceptances row per revision with subject='invoice' and revision=co_no.
+      const { data: acc } = await admin.from("design_acceptances")
+        .select("method, signer_name, typed_signature, signature_image_path, accepted_at, ip, consent_text, total")
+        .eq("client_id", clientId).eq("short_code", shortCode).eq("subject", "invoice")
+        .order("revision", { ascending: false }).limit(1).maybeSingle();
+      // Only a real signature earns a certificate page — the same rule the quote path
+      // states: a page asserting a typed signature over an empty name claims more than
+      // the customer did. Invoices are only ever drawn/typed today (customer-accept's
+      // click branch is quote-only), so this is a guard, not a filter.
+      if (acc && (acc.method === "drawn" || acc.method === "typed")) {
+        let signaturePng: Uint8Array | null = null;
+        if (acc.signature_image_path) {
+          try {
+            const dl = await admin.storage.from("signatures").download(String(acc.signature_image_path));
+            if (dl.data) signaturePng = new Uint8Array(await dl.data.arrayBuffer());
+          } catch (e) {
+            logEdgeError({
+              fn: "portal-settings", req, clientId, code: "invoice_signature_png_unreadable",
+              message: `reissue_invoice: signature image download failed: ${(e as Error).message}`,
+              context: { shortCode, path: String(acc.signature_image_path) },
+            }).catch(() => {});
+          }
+        }
+        // A failed embed must NOT be silent: the visible document would lose the
+        // countersign while design_acceptances still says it was signed.
+        pdfBytes = await appendAcceptancePage(pdfBytes, {
+          businessName: csRes.data?.business_name ?? null,
+          quoteNumber: String(inv.invoice_number),
+          total: acc.total == null ? null : Number(acc.total),
+          signerName: String(acc.signer_name ?? ""),
+          method: acc.method === "drawn" ? "drawn" : "typed",
+          signaturePng,
+          typedSignature: acc.typed_signature ?? null,
+          acceptedAtIso: String(acc.accepted_at ?? ""),
+          ip: acc.ip == null ? null : String(acc.ip),
+          consentText: String(acc.consent_text ?? ""),
+          docLabel: "Invoice",
+        });
+      }
+
       const pdfPath = `${clientId}/${shortCode}-invoice.pdf`;
       const up = await admin.storage.from("floor-plans")
         .upload(pdfPath, pdfBytes, FIXED_PATH_PDF_UPLOAD);
