@@ -1,5 +1,13 @@
 // dev/score-generator.mjs — the acceptance instrument for video-to-3D.
 //
+// ⚠️ WHAT IT CANNOT MEASURE, so a green table is never read as the bar being met:
+//   bar 2, "no run scores below its own first pass", needs the SECOND pass, and only
+//     --replay can supply it — the self-check runs in a browser against renders this script
+//     cannot produce, so a live pass here records the first read and nothing else. The
+//     footer says so in those words whenever no run carried one.
+//   bar 3, the refusal rate, has no runner at all: it needs the truth spec written into a
+//     ledger row's `drafted` and rendered, five times, which is a database write.
+//
 // It puts drafts in front of dev/score.mjs and prints the table. Three ways to get the
 // drafts, and the mode is always explicit because WHERE a draft came from is part of what
 // the number means:
@@ -247,7 +255,8 @@ async function replay(local, limit) {
   const r = await fetch(
     `${need("SUPABASE_URL")}/rest/v1/ai_style_calls?client_id=eq.${encodeURIComponent(local.client_id)}`
     + `&style_key=eq.${encodeURIComponent(local.style_value)}&drafted=not.is.null`
-    + `&order=called_at.desc&limit=${limit}&select=id,called_at,drafted,observed,frames,video_count,source,dims`,
+    + `&order=called_at.desc&limit=${limit}`
+    + "&select=id,called_at,drafted,observed,frames,video_count,source,dims,self_check_after,self_check_verdict",
     { headers: { apikey: svc, Authorization: `Bearer ${svc}` } },
   );
   if (!r.ok) throw new Error(`replay read failed: ${r.status}`);
@@ -256,6 +265,12 @@ async function replay(local, limit) {
   // Oldest first, so "run 1" means the same thing it means in a live pass.
   return rows.reverse().map((row) => ({
     drafted: row.drafted, observed: row.observed, source: row.source, dims: row.dims,
+    // THE SECOND PASS, when the row has one. `drafted` deliberately keeps the first read and
+    // `self_check_after` is written only when something actually moved, so a null here means
+    // the check ran and changed nothing, or did not run at all — either way the first pass IS
+    // the answer and there is nothing to compare it with. That is why the footer counts
+    // checked runs rather than assuming every row can answer bar 2.
+    after: row.self_check_after || null, verdict: row.self_check_verdict || null,
     label: `${String(row.called_at || "").slice(5, 16)}`,
   }));
 }
@@ -293,7 +308,7 @@ for (const e of entries) {
   }
   if (!runs.length) { console.log(`\n(no runs for ${e.name} in ${mode} mode - skipped)`); continue; }
   out.push(...scoreEntry(e.file, e, runs));
-  record.push({ file: e.file, name: e.name, mode, runs: runs.map((r) => ({ label: r.label, drafted: r.drafted, observed: r.observed, source: r.source, dims: r.dims })) });
+  record.push({ file: e.file, name: e.name, mode, runs: runs.map((r) => ({ label: r.label, drafted: r.drafted, observed: r.observed, source: r.source, dims: r.dims, after: r.after || null, verdict: r.verdict || null })) });
 }
 
 const headline = printFooter(out);

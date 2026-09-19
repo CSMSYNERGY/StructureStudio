@@ -539,6 +539,22 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
   if (entry.note) console.log(`   ${entry.note}`);
   console.log("");
 
+  // ⚠️ THE SECOND PASS, SCORED AGAINST THE SAME TRUTH. Acceptance bar 2 is "no run scores
+  // below its own first pass", it is BLOCKING and it outranks the mean — because the measured
+  // A/B says a check that corrects an already-good draft scores 70.5 against the 74.3 of not
+  // checking at all. Nothing in dev/ could compute it: scoreRun took one draft, and the replay
+  // select did not read the self-check columns. A run carries `after` when there is one; every
+  // mode that has none prints nothing extra and the table is exactly as it was.
+  const afterResults = runs.map((r) => (r.after
+    ? scoreRun({
+      truth: entry.truth, prior: priorSpec, draft: r.after,
+      source: r.source || source, dims: r.dims || entry.dims || null, observed: r.observed || null,
+      provenance,
+    })
+    : null));
+  const checked = afterResults.filter(Boolean).length;
+  const regressions = afterResults.filter((a, i) => a && a.match < results[i].match).length;
+
   const head = `${pad("field", 22)}${lpad("w", 3)}  ${pad("truth", 12)}${runs.map((r, i) => pad(r.label || `run ${i + 1}`, 22)).join("")}${lpad("spread", 8)}`;
   console.log(head);
   console.log("─".repeat(head.length));
@@ -560,7 +576,7 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
     console.log(`${pad(r0.id, 22)}${lpad(r0.w, 3)}  ${pad(fmt(r0.truth), 12)}${cells}${lpad(sp == null ? "-" : (flatWrong ? `${sp} flat!` : String(sp)), 8)}`);
   }
   console.log("─".repeat(head.length));
-  const line = (label, pick) => console.log(`${pad(label, 22)}${lpad("", 3)}  ${pad("", 12)}${results.map((r) => pad(pick(r), 22)).join("")}`);
+  const line = (label, pick) => console.log(`${pad(label, 22)}${lpad("", 3)}  ${pad("", 12)}${results.map((r, i) => pad(pick(r, i), 22)).join("")}`);
   line("MATCH /100", (r) => r.match);
   line("  shape", (r) => r.shape);
   line("  shape, no wall", (r) => r.shape_no_wall);
@@ -580,6 +596,19 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
       : "-"));
   }
   line("PASS?", (r) => (r.pass ? "PASS" : "FAIL"));
+  if (checked) {
+    console.log("");
+    line("AFTER THE CHECK", (r, i) => (afterResults[i] ? String(afterResults[i].match) : "· not checked"));
+    line("  verdict", (r, i) => (runs[i].verdict || (afterResults[i] ? "corrections" : "·")));
+    // The blocking comparison, per run, with its own word. A mean that improves while one run
+    // went backwards is the exact shape variant G measured, and it is invisible in an average.
+    line("  vs its first pass", (r, i) => {
+      const a = afterResults[i];
+      if (!a) return "-";
+      const d = round2(a.match - r.match);
+      return `${d > 0 ? "+" : ""}${d}${d < 0 ? "  REGRESSED" : ""}`;
+    });
+  }
   console.log("");
   // Per-run detail that does not fit a column. `wasted` is the answers the model spent on
   // fields nothing reads: free today (a gambrel's pitch changes no pixel) but they are prompt
@@ -603,7 +632,11 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
   // the first declared prior, which every corpus entry declares as the fresh style. The
   // other priors are diagnostics — scoring the same runs twice and averaging both would
   // count each building once for every prior somebody happened to add.
-  return { file, name: entry.name, prior: priorName, headline: priorIndex === 0, provenance: prov, gates: prov === "measured", mean, worst, results };
+  return {
+    file, name: entry.name, prior: priorName, headline: priorIndex === 0, provenance: prov,
+    gates: prov === "measured", mean, worst, results,
+    checked, regressions, afterResults,
+  };
 }
 
 // ─── THE HEADLINE ───────────────────────────────────────────────────────────────────────
@@ -612,6 +645,17 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
 // somebody added another building the model graded itself on, which is the exact failure
 // mode this footer exists to prevent. Non-gating rows are still printed — variance between
 // runs is real information — they just do not move the number anybody quotes.
+// The bar is stated as a MEDIAN over five runs ("median MATCH >= 85 and >= 3/5 PASS") and this
+// printed a mean. On five runs those are different numbers, and the one anybody quotes has to
+// be the one the bar is written in. The mean stays beside it — it is what every earlier run was
+// recorded as, and dropping it would break the comparison this instrument exists for.
+const medianOf = (xs) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return round2(s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2);
+};
+
 export function printFooter(out) {
   if (!out.length) return null;
   const gating = out.filter((b) => b.gates && b.headline);
@@ -627,11 +671,27 @@ export function printFooter(out) {
   if (gating.length) {
     const runs = gating.flatMap((b) => b.results);
     const mean = round2(runs.reduce((a, r) => a + r.match, 0) / runs.length);
+    const median = medianOf(runs.map((r) => r.match));
     const worst = round2(Math.min(...runs.map((r) => r.match)));
     const passed = runs.filter((r) => r.pass).length;
-    headline = { mean, worst, passed, total: runs.length, buildings: gating.length };
-    console.log(`GATING SCORE  ${mean} mean · ${worst} worst · ${passed}/${runs.length} runs would ship unedited`
+    const checked = gating.reduce((a, b) => a + (b.checked || 0), 0);
+    const regressions = gating.reduce((a, b) => a + (b.regressions || 0), 0);
+    headline = { mean, median, worst, passed, total: runs.length, buildings: gating.length, checked, regressions };
+    console.log(`GATING SCORE  ${median} median · ${mean} mean · ${worst} worst · ${passed}/${runs.length} runs would ship unedited`
       + `   (${gating.length} measured building${gating.length === 1 ? "" : "s"}, first-declared prior)`);
+    // ⚠️ THE BLOCKING GATE, SAID OUT LOUD OR SAID TO BE MISSING. Bar 2 outranks the mean, so a
+    // green table that never evaluated it is worse than a red one: it reads as the bar being
+    // met. Either this instrument saw the second pass and can answer, or it says it could not.
+    if (!checked) {
+      console.log("   ⚠️ BAR 2 NOT MEASURED: no run in this table carried a self_check_after, so");
+      console.log('      "no run scores below its own first pass" is unanswered. Only --replay over');
+      console.log("      real portal generations can answer it; --recorded and a live pass cannot.");
+    } else if (regressions) {
+      console.log(`   ⛔ BLOCKING: ${regressions} of ${checked} checked run(s) scored BELOW their own first pass.`);
+      console.log("      Bar 2 outranks the mean. One regression across five runs blocks the ship.");
+    } else {
+      console.log(`   ✓ bar 2: ${checked} checked run(s), none below its own first pass.`);
+    }
   } else {
     console.log("GATING SCORE  none — no building in this set has a MEASURED truth, so nothing here gates a release.");
   }
