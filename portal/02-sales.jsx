@@ -1756,6 +1756,11 @@ const CRM_RAIL_TONES = {
   delivery: { on: "#15803D", past: "#DCFCE7" },  // green -- the ladder ends in "Delivered"
 };
 const CRM_RAIL_IDLE = { bg: "#F1F5F9", fg: "#94A3B8" };
+// The chevron's notch, in ONE place. CrmChevronRail draws the real rail and
+// CrmRecordSkeleton draws its grey stand-in, and a skeleton whose geometry has drifted from
+// the thing it stands in for is worse than no skeleton: the page visibly re-cuts itself the
+// moment the data lands, which is the jump every skeleton here exists to prevent.
+const CRM_CHEVRON_CLIP = "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)";
 
 // ⚠️ idx === null is NOT STARTED, which is not stage zero -- every chevron stays idle
 // rather than filling the first one, because filling it would claim the building is in it.
@@ -1781,7 +1786,7 @@ function CrmChevronRail({ stages, idx = null, tone, title = null }) {
             flex: "1 1 90px", padding: "5px 10px", fontSize: 11, fontWeight: 700, textAlign: "center",
             background: idx == null ? CRM_RAIL_IDLE.bg : i < idx ? t.past : i === idx ? t.on : CRM_RAIL_IDLE.bg,
             color: idx == null ? CRM_RAIL_IDLE.fg : i === idx ? "#FFF" : i < idx ? t.on : CRM_RAIL_IDLE.fg,
-            clipPath: "polygon(0 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%, 0 100%, 8px 50%)",
+            clipPath: CRM_CHEVRON_CLIP,
           }}>
           {s.name}
         </div>
@@ -2199,6 +2204,91 @@ function QuoteSalesTaxCard({ clientId = null, shortCode, viewingLabel = null, to
   );
 }
 
+// ─── The record page's skeleton ───
+// Ahsan, 2026-09-20, opening a contact and a deal: "it takes too much time to open this …
+// add the skeleton card in here also." Until now this page was the one screen still sitting
+// on the word "Loading…" over a single empty card — the exact thing Carolyn complained about
+// on 2026-08-26 ("the page opens and there's nothing there") and that SkelBar/SkelRows were
+// built to answer everywhere else.
+//
+// ⚠️ IT DRAWS ONLY WHAT BOTH RECORDS ARE CERTAIN TO HAVE. Six CRM_SECTIONS carry
+// `when: () => true` (Summary, Details, Build schedule, Delivery schedule, Repairs,
+// Overview) and the tabbed card on the right is unconditional, so those two columns are
+// real. Deals/Orders (contact only), Person (design only) and Sales tax (needs an SS quote
+// number) are NOT claimed — a skeleton that overstates the answer is the thing skeletons
+// exist to avoid, and this page's shape varies more by kind than any other.
+//
+// ⚠️ THE CHEVRON RAIL IS DRAWN FOR A DESIGN ONLY. CrmStageBar renders unconditionally on a
+// deal, so a rail is certain there. On a CONTACT the rails appear only once a deal has been
+// picked, and nothing is picked on first paint (Carolyn 2026-09-02: "you have to have one of
+// these selected for anything to show up here") — so drawing one would promise a ladder that
+// never arrives. Blocks, not an idle CrmChevronRail: an idle rail carries the real stage
+// names and the words "Not started", which is a claim about this deal, not a placeholder.
+//
+// BACK IS THE REAL BUTTON. It is the one control that works before any data lands, and
+// somebody who clicked the wrong row should not have to wait out the load to leave. It is
+// also why this takes onBack rather than rendering a grey block in its place.
+//
+// No hooks here, deliberately — CrmRecord's own hook block carries three warnings about
+// what a hook near an early return does to this page, and a stateless skeleton cannot be
+// dragged into that.
+function CrmRecordSkeleton({ kind, onBack }) {
+  const card = { ...S.card, marginBottom: 10 };
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button style={{ ...S.btn("#FFF", ACCENT), border: "1px solid #E2E8F0" }} onClick={onBack}>Back</button>
+        <SkelBar w={210} h={17} />
+      </div>
+      {kind === "design" && (
+        <div style={{ display: "flex", gap: 2, flexWrap: "wrap", marginBottom: 12 }}>
+          {CRM_STAGES.map((s, i) => (
+            <SkelBar key={i} h={23} style={{ flex: "1 1 90px", borderRadius: 0, clipPath: CRM_CHEVRON_CLIP }} />
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* The section cards, same flex basis and same caps as the real column, so the page
+            does not re-flow into two columns when the data lands. Faded down the stack for
+            the reason SkelRows fades its rows: the eye reads it as "more below" rather than
+            as five equal pending things it has to keep track of. */}
+        <div style={{ flex: "1 1 260px", minWidth: 240, maxWidth: 360 }}>
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} style={{ ...card, opacity: 1 - i * 0.13 }}>
+              <SkelBar w={74} h={8} style={{ marginBottom: 11 }} />
+              <SkelBar w="88%" style={{ marginBottom: 7 }} />
+              <SkelBar w="64%" />
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: "3 1 420px", minWidth: 320 }}>
+          <div style={S.card}>
+            {/* The action bar. Six blocks because every record has at least that many tabs
+                after CRM_TABS' `when` filters run, and the widths vary the way real labels
+                do — a row of identical blocks reads as a loading bar, not as tabs. */}
+            <div style={{ display: "flex", gap: 3, flexWrap: "wrap", borderBottom: "1px solid #E2E8F0", paddingBottom: 7, marginBottom: 9 }}>
+              {[38, 56, 44, 34, 62, 48].map((w, i) => <SkelBar key={i} w={w} h={20} style={{ borderRadius: 6 }} />)}
+            </div>
+            <SkelBar w={54} h={9} style={{ marginBottom: 9 }} />
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 9 }}>
+              {[58, 46, 52, 40].map((w, i) => <SkelBar key={i} w={w} h={17} style={{ borderRadius: 999 }} />)}
+            </div>
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div key={i} style={{ display: "flex", gap: 9, padding: "7px 0", borderTop: "1px solid #F1F5F9", opacity: 1 - i * 0.13 }}>
+                <SkelBar w={8} h={8} style={{ borderRadius: 99, marginTop: 5, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <SkelBar w="46%" h={9} style={{ marginBottom: 6 }} />
+                  <SkelBar w="78%" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // The record page. One component, two contexts, driven entirely by the registries above.
 //
 // ⚠️ IT MAKES EXACTLY ONE FETCH, and never a direct sb.from(). designs/payments RLS is
@@ -2349,7 +2439,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
       </div>
     );
   }
-  if (!data) return <div style={S.card}>Loading…</div>;
+  if (!data) return <CrmRecordSkeleton kind={kind} onBack={onBack} />;
 
   const record = kind === "design" ? (data.designs || [])[0] : data.contact;
 
