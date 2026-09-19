@@ -324,11 +324,31 @@ export async function main() {
         });
         // The eave fascia over this lamp, if any: the lowest roof mesh bottom above the head's
         // footprint, among axis-aligned boxes (fascia / rake boards), and the head's clearance.
+        //
+        // ⚠️ MATCHED ON THICKNESS ONLY, NOT ON HEIGHT (2026-09-19). This used to also require
+        // height == D3_EAVE.FASCIA_H (0.4), which was safe for exactly as long as one eave
+        // framing existed. roof.overhangStyle added a second: a NOTCHED tail is cut back to the
+        // deck, so its fascia board is the remnant below the deck line — 0.203 ft at the shapes
+        // overhangNotch.mjs measures — and 0.4 stopped matching anything. The failure mode is
+        // the nasty one: the traverse simply never fires, fasciaBottom stays null, and the
+        // clearance check below fails with "fascia bottom ?" as though the roof had lost its
+        // fascia rather than the DETECTOR having gone blind. Nothing was wrong with the model.
+        //
+        // Thickness is the stable half of that signature: D3_EAVE.FASCIA_T is the board's own
+        // 0.14 ft and is framing-independent, while the height is now derived from the pitch and
+        // the overhang. Matching on it alone sees both framings, and the ±1 ft footprint filter
+        // just below is what actually scopes this to the boards over THIS lamp.
+        //
+        // Verified rather than assumed: with the notched default this fixture now gets (the
+        // stock 0.6 ft overhang derives "notched", D3.OVERHANG > 0.5), the flood light's head
+        // top is 7.461 and the notched fascia bottom is 7.746 — a 0.285 ft gap, inside the
+        // 0.2–0.35 band this check has always required. The lamp did not move and did not need
+        // to; only the board above it got shorter.
         let fasciaBottom = null;
         E.model.roofGroup.traverse((o) => {
           if (!o.isMesh || o.geometry.type !== "BoxGeometry") return;
           const p = o.geometry.parameters;
-          if (!(Math.abs(p.width - 0.14) < 0.001 && Math.abs(p.height - 0.4) < 0.001)) return;
+          if (!(Math.abs(p.width - 0.14) < 0.001)) return;
           const bb = new THREE.Box3().setFromObject(o);
           if (bb.max.x < head.min[0] - 1 || bb.min.x > head.max[0] + 1 || bb.max.z < head.min[2] - 1 || bb.min.z > head.max[2] + 1) return;
           fasciaBottom = fasciaBottom == null ? bb.min.y : Math.min(fasciaBottom, bb.min.y);
