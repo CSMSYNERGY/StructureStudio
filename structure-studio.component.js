@@ -8499,28 +8499,29 @@ function d3ConfigureRenderer(THREE, renderer) {
   renderer.toneMappingExposure = 1.15;
 }
 
-// A default 3/4 view of the building, rendered OFF-SCREEN, with no 3D modal involved.
+// ─── ONE MODEL BUILD, N CAMERA MOVES, OFF SCREEN (2026-09-19) ─────────────────────────────
+// The shared body of every off-screen shot this app takes. It was the inside of
+// renderDefault3DShot until the free self-check needed four views of the same building, and
+// it was lifted out rather than parameterised in place FOR A REASON WORTH WRITING DOWN:
+// renderDefault3DShot renders PAGE 2 OF THE CUSTOMER'S QUOTE PDF. Editing it to take a size,
+// a quality and a camera list would have changed every quote in the field the moment the
+// self-check wanted a different one of the three, and nothing on that path would have said so.
+// So the quote keeps its own function, its own 1200x900 and its own 0.9, a test pins all
+// three, and the new caller is a SIBLING that shares only the parts that are genuinely the same.
 //
-// WHY THIS EXISTS. The quote's 3D page and the customer's quote-card thumbnail only ever
-// appeared when someone had opened the 3D view and pressed "Use this view in my quote".
-// Most reps never do, so most customers received paperwork showing a floor plan and nothing
-// that looks like a building — the single most persuasive thing we can put in front of them.
-// This is the fallback, taken at submit time when no shot was armed.
+// WHY N CAMERAS OFF ONE BUILD rather than N calls. Measured on the design's own prototype: a
+// per-viewpoint render is 0.5-3 ms and the JPEG encode is 95-300 ms, while buildShed3DModel is
+// the expensive part. Four separate calls would pay the model build four times for nothing.
 //
-// It deliberately reuses the D3Viewer's OWN framing (34° lens, dist = R*3.66, the front
-// three-quarter OUT map keyed on frontWall) rather than inventing a camera: the fallback and
-// the hand-picked shot should look like the same product, and a second set of magic numbers
-// would drift from the first the next time either is tuned.
-//
-// Never throws — every caller treats a null as "no 3D page", which is exactly the behaviour
-// that shipped before this existed.
-async function renderDefault3DShot(p) {
+// It never throws. Every caller treats a null as "no shot", which is the behaviour that
+// shipped before any of this existed.
+async function d3OffscreenShots(p, opts) {
   let renderer = null;
   let model = null;
   let metalEnv = null;
   try {
     const { THREE } = await loadThree();
-    const W = 1200, H = 900;
+    const W = opts.w, H = opts.h;
     const cv = document.createElement("canvas");
     cv.width = W; cv.height = H;
     renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true });
@@ -8550,32 +8551,40 @@ async function renderDefault3DShot(p) {
     });
     scene.add(model.root);
     scene.add(new THREE.HemisphereLight(0xDCE9FF, 0x8D8573, 1.5));
-
-    const fw = p.frontWall || "south";
-    const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
-    const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
-    const dist = R * 3.66;
-    const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
-    const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+    // ONE SUN, MOVED PER SHOT, always behind the camera. `renderer.shadowMap` is never enabled
+    // on this path, so it casts nothing — which is the property the self-check needs: a cast
+    // shadow under the roof edge is exactly what a model reads as an overhang, and a light
+    // that manufactured one would make the eave check answer confidently about our lighting.
     const sun = new THREE.DirectionalLight(0xFFF3E0, 2.6);
-    sun.position.set(camX * 0.8, dist * 0.9, camZ * 0.8);
     scene.add(sun);
-    const camera = new THREE.PerspectiveCamera(34, W / H, 0.1, dist * 10);
-    camera.position.set(camX, dist * 0.5, camZ);
-    camera.lookAt(0, D3.WALL_H * 0.45, 0);
 
-    renderer.render(scene, camera);
-    // Catalog fixture photos (a door's real photo on its slab) load asynchronously. Reading
-    // the canvas before they land ships a building with blank doors, so wait the same
-    // bounded 1.5s the shutter waits and re-render if any arrived.
-    if (d3FixtureTexturesPending() > 0) {
-      await d3WaitFixtureTextures(1500);
+    const cams = opts.cameras(p) || [];
+    if (!cams.length) return null;
+    const out = [];
+    // The fixture-photo wait happens ONCE for the whole set, not once per shot: the textures
+    // are shared across the scene, so the second camera cannot be waiting on anything the
+    // first one did not already get.
+    let waited = false;
+    for (const c of cams) {
+      const camera = new THREE.PerspectiveCamera(c.fov, W / H, 0.1, c.far);
+      camera.position.set(c.eye[0], c.eye[1], c.eye[2]);
+      camera.lookAt(c.at[0], c.at[1], c.at[2]);
+      sun.position.set(c.sun[0], c.sun[1], c.sun[2]);
       renderer.render(scene, camera);
+      // Catalog fixture photos (a door's real photo on its slab) load asynchronously. Reading
+      // the canvas before they land ships a building with blank doors, so wait the same
+      // bounded 1.5s the shutter waits and re-render if any arrived.
+      if (!waited && d3FixtureTexturesPending() > 0) {
+        waited = true;
+        await d3WaitFixtureTextures(1500);
+        renderer.render(scene, camera);
+      }
+      const url = cv.toDataURL("image/jpeg", opts.quality);
+      // A lost context yields "data:," — treat that as no snapshot rather than a broken page.
+      if (!url || url.length < 512) return null;
+      out.push({ ...c, url, w: W, h: H });
     }
-    const url = cv.toDataURL("image/jpeg", 0.9);
-    // A lost context yields "data:," — treat that as no snapshot rather than a broken page.
-    if (!url || url.length < 512) return null;
-    return { url, w: W, h: H };
+    return out;
   } catch (_e) {
     return null;
   } finally {
@@ -8585,6 +8594,262 @@ async function renderDefault3DShot(p) {
       try { renderer.dispose(); if (renderer.forceContextLoss) renderer.forceContextLoss(); } catch (_e) { /* context already gone */ }
     }
   }
+}
+
+// The quote's own camera, unchanged: the D3Viewer's framing (34° lens, dist = R*3.66, the front
+// three-quarter OUT map keyed on frontWall) rather than an invented one, so the fallback shot
+// and the hand-picked one look like the same product.
+function d3DefaultShotCamera(p) {
+  const fw = p.frontWall || "south";
+  const OUT = { north: [0.35, -1], south: [0.35, 1], west: [-1, 0.35], east: [1, 0.35] }[fw] || [0.35, 1];
+  const R = Math.max(p.bldgW, p.bldgH) * 0.5 + D3.WALL_H;
+  const dist = R * 3.66;
+  const outLen = Math.sqrt(OUT[0] * OUT[0] + OUT[1] * OUT[1]);
+  const camX = (OUT[0] / outLen) * dist, camZ = (OUT[1] / outLen) * dist;
+  return [{
+    fov: 34, far: dist * 10,
+    eye: [camX, dist * 0.5, camZ],
+    at: [0, D3.WALL_H * 0.45, 0],
+    sun: [camX * 0.8, dist * 0.9, camZ * 0.8],
+  }];
+}
+
+// A default 3/4 view of the building, rendered OFF-SCREEN, with no 3D modal involved.
+//
+// WHY THIS EXISTS. The quote's 3D page and the customer's quote-card thumbnail only ever
+// appeared when someone had opened the 3D view and pressed "Use this view in my quote".
+// Most reps never do, so most customers received paperwork showing a floor plan and nothing
+// that looks like a building — the single most persuasive thing we can put in front of them.
+// This is the fallback, taken at submit time when no shot was armed.
+//
+// ⚠️ 1200 × 900 AT JPEG 0.9 ARE THE QUOTE PDF'S NUMBERS AND A TEST PINS THEM
+// (_test_stubs/selfCheckShots_test.ts). The self-check renders at 896 × 672 / 0.80 and wanted
+// four cameras; changing them here would have silently re-cut every customer's quote. That is
+// why renderSelfCheckShots below is a sibling and not a flag on this function.
+//
+// Never throws — every caller treats a null as "no 3D page", which is exactly the behaviour
+// that shipped before this existed.
+async function renderDefault3DShot(p) {
+  const shots = await d3OffscreenShots(p, { w: 1200, h: 900, quality: 0.9, cameras: d3DefaultShotCamera });
+  if (!shots || !shots[0]) return null;
+  return { url: shots[0].url, w: shots[0].w, h: shots[0].h };
+}
+
+// ─── THE SELF-CHECK'S OWN CAMERAS (2026-09-19) ────────────────────────────────────────────
+// 896 × 672 at JPEG 0.80, because the design measured the same one-field error at 1280, 1024,
+// 896, 768, 640 and 512 px and the signal is FLAT (9.07 / 9.05 / 9.07 / 9.09 / 9.09 / 9.16 %
+// of pixels changed). Resolution is not what makes an error visible; the CAMERA is. 896 is
+// where the roof edge is still a few clean pixels and bytes have stopped buying confidence.
+//
+// EYE HEIGHT 5.3 ft, and it is not cosmetic. The builder's half of every pair is a phone held
+// at chest height. Put a panel camera at 8–14 ft beside it and the comparison looks wrong for
+// a reason that has nothing to do with the model — the design's own render drivers already
+// encode a person as `[W/2 + 12, 5.3, …]`. Get this right and a 30° azimuth error still reads
+// as a fair comparison; get it wrong and a perfect azimuth does not.
+const SS_SHOT = { W: 896, H: 672, Q: 0.8, EYE_FT: 5.3, FOV: 60, EAVE_FOV: 38, MARGIN: 1.12 };
+// How tall the eave shot's frame is, in wall heights. 1.27 puts the whole wall in shot with
+// the roof edge near the top and sky above it — the wall is what gives a few inches of roof a
+// scale, and the design rejected a tighter crop (20.7 % of pixels moved, and meaningless to
+// read) for having nothing in frame but roof.
+const SS_EAVE_FRAME_WALLS = 1.27;
+// How far off the wall's own normal the eave camera stands, and this number was MEASURED on
+// this repo's own renderer rather than chosen. Flat on, the roof edge is a horizontal line
+// with no depth and an inch of overhang is an inch of line; from an angle it is a ledge.
+//
+// Method: one 16 x 24 gambrel with 9 ft walls, rendered at 896 x 672, overhang moved from
+// 0.15 to 1.0 ft with every other field held. Percentage of pixels that moved:
+//
+//     front  1.43 · side 2.30 · corner 1.05        <- the wide views, where it is not checkable
+//     eave at yaw 0 4.64 · 10 4.91 · 15 5.17 · 20 5.27 · 25 5.21 · 30 5.18 · 48.6 3.26
+//
+// Two findings. The plateau is broad, so this is not a knife edge. And the design's own
+// camera sat 48.6 degrees off the wall, which measures WORSE than any of 10..30 — the eave
+// starts disappearing behind its own foreshortening — as well as being half a right angle
+// away from the frame it is about to be shown beside. 20 is the measured peak and the
+// closest to the builder's own angle of the values that tie with it.
+const SS_EAVE_YAW_DEG = 20;
+// The four the first pass labels, and the same list the server's SELF_CHECK_VIEWPOINTS holds.
+// Order matters: it is the order the pairs are shown in and the order the request is built in.
+const SS_SELFCHECK_VIEWS = ["front", "side", "eaveCorner", "corner"];
+
+// ⚠️ WHERE AZIMUTH 0 POINTS, and this is the one number that has to agree with the prompt or
+// every pair is mirrored. The prompt says: "0 is square in front of the gable end the door is
+// on. Going from there around the building toward its RIGHT side, 90 is square to the
+// right-hand long side, 180 is square at the far gable end, and 270 is square to the left-hand
+// long side. Right and left are as seen from outside facing the doors."
+//
+// In world terms the renderer's out-directions are south [0, 1], east [1, 0], north [0, -1],
+// west [-1, 0] (renderDefault3DShot's own OUT map). Standing outside the SOUTH wall facing the
+// doors you look along -z, and your right hand points at +x — east. So with the front gable end
+// at south, azimuth A comes out as [sin A, cos A] and the four cardinals land exactly where the
+// prompt puts them. Every other front wall is the same function rotated by that wall's own
+// azimuth, which is what this table is.
+const D3_WALL_AZIMUTH = { south: 0, east: 90, north: 180, west: 270 };
+function ssAzimuthDir(deg) {
+  const r = (deg * Math.PI) / 180;
+  return [Math.sin(r), Math.cos(r)];
+}
+// Which wall the model's azimuth 0 is looking at. Derived through d3RoofAxes rather than
+// restated, so it cannot drift from where the renderer actually puts the porch: this is
+// d3ProjectingPorch's own wall arithmetic with the depth test taken out, because the anchor
+// exists whether or not the porch does.
+function d3FrontGableWall(roofCfg, bldgW, bldgH) {
+  const front = ((roofCfg && roofCfg.porchEnd) || "front") !== "back";
+  return d3RoofAxes(roofCfg, bldgW, bldgH).uAxisIsX ? (front ? "south" : "north") : (front ? "west" : "east");
+}
+
+// How far back the camera has to stand for the whole building to fit, solved rather than
+// guessed. The old way — a constant times the biggest dimension — is fine for one fixed
+// three-quarter view and wrong for an arbitrary azimuth on a 10 × 40: the same distance that
+// frames the gable end crops half the length off the side view, and a builder comparing a
+// cropped render against their own photo reads it as a wrong model.
+//
+// Exact for a pinhole camera with no roll, which is what lookAt gives when the eye and the
+// target sit in the same vertical plane. Bisected rather than solved in closed form because
+// the pitch moves with the distance, and forty halvings of a bracket is cheaper to read than
+// the quadratic.
+function ssFitDistance(f) {
+  const vHalf = Math.tan((f.fovDeg / 2) * Math.PI / 180) / SS_SHOT.MARGIN;
+  const hHalf = vHalf * (SS_SHOT.W / SS_SHOT.H);
+  // A point at horizontal distance `hx` in front of the eye and height `y`, tested in camera
+  // space: `z` is its depth along the view axis and `vy` its offset up the film plane.
+  const fits = (d) => {
+    const pitch = Math.atan2(f.lookY - f.eyeY, d);
+    const fx = Math.cos(pitch), fy = Math.sin(pitch);
+    const pts = [[d - f.depthHalf, 0], [d + f.depthHalf, 0], [d, f.peak], [d - f.depthHalf, f.peak]];
+    for (let i = 0; i < pts.length; i++) {
+      const hx = pts[i][0], dy = pts[i][1] - f.eyeY;
+      if (hx <= 0.5) return false;
+      const z = hx * fx + dy * fy;
+      if (z <= 0.5) return false;
+      if (Math.abs(dy * fx - hx * fy) > z * vHalf) return false;
+    }
+    // The widest part of the footprint sits at the NEAR face, which is where it subtends most.
+    const zNear = Math.max(0.5, d - f.depthHalf);
+    return f.crossHalf <= zNear * hHalf;
+  };
+  let hi = f.depthHalf + 2;
+  for (let i = 0; i < 40 && !fits(hi); i++) hi *= 1.3;
+  let lo = f.depthHalf + 0.5;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (fits(mid)) hi = mid; else lo = mid;
+  }
+  return hi;
+}
+
+// The cameras for one self-check, one per viewpoint the FIRST pass labelled — and no others.
+//
+// ⚠️ THE CAMERA FOLLOWS THE LABEL; IT NEVER LEADS IT. The obvious design fixes four cameras
+// and then hunts a frame for each, and it cannot work on a real lap: the measured azimuths of
+// one eight-frame walk are 0, 111, 149, 218, 272, 294, 332, 358°, four of the eight sit in the
+// last quadrant, and there is no clean head-on at the back at all. Against the best uniform
+// orbit model those frames are off by a mean of 37° and a max of 66°, which is more than a
+// corner — so a fixed camera would pair a head-on wall against a corner view and make a
+// correct model look wrong. The model labels the frame; the render is aimed at the label.
+//
+// A viewpoint with no label gets NO CAMERA. Nothing here invents an angle, and nothing here
+// substitutes one frame for another: the frame index and the azimuth arrive together from
+// parseFrameMap or not at all.
+function ssSelfCheckCameras(p, frameMap) {
+  if (!frameMap) return [];
+  const W = Math.max(1, Number(p.bldgW) || 0);
+  const L = Math.max(1, Number(p.bldgH) || 0);
+  const spec = p.style3d || {};
+  const roof = spec.roof || null;
+  const H = Math.max(1, Number(spec.wallHeightFt) || D3.WALL_H);
+  const off = D3_WALL_AZIMUTH[d3FrontGableWall(roof, W, L)] || 0;
+  // The top of the roof, generously: 0.62 of the profile span above the wall covers a 12:12
+  // gable and every gambrel the sanitiser will pass. Over-estimating costs a little air above
+  // the ridge; under-estimating crops the peak, which is one of the four things the builder is
+  // being asked to judge.
+  const peak = H + d3RoofAxes(roof, W, L).S * 0.62;
+  const out = [];
+  for (let i = 0; i < SS_SELFCHECK_VIEWS.length; i++) {
+    const view = SS_SELFCHECK_VIEWS[i];
+    const pick = frameMap[view];
+    if (!pick) continue;
+    const frame = Math.floor(Number(pick.frame));
+    const azRaw = Number(pick.azimuthDeg);
+    if (!(frame >= 1) || !isFinite(azRaw)) continue;
+    const az = ((azRaw % 360) + 360) % 360;
+    const dir = ssAzimuthDir(az + off);
+    // The footprint's half-extents along the view axis and across it. `|dx| * W/2 + |dz| * L/2`
+    // is the support function of the rectangle, so this is right at 45° as well as at 0.
+    const depthHalf = Math.abs(dir[0]) * W / 2 + Math.abs(dir[1]) * L / 2;
+    const crossHalf = Math.abs(dir[1]) * W / 2 + Math.abs(dir[0]) * L / 2;
+    const eyeY = SS_SHOT.EYE_FT;
+    out.push(view === "eaveCorner"
+      ? ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az)
+      : ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view));
+  }
+  return out;
+}
+
+// The three wide views: where a person filming would have stood, at the angle they stood at.
+function ssWalkCamera(dir, H, peak, depthHalf, crossHalf, eyeY, frame, az, view) {
+  const lookY = peak * 0.45;
+  const dist = ssFitDistance({ depthHalf, crossHalf, peak, eyeY, lookY, fovDeg: SS_SHOT.FOV });
+  const ex = dir[0] * dist, ez = dir[1] * dist;
+  return {
+    viewpoint: view, frame, azimuthDeg: az, fov: SS_SHOT.FOV, far: dist * 10,
+    eye: [ex, eyeY, ez], at: [0, lookY, 0],
+    sun: [ex * 0.8, dist * 0.9, ez * 0.8],
+  };
+}
+
+// THE EAVE CAMERA, and it is the load-bearing one. The design measured the overhang error
+// (0.15 → 1.0 ft, one field, nothing else changed) at 9.07 % of pixels from a close corner view
+// against a 3.18 % floor, and at 3.75 % against a 2.29 % floor from the wide head-on — which is
+// to say the overhang is simply not checkable from the wide views. It is also the field the
+// model has never once got right in nineteen recorded generations, so without this camera the
+// self-check cannot fix the thing it most needs to fix.
+//
+// Kept as FIXED GEOMETRY, per the brief, but expressed relative to the azimuth the model gave
+// rather than to a hard-coded back corner: on the one lap we have measured, the only frame
+// where the flush eave is unambiguous is near the FRONT, and the back of that lot is where the
+// sun flare and the neighbouring sheds are. So the shape of the shot is fixed and where it is
+// pointed is not.
+//
+// The numbers reproduce the design's own camera on a 16 × 24 with 9 ft walls to within 2 %,
+// re-derived from what the shot is FOR so that they scale: the eye-to-target run is whatever
+// makes the frame about 1.27 wall heights tall at this lens, the target sits on the roof edge
+// rather than on the building's centre, and the yaw off the wall puts the eave in perspective
+// instead of flat on, which is what gives a few inches of roof somewhere to go.
+function ssEaveCamera(dir, W, L, H, peak, depthHalf, crossHalf, frame, az) {
+  const tan = [dir[1], -dir[0]];
+  const tanHalf = Math.abs(tan[0]) * W / 2 + Math.abs(tan[1]) * L / 2;
+  const reach = (SS_EAVE_FRAME_WALLS * H) / (2 * Math.tan((SS_SHOT.EAVE_FOV / 2) * Math.PI / 180));
+  const drop = 0.33 * H;
+  const run = Math.sqrt(Math.max(1, reach * reach - drop * drop));
+  const yaw = (SS_EAVE_YAW_DEG * Math.PI) / 180;
+  // The aim point: on the roof edge, three quarters of the way along the wall from the camera's
+  // end, so the eave runs from the near corner into the frame rather than sitting across it.
+  const tx = dir[0] * depthHalf * 0.85 + tan[0] * -0.875 * tanHalf;
+  const tz = dir[1] * depthHalf * 0.85 + tan[1] * -0.875 * tanHalf;
+  const ty = H * 1.02;
+  const ex = tx + dir[0] * run * Math.cos(yaw) + tan[0] * -run * Math.sin(yaw);
+  const ez = tz + dir[1] * run * Math.cos(yaw) + tan[1] * -run * Math.sin(yaw);
+  const ey = H * 0.69;
+  const far = Math.max(reach, depthHalf + crossHalf + peak) * 10;
+  return {
+    viewpoint: "eaveCorner", frame, azimuthDeg: az, fov: SS_SHOT.EAVE_FOV, far,
+    eye: [ex, ey, ez], at: [tx, ty, tz],
+    sun: [ex * 0.8 + 1, Math.max(peak, reach), ez * 0.8 + 1],
+  };
+}
+
+// Render the draft the builder just paid for, from the angles their own frames were shot at.
+// A sibling of renderDefault3DShot, sharing d3OffscreenShots and NOTHING ELSE — see that
+// function's header for why the quote path is not parameterised.
+//
+// Returns [{ viewpoint, frame, azimuthDeg, url }] in SS_SELFCHECK_VIEWS order, or null. The
+// caller strips the data: prefix; the server sniffs the bytes for JPEG's start-of-image marker
+// and refuses anything else, so the quality argument here is not a suggestion.
+async function renderSelfCheckShots(p, frameMap) {
+  const cams = ssSelfCheckCameras(p, frameMap);
+  if (!cams.length) return null;
+  return await d3OffscreenShots(p, { w: SS_SHOT.W, h: SS_SHOT.H, quality: SS_SHOT.Q, cameras: () => cams });
 }
 
 // Free every geometry/material a buildShed3DModel() group holds — Three.js
