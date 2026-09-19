@@ -71,6 +71,8 @@ const styleValue = opt("style");
 if (!styleValue) { console.error("refusing: pass --style <the style key the generation used>"); process.exit(2); }
 // score-generator's rail, repeated here for the same reason: an explicit tenant that has to
 // match the environment is what stops this being pointed at a real builder by a stale shell.
+// It is HALF the rail on its own — see the `status` echo below, which is the half that asks
+// the server where the session actually landed rather than comparing two of our own strings.
 const tenant = need("SCORING_TENANT_ID");
 if (opt("tenant") !== tenant) { console.error("refusing: pass --tenant explicitly and it must equal SCORING_TENANT_ID"); process.exit(2); }
 
@@ -123,9 +125,26 @@ function expect(name, got, want) {
 
 const token = await portalToken();
 
+// ⚠️ WHICH TENANT IS THIS SESSION ON? Nothing in a request body answers that: portal-settings
+// resolves the tenant from `client_users` for the account SCORING_USER_EMAIL names, so
+// `--tenant` and SCORING_TENANT_ID are two strings the server never reads. The self-check claim
+// is scoped `.eq("client_id", …)` server-side, so a wrong tenant here answers 409 rather than
+// burning a real builder's one free check — but a rail that cannot say WHICH tenant it proved
+// anything about is not a rail. `status` echoes the resolved id; refuse if it disagrees.
+const statusEcho = await post(token, { action: "status" });
+if (statusEcho.status !== 200 || !statusEcho.body?.clientId) {
+  console.error(`could not read the session's tenant: ${statusEcho.status} ${JSON.stringify(statusEcho.body).slice(0, 200)}`);
+  process.exit(1);
+}
+if (String(statusEcho.body.clientId) !== tenant) {
+  console.error(`refusing: SCORING_USER_EMAIL's session resolves to tenant "${statusEcho.body.clientId}", not "${tenant}".`);
+  console.error("   Every request below would be answered about that tenant, not the scoring one.");
+  process.exit(2);
+}
+
 // The style's OWN stored images, read back through the catalog the panel reads. These are what
 // the whitelist will accept, so a rail that needs a real pair has to use them.
-const catalog = await post(token, { action: "catalog", clientId: tenant });
+const catalog = await post(token, { action: "catalog" });
 if (catalog.status !== 200) { console.error(`catalog failed: ${catalog.status}`); process.exit(1); }
 const style = (catalog.body?.styles || []).find((s) => s.key === styleValue || s.value === styleValue);
 if (!style) { console.error(`no style "${styleValue}" on this tenant`); process.exit(2); }
@@ -139,36 +158,36 @@ const render = (viewpoint, frame, base64 = STUB_JPEG) => ({ viewpoint, frame, ba
 console.log("RAILS (free — nothing below reaches the model)\n");
 
 expect("a checkId that is not a uuid is a 400, not a database fault",
-  await post(token, { action: "calibrate_style_check", clientId: tenant, styleValue, checkId: "nope", photoUrls: own, renders: [render("front", 1)] }),
+  await post(token, { action: "calibrate_style_check", styleValue, checkId: "nope", photoUrls: own, renders: [render("front", 1)] }),
   (r) => r.status === 400 && /checkId/.test(r.body?.error || ""));
 
 expect("no photoUrls is refused by name",
-  await post(token, { action: "calibrate_style_check", clientId: tenant, styleValue, checkId: NOWHERE, renders: [render("front", 1)] }),
+  await post(token, { action: "calibrate_style_check", styleValue, checkId: NOWHERE, renders: [render("front", 1)] }),
   (r) => r.status === 400 && /photoUrls/.test(r.body?.error || ""));
 
 expect("seven renders are refused, not sliced to four",
   await post(token, {
-    action: "calibrate_style_check", clientId: tenant, styleValue, checkId: NOWHERE, photoUrls: own,
+    action: "calibrate_style_check", styleValue, checkId: NOWHERE, photoUrls: own,
     renders: ["front", "side", "eaveCorner", "corner", "front", "side", "corner"].map((v, i) => render(v, (i % own.length) + 1)),
   }),
   (r) => r.status === 400 && /at most 4/.test(r.body?.error || ""));
 
 expect("a PNG is refused however it is labelled",
   await post(token, {
-    action: "calibrate_style_check", clientId: tenant, styleValue, checkId: NOWHERE, photoUrls: own,
+    action: "calibrate_style_check", styleValue, checkId: NOWHERE, photoUrls: own,
     renders: [{ viewpoint: "front", frame: 1, base64: NOT_A_JPEG }],
   }),
   (r) => r.status === 400 && /not a JPEG/.test(r.body?.error || ""));
 
 expect("⚠️ a URL the style does not own is dropped, so nothing pairs and the check is skipped",
   await post(token, {
-    action: "calibrate_style_check", clientId: tenant, styleValue, checkId: NOWHERE,
+    action: "calibrate_style_check", styleValue, checkId: NOWHERE,
     photoUrls: ["https://example.invalid/not-ours.jpg"], renders: [render("front", 1)],
   }),
   (r) => r.status === 200 && r.body?.verdict === "skipped" && r.body?.reason === "no_frames");
 
 const claim = await post(token, {
-  action: "calibrate_style_check", clientId: tenant, styleValue, checkId: NOWHERE,
+  action: "calibrate_style_check", styleValue, checkId: NOWHERE,
   photoUrls: own, renders: [render("front", 1)],
 });
 expect("⚠️ THE CLAIM: a generation that does not exist is a 409, with no model call",
@@ -200,7 +219,7 @@ if (live) {
 
   const t0 = Date.now();
   const first = await post(token, {
-    action: "calibrate_style_check", clientId: tenant, styleValue,
+    action: "calibrate_style_check", styleValue,
     checkId: inputs.checkId, photoUrls: inputs.photoUrls, renders,
   });
   console.log(`   ${Date.now() - t0} ms  status ${first.status}`);
@@ -212,7 +231,7 @@ if (live) {
   // one paid generation buys exactly one free check, and the row is what remembers.
   expect("⚠️ SINGLE-USE: the same generation cannot be checked twice",
     await post(token, {
-      action: "calibrate_style_check", clientId: tenant, styleValue,
+      action: "calibrate_style_check", styleValue,
       checkId: inputs.checkId, photoUrls: inputs.photoUrls, renders,
     }),
     (r) => r.status === 409 && r.body?.code === "check_unavailable");

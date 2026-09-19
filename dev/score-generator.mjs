@@ -23,7 +23,7 @@
 //                that has to send `dims` — a pass without them measures the OLD prompt.
 //
 //   node dev/score-generator.mjs --recorded
-//   node dev/score-generator.mjs --replay --runs 5
+//   node dev/score-generator.mjs --replay --tenant "$SCORING_TENANT_ID" --runs 5
 //   node dev/score-generator.mjs --tenant "$SCORING_TENANT_ID" --runs 3 --yes
 //   node dev/score-generator.mjs --preflight        (the drift check on its own)
 //
@@ -73,15 +73,30 @@
 // anywhere, and the token dies in an hour. SCORING_USER_EMAIL is a real portal user with
 // settings_structures edit on ONE tenant that exists for this purpose and sells nothing.
 //
-// ─── WHAT A LIVE RUN COSTS, AND THE TWO RAILS ───────────────────────────────────────────
+// ─── WHAT A LIVE RUN COSTS, AND THE THREE RAILS ─────────────────────────────────────────
 // TODAY: nothing but Anthropic tokens. usage_prices video_3d_generation is active=false, so
 // wallet_hold returns meter_inactive, holdId stays null and the generation runs free.
 // THE DAY THAT BOOLEAN FLIPS, a 12-building x 3-run pass becomes 36 x $20 = $720 of holds.
-//   RAIL 1  refuses to start unless --tenant matches SCORING_TENANT_ID from the environment,
-//           so a typo cannot bill a real builder. (Environment, not a constant: the repo is
-//           public, so an allow-list here would publish a tenant id.)
-//   RAIL 2  prints the price the meter would charge and the run's total BEFORE the first
-//           call, and stops there without --yes.
+//   RAIL 1  refuses to start unless --tenant matches SCORING_TENANT_ID from the environment
+//           AND every corpus sidecar names that same tenant. (Environment, not a constant:
+//           the repo is public, so an allow-list here would publish a tenant id.) It covers
+//           --replay too, because a replay reads one tenant's recorded history and a live
+//           pass generates on another — a before/after across the two is a comparison of two
+//           different rulers, which is the exact failure the preflight above exists to stop.
+//   RAIL 2  ⚠️ ASKS THE SERVER WHICH TENANT IT RESOLVED, and refuses unless it is the same
+//           one. This is the only rail that can answer the question that decides where the
+//           money lands. NOTHING IN THE REQUEST BODY SELECTS A TENANT: portal-settings
+//           resolves it from `client_users` for the session minted from SCORING_USER_EMAIL
+//           (resolveTenant.ts), so `--tenant`, SCORING_TENANT_ID and the sidecar's client_id
+//           are three strings the server never reads. A stale or borrowed SCORING_USER_EMAIL
+//           put every hold, every ai_style_calls row and every daily-cap slot on whichever
+//           tenant that account belongs to, and both of the other rails passed while it
+//           happened. `action: "status"` echoes the resolved tenant — the same tripwire
+//           portal/01-core.jsx already keys on — so the session is minted and questioned
+//           BEFORE --yes is accepted, not after.
+//   RAIL 3  prints the price the meter would charge and the run's total BEFORE the first
+//           call, naming the tenant the server echoed rather than the one we typed, and
+//           stops there without --yes.
 // Serial, never parallel: wallet_hold returns hold_in_flight for a second concurrent
 // generation on one tenant, and ai_style_daily_cap is per tenant per 24h - a 36-run pass
 // needs the scoring tenant's cap raised or the pass split across days.
@@ -149,14 +164,20 @@ if (!entries.length) { console.error(`no corpus entries in ${corpusDir}`); proce
 
 const mode = args.recorded ? "recorded" : args.replay ? "replay" : "live";
 
-// RAIL 1, and it goes before everything else in live mode: it is the one that stops a typo
-// billing a real builder, so nothing — not even reading the corpus sidecars — happens ahead
-// of it. RAIL 2 (the cost and the --yes gate) comes after the sidecar check, so a run that
-// is going to fail on a missing file says so on the first attempt rather than the second.
-if (mode === "live") {
-  const tenant = need("SCORING_TENANT_ID");
-  if (!args.tenant) { console.error("refusing: pass --tenant explicitly, and it must equal SCORING_TENANT_ID"); process.exit(2); }
-  if (args.tenant !== tenant) { console.error("refusing: --tenant is not the scoring tenant"); process.exit(2); }
+// RAIL 1, and it goes before everything else in any mode that touches the live database: it
+// is the one that stops a typo billing a real builder, so nothing — not even reading the
+// corpus sidecars — happens ahead of it. RAIL 3 (the cost and the --yes gate) comes after the
+// sidecar check, so a run that is going to fail on a missing file says so on the first attempt
+// rather than the second.
+//
+// --replay IS COVERED, and that is not tidiness. It reads ai_style_calls for the sidecar's
+// client_id with the service-role key, which reaches any tenant in the project; an unguarded
+// replay against tenant A beside a live pass on tenant B is the two-rulers comparison the
+// preflight above refuses in the other direction. --recorded reads nothing and is exempt.
+const scoringTenant = mode === "recorded" ? null : need("SCORING_TENANT_ID");
+if (mode !== "recorded") {
+  if (!args.tenant) { console.error(`refusing: pass --tenant explicitly in ${mode} mode, and it must equal SCORING_TENANT_ID`); process.exit(2); }
+  if (args.tenant !== scoringTenant) { console.error("refusing: --tenant is not the scoring tenant"); process.exit(2); }
 }
 
 // Both non-recorded modes need the sidecar. Refused up front, by name, rather than three
@@ -168,6 +189,17 @@ if (mode !== "recorded") {
     for (const m of missing) console.error(`   ${m.localPath}`);
     console.error('   { "client_id": "...", "style_value": "...", "frames": ["https://...", ...],');
     console.error('     "dims": { "widthFt": 16, "lengthFt": 24, "wallHeightFt": 9 } }');
+    process.exit(2);
+  }
+  // THE SECOND HALF OF RAIL 1. `client_id` is the id --replay reads history for, and the
+  // tenant whose style the pinned frames belong to; a sidecar naming a different one is a
+  // different building's history scored as this one's. Compared by name so the message says
+  // which file is wrong rather than "refusing".
+  const foreign = entries.filter((e) => String(e.local.client_id) !== String(scoringTenant));
+  if (foreign.length) {
+    console.error("refusing: these sidecars name a tenant that is not SCORING_TENANT_ID:");
+    for (const f of foreign) console.error(`   ${f.localPath}`);
+    console.error("   --replay would read that tenant's ledger, and a live pass would score its frames.");
     process.exit(2);
   }
 }
@@ -209,6 +241,30 @@ async function portalToken() {
   return sess.access_token;
 }
 
+// ⚠️ RAIL 2: WHICH WALLET IS THIS SESSION? `status` returns the tenant resolveTenant picked for
+// the caller, which is the id every costing line in calibrate_style_ai keys on — the daily-cap
+// read, the ai_style_calls insert and wallet_hold. Asking is the only way to know: the request
+// body cannot select a tenant, so nothing this script types is capable of being wrong in a way
+// the server would notice.
+//
+// It is also the only rail that catches a DUPLICATE client_users row. resolveTenant's lookup is
+// `.limit(1)` with no ORDER BY and its own comment records duplicates as a real condition, so a
+// scoring account linked to two tenants can resolve differently between runs. That cannot be
+// prevented from here; it can be seen, and a run that sees it stops.
+async function resolvedTenant(token) {
+  const r = await fetch(`${need("SUPABASE_URL")}/functions/v1/portal-settings`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, apikey: need("SUPABASE_ANON_KEY"), "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "status" }),
+  });
+  let body = null;
+  try { body = await r.json(); } catch { /* a non-JSON body is itself the finding */ }
+  if (!r.ok || !body?.clientId) {
+    throw new Error(`could not read the session's tenant (${r.status}): ${JSON.stringify(body).slice(0, 200)}`);
+  }
+  return String(body.clientId);
+}
+
 // One generation, exactly the call the panel makes.
 async function generate(token, entry, n) {
   const local = entry.local;
@@ -223,7 +279,10 @@ async function generate(token, entry, n) {
     headers: { Authorization: `Bearer ${token}`, apikey: need("SUPABASE_ANON_KEY"), "Content-Type": "application/json" },
     body: JSON.stringify({
       action: "calibrate_style_ai",
-      clientId: local.client_id,
+      // NO `clientId` HERE, DELIBERATELY. It used to ride along and read like a tenant
+      // selector; portal-settings never looks at it (the only body-derived tenant is
+      // `targetClientId`, for operator view-as). A key that looks like it aims the money and
+      // does not is worse than no key: RAIL 2 above is what actually knows where this lands.
       styleValue: local.style_value,          // only labels the ledger row; it selects nothing
       source: entry.source || "video",        // "video" | "combined" | "photos"
       photoUrls: frames,                      // PINNED in the sidecar, walk order first
@@ -275,46 +334,67 @@ async function replay(local, limit) {
   }));
 }
 
-// ─── RAIL 2, before anything is spent ───────────────────────────────────────────────────
-if (mode === "live") {
-  const total = entries.length * runsWanted;
-  console.log(`about to run ${entries.length} building(s) x ${runsWanted} = ${total} live generations on the scoring tenant`);
-  for (const e of entries) {
-    const d = dimOf(e);
-    console.log(`   ${e.name}: measured against ${d.widthFt} x ${d.lengthFt} ft, ${d.wallHeightFt} ft walls`);
-  }
-  console.log(`if the meter is ARMED this holds $${(total * 20).toFixed(2)}. Re-run with --yes to proceed.`);
-  if (!args.yes) process.exit(0);
-}
-
+// ─── RAILS 2 AND 3, before anything is spent ────────────────────────────────────────────
+// The session is minted HERE, above the --yes gate, and questioned before the cost is even
+// printed. It used to be minted after the operator had already authorised the spend, which
+// made the one fact that decides where the money goes unavailable at the moment of deciding.
 const token = mode === "live" ? await portalToken() : null;
-
-const out = [];
-const record = [];
-for (const e of entries) {
-  let runs = [];
-  if (mode === "recorded") {
-    // ALL of them unless --runs says otherwise: the pinned set is the whole recorded history
-    // for that building, and silently dropping the fourth and fifth run would change what the
-    // "before" number means depending on a flag nobody passed.
-    runs = (e.runs || []).slice(0, runsGiven ? runsWanted : Infinity).map((r, i) => ({ ...r, label: `run ${i + 1}` }));
-  } else if (mode === "replay") {
-    runs = await replay(e.local, runsWanted);
+// ⚠️ NO process.exit() PAST THIS LINE. Once a request has gone out, exiting explicitly aborts
+// inside libuv on Windows + Node 24 — "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+// and an exit code of 127 — while undici still holds the keep-alive socket. A rail that
+// refuses correctly and then dies with somebody else's crash message reads as the rail being
+// broken. So the rails set `stop` and the code, and the script falls off the end instead;
+// natural exit is immediate (the sockets are unref'd) and quiet.
+let stop = false;
+if (mode === "live") {
+  const resolved = await resolvedTenant(token);
+  if (resolved !== args.tenant) {
+    console.error(`refusing: SCORING_USER_EMAIL's session resolves to tenant "${resolved}", not "${args.tenant}".`);
+    console.error("   That is the tenant this pass would hold money against, write ai_style_calls rows on");
+    console.error("   and spend daily-cap slots from. Point SCORING_USER_EMAIL at the scoring tenant's own");
+    console.error("   portal user, or check for a duplicate client_users row for that account.");
+    process.exitCode = 2;
+    stop = true;
   } else {
-    for (let i = 0; i < runsWanted; i++) {
-      const body = await generate(token, e, i + 1);   // SERIAL: wallet_hold refuses a second one
-      runs.push({ drafted: body.d3, observed: body.observed, source: e.source || "video", dims: body.dims || null, label: `run ${i + 1}` });
+    const total = entries.length * runsWanted;
+    console.log(`about to run ${entries.length} building(s) x ${runsWanted} = ${total} live generations on tenant ${resolved} (the server's own answer, not the flag)`);
+    for (const e of entries) {
+      const d = dimOf(e);
+      console.log(`   ${e.name}: measured against ${d.widthFt} x ${d.lengthFt} ft, ${d.wallHeightFt} ft walls`);
     }
+    console.log(`if the meter is ARMED this holds $${(total * 20).toFixed(2)}. Re-run with --yes to proceed.`);
+    if (!args.yes) stop = true;
   }
-  if (!runs.length) { console.log(`\n(no runs for ${e.name} in ${mode} mode - skipped)`); continue; }
-  out.push(...scoreEntry(e.file, e, runs));
-  record.push({ file: e.file, name: e.name, mode, runs: runs.map((r) => ({ label: r.label, drafted: r.drafted, observed: r.observed, source: r.source, dims: r.dims, after: r.after || null, verdict: r.verdict || null })) });
 }
 
-const headline = printFooter(out);
+if (!stop) {
+  const out = [];
+  const record = [];
+  for (const e of entries) {
+    let runs = [];
+    if (mode === "recorded") {
+      // ALL of them unless --runs says otherwise: the pinned set is the whole recorded history
+      // for that building, and silently dropping the fourth and fifth run would change what the
+      // "before" number means depending on a flag nobody passed.
+      runs = (e.runs || []).slice(0, runsGiven ? runsWanted : Infinity).map((r, i) => ({ ...r, label: `run ${i + 1}` }));
+    } else if (mode === "replay") {
+      runs = await replay(e.local, runsWanted);
+    } else {
+      for (let i = 0; i < runsWanted; i++) {
+        const body = await generate(token, e, i + 1);   // SERIAL: wallet_hold refuses a second one
+        runs.push({ drafted: body.d3, observed: body.observed, source: e.source || "video", dims: body.dims || null, label: `run ${i + 1}` });
+      }
+    }
+    if (!runs.length) { console.log(`\n(no runs for ${e.name} in ${mode} mode - skipped)`); continue; }
+    out.push(...scoreEntry(e.file, e, runs));
+    record.push({ file: e.file, name: e.name, mode, runs: runs.map((r) => ({ label: r.label, drafted: r.drafted, observed: r.observed, source: r.source, dims: r.dims, after: r.after || null, verdict: r.verdict || null })) });
+  }
 
-mkdirSync("dev/score-runs", { recursive: true });
-const stamp = `${new Date().toISOString().slice(0, 10)}-${mode}`;
-const path = join("dev/score-runs", `${stamp}.json`);
-writeFileSync(path, JSON.stringify({ at: new Date().toISOString(), mode, headline, buildings: record, scored: out }, null, 1));
-console.log(`wrote ${path}`);
+  const headline = printFooter(out);
+
+  mkdirSync("dev/score-runs", { recursive: true });
+  const stamp = `${new Date().toISOString().slice(0, 10)}-${mode}`;
+  const path = join("dev/score-runs", `${stamp}.json`);
+  writeFileSync(path, JSON.stringify({ at: new Date().toISOString(), mode, headline, buildings: record, scored: out }, null, 1));
+  console.log(`wrote ${path}`);
+}
