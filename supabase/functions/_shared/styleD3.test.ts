@@ -2145,3 +2145,68 @@ Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing
     assert(!(SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} must never be applicable`);
   }
 });
+
+Deno.test("⚠️ the prompt states the wall the RENDER was drawn at, not the one that was typed", () => {
+  // parseKnownDims accepts 3..20 and sanitizeD3Spec clamps to the 5..14 the renderer can draw,
+  // so a measured 16 is DRAWN at 14. The prompt then tells the model "every render you are
+  // shown was drawn at exactly these dimensions" and step 1 converts a fraction of that wall
+  // into feet — so stating the 16 makes every length it reads off a render long by 16/14, in
+  // the same direction, on the one field this pass exists to fix.
+  const typed: KnownDims = { widthFt: 30, lengthFt: 40, wallHeightFt: 16 };
+  const drawn = cleanSpec(applyKnownDims({ ...DRAFT }, typed));
+  assertEquals(drawn.wallHeightFt, 14, "the fixture really is clamped");
+  const p = selfCheckPrompt({ dims: typed, draft: drawn, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("wall height at the eave: 14 ft"), "the wall as DRAWN");
+  assert(!p.includes("16 ft"), "and the typed 16 appears nowhere");
+  assert(p.includes("on a 14 ft wall is about"), "step 1 converts against the drawn wall");
+  assert(p.includes("   14/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
+  // Width and length never clamp, so they are stated exactly as typed.
+  assert(p.includes("building size: 30 ft wide by 40 ft long"), "the size is untouched");
+  // The unclamped case is unchanged, which is every ordinary building.
+  const ok = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(ok.includes("wall height at the eave: 9 ft"), "a wall inside the band still reads as typed");
+});
+
+Deno.test("⚠️ a builder who MEASURED the eave does not have it re-measured from a photograph", () => {
+  // The overhang chip is optional: null is "read it off the video", a number is a tape measure.
+  // applyKnownDims has already written it into the draft, so a check that re-reads it off a
+  // frame overwrites the measurement — on the field the prompt spends its longest step on,
+  // with the chip on the card still showing the builder's own answer afterwards.
+  const measured: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 16 };
+  const draft = cleanSpec(applyKnownDims({ ...DRAFT }, measured));
+  assertEquals(draft.roof.overhang, 16 / 12, "the fixture carries the builder's eave");
+
+  const p = selfCheckPrompt({ dims: measured, draft, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("eave overhang: 16 in past the wall"), "it is stated as a measured fact");
+  assert(p.includes("THE BUILDER MEASURED THIS ONE TOO"), "and step 1 says so instead of asking");
+  assert(!p.includes("Do not settle on 1.0 ft"), "the re-measuring instruction is gone");
+  assert(p.includes("Never return wallHeightFt, sizeFt, colors or siding or roof.overhang."),
+    "and the rules put it beside the other measured fields");
+
+  // THE GATE, not just the wording: a model that returns it anyway is dropped.
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.15 } },
+    changed: [{ field: "roof.overhang", from: 1.33, to: 0.15, why: "flush in the close-up" }],
+    checked: {}, note: "",
+  });
+  const applied = applySelfCheck(draft, read, measured);
+  assert(applied.ok, "the merge is buildable");
+  assertEquals((applied as { d3: D3Spec }).d3.roof.overhang, 16 / 12, "the builder's eave stands");
+  assertEquals((applied as { dropped: string[] }).dropped, ["roof.overhang"], "and the correction is recorded as dropped");
+  assertEquals((applied as { changed: unknown[] }).changed.length, 0, "so nothing is reported as changed");
+
+  // WITHOUT a measured eave — the default, and every call production's older bundle makes —
+  // the field is still the check's to correct. That is the whole point of the eave camera.
+  const guessed: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+  const p2 = selfCheckPrompt({ dims: guessed, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(!p2.includes("eave overhang:"), "nothing is claimed about an eave nobody measured");
+  assert(p2.includes("Do not settle on 1.0 ft"), "and step 1 asks for it as before");
+  const applied2 = applySelfCheck(CLEAN, read, guessed);
+  assert(applied2.ok, "and so is the unmeasured one");
+  assertEquals((applied2 as { d3: D3Spec }).d3.roof.overhang, 0.15, "the correction lands");
+  // Two arguments, the shape every existing caller uses, behaves the same as no dims.
+  const applied3 = applySelfCheck(CLEAN, read);
+  assert(applied3.ok, "and the two-argument call");
+  assertEquals((applied3 as { d3: D3Spec }).d3.roof.overhang, 0.15, "and so does the two-argument call");
+});

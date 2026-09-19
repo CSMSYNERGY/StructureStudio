@@ -1148,7 +1148,29 @@ export function selfCheckPrompt(opts: {
   const views = SELF_CHECK_VIEWPOINTS.filter((v) => opts.viewpoints.includes(v));
   const overhang = num((draft.roof ?? {})["overhang"]);
   const eave = overhang === null ? "not set" : `${dimFt(overhang)} ft`;
-  const wall = dimFt(dims.wallHeightFt);
+  // ⚠️ THE WALL THE RENDER WAS DRAWN AT, NOT THE ONE THAT WAS TYPED. parseKnownDims accepts a
+  // measured wall of 3..20 ft and sanitizeD3Spec then CLAMPS it to the 5..14 the renderer can
+  // draw, so a builder who measured 16 has a draft -- and therefore a set of renders -- with a
+  // 14 ft wall in them. Stating the 16 here would tell the model that "every render you are
+  // shown was drawn at exactly these dimensions" over pictures of a wall an eighth shorter,
+  // and step 1 turns a fraction of that wall into feet: every length it read off a render
+  // would be long by the same ratio, in the same direction, on roof.overhang -- the field this
+  // whole pass exists to fix. Step 3 is worse still, because it asks whether the gambrel rises
+  // are absorbing a wall difference, and the clamp is exactly such a difference.
+  //
+  // Width and length never clamp -- they are the ruler for this reading and are never stored --
+  // so they stay as typed. The builder is told about the clamp separately, by knownDimsNote.
+  const wall = dimFt(num(draft.wallHeightFt) ?? dims.wallHeightFt);
+  // ⚠️ AND THE EAVE, WHERE THE BUILDER MEASURED IT. `overhangIn` is an optional chip on the
+  // dimensions card: null means "read it off the video", and a number means they went and
+  // looked. applyKnownDims has already written it into the draft, so asking the model to
+  // re-measure it from a photograph is asking it to overwrite a tape measure with a guess --
+  // on the one field this prompt spends its first and longest step on, and with nothing on the
+  // panel reconciling the two afterwards (the chip goes on reading "16 in" while the spec says
+  // 2, and pressing the chip again does nothing). applySelfCheck drops roof.overhang from the
+  // allow-list for the same generation, so a correction would be thrown away in any case; this
+  // is what stops the model spending its effort on a field that cannot land.
+  const measuredEave = dims.overhangIn === undefined || dims.overhangIn === null ? null : dims.overhangIn;
   const present = views.length
     ? views.map((v) => `${v} (${SELF_CHECK_VIEW_WORDS[v]})`).join(", ")
     : "none";
@@ -1165,7 +1187,8 @@ overwrites a number that was already good.
 THE BUILDER HAS MEASURED THESE. They are facts, not your estimates, and you must not change
 them or argue with them:
   building size: ${dimFt(dims.widthFt)} ft wide by ${dimFt(dims.lengthFt)} ft long
-  wall height at the eave: ${wall} ft
+  wall height at the eave: ${wall} ft${measuredEave === null ? "" : `
+  eave overhang: ${dimFt(measuredEave)} in past the wall`}
 Use them as your ruler. Every render you are shown was drawn at exactly these dimensions, so
 anything in a render can be measured against a wall you know the height of.
 
@@ -1186,14 +1209,16 @@ CHECK EXACTLY THESE, IN THIS ORDER. For each one, say whether it matches or give
 correction. These first three are the ones this pass gets wrong most often, so spend your
 effort here.
 
-1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
+${measuredEave !== null ? `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). THE BUILDER MEASURED THIS ONE TOO
+   and it is already in the draft. It is not yours to change: a correction to roof.overhang
+   will be thrown away. Mark "overhang" as "ok" and spend the effort on the porch below.` : `1. THE EAVE OVERHANG (roof.overhang, currently ${eave}). Look at the close-up
    viewpoint, where the roof edge is seen in profile against the sky with the wall below it.
    Measure how far the roof stands out past the wall as a FRACTION OF THE WALL HEIGHT you
    were given, in the frame and in the render, and convert: a roof that projects a
    twentieth of the wall's height on a ${wall} ft wall is about
    ${wall}/20 ft. Buildings with a tight, trimmed eave are common and read as
    almost no projection at all - values near 0.15 ft are real. Do not settle on 1.0 ft
-   because it is typical; report what this eave actually does.
+   because it is typical; report what this eave actually does.`}
 
 2. THE PORCH, AND WHICH KIND (roof.porchOutFt / roof.porchDepthFt). There are two kinds and
    they are not interchangeable:
@@ -1243,7 +1268,7 @@ RULES FOR THE ANSWER:
     "changed": []. That is a complete, correct answer. Stop there.
   * Every field in "corrections" must also appear in "changed". Anything not in both is
     ignored.
-  * Never return wallHeightFt, sizeFt, colors or siding. They are not yours to change here.
+  * Never return wallHeightFt, sizeFt, colors or siding${measuredEave === null ? "" : " or roof.overhang"}. They are not yours to change here.
   * Change at most ${SELF_CHECK_MAX_FIELDS} fields. If you believe more than ${SELF_CHECK_MAX_FIELDS} are wrong, the draft is
     not worth patching: return the ${SELF_CHECK_MAX_FIELDS} that matter most and say so in "note".
   * "unclear" is better than a guess. A field the frames genuinely do not settle should be
@@ -1319,7 +1344,13 @@ export function parseSelfCheck(text: string): SelfCheckRead | null {
 // recorded as the 3 ft it actually became. A correction whose value comes out of the sanitiser
 // EQUAL to the draft's did not change anything, and is dropped rather than reported to the
 // builder as a change — the "What the check changed" list has to be true line by line.
-export function applySelfCheck(draft: unknown, read: SelfCheckRead):
+// `dims` is optional and carries ONE decision: if the builder measured the eave themselves
+// (the overhang chip on the dimensions card), roof.overhang comes off the allow-list for this
+// generation, exactly as wallHeightFt and sizeFt are permanently off it. Same rule, same
+// reason -- a field the builder measured is not the check's to re-measure from a photograph.
+// Absent (every existing caller, and production's older bundle, which sends no dims at all)
+// means the list is unchanged.
+export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: KnownDims | null):
   | { ok: false; error: string }
   | {
     ok: true;
@@ -1343,7 +1374,10 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead):
     return { ok: true, verdict: "rejected_too_many", d3: base.d3, changed: [], dropped: declared.slice() };
   }
 
-  const allow = SELF_CHECK_ALLOW as readonly string[];
+  const measuredEave = !!dims && dims.overhangIn !== undefined && dims.overhangIn !== null;
+  const allow = measuredEave
+    ? (SELF_CHECK_ALLOW as readonly string[]).filter((f) => f !== "roof.overhang")
+    : (SELF_CHECK_ALLOW as readonly string[]);
   const dropped: string[] = [];
   // The value the model wants at each allowed path. Read out of `corrections`, never out of the
   // `to` in `changed`: that one is prose about the change, and the prompt says a field has to be

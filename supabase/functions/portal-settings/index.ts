@@ -4248,7 +4248,10 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
     // Allow-list, six-field cap, both-lists, the porch exclusion and sanitizeD3Spec, all inside
     // applySelfCheck so they are testable without a network. `drafted` is NOT touched by any of
     // it: the first pass stays on the row or "did the check help?" stops being answerable.
-    const applied = applySelfCheck(draftRead.d3, read);
+    // `dims` rides along so a builder who MEASURED the eave keeps it: roof.overhang comes off
+    // the allow-list for that generation, the same way wallHeightFt and sizeFt are permanently
+    // off it. selfCheckPrompt stops asking for it in the same breath.
+    const applied = applySelfCheck(draftRead.d3, read, dims);
     if (!applied.ok) {
       return await failedCheck("ai_selfcheck_merge_failed", applied.error, { elapsedMs: Date.now() - t0, renders: pairs.length, tokens });
     }
