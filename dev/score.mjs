@@ -276,7 +276,18 @@ const FIELDS = [
     get: (s) => (roofOf(s).porchTruss === true ? "yes" : "no"), stated: (d) => typeof roofOf(d).porchTruss === "boolean" },
 
   // ── C. eave and trim ─────────────────────────────────────────────────────────────────
+  // AND THE EAVE, THE SAME WAY, THE DAY THE BUILDER PRESSES AN OVERHANG CHIP. Since the chip
+  // shipped, `dims.overhangIn` is applied by applyKnownDims BEFORE sanitizeD3Spec, the prompt
+  // is told not to touch it and applySelfCheck drops it from the allow-list -- so the number
+  // in `drafted` is the builder's tape, not the model's answer, exactly as wall height is.
+  // Scoring it credited the tape to the generator: on a --replay over rows with the chip
+  // pressed, run 1 of the measured building went from MATCH 60 to 78.4 and hard.overhang
+  // flipped to true on a reply that still said 1.0 ft. `live` false takes it out of the score,
+  // out of `coverage` and out of `stated_only` (a builder's number read back is not the model
+  // having answered), and the assertion below is what checks it instead.
   { id: "roof.overhang", group: G.EAVE, w: 6, kind: "num", full: 0.1, zero: 0.75,
+    owner: (ctx) => (ctx.dimsEave == null ? "model" : "given"),
+    live: (t, ctx) => ctx.dimsEave == null,
     get: (s) => num(roofOf(s).overhang) ?? R.OVERHANG, stated: (d) => roofOf(d).overhang != null },
   { id: "roof.eave", group: G.EAVE, w: 2, kind: "cat",
     get: (s) => (roofOf(s).eave === "open" ? "open" : "fascia"), stated: (d) => roofOf(d).eave != null },
@@ -386,8 +397,12 @@ export function clampEdges(draft) {
 export function scoreRun({ truth, prior, draft, source = "video", dims = null, observed = null, provenance = "asserted" }) {
   const merged = mergeDraft(prior, draft, source);
   const dimsWall = dims && num(dims.wallHeightFt) !== null ? num(dims.wallHeightFt) : null;
+  // IN FEET, because that is what the spec key holds and what the truth is stated in. The chip
+  // is in inches and applyKnownDims divides by 12; comparing the two in different units is how
+  // an assertion passes on a building whose eave is a foot out.
+  const dimsEave = dims && num(dims.overhangIn) !== null ? num(dims.overhangIn) / 12 : null;
   const ctx = {
-    source, dimsWall,
+    source, dimsWall, dimsEave,
     kindMatches: porchKind(roofOf(truth)) === porchKind(roofOf(merged)),
   };
 
@@ -463,6 +478,16 @@ export function scoreRun({ truth, prior, draft, source = "video", dims = null, o
     // ASSERTED OK 13 vs 13" for a building four feet too tall. This is the half that knows.
     errVsTruth: round(mergedWall - (num(truth.wallHeightFt) ?? R.WALL_H)),
   };
+  // THE EAVE ASSERTION, the same two halves. `ok` is plumbing -- did the inches the builder
+  // pressed survive applyKnownDims, the sanitiser's 0..3 ft clamp and the self-check's
+  // allow-list -- and errVsTruth is the half that knows whether the builder measured it right.
+  // A chip pressed at 12 in on a building whose eave is 2 in gives ok:true and errVsTruth
+  // +0.83, which is a wrong building nobody would otherwise be told about.
+  const mergedEave = num((merged.roof || {}).overhang) ?? R.OVERHANG;
+  const eaveAssert = dimsEave == null ? null : {
+    typed: round(dimsEave), got: mergedEave, ok: Math.abs(mergedEave - dimsEave) < 1e-9,
+    errVsTruth: round(mergedEave - (num(roofOf(truth).overhang) ?? R.OVERHANG)),
+  };
 
   // The four fields that decide whether a builder would accept the model without touching
   // it. A run that misses any of them has failed however good the average looks.
@@ -479,7 +504,14 @@ export function scoreRun({ truth, prior, draft, source = "video", dims = null, o
     wall: wallAssert
       ? (wallAssert.ok && (provenance !== "measured" || Math.abs(wallAssert.errVsTruth) <= 0.5))
       : Math.abs(wallRow.err) <= 0.5,
-    overhang: Math.abs(rows.find((r) => r.id === "roof.overhang").err) <= 0.35,
+    // SAME RULE AS THE WALL. Read off the merged error, bar 4 ("roof.overhang <= 0.35 ft in
+    // >=4/5") kept reporting itself satisfied on the builder's own chip value -- an error of
+    // zero by construction, on the one field the whole prompt rewrite is judged by, with
+    // nothing in the table to prompt a second look. Where the eave was GIVEN this asserts it
+    // instead: the typed value has to survive, and on a measured truth it has to be right.
+    overhang: eaveAssert
+      ? (eaveAssert.ok && (provenance !== "measured" || Math.abs(eaveAssert.errVsTruth) <= 0.35))
+      : Math.abs(rows.find((r) => r.id === "roof.overhang").err) <= 0.35,
   };
   const shape = agg((r) => r.group !== G.LOOK);
   // THE HEADLINE FOR ANY BEFORE/AFTER THAT STRADDLES THE DIMENSIONS CARD. Wall height is a
@@ -487,14 +519,20 @@ export function scoreRun({ truth, prior, draft, source = "video", dims = null, o
   // reason that has nothing to do with the generator. This number excludes it on BOTH sides
   // and is the only shape figure the two eras can be compared on.
   const shapeNoWall = agg((r) => r.group !== G.LOOK && r.id !== "wallHeightFt");
+  // AND THE ONE THAT EXCLUDES BOTH BUILDER-OWNED FIELDS. shape_no_wall was enough while wall
+  // height was the only number the builder typed; the overhang chip makes it two, and a
+  // pre-chip run against a post-chip run compares a generator answering the eave with one
+  // being handed it. This is the figure those two eras can be compared on. It equals
+  // shape_no_wall whenever no chip was pressed.
+  const shapeNoGiven = agg((r) => r.group !== G.LOOK && r.id !== "wallHeightFt" && r.id !== "roof.overhang");
   const pass = shape >= 85 && Object.values(hard).every(Boolean) && phantoms.length === 0;
 
   return {
-    match, shape, shape_no_wall: shapeNoWall, look: agg((r) => r.group === G.LOOK),
+    match, shape, shape_no_wall: shapeNoWall, shape_no_given: shapeNoGiven, look: agg((r) => r.group === G.LOOK),
     stated_only: aggStated(all), coverage,
     phantoms: phantoms.map((p) => p.id), phantomPenalty,
     agreement: porchAgreement(draft, observed), clamped: clampEdges(draft),
-    wallAssert, hard, pass, rows, merged,
+    wallAssert, eaveAssert, hard, pass, rows, merged,
   };
 }
 
@@ -580,11 +618,21 @@ export function printBuilding({ file, entry, priorName, priorSpec, priorIndex, r
   line("MATCH /100", (r) => r.match);
   line("  shape", (r) => r.shape);
   line("  shape, no wall", (r) => r.shape_no_wall);
+  // ALWAYS, because its whole job is to be quotable ACROSS tables. On a run where the eave
+  // was given it equals shape_no_wall (the field is already out of the aggregate); on a run
+  // from before the chip it is lower, and the difference between those two numbers is the
+  // only honest way to read the two eras against each other.
+  line("  shape, no given", (r) => r.shape_no_given);
   line("  look", (r) => r.look);
   line("  stated-only", (r) => r.stated_only);
   line("  coverage %", (r) => r.coverage);
   line("  porch agreement", (r) => r.agreement);
   line("  clamp edges", (r) => r.clamped.length);
+  if (results.some((r) => r.eaveAssert)) {
+    line("  eave ASSERTED", (r) => (r.eaveAssert
+      ? `${r.eaveAssert.ok ? "OK" : "FAIL"} ${Math.round(r.eaveAssert.got * 12)}/${Math.round(r.eaveAssert.typed * 12)}in tape ${r.eaveAssert.errVsTruth > 0 ? "+" : ""}${r.eaveAssert.errVsTruth}`
+      : "-"));
+  }
   if (results.some((r) => r.wallAssert)) {
     // ⚠️ errVsTruth IS PRINTED, not merely recorded. It was computed here from the first
     // day with a comment saying it exists "so a builder typing the WRONG number is not read

@@ -290,6 +290,15 @@ async function generate(token, entry, n) {
       // THE RULER. Exactly what the dimensions card sends, so the prompt this pass measures
       // is the one a builder gets. Sent as three numbers rather than the whole sidecar
       // object, so a stray key in a local file cannot reach the server's parser.
+      //
+      // ⚠️ THREE NUMBERS AND NOT THE OVERHANG CHIP, and that is a measurement decision rather
+      // than an oversight. `dims.overhangIn` is builder-owned exactly as the wall height is:
+      // applyKnownDims writes it in before the sanitiser and the self-check may not touch it,
+      // so sending it turns acceptance bar 4 ("roof.overhang <= 0.35 ft in >=4/5") from a
+      // measurement of the generator into an assertion about our own plumbing. The eave is
+      // the field the prompt rewrite exists to fix; a scoring pass has to let the model
+      // answer it. score.mjs treats it as given whenever a run's `dims` carries it, so a
+      // --replay over rows where a real builder pressed the chip still reports honestly.
       dims: { widthFt: Number(dims.widthFt), lengthFt: Number(dims.lengthFt), wallHeightFt: Number(dims.wallHeightFt) },
       // A fresh key per run, deliberately: reusing one would make wallet_hold refuse every
       // run after the first and the "three runs" would be one run printed thrice.
