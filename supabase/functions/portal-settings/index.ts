@@ -3623,6 +3623,31 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
         if (ledgerRow?.id) await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
         return json({ error: "A 3D generation is already running for this account - wait for it to finish." }, 409);
       }
+      // ⚠️ PAID ALREADY, FOR THIS EXACT PRESS. New in migration 248, and unreachable until it
+      // is applied. The browser mints one idempotency key per press and keeps it until a draft
+      // lands, so a press whose reply never arrived — a dropped connection, a gateway 504 after
+      // wallet_capture — retries under the same key. That is the idempotency working: the money
+      // was taken once and must not be taken again.
+      //
+      // What was wrong was the sentence. Before 248, wallet_hold could not tell this apart from
+      // a concurrent press and said "a 3D generation is already running - wait for it to
+      // finish", forever, for a generation that finished and was charged for. This says the
+      // true thing instead, and names the one act that recovers the draft: it is on the ledger
+      // row, so reopening the Designer reads it back.
+      //
+      // No capture and no release: there is no live hold here, only a posted row.
+      if (err === "hold_replayed") {
+        if (ledgerRow?.id) await admin.from("ai_style_calls").delete().eq("id", ledgerRow.id);
+        await logEdgeError({
+          fn: "portal-settings", req, clientId, code: "wallet_hold_replayed", severity: "info",
+          message: "A generation was retried under the key of one that had already been charged; no second hold was taken.",
+          context: { shapeFirst, ledgerRow: ledgerRow?.id ?? null },
+        });
+        return json({
+          error: "This generation has already been paid for and finished - we just could not get the answer back to you. Close the Designer and open it again to pick it up; you have not been charged twice.",
+          code: "already_charged",
+        }, 409);
+      }
       if (err === "meter_unknown") {
         await logEdgeError({ fn: "portal-settings", req, clientId, code: "wallet_meter_missing", message: "usage_prices has no video_3d_generation row" });
         return json({ error: "The billing meter is unavailable right now - please try again shortly." }, 503);
