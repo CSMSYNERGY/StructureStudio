@@ -20704,9 +20704,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   no sizes the fields start BLANK and the card says why in words.
 
                   ⚠️ NO SSD_CSS ON THIS SURFACE. See SSC_CAL_CSS at module scope. ── */}
-              {/* `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
+              {/* GATED EXACTLY LIKE STEP 1, and for the same reason. The public ?admin=1
+                  operator page has no `setup3d`, so it renders no step 1 card and no Generate
+                  button -- and this card was left ungated, so that surface showed a "Step 2"
+                  with no step 1, an amber "required" badge that gated nothing, and copy about
+                  "the building you filmed" for an operator who filmed nothing. Two of its
+                  three fields were pure local state there and were silently discarded on the
+                  next style click. Step 3 is ungated on purpose (pasting photo URLs still
+                  works there); there is nothing on the operator surface that consumes these
+                  numbers, and it already has its own "Wall height (ft)" field below.
+
+                  `data-ssc-card` is a TEST HOOK and nothing else. tests/harness/calDims.mjs
                   photographs this card in each of its states, and locating it by its heading
                   text would make a reworded heading look like a broken harness. */}
+              {setup3d && setup3d.onUploadPhoto && (
               <div data-ssc-card="dims" style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <style>{SSC_CAL_CSS}</style>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -20796,6 +20807,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                 )}
               </div>
+              )}
               {/* ── STEP 3: the builder's own photos (OPTIONAL since 2026-09-16), and the one
                   button that spends money. ──
                   Carolyn 2026-09-04 @16:05: "we put a thing in here that says, you know, front
@@ -21197,7 +21209,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   })}
                   {calPairs.length === 0 && (
                     <div style={{ marginTop: 8, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
-                      We couldn't line your video frames up with the 3D this time, so there is nothing to put side by side. Open the 3D preview and compare it with your own pictures before you save.
+                      {/* ⚠️ DO NOT SEND THEM TO THE 3D PREVIEW FROM HERE. One of the three
+                          ways to land on this line is a device that cannot render at all (no
+                          WebGL, a lost context), and on that device the docked preview beside
+                          this card has already failed and the full-screen one will too -- so
+                          the one remedy the card offered was the one thing that could not
+                          work. It is not forked on `reason` because the third way here is
+                          merely being over the five-second budget, where the preview is fine;
+                          instead it names what is true on every device. "What we drew" is
+                          rendered below this, and the dimension drawing under it is 2D. */}
+                      We couldn't put your own frames side by side with the 3D this time, so there is nothing to compare here. Read <b>What we drew</b> just below, and the dimension drawing under it, against your own pictures before you save.
                     </div>
                   )}
                   {/* THE ROOF, IN FEET. The prompt keeps asking for ratios because the ratios

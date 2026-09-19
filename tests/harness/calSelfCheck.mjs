@@ -623,6 +623,19 @@ async function main() {
   }));
   r.ok("a first pass with no labels shows no pairs — and so no questions to hang a fix panel on",
     noPairs.pairs === 0 && noPairs.questions === 0, JSON.stringify(noPairs));
+  // ⚠️ AND IT MUST NOT SEND THEM TO THE 3D PREVIEW. The same line is shown when the DEVICE
+  // could not render at all (no WebGL, a lost context), and on that device the docked preview
+  // beside this card has already failed and the full-screen one will too — so the only remedy
+  // the card offered was the one thing that could not work there.
+  const compareText = await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-card="compare"]');
+    return el ? el.innerText : "";
+  });
+  const noPairLine = (compareText.match(/We couldn't put[^\n]*/) || [""])[0];
+  r.ok("⚠️ NOTHING ON THE CARD SENDS A DEVICE THAT CANNOT RENDER TO THE 3D PREVIEW",
+    Boolean(compareText) && !/3D preview/i.test(compareText), (compareText.match(/[^\n]*3D preview[^\n]*/) || ["none"])[0]);
+  r.ok("and the no-pairs line points at what works on any device instead",
+    /What we drew/.test(noPairLine) && /dimension drawing/.test(noPairLine), noPairLine);
   const banner = await page.evaluate(() => {
     const el = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
     return el ? el.textContent : "";
