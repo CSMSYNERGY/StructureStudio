@@ -24,7 +24,9 @@
 //   7. the warnings warn and do not refuse: a builder may well have filmed a size their catalog
 //      does not sell yet
 //   8. the wall height is ONE slice with two views — this card and the field further down
-//   9. zero page errors, and no generation ever leaves without dims
+//   9. clearing the wall height NEVER erases the style's stored wall — the sanitiser DROPS a
+//      wall outside 3..20 instead of clamping it, so a 0 on the wire is an erasure, not a clamp
+//  10. zero page errors, and no generation ever leaves without dims
 //
 // Stubbed at the NETWORK layer, like calIdempotency.mjs: no account, no login, no writes, and the
 // artifacts under test are the compiled bundles the browser really loads. A change that was never
@@ -83,6 +85,9 @@ const CONFIG = {
 };
 
 const generateCalls = [];
+// Every save_style_d3 body, so the one assertion that cannot be made anywhere else — what this
+// card writes into building_styles.d3 — is made against the wire rather than against the screen.
+const saveCalls = [];
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -157,6 +162,7 @@ async function main() {
           balanceCents: 18000, dims,
         });
       }
+      if (a === "save_style_d3") { saveCalls.push(body); return json(route, { ok: true }); }
       return json(route, { ok: true });
     }
     return route.fulfill({ status: 404, headers: { "access-control-allow-origin": "*" }, body: "" });
@@ -348,7 +354,45 @@ async function main() {
     Boolean(a7) && a7.dims.widthFt === 10 && a7.dims.lengthFt === 20 && a7.styleValue === "shed",
     JSON.stringify(a7 && a7.dims));
 
-  // ── 9: nothing slipped through ────────────────────────────────────────────────────────────
+  // ── 9: A BLANK WALL HEIGHT MUST NOT ERASE THE STYLE'S STORED WALL ────────────────────────
+  // The regression this pins, end to end: clear the box, press Save, and the measured wall is
+  // gone from building_styles.d3 for every customer of that style. It is silent in both
+  // directions — Save is not gated on this card, and the older "Wall height (ft)" field renders
+  // `|| 8`, so the panel positively displays 8 as if that were the value.
+  //
+  // WHY IT IS AN ERASURE AND NOT A CLAMP: sanitizeD3Spec ACCEPTS 3..20 and DROPS anything else,
+  // so a 0 does not come back as a 3 — the key is simply not emitted, and d3ResolveStyleSpec
+  // then falls through to the renderer's 8 ft.
+  await openStyle("Barn", "barn");
+  await setDim(widthIn, 16);
+  await setDim(lengthIn, 24);
+  await setDim(wallIn, 9);
+  const nSaves = saveCalls.length;
+  await setDim(wallIn, "");
+  r.ok("the wall height box clears, like the other two", (await wallIn.inputValue()) === "", await wallIn.inputValue());
+  r.ok("and a cleared wall locks Generate", (await genEnabled()) === false, await whyLine());
+  r.ok("the line names the wall height as the missing one", /wall height/.test(await whyLine()), (await whyLine()).slice(0, 110));
+  await page.getByRole("button", { name: /^Save 3D look$/ }).first().click();
+  for (let i = 0; i < 100 && saveCalls.length === nSaves; i++) await page.waitForTimeout(100);
+  const sv = saveCalls[nSaves] || null;
+  r.ok("pressing Save with a blank wall height reached the wire", Boolean(sv), String(saveCalls.length - nSaves));
+  r.ok("⚠️ THE MEASURED WALL SURVIVED THE BLANK — no 0, no dropped key",
+    Boolean(sv) && sv.d3 && sv.d3.wallHeightFt === 9, JSON.stringify(sv && sv.d3 && sv.d3.wallHeightFt));
+  // A half-typed number is out of the sanitiser's band too, and would be dropped just the same.
+  await wallIn.click();
+  await wallIn.fill("1");
+  await wallIn.blur();
+  await page.waitForTimeout(150);
+  const nSaves2 = saveCalls.length;
+  await page.getByRole("button", { name: /^Save 3D look$/ }).first().click();
+  for (let i = 0; i < 100 && saveCalls.length === nSaves2; i++) await page.waitForTimeout(100);
+  const sv2 = saveCalls[nSaves2] || null;
+  r.ok("a 1 ft wall the sanitiser would drop never reaches the spec either",
+    Boolean(sv2) && sv2.d3 && sv2.d3.wallHeightFt === 9, JSON.stringify(sv2 && sv2.d3 && sv2.d3.wallHeightFt));
+  await setDim(wallIn, 9);
+  r.ok("and typing a storable number puts the card back in business", (await genEnabled()) === true, await whyLine());
+
+  // ── 10: nothing slipped through ───────────────────────────────────────────────────────────
   const missing = generateCalls.filter((c) => !c.dims || !(c.dims.widthFt > 0) || !(c.dims.lengthFt > 0) || !(c.dims.wallHeightFt > 0)).length;
   r.ok("EVERY generation on the wire carried a complete set of dims", missing === 0, `${missing} of ${generateCalls.length} without`);
   r.ok("every generation still carried its idempotency key", generateCalls.filter((c) => !c.idempotencyKey).length === 0);

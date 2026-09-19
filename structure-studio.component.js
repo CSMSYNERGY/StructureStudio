@@ -15591,10 +15591,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // `overhangIn` null means "read it off the video" and is NOT 0. 0 is a flush eave, which is a
   // measurement; null is the absence of one.
   //
+  // `wallBlank` is "I do not know this yet" for the ONE field whose value lives in the spec.
+  // Clearing a required box has to be possible, but the number it clears is the style's stored
+  // wall, and a 0 parked there does not clamp on save -- `sanitizeD3Spec` accepts 3..20 and
+  // DROPS anything else, so the key would vanish from `building_styles.d3` and every customer's
+  // 3D would fall back to the renderer's 8 ft. So the blank is recorded HERE and the spec is
+  // left alone; calDimH reads 0 while it is set, which is what keeps the gate refusing.
+  //
   // Up here with the other adminCal* state on purpose, and this is not filing: the last hook in
   // this component sits above a `calibrationOnly` early return, and a useState added down beside
   // its handlers is React #310 on the operator path. This file has shipped that.
-  const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, wallPrefilled: false, wallSeen: false });
+  const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, wallPrefilled: false, wallSeen: false, wallBlank: false });
   // ─── THE FREE SECOND PASS, AND THE BUILDER'S OWN LOOK AT IT (2026-09-19) ───────────────
   // `adminCalCheck` is the whole of it, from the moment Generate is pressed to the moment the
   // builder saves:
@@ -17865,6 +17872,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       overhangIn: null,
       wallPrefilled: Number(spec.wallHeightFt) > 0,
       wallSeen: false,
+      wallBlank: false,
     });
     setAdminCal({
       styleValue: s.value,
@@ -18251,7 +18259,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // the field label says so rather than leaving a builder to guess which number is which.
   const calDimW = Number(adminCalDims.widthFt);
   const calDimL = Number(adminCalDims.lengthFt);
-  const calDimH = Number(adminCal && adminCal.spec && adminCal.spec.wallHeightFt) || 0;
+  // 0 WHILE THE BOX IS BLANK, and the spec untouched underneath it (see calSetDim and
+  // adminCalDims.wallBlank). The gate reads this, so a cleared wall height locks Generate the
+  // way a cleared width does -- without a 0 ever reaching the spec that Save writes.
+  const calDimH = adminCalDims.wallBlank ? 0 : (Number(adminCal && adminCal.spec && adminCal.spec.wallHeightFt) || 0);
   const calDimInBand = (key, n) => isFinite(n) && n > 0 && n >= CAL_DIM_BANDS[key][0] && n <= CAL_DIM_BANDS[key][1];
   // Named in the order they are asked for, so the gate line reads like the card looks.
   const calDimsMissing = [
@@ -18304,7 +18315,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Three fields, two slices. Routing them through one setter is what keeps this card's gate and
   // the panel below reading the same wall.
   const calSetDim = (key, v) => {
-    if (key === "wallHeightFt") { calSet({ wallHeightFt: v === "" ? 0 : v }); return; }
+    if (key === "wallHeightFt") {
+      // ⚠️ NOTHING THE SANITISER WOULD DROP MAY REACH THE SPEC. This box edits
+      // `spec.wallHeightFt`, which is the style's stored wall, and `sanitizeD3Spec` ACCEPTS
+      // 3..20 and DROPS everything else instead of clamping it. A 0 written here therefore does
+      // not come back as a 3 -- on the next Save the key disappears from `building_styles.d3`,
+      // every customer's 3D for that style falls back to the renderer's 8 ft, and the "Wall
+      // height (ft)" field below renders that 8 as though it were the value. A measured 9 would
+      // be gone with nothing on screen saying so.
+      //
+      // So a blank is recorded in this card (wallBlank) and an out-of-band number is refused
+      // outright. Both leave the last storable value standing, and both leave the gate refusing
+      // -- which is what a required field that has not been answered is supposed to do.
+      if (v === "") { setAdminCalDims((p) => (p.wallBlank ? p : { ...p, wallBlank: true })); return; }
+      if (!calDimInBand("wallHeightFt", Number(v))) return;
+      setAdminCalDims((p) => (p.wallBlank ? { ...p, wallBlank: false } : p));
+      calSet({ wallHeightFt: v });
+      return;
+    }
     setAdminCalDims((p) => ({ ...p, [key]: v }));
   };
   // calNumProps with two additions, and both are about a REQUIRED field rather than an optional
@@ -19189,9 +19217,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return (
         <div style={{ display: "grid", gap: 6 }}>
           <label style={calFixLabel}>Wall height (ft)
+            {/* THE SAME REFUSAL AS STEP 2's BOX, and for the same reason: the sanitiser DROPS a
+                wall outside 3..20 rather than clamping it, so committing the "1" on the way to
+                "12" -- or a typed 0 -- would erase the style's stored wall on Save. Routed
+                through calNumProps so the raw keystrokes survive while the field has focus and
+                a half-typed number can still exist; calSetDim is the one place that decides
+                what is storable. */}
             <input className="ssc-dim-in" type="number" step="0.5" min="3" max="20" inputMode="decimal"
-              value={String(Number(adminCal.spec.wallHeightFt) || 0)}
-              onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n)) calSet({ wallHeightFt: n }); }}
+              {...calNumProps("ssc-fix-wall", Number(adminCal.spec.wallHeightFt) || 0, (n) => calSetDim("wallHeightFt", n))}
               style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
           </label>
           <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
