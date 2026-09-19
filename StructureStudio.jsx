@@ -4735,6 +4735,23 @@ function d3OverhangStyle(roofCfg) {
     : d3DefaultOverhangStyle(r);
 }
 
+// ⚠️ AND WHETHER THE ANSWER REACHES ANYTHING AT ALL. The notch is a FASCIA-eave distinction --
+// it changes the fascia board and the soffit, and an OPEN eave has neither, just bare rafter
+// tails hung at a drop that was MEASURED off a real building rather than derived. So on an open
+// eave both framings build the same bytes, and d3EaveFinishDrop returns below before it ever
+// asks which one is set.
+//
+// The calibration panel's select reads this too and is DISABLED when it answers false. Shipped
+// live for a day (2026-09-18 → 09-19): on an open-eave style the select rendered, took a pick
+// and wrote overhangStyle into the tenant's column while the 3D and the elevation both ignored
+// it -- a control that silently did nothing, which is worse than one that is plainly off. ONE
+// predicate for the render gate and the control is what stops those two drifting apart again,
+// and drifting apart is exactly what the elevation and the 3D had just been pulled out of in
+// this same field. Change this and both move together or neither does.
+function d3OverhangStyleApplies(roofCfg) {
+  return (roofCfg || {}).eave !== "open";
+}
+
 // ── WHERE THE EAVE FINISH ENDS, IN ONE PLACE ──────────────────────────────────────────────
 // The elevation drawing and the 3D model both draw the finished edge of the eave, and until
 // 2026-09-19 they were free to disagree: D3ElevationSVG drew a fascia blade and a soffit with
@@ -4767,7 +4784,7 @@ function d3EaveFinishDrop(roofCfg, ny) {
   // `TAIL_DROP - ny * DECK_N` (the shape the fascia cases take, where the board's own height IS
   // vertical) moves every open eave by (1 - ny) * TAIL_DROP -- 0.021 ft at pitch 0.4 -- and that
   // is exactly the silent open-eave drift this change exists to undo.
-  if (r.eave === "open") return ny * (D3_EAVE.TAIL_DROP - D3_EAVE.DECK_N);
+  if (!d3OverhangStyleApplies(r)) return ny * (D3_EAVE.TAIL_DROP - D3_EAVE.DECK_N);
   return d3OverhangStyle(r) === "notched"
     // NOTCHED: cut back to the deck. Nothing is left below the roof plane but the soffit board.
     ? D3_EAVE.SOFFIT_T - ny * D3_EAVE.DECK_N
@@ -19969,14 +19986,43 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
 
                     Placed here rather than with the other enum selects: it qualifies the overhang
                     directly above it, and focusing that input highlights the eave dimension in the
-                    drawing this control changes. */}
+                    drawing this control changes.
+
+                    ⛔ OFF ON AN OPEN EAVE (2026-09-19), on d3OverhangStyleApplies -- the same
+                    predicate d3EaveFinishDrop gates on, so the control is inert in exactly the
+                    cases the renderer ignores it. For one day it was not: on an open-eave style
+                    this select rendered live, accepted a change and persisted overhangStyle into
+                    the tenant's column while changing nothing whatever in the 3D or the drawing.
+
+                    DISABLED, NOT HIDDEN, because roof.eave is not editable in this panel -- it
+                    comes from the style's own defaults -- so a control that simply vanished would
+                    give the builder nothing to act on and no reason for its absence. Greyed with
+                    the line below, they can see the setting exists, see which framing it would
+                    use, and read why this style cannot. The elevation already labels its eave
+                    dimension "eave, open"; this is the panel finally saying the same thing.
+
+                    'disabled' is also what stops the write: a disabled <select> fires no change
+                    event, so no value can reach calSetRoof from a control that cannot take effect.
+
+                    A value a style ALREADY stores is left alone, not scrubbed. It is inert while
+                    the eave is open and correct again the moment the eave is not, and having
+                    sanitizeD3Spec delete a key on a style's behalf is the "the sanitiser never
+                    emits a default" rule run backwards -- the same tenant-column damage in the
+                    other direction. */}
+                {(() => {
+                  const ohLive = d3OverhangStyleApplies(adminCal.spec.roof);
+                  return (
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang style
-                  <select value={d3OverhangStyle(adminCal.spec.roof)} onChange={(e) => calSetRoof({ overhangStyle: e.target.value === d3DefaultOverhangStyle(adminCal.spec.roof) ? null : e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                  <select value={d3OverhangStyle(adminCal.spec.roof)} disabled={!ohLive} aria-disabled={!ohLive || undefined} onChange={(e) => calSetRoof({ overhangStyle: e.target.value === d3DefaultOverhangStyle(adminCal.spec.roof) ? null : e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box", opacity: ohLive ? 1 : 0.55, cursor: ohLive ? "pointer" : "not-allowed" }}>
                     <option value="notched">Notched rafter tail (level soffit)</option>
                     <option value="extended">Extended rafter tail (full tail carried out)</option>
                   </select>
-                  <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>A notched tail keeps the roof on one straight plane and steps the underside back; an extended tail carries the whole rafter out. Left alone, anything over 6 in of overhang is notched.</span>
+                  <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>{ohLive
+                    ? "A notched tail keeps the roof on one straight plane and steps the underside back; an extended tail carries the whole rafter out. Left alone, anything over 6 in of overhang is notched."
+                    : "Off for this style: its eave is open, so the rafter tails are the finished edge and there is no fascia or soffit to notch. Both framings build the same eave here. Give the style a fascia eave and the choice comes back."}</span>
                 </label>
+                  );
+                })()}
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
                 </label>

@@ -43,21 +43,35 @@ const NY = Math.cos(Math.atan(PITCH));
 const SIN = Math.sin(Math.atan(PITCH));
 const ROOF_T = 0.2, DECK_N = 0.02, SOFFIT_T = 0.05;
 
+// st "absent" leaves the KEY OFF the roof object entirely, which is what every style shipped
+// before 2026-09-18 actually has in its column. Writing `overhangStyle: undefined` would not do:
+// this object is the shape the calibration panel posts back, and an undefined-valued key is still
+// a key to the deep-equal that decides whether a save writes anything.
 const d3 = (overhang, overhangStyle, eave) => ({
-  roof: { type: "gable", pitch: PITCH, ridgeOffset: 0, eave, overhang, overhangStyle, tailSpacingIn: 24 },
+  roof: Object.assign(
+    { type: "gable", pitch: PITCH, ridgeOffset: 0, eave, overhang, tailSpacingIn: 24 },
+    overhangStyle === "absent" ? {} : { overhangStyle }),
   colors: { body: BODY, roof: "#8a8f94", trim: TRIM },
   siding: "panel", foundation: "slab", roofMaterial: "shingle", wallHeightFt: H,
 });
 const CLADS = ["panel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
 const style = (value, label, spec) => ({ value, label, img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {}, d3: spec });
 
-// Eight variants: both framings, at a 4 in tail and a 12 in tail, on both eave finishes. The
-// 4 in pair is the case Carolyn says builders really do just extend; the 12 in pair is where
-// the two diverge visibly; the OPEN pairs are the regression guard — they must not diverge at all.
+// Ten variants: both framings, at a 4 in tail and a 12 in tail, on both eave finishes, plus a
+// STORED-NOTHING case on each open eave. The 4 in pair is what Carolyn says builders really do
+// just extend; the 12 in pair is where the two diverge visibly; the OPEN rows are the regression
+// guard — they must not diverge at all.
+//
+// The open "absent" row exists for the calibration panel (2026-09-19). That select used to render
+// live on an open-eave style: it took a pick and persisted overhangStyle into the tenant's column
+// while nothing in the 3D or the elevation moved. The select is disabled there now, and this row
+// is what makes that the right fix rather than a cover-up — SET has to measure identical to
+// ABSENT, or a value the panel already wrote is quietly changing a building and turning the
+// control off would be hiding it.
 const VARIANTS = [];
 for (const eave of ["fascia", "open"]) {
   for (const [ovTag, ov] of [["4in", 4 / 12], ["12in", 1.0]]) {
-    for (const st of ["extended", "notched"]) {
+    for (const st of eave === "open" ? ["extended", "notched", "absent"] : ["extended", "notched"]) {
       VARIANTS.push({ tag: `${eave}-${st}-${ovTag}`, label: `${eave} ${st} ${ovTag}`, ov, ovTag, st, eave });
     }
   }
@@ -215,8 +229,25 @@ export async function main() {
         ok(`open ${ovTag}: naming a framing changes NOTHING about an open eave`,
           Math.abs(e.finish - n.finish) < 1e-6 && e.tailCount === n.tailCount && e.trimCount === n.trimCount,
           `ext finish ${f4(e.finish)} (${e.tailCount} tails) notched ${f4(n.finish)} (${n.tailCount} tails)`);
+
+        // ── AND SET vs ABSENT, which is the claim the disabled select rests on ──────────────
+        // Naming a framing on an open eave has to be indistinguishable from naming none. Every
+        // number this harness collects, not a chosen subset, and at 1e-12 rather than the 1e-6
+        // above: these are meant to be the SAME FLOATS off the same branch, not two numbers that
+        // agree to a tolerance. If this ever parts, a stored overhangStyle is live on an open eave
+        // after all, and disabling the control would be concealing a real difference.
+        const a = got[`open-absent-${ovTag}`];
+        for (const [who, g] of [["extended", e], ["notched", n]]) {
+          ok(`open ${ovTag}: a stored "${who}" renders identically to nothing stored at all`,
+            Math.abs(g.finish - a.finish) < 1e-12 && Math.abs(g.deckOutX - a.deckOutX) < 1e-12
+              && Math.abs(g.deckLowY - a.deckLowY) < 1e-12 && Math.abs(g.deckHighY - a.deckHighY) < 1e-12
+              && Math.abs(g.deckUnder - a.deckUnder) < 1e-12
+              && g.tailCount === a.tailCount && g.trimCount === a.trimCount,
+            `${who} finish ${f4(g.finish)} (${g.tailCount} tails, ${g.trimCount} trim) vs absent ${f4(a.finish)} (${a.tailCount} tails, ${a.trimCount} trim)`);
+        }
+
         // …and the tails hang where the building was measured: 3.5 in below the deck underside.
-        for (const g of [e, n]) {
+        for (const g of [e, n, a]) {
           // 3.5 in measured ALONG THE SLOPE NORMAL, which is how the renderer drops them
           // (eaveY + ny * (DECK_N - TAIL_DROP)) -- so the VERTICAL gap is ny times that.
           ok(`[${g.tag}] the tails hang the MEASURED 3.5 in below the deck`,
