@@ -14025,6 +14025,162 @@ const CAL_OVERHANG_CHIPS = [[null, "Read it from the video"], [0, "Flush"], [2, 
 // 16px, and every other field on this panel spreads S.sel's inline fontSize 13. An inline style
 // beats a class, so these three inputs deliberately drop it and take their size from here.
 const SSC_CAL_CSS = ".ssc-dim-in{font-size:13px}@media (pointer:coarse){.ssc-dim-in{font-size:16px}}";
+// ─── THE FREE SECOND PASS, AS THE BUILDER EXPERIENCES IT (2026-09-19) ─────────────────────
+// One press is one hold is one charge. The clocks below are the whole of the wait a builder
+// can be asked to sit through, and they are deliberately not the same as the server's.
+//
+//   call 1   the draft        server-side AbortSignal.timeout(110_000), and NO client abort.
+//                             Abandoning a call that has already taken the hold is the one
+//                             thing that would turn a slow generation into a lost $20.
+//   render   SS_RENDER_MS     wall clock in this browser. Over it, the check is skipped and
+//                             the builder keeps the draft. WebGL cannot be interrupted, so
+//                             the loser of the race still runs to its own dispose.
+//   call 2   the check        server aborts at 45 s; this aborts at SS_CHECK_MS, far enough
+//                             above it that a server that answered in time is still heard.
+//
+// 110 + 5 + 60 is 175 s, so there is no path past the three minutes the design budgeted and
+// no watchdog that could throw away a paid draft to enforce one.
+const SS_RENDER_MS = 5000;
+const SS_CHECK_MS = 60000;
+// When the progress card stops saying "usually about a minute" and says so.
+const SS_SLOW_MS = 90000;
+// How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
+// angle and big enough that a builder is not pressing it forty times.
+const SS_SPIN_STEP_DEG = 15;
+// The four questions, in the order they are asked, and they are not generic reassurance: they
+// are the measured failure list. Roof shape (the 09-16 gambrel that drew as a gable), porch
+// (`porchOutFt` returned 0 times in 19 recorded generations), wall height (7 in 74 % of them,
+// on buildings measuring 9) and colours.
+const SS_CHECKS = [
+  ["roof", "Is the roof the same shape?", "Barn roof with a bend in it, two straight slopes, or one slant."],
+  ["porch", "Is the porch right?", "In front of the building or cut into it, at the right end, about the right depth."],
+  ["walls", "Are the walls the right height?", "Compare the side wall next to the door with your picture."],
+  ["colours", "Are the colours close?", "Walls, trim and roof. Customers repaint it anyway, so close is fine."],
+];
+// What each viewpoint is, in words a builder owns. "eaveCorner" is our name for it.
+const SS_VIEW_WORDS = {
+  front: "The end with the door",
+  side: "The long side",
+  eaveCorner: "Close up on the roof edge",
+  corner: "From the corner",
+};
+
+// ⚠️ THE BUILDER NEVER SEES kneeU AS A NUMBER, here or anywhere. The CLAMPS comment records
+// that a model reads it from the eave by default and the renderer reads it from the centreline,
+// which is a distinction nobody should have to hold to fix their own roof. Two sliders in plain
+// words, and the third number is DERIVED so the pair cannot produce a gambrel that trips
+// gambrelRoofWarning — the whole point of the panel is to get out of that state, not into it.
+//
+// The bend is aimed at SS_GAMBREL_BEND_DEG rather than at the minimum the warning accepts: 15
+// is where a roof stops LOOKING like a gable, and a slider that parks every roof exactly on
+// that line would make every answer marginal. 24 is between the renderer's own default (26)
+// and the measured barn (48).
+const SS_GAMBREL_BEND_DEG = 24;
+const SS_GAMBREL_KNEE_U = [0.45, 0.95];
+const SS_GAMBREL_KNEE_RISE = [0.25, 0.95];
+function ssGambrelFromSliders(bendPct, steepPct) {
+  const lerp = (band, pct) => band[0] + (Math.max(0, Math.min(100, Number(pct) || 0)) / 100) * (band[1] - band[0]);
+  const kneeU = lerp(SS_GAMBREL_KNEE_U, bendPct);
+  const kneeRise = lerp(SS_GAMBREL_KNEE_RISE, steepPct);
+  // d3RoofProfile's own geometry: the knee sits at ±s2*kneeU out from the CENTRELINE and both
+  // rises are measured from the wall plate, so the lower slope runs (1 - kneeU) across and
+  // kneeRise up, and the upper runs kneeU across and (ridgeRise - kneeRise) up.
+  const lower = Math.atan2(kneeRise, 1 - kneeU);
+  const upper = Math.max(0.02, lower - (SS_GAMBREL_BEND_DEG * Math.PI) / 180);
+  const r3 = (n) => Math.round(n * 1000) / 1000;
+  // Clamped into ridgeRise's own band. Clamping DOWN only widens the bend, and the floor is
+  // above kneeRise, so neither arm of this can produce the inverted roof the warning refuses.
+  const ridgeRise = Math.min(1.5, Math.max(kneeRise + 0.02, kneeRise + kneeU * Math.tan(upper)));
+  return { kneeU: r3(kneeU), kneeRise: r3(kneeRise), ridgeRise: r3(ridgeRise) };
+}
+// Where the two sliders sit for a roof that already exists. Mirrors d3RoofProfile's defaults,
+// including the `||`, for the same reason gambrelRoofWarning does: a 0 or absent kneeU DRAWS
+// at 0.55, so the slider has to show 0.55.
+function ssGambrelSliders(roof) {
+  const pct = (band, v) => Math.round(Math.max(0, Math.min(100, ((v - band[0]) / (band[1] - band[0])) * 100)));
+  return {
+    bendPct: pct(SS_GAMBREL_KNEE_U, Number(roof && roof.kneeU) || 0.55),
+    steepPct: pct(SS_GAMBREL_KNEE_RISE, Number(roof && roof.kneeRise) || 0.55),
+  };
+}
+
+// Feet and inches IN WORDS, for the compare step only. Everywhere else in this app a length
+// is drawn as 2' 3" — a drawing convention — and this card is deliberately written the way a
+// builder would say it out loud. Derived from d3FtIn rather than re-rounded: two roundings of
+// one number is one edit away from a confirm line that disagrees with the dimension label
+// three inches above it.
+function ssFtInWords(ft) {
+  const s = d3FtIn(ft);
+  const m = /^(-?\d+)' (\d+)"$/.exec(s || "");
+  if (!m) return s;
+  return m[2] === "0" ? `${m[1]} ft` : `${m[1]} ft ${m[2]} in`;
+}
+
+// The roof, in feet, for the confirm step. The prompt keeps asking for ratios because the
+// ratios measurably work (0.78 / 0.70 / 1.00 against a truth of 0.72 / 0.72 / 1.00, in 3 of 3
+// runs); a builder cannot check a ratio against a building. Both are true at once, so the
+// number stays a ratio on the wire and becomes feet on the screen.
+function ssRoofInFeet(roof, spanFt) {
+  const s2 = Math.max(0.5, Number(spanFt) || 0) / 2;
+  const cfg = roof || {};
+  if (cfg.type === "gambrel") {
+    const kneeU = Number(cfg.kneeU) || 0.55;
+    const kneeRise = Number(cfg.kneeRise) || 0.55;
+    const ridgeRise = Number(cfg.ridgeRise) || 0.8;
+    // "back from the wall", not "in from the wall": ssFtInWords already ends in "in" on most
+    // values, and "2 ft 3 in in from the wall" is what that reads as on a screen.
+    return `The bend sits ${ssFtInWords(s2 * (1 - kneeU))} back from the wall and ${ssFtInWords(s2 * kneeRise)} above it; the peak is ${ssFtInWords(s2 * ridgeRise)} above the wall.`;
+  }
+  if (cfg.type === "shed") {
+    return `The high side stands ${ssFtInWords(spanFt * (Number(cfg.pitch) || 0.25))} above the low side.`;
+  }
+  return `The peak is ${ssFtInWords(s2 * (Number(cfg.pitch) || 0.5))} above the wall.`;
+}
+
+// One line of the "What the check changed" list, in the words the fix panels use. The numbers
+// are re-expressed for the same reason the fix panel is: 1.0 ft against 0.15 ft reads as a
+// rounding, and 12 in against 2 in is obviously wrong at a glance. Same number, same clamp,
+// different boundary.
+const SS_CHANGE_WORDS = {
+  "roof.type": ["The roof's shape", (v) => ({ gable: "two straight slopes", gambrel: "a barn roof with a bend", shed: "one slant" })[String(v)] || String(v)],
+  "roof.pitch": ["How steep the roof is", (v) => `${Math.round(Number(v) * 12)} in 12`],
+  // A saltbox shift, as a fraction of the span. No builder-readable value, so it reports a
+  // direction — and it is here at all because the test that compares this table against the
+  // server's own allow-list found it missing, which is exactly what that test is for.
+  "roof.ridgeOffset": ["Where the peak sits across the roof", null],
+  "roof.overhang": ["How far the roof sticks out past the wall", (v) => `${Math.round(Number(v) * 12)} in`],
+  "roof.kneeU": ["Where the barn roof's bend sits", null],
+  "roof.kneeRise": ["How steep the bottom part of the barn roof is", null],
+  "roof.ridgeRise": ["How high the peak of the barn roof is", null],
+  "roof.eave": ["The roof edge", (v) => String(v)],
+  "roof.tailSpacingIn": ["How far apart the rafter tails are", (v) => `${Math.round(Number(v))} in`],
+  "roof.porchOutFt": ["How far the porch sticks out", (v) => ssFtInWords(Number(v))],
+  "roof.porchDepthFt": ["How far the porch goes into the building", (v) => ssFtInWords(Number(v))],
+  "roof.porchEnd": ["Which end the porch is on", (v) => (String(v) === "back" ? "the other end" : "the end you filmed first")],
+  "roof.porchTruss": ["The beam across the porch", (v) => (v ? "there" : "not there")],
+  "roof.leanToWidthFt": ["How far the lean-to sticks out", (v) => ssFtInWords(Number(v))],
+  "roof.leanToDropFt": ["How far the lean-to roof drops", (v) => ssFtInWords(Number(v))],
+  "roof.leanToSide": ["Which side the lean-to is on", (v) => String(v)],
+  "roof.dormerWidthFt": ["How wide the dormer is", (v) => ssFtInWords(Number(v))],
+  "roof.dormerRiseFt": ["How tall the dormer is", (v) => ssFtInWords(Number(v))],
+  "roof.dormerOffsetU": ["Where the dormer sits along the roof", null],
+  gableVent: ["The vent in the gable", (v) => (v && v.widthFrac > 0 ? "there" : "not there")],
+  foundation: ["What it sits on", (v) => (String(v) === "skids" ? "runners" : "a slab")],
+  roofMaterial: ["What the roof is made of", (v) => String(v)],
+};
+// A ratio has no builder-readable value, so the line says which WAY it moved instead of
+// showing a number nobody can check against a building.
+function ssChangeLine(change) {
+  const known = SS_CHANGE_WORDS[change.field];
+  const label = known ? known[0] : change.field;
+  const show = known && known[1];
+  if (!show) {
+    const from = Number(change.from), to = Number(change.to);
+    const way = !isFinite(from) || !isFinite(to) ? "changed" : to > from ? "increased" : "reduced";
+    return { label, text: way };
+  }
+  return { label, text: `${show(change.from)} → ${show(change.to)}` };
+}
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
 // ⚠️ THREE LANES, AND THIS HAS NOW BEEN WRONG IN BOTH DIRECTIONS. The history is short and worth
@@ -15431,6 +15587,61 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // this component sits above a `calibrationOnly` early return, and a useState added down beside
   // its handlers is React #310 on the operator path. This file has shipped that.
   const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, wallPrefilled: false, wallSeen: false });
+  // ─── THE FREE SECOND PASS, AND THE BUILDER'S OWN LOOK AT IT (2026-09-19) ───────────────
+  // `adminCalCheck` is the whole of it, from the moment Generate is pressed to the moment the
+  // builder saves:
+  //   { step, verdict, reason, note, changed[], pairs[], renders, ms, corrected }
+  //   step     "draft" | "render" | "check" | "done" — which of the four progress lines is live
+  //   verdict  what the SERVER said: matches | corrections | rejected_too_many | skipped | failed
+  //   pairs    [{ viewpoint, frame, azimuthDeg, frameUrl, shotUrl }] — one per viewpoint the
+  //            first pass labelled, which is the only honest source of a pairing there is
+  //
+  // `adminCalAnswers` is the four questions, and they are the ONLY thing standing between a
+  // draft and Save. "unsure" counts as answered on purpose: forcing a builder to click Yes when
+  // they genuinely cannot tell is how you get people clicking Yes to get past the gate.
+  //
+  // ⚠️ UP HERE WITH THE OTHER adminCal* STATE, and this is not filing. The last hook in this
+  // component sits above a `calibrationOnly` early return, and a useState added down beside the
+  // compare JSX is React #310 on the operator path. This file has shipped that.
+  const [adminCalCheck, setAdminCalCheck] = useState(null);
+  const [adminCalAnswers, setAdminCalAnswers] = useState({});
+  const [adminCalFix, setAdminCalFix] = useState(null);         // which question's fix panel is open
+  const [adminCalSpin, setAdminCalSpin] = useState({});         // viewpoint -> degrees turned by hand
+  const [adminCalPairView, setAdminCalPairView] = useState({}); // viewpoint -> "both" | "photo" | "3d"
+  // ⚠️ THE SPEC AS IT STOOD BEFORE THIS PRESS, and it is the fix for a defect that is invisible
+  // until a customer sees it. `calDraftRoof` only clears the OPPOSITE porch key when the
+  // incoming draft declares one, so a correction that says nothing about the porch, merged on
+  // top of an already-merged draft, leaves a stale porchDepthFt standing beside a fresh
+  // porchOutFt — the renderer draws one and Save writes both. So the first draft is applied to
+  // this, and when a correction comes back the FINAL spec is applied to this SAME base, once.
+  // Never a correction on top of a merge.
+  //
+  // A consequence, stated rather than hidden: a hand edit made in the half minute while the
+  // check is running is discarded by that second merge. The panel says "Checking…" throughout
+  // and the ordering rule is what keeps the porch coherent, so that is the trade being made.
+  const calPreGenRef = useRef(null);
+  // The parameters the compare renders were taken with, so a builder dragging one round can be
+  // given a new one without another generation. A ref because nothing renders from it and a
+  // re-render between the drag and the shot must not change what is drawn.
+  const calShotRef = useRef(null);      // { params, frameMap } | null
+  const calSpinReqRef = useRef({});     // viewpoint -> the degrees last asked for
+  // Where a drag started, and how far it has travelled since. A ref, because a pointermove
+  // that re-rendered the panel would fight the drag it is trying to follow.
+  const calDragRef = useRef(null);      // { viewpoint, x, from } | null
+  // "Still going." after a minute and a half. A boolean rather than a live elapsed counter:
+  // a number ticking up beside a paid generation reads as a stopwatch on a fault, and the
+  // only thing a builder can do with it is worry.
+  const [adminCalSlow, setAdminCalSlow] = useState(false);
+  useEffect(() => {
+    if (!adminCalBusy || !adminCalCheck) { setAdminCalSlow(false); return undefined; }
+    const t = setTimeout(() => setAdminCalSlow(true), SS_SLOW_MS);
+    return () => clearTimeout(t);
+    // Keyed on the press, not on the step: the ninety seconds is the whole wait, and
+    // restarting the clock at each step would mean it never fired.
+  }, [adminCalBusy, adminCalCheck && adminCalCheck.at]);
+  // Which run a late answer belongs to. A builder who presses Generate again while a check is
+  // still in flight must not have the old check's corrections land on the new draft.
+  const calRunRef = useRef(0);
   // ONE PRESS IS ONE HOLD IS ONE CHARGE, EVEN AFTER A TIMEOUT (2026-09-18). calibrate_style_ai
   // has always read `idempotencyKey` off the body and handed it to wallet_hold, whose
   // `wallet_tx_idem` unique index is the thing that stops a second $20 hold for one intent - and
@@ -17669,6 +17880,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // Reset with the scan: cached frame URLs belong to the style they were filmed for, and
     // carrying them across would draft the next style from the previous building.
     setAdminCalVideo({ busy: false, step: null, err: null, count: 0, urls: null, observed: null, read: 0 });
+    // And so does the compare step: its pairs are pictures of ANOTHER building, and four
+    // checklist answers about that one would otherwise unlock Save on this one.
+    calRunRef.current += 1;
+    calShotRef.current = null;
+    calPreGenRef.current = null;
+    setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
+    setAdminCalSpin({}); setAdminCalPairView({});
     // One authenticated read gives everything the customer config deliberately does not carry:
     // the reference photos (a builder's own buildings — see 093), this style's scan status, and
     // whether AI drafting is even configured on the server.
@@ -17834,28 +18052,31 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // old two-value allow-list here would also have quietly become WRONG the moment the
   // vocabulary widened to four, because it would have kept waving batten and lap through
   // while silently dropping panel and metal.
-  const applyDraftedShape = (d3) => setAdminCal((p) => ({
-    ...p,
-    spec: {
-      ...p.spec,
-      roof: calDraftRoof(p.spec.roof, d3 && d3.roof),
-      // Only the keys the model actually read — see the header. An unreported colour is absent
-      // from `d3.colors`, so this cannot blank one the builder set.
-      colors: { ...p.spec.colors, ...((d3 && d3.colors) || {}) },
-      wallHeightFt: (d3 && d3.wallHeightFt) || p.spec.wallHeightFt,
-      // gableVent and foundation are TOP-LEVEL, so a `roof`-only merge silently drops
-      // them and the video draft looks like it read nothing about vents or skids. Each
-      // keeps its existing value when the model omits the key, so "the frames never
-      // showed the bottom of the building" leaves the builder's setting alone rather
-      // than resetting it to a slab.
-      gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : p.spec.gableVent,
-      foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : p.spec.foundation,
-      // Third top-level field, same trap: the renderer textures the roof from this before
-      // any customer roof-type pick, so a video that read "metal" and had it dropped here
-      // would show shingles on a metal building and look like the model got it wrong.
-      roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : p.spec.roofMaterial,
-    },
-  }));
+  //
+  // SPLIT INTO A PURE MERGE AND A SETTER (2026-09-19), because the free self-check has to apply
+  // its FINAL spec to the spec as it stood BEFORE the generation rather than on top of the
+  // first draft. Merging twice is exactly how a porch key survives its own exclusion — see
+  // calPreGenRef. Same body, same rules, one caller more.
+  const calShapeMerged = (spec, d3) => ({
+    ...spec,
+    roof: calDraftRoof(spec.roof, d3 && d3.roof),
+    // Only the keys the model actually read — see the header. An unreported colour is absent
+    // from `d3.colors`, so this cannot blank one the builder set.
+    colors: { ...spec.colors, ...((d3 && d3.colors) || {}) },
+    wallHeightFt: (d3 && d3.wallHeightFt) || spec.wallHeightFt,
+    // gableVent and foundation are TOP-LEVEL, so a `roof`-only merge silently drops
+    // them and the video draft looks like it read nothing about vents or skids. Each
+    // keeps its existing value when the model omits the key, so "the frames never
+    // showed the bottom of the building" leaves the builder's setting alone rather
+    // than resetting it to a slab.
+    gableVent: (d3 && d3.gableVent && d3.gableVent.widthFrac > 0) ? d3.gableVent : spec.gableVent,
+    foundation: (d3 && (d3.foundation === "skids" || d3.foundation === "slab")) ? d3.foundation : spec.foundation,
+    // Third top-level field, same trap: the renderer textures the roof from this before
+    // any customer roof-type pick, so a video that read "metal" and had it dropped here
+    // would show shingles on a metal building and look like the model got it wrong.
+    roofMaterial: (d3 && (d3.roofMaterial === "shingle" || d3.roofMaterial === "metal")) ? d3.roofMaterial : spec.roofMaterial,
+  });
+  const applyDraftedShape = (d3) => setAdminCal((p) => ({ ...p, spec: calShapeMerged(p.spec, d3) }));
   const copyCalJson = () => {
     const out = JSON.stringify({ d3: adminCal.spec, d3Photos: adminCal.photos.filter(Boolean), d3VideoFrames: calVideoFrames }, null, 2);
     try {
@@ -18193,6 +18414,160 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos, measured against your ${calDimW} × ${calDimL} ft.`
     : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views, measured against your ${calDimW} × ${calDimL} ft. Photos in step 3 are optional.`;
 
+  // ─── THE FREE SECOND PASS (2026-09-19) ─────────────────────────────────────────────────
+  // What one press now does, end to end:
+  //
+  //   1. the paid call drafts a spec AND labels which frame shows which view, at what angle
+  //   2. this browser renders that draft from those angles, off screen
+  //   3. a FREE second call is handed each render beside the builder's own frame of the same
+  //      view, and asked one narrow question: where does our draft not match their building?
+  //   4. whatever it corrects is merged ONCE onto the spec as it stood before step 1
+  //
+  // ⚠️ NOTHING IN STEPS 2-4 CAN COST THE BUILDER THEIR DRAFT. They have already been charged
+  // and they are already holding it. So there is no throw on this path: no renders, no
+  // labels, no answer, a 409, a timeout — every one of them ends with a verdict the panel
+  // renders as one quiet line saying the CHECK could not run, never that the generation
+  // failed. The only thing that changes is whether the free improvement happened.
+  //
+  // The renders are the CURRENT preview's building at the size the builder typed, not at the
+  // catalog size showing in the preview: the check's own prompt states those measurements as
+  // fact, so a render at some other size would be answering about a different building.
+  const calShotParams = (spec, dims) => ({
+    bldgW: Number(dims.widthFt), bldgH: Number(dims.lengthFt),
+    items, itemTypes: ITEMS, frontWall, scale, mgX, mgY,
+    // Pinned to what the docked panel and the full-screen preview pass, so the render the
+    // model judges and the 3D the builder is looking at cannot disagree about the style.
+    style3d: spec, painted: false, paintBody: "", paintTrim: "", roofType: "", roofColorHex: "",
+    fixtures: C.fixtures, bodyColors: bodyPaintPool, trimColors: trimPaintPool,
+    dormerWindowId: null, dormerWindowOffset: 0,
+  });
+  // A wall clock the renderer itself cannot keep. WebGL has no abort, so the loser of this
+  // race runs on to its own dispose in d3OffscreenShots' finally; what the race buys is that
+  // the BUILDER is not kept waiting on a device that cannot do it.
+  const calShootWithin = async (params, frameMap) => {
+    let timer = null;
+    try {
+      return await Promise.race([
+        renderSelfCheckShots(params, frameMap),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), SS_RENDER_MS); }),
+      ]);
+    } catch (_e) {
+      return null;
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  const calRunSelfCheck = async (res, urls, draftSpec, dims) => {
+    const run = calRunRef.current;
+    const mine = () => calRunRef.current === run;
+    const settle = (patch) => { if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "done", ...patch })); };
+    // NO LABELS, NO CHECK, and no fallback either. A uniform orbit is off by a mean of 37
+    // degrees on the one lap anyone has measured, so pairing a frame with a render at a
+    // guessed angle would show the builder a mismatch we invented and ask them to judge it.
+    if (!res.checkId || !res.frameMap) {
+      settle({ verdict: "skipped", reason: "no_frames", pairs: [] });
+      return;
+    }
+    if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "render" }));
+    const params = calShotParams(draftSpec, dims);
+    const shots = await calShootWithin(params, res.frameMap);
+    if (!mine()) return;
+    calShotRef.current = { params, frameMap: res.frameMap };
+    // The pairs exist whatever happens to the CHECK: a builder who can see their own frame
+    // beside our 3D can answer the four questions without any help from a second model call.
+    const pairs = (shots || []).map((s) => ({
+      viewpoint: s.viewpoint, frame: s.frame, azimuthDeg: s.azimuthDeg,
+      frameUrl: urls[s.frame - 1] || null, shotUrl: s.url,
+    })).filter((p) => p.frameUrl);
+    if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), pairs }));
+    // TWO RENDERS IS THE FLOOR FOR THE CHECK, and one pair is still worth showing. A single
+    // view cannot disagree with itself, so a check run on one is a confident answer about a
+    // quarter of a building; a single pair in front of a person who owns the building is not.
+    if (!shots || shots.length < 2) {
+      settle({ verdict: "skipped", reason: shots && shots.length ? "one_view" : "no_render", pairs });
+      return;
+    }
+    if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "check" }));
+    let out = null;
+    try {
+      out = await setup3d.onSelfCheck({
+        styleValue: adminCal.styleValue, checkId: res.checkId,
+        // THE EXACT ARRAY THE GENERATION WAS SENT, in that order and uncompacted. The frame
+        // indices only mean anything against it, and closing a gap would shift every index
+        // after it — a render aimed at image 6 paired with image 7 looks exactly like a right
+        // answer. The server trusts nothing in it but the positions.
+        photoUrls: urls,
+        renders: shots.map((s) => ({ viewpoint: s.viewpoint, frame: s.frame, base64: s.url })),
+      });
+    } catch (e) {
+      out = { verdict: "failed", reason: "unreachable", note: e && e.message, changed: [], d3: null };
+    }
+    if (!mine()) return;
+    const changed = (out && Array.isArray(out.changed)) ? out.changed : [];
+    // ⚠️ THE FINAL SPEC ONTO THE PRE-GENERATION SPEC, ONCE. Not onto the merged draft — see
+    // calPreGenRef. `d3` is non-null only on verdict "corrections", which is also the only
+    // verdict where anything actually moved.
+    if (out && out.d3 && changed.length) {
+      setAdminCal((p) => ({ ...p, spec: calShapeMerged(calPreGenRef.current || p.spec, out.d3) }));
+    }
+    settle({
+      verdict: (out && out.verdict) || "failed",
+      reason: (out && out.reason) || null,
+      note: (out && out.note) || "",
+      changed, pairs,
+      renders: (out && out.renders) || shots.length,
+      ms: (out && out.ms) || 0,
+      corrected: changed.length > 0,
+    });
+    // The pairs were taken of the DRAFT. If the check moved something, they are now pictures
+    // of a building the builder is not going to save, so they are taken again — one model
+    // build, and only on the one path where it is wrong to skip it.
+    if (out && out.d3 && changed.length) {
+      const after = calShapeMerged(calPreGenRef.current || draftSpec, out.d3);
+      const p2 = calShotParams(after, dims);
+      const reshot = await calShootWithin(p2, res.frameMap);
+      if (!mine() || !reshot) return;
+      calShotRef.current = { params: p2, frameMap: res.frameMap };
+      setAdminCalCheck((p) => ({
+        ...(p || {}),
+        pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
+          const s = reshot.find((x) => x.viewpoint === pair.viewpoint);
+          return s ? { ...pair, shotUrl: s.url } : pair;
+        }),
+      }));
+    }
+  };
+
+  // Turn one compare render by hand. The escape hatch for a pairing the labels got wrong: a
+  // builder who can see the two are not facing the same way drags until they are, and the
+  // whole class of "the model is wrong" that is really "the camera was somewhere else" goes
+  // away. Keyboard too — left and right arrows turn, Home resets — because a drag-only
+  // affordance excludes keyboard users from the one control that rescues a bad pair.
+  //
+  // It re-renders rather than interpolating: there is nothing to interpolate between. One
+  // model build and one encode, kicked per COMMITTED gesture (pointer up, or a key press),
+  // never per pointermove.
+  const calSpinPair = async (viewpoint, nextDeg) => {
+    const held = calShotRef.current;
+    const pair = adminCalCheck && (adminCalCheck.pairs || []).find((p) => p.viewpoint === viewpoint);
+    if (!held || !pair) return;
+    const run = calRunRef.current;
+    const deg = ((Math.round(nextDeg) % 360) + 360) % 360;
+    calSpinReqRef.current = { ...calSpinReqRef.current, [viewpoint]: deg };
+    setAdminCalSpin((p) => ({ ...p, [viewpoint]: deg }));
+    const shots = await calShootWithin(held.params, {
+      ...held.frameMap,
+      [viewpoint]: { frame: pair.frame, azimuthDeg: ((pair.azimuthDeg + deg) % 360 + 360) % 360 },
+    });
+    if (calRunRef.current !== run || !shots) return;
+    const s = shots.find((x) => x.viewpoint === viewpoint);
+    if (!s) return;
+    // LAST GESTURE WINS. A builder who dragged twice while the first render was still going
+    // must not watch it snap back to the angle they have already left. Read off a REF rather
+    // than out of a setState updater: an updater that fired a second setState would run twice
+    // under StrictMode and is a side effect in a place React is allowed to replay.
+    if (calSpinReqRef.current[viewpoint] !== deg) return;
+    setAdminCalCheck((p) => (p ? { ...p, pairs: (p.pairs || []).map((x) => (x.viewpoint === viewpoint ? { ...x, shotUrl: s.url } : x)) } : p));
+  };
+
   // ─── Generate the shape from the video, plus the photos when there are any ────────────
   // The button Carolyn asked for at 09-04 17:00: "once they have changed it, there will be a,
   // like, basically a generate button. And this is where we're going to charge them the 20
@@ -18216,7 +18591,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calGenerate = async () => {
     // The ONE place that still waits on all three: it reads the frames AND the images, so
     // pressing it mid-upload would spend $20 on a partial set.
-    if (adminCalBusy || adminCalVideo.busy || adminCalPhotos.busy) return;
+    //
+    // A SECOND PRESS IS SWALLOWED AND ANSWERED (2026-09-19). The flow now takes a minute and
+    // shows four steps, so pressing again is the natural thing to do; it used to return in
+    // silence, which reads as a dead button on a paid feature. The key in calIdemRef means a
+    // press that somehow got through would take no second hold, but the builder should not
+    // have to rely on that to know their generation is still running.
+    if (adminCalBusy) { setAdminCalMsg({ ok: true, msg: "That generation is already running — hold on, it's nearly there." }); return; }
+    if (adminCalVideo.busy || adminCalPhotos.busy) return;
     if (!(setup3d && setup3d.onDraftFromCombined)) return;
     if (!calCanGenerate) { setAdminCalMsg({ ok: false, msg: calGenerateWhy }); return; }
     const { urls, videoCount, held } = calGenerateSet();
@@ -18230,6 +18612,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const dims = calDimsPayload();
     if (!dims) { setAdminCalMsg({ ok: false, msg: calGenerateWhy }); return; }
     setAdminCalBusy(true); setAdminCalMsg(null);
+    // ⚠️ THE SPEC AS IT STANDS RIGHT NOW, before any of this press lands on it. The first
+    // draft is merged onto it and, if the check corrects anything, the FINAL spec is merged
+    // onto this same base a second time rather than onto the merged draft. See calPreGenRef.
+    calPreGenRef.current = adminCal.spec;
+    calRunRef.current += 1;
+    calShotRef.current = null;
+    calSpinReqRef.current = {};
+    // Four answers about the LAST building are not four answers about this one.
+    setAdminCalAnswers({}); setAdminCalFix(null); setAdminCalSpin({}); setAdminCalPairView({});
+    setAdminCalCheck({ step: "draft", at: Date.now(), verdict: null, reason: null, note: "", changed: [], pairs: [], views: urls.length });
     // THE KEY FOR THIS INTENT (see calIdemRef): minted on the first press, reused by every retry
     // of it, dropped the moment a draft lands. Minted HERE rather than above, after both
     // refusals, so a press the gate turns away never burns one.
@@ -18274,8 +18666,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
           + (back ? `. ${back} more were held back; twelve views is the most one generation reads` : "")
           + `.${ruler} Colours are set where the views show them clearly; cladding is untouched. Preview it, adjust anything, then Save.`,
       });
+      // THE FREE SECOND PASS, inside the same press and the same hold. It is awaited rather
+      // than fired and forgotten: the builder is being shown a four-step progress card and
+      // Save is gated on a compare step that does not exist until this returns, so a flow
+      // that released the button here would leave them looking at a half-drawn screen.
+      //
+      // It cannot throw — see calRunSelfCheck's header — so the draft above is already safe
+      // whatever happens inside it, and this needs no try of its own.
+      if (setup3d.onSelfCheck) {
+        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, res.d3), dims);
+      } else {
+        // An older host with no check capability. The draft is exactly what it always was.
+        setAdminCalCheck((p) => ({ ...(p || {}), step: "done", verdict: "skipped", reason: "unsupported", pairs: [] }));
+      }
     } catch (e) {
       setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });
+      // The generation itself failed, so there is no draft to compare against and no compare
+      // step to show. Clearing it also un-gates Save, which is right: nothing new was applied.
+      setAdminCalCheck(null);
     } finally { setAdminCalBusy(false); }
   };
 
@@ -18605,7 +19013,201 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // component's supabase client is the anon one, and calling portal-settings with it would
   // 401 at resolveTenant. On the public page (?admin=1) there is no session at all, so the
   // operator path keeps going through admin-save-settings with the shared password.
+  // ── What the compare step reads, all in one place ───────────────────────────────────────
+  // Every one of these is derived. Nothing here is state, so there is no second copy of the
+  // answer to "can this be saved?" that could drift from the first.
+  const calPairs = (adminCalCheck && adminCalCheck.pairs) || [];
+  const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
+  const calSaveWhy = calChecksAnswered < SS_CHECKS.length
+    ? `Answer all four questions first. ${calChecksAnswered} of ${SS_CHECKS.length} answered.`
+    : `This replaces what your customers see in 3D for ${(C.buildingStyles.find((s) => adminCal && s.value === adminCal.styleValue) || {}).label || "this style"}. You can change it again any time.`;
+  // ── THE FIX PANELS ──────────────────────────────────────────────────────────────────────
+  // Everything a builder can change here is stated as a thing on a building, never as a field
+  // name, and the panel opens INSIDE the row of the question it answers. "No" must never be a
+  // dead end, and it must never be a link away from the pictures the answer was about.
+  //
+  // ⚠️ THREE THINGS ARE DELIBERATELY NOT HERE, each for its own reason.
+  //   kneeU as a number — it is measured from the CENTRELINE by the renderer and from the eave
+  //     by most people, and a builder should not have to hold that distinction to fix a roof.
+  //     Two sliders in plain words, with the third number derived (ssGambrelFromSliders).
+  //   the building's size — it is step 2's, and letting it be edited here would break the tie
+  //     between the numbers and the video they were measured against.
+  //   doors, windows and vents — placed in the designer; this only sets the shape.
+  //
+  // The overhang is in INCHES and that is the point of it: 1.0 ft against a 0.15 ft truth
+  // reads as a rounding, and 12 in against 2 in is obviously wrong at a glance. Same number,
+  // same clamp, different boundary.
+  const calFixLabel = { fontSize: 11, fontWeight: 700, color: "#334155", display: "block" };
+  const calFixTile = (on, label, sub, onClick, key) => (
+    <button key={key} type="button" onClick={onClick} aria-pressed={on}
+      style={{ ...S.btn(on ? "#5B21B6" : "#FFF", on ? "#FFF" : "#334155"), border: `1px solid ${on ? "#5B21B6" : "#CBD5E1"}`, fontSize: 11.5, textAlign: "left", padding: "6px 10px", minHeight: 34, lineHeight: 1.35 }}>
+      <span style={{ fontWeight: 800 }}>{label}</span>
+      <span style={{ display: "block", fontWeight: 500, opacity: 0.85, fontSize: 10.5 }}>{sub}</span>
+    </button>
+  );
+  const calFixPanel = (key) => {
+    const roof = (adminCal && adminCal.spec && adminCal.spec.roof) || {};
+    if (key === "roof") {
+      const sliders = ssGambrelSliders(roof);
+      return (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+            {calFixTile(roof.type === "gambrel", "Barn roof", "bends partway down", () => calSetRoof({ type: "gambrel" }), "ssc-rt-gambrel")}
+            {calFixTile(roof.type === "gable" || !roof.type, "Two slopes", "straight to the peak", () => calSetRoof({ type: "gable" }), "ssc-rt-gable")}
+            {calFixTile(roof.type === "shed", "One slant", "high side to low", () => calSetRoof({ type: "shed" }), "ssc-rt-shed")}
+          </div>
+          {roof.type === "gambrel" ? (
+            <div style={{ display: "grid", gap: 6 }}>
+              {/* TWO SLIDERS, AND THE THIRD NUMBER IS DERIVED so the pair cannot produce a
+                  gambrel that trips the "it will look like a plain gable" warning. Getting
+                  OUT of that state is what this panel is for. */}
+              <label style={calFixLabel}>Where the bend sits
+                <input type="range" min="0" max="100" step="1" value={sliders.bendPct} className="ssc-fix-range"
+                  onChange={(e) => calSetRoof(ssGambrelFromSliders(e.target.value, sliders.steepPct))}
+                  style={{ width: "100%", display: "block" }} />
+                <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>near the peak</span><span>near the wall</span></span>
+              </label>
+              <label style={calFixLabel}>How steep the bottom part is
+                <input type="range" min="0" max="100" step="1" value={sliders.steepPct} className="ssc-fix-range"
+                  onChange={(e) => calSetRoof(ssGambrelFromSliders(sliders.bendPct, e.target.value))}
+                  style={{ width: "100%", display: "block" }} />
+                <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
+              </label>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, bldgW)}</div>
+            </div>
+          ) : (
+            /* "{n} in 12", because that is what a framing square is marked in and what a
+               roof gets ordered as. 0.5 is the same number and nobody can hold a tape to it. */
+            <label style={calFixLabel}>How steep the roof is
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input className="ssc-dim-in" type="number" step="1" min="1" max="24" inputMode="decimal"
+                  value={String(Math.round((Number(roof.pitch) || 0.5) * 12))}
+                  onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n)) calSetRoof({ pitch: Math.max(0, Math.min(2, n / 12)) }); }}
+                  style={{ ...S.sel, fontSize: undefined, width: 80 }} />
+                <span style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>in 12 — it rises this many inches for every foot across</span>
+              </div>
+            </label>
+          )}
+          <label style={calFixLabel}>How far the roof sticks out past the wall (in)
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input className="ssc-dim-in" type="number" step="1" min="0" max="36" inputMode="decimal"
+                value={String(Math.round((Number(roof.overhang) || 0) * 12))}
+                onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n)) calSetRoof({ overhang: Math.max(0, Math.min(3, n / 12)) }); }}
+                style={{ ...S.sel, fontSize: undefined, width: 80 }} />
+              <span style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>Measure at the side wall. Most sheds are 2–12 in; flush is 0.</span>
+            </div>
+          </label>
+          {/* Never returned by any prompt in this pipeline, so it will always need setting by
+              hand — which is why it is a visible tick here and not only a row in the grid. */}
+          <label style={{ ...calFixLabel, display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
+            <input type="checkbox" checked={roof.plateBand === true} onChange={(e) => calSetPlateBand(e.target.checked)} />
+            Trim board across both ends at the top of the wall
+          </label>
+        </div>
+      );
+    }
+    if (key === "porch") {
+      const kind = calPorchKind(roof);
+      const depth = kind === "projecting" ? roof.porchOutFt : kind === "recessed" ? roof.porchDepthFt : 0;
+      return (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+            {calFixTile(kind === "none", "No porch", "the wall runs straight across", () => calSetPorch("none", 0), "ssc-pk-none")}
+            {calFixTile(kind === "recessed", "Cut into the end", "roof and floor stay put, the wall sets back", () => calSetPorch("recessed", 0), "ssc-pk-recessed")}
+            {calFixTile(kind === "projecting", "In front of the end", "deck and posts standing out", () => calSetPorch("projecting", 0), "ssc-pk-projecting")}
+          </div>
+          {kind !== "none" && (
+            <label style={calFixLabel}>{kind === "projecting" ? "How far it sticks out (ft)" : "How far it goes into the building (ft)"}
+              <input className="ssc-dim-in" type="number" step="0.5" min="0" max="12" inputMode="decimal"
+                value={String(Number(depth) || 0)}
+                onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n)) calSetPorch(kind, Math.max(0, Math.min(12, n))); }}
+                style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
+            </label>
+          )}
+          {kind !== "none" && (
+            /* "The end you filmed first" rather than "the front gable end": one of those is a
+               fact the builder possesses and the other needs d3RoofAxes read first. */
+            <div style={{ display: "grid", gap: 4 }}>
+              <span style={calFixLabel}>Which end it's on</span>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {[["front", "The end you filmed first"], ["back", "The other end"]].map(([v, lbl]) => (
+                  <button key={"ssc-pe-" + v} type="button" aria-pressed={(roof.porchEnd || "front") === v}
+                    onClick={() => calSetRoof({ porchEnd: v })}
+                    style={{ ...S.btn((roof.porchEnd || "front") === v ? "#5B21B6" : "#FFF", (roof.porchEnd || "front") === v ? "#FFF" : "#334155"), border: "1px solid #CBD5E1", fontSize: 11.5, minHeight: 30 }}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+    if (key === "walls") {
+      return (
+        <div style={{ display: "grid", gap: 6 }}>
+          <label style={calFixLabel}>Wall height (ft)
+            <input className="ssc-dim-in" type="number" step="0.5" min="3" max="20" inputMode="decimal"
+              value={String(Number(adminCal.spec.wallHeightFt) || 0)}
+              onChange={(e) => { const n = parseFloat(e.target.value); if (isFinite(n)) calSet({ wallHeightFt: n }); }}
+              style={{ ...S.sel, fontSize: undefined, width: 100, display: "block" }} />
+          </label>
+          <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
+            Floor to the top of the side wall, not to the peak. <b>This is the number you gave us in step 2</b> — changing it here changes it there, because it is one measurement with two boxes.
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "grid", gap: 6 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(140px, 100%), 1fr))", gap: 6 }}>
+          {[["body", "Wall"], ["trim", "Trim"], ["roof", "Roof"]].map(([k, lbl]) => (
+            <label key={"ssc-col-" + k} style={calFixLabel}>{lbl}
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="text" placeholder="#hex or blank" value={adminCal.spec.colors[k] || ""} onChange={(e) => calSetColor(k, e.target.value)}
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors[k] || "#EEE", flexShrink: 0 }} />
+              </div>
+            </label>
+          ))}
+          {/* The porch's own lumber. No prompt in this pipeline ever asks for it, so on a
+              projecting porch it will always need setting by hand — surfaced here rather than
+              hidden in a colour loop for exactly that reason. */}
+          {calPorchKind(roof) === "projecting" && (
+            <label style={calFixLabel}>Porch wood
+              <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                <input type="text" placeholder="blank = natural wood" value={adminCal.spec.colors.wood || ""} onChange={(e) => calSetWood(e.target.value)}
+                  style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                <span style={{ width: 22, height: 22, borderRadius: 4, border: "1px solid #CBD5E1", background: adminCal.spec.colors.wood || "#B08A5A", flexShrink: 0 }} />
+              </div>
+            </label>
+          )}
+        </div>
+        <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>Customers pick their own paint, so these are just what an unpainted one looks like.</div>
+      </div>
+    );
+  };
+  // ⚠️ PROMOTED OUT OF THE GREY NOTES LIST. `gambrelRoofWarning` and `porchAgreementWarning`
+  // reach the builder by being stuffed into `observed.roofNote` with confidence forced to
+  // "low", which lands the loudest message on the panel in its quietest place — under four
+  // other lines in "What the model saw". Both open with a fixed sentence, which is what makes
+  // them findable from here without a second copy of either rule living in the browser.
+  const calRoofNote = (adminCalVideo.observed && adminCalVideo.observed.roofNote) || "";
+  const calWarnBanner = /^Check (this roof|the porch) before saving/.test(calRoofNote) ? calRoofNote : null;
+  // Which question a machine warning belongs to, so the banner can arm that question's fix
+  // panel rather than leaving the builder to work out which of the four it was about.
+  const calWarnQuestion = !calWarnBanner ? null : /^Check the porch/.test(calWarnBanner) ? "porch" : "roof";
+  // ⚠️ FOUR ANSWERS BEFORE SAVE, and only when there is something to answer about. A builder
+  // who has just generated is looking at their own pictures beside our 3D, and the four
+  // questions are the measured failure list — roof shape, porch, wall height, colours. An
+  // operator tuning a style by hand has no pairs on screen and is not asked anything.
+  //
+  // Refused HERE as well as on the button, because this is the line that changes what every
+  // customer of this builder sees in 3D: a disabled button is a hint, and the check that
+  // matters has to be on the act.
+  const calSaveBlocked = Boolean(adminCalCheck && (adminCalCheck.pairs || []).length && calChecksAnswered < SS_CHECKS.length);
   const saveCalSpec = async () => {
+    if (calSaveBlocked) { setAdminCalMsg({ ok: false, msg: calSaveWhy }); return; }
     if (setup3d && setup3d.onSaveSpec) {
       setAdminCalBusy(true); setAdminCalMsg(null);
       try {
@@ -18616,6 +19218,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // frame URLs, so recovery from that is re-filming.
         await setup3d.onSaveSpec(adminCal.styleValue, adminCal.spec, adminCal.photos.filter(Boolean),
           adminCalVideo.urls === null ? undefined : calVideoFrames);
+        // The compare step goes with the save. Its four answers were about the draft that has
+        // just been written, and a later hand edit is not something they were ever an answer
+        // to — leaving them up would gate the next save on a question nobody was asked.
+        calRunRef.current += 1;
+        calShotRef.current = null;
+        setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
+        setAdminCalSpin({}); setAdminCalPairView({});
         setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
       } catch (e) {
         setAdminCalMsg({ ok: false, msg: e.message || "Save failed" });
@@ -20156,6 +20765,50 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div style={{ marginTop: 6, fontSize: 11.5, color: calCanGenerate ? "#166534" : "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
                       {calGenerateWhy}
                     </div>
+                    {/* ── WHAT ONE PRESS IS DOING, in four honest lines ────────────────────
+                        A builder who watches a four-step bar with no explanation assumes four
+                        charges. The money line under the rule is what makes "the check
+                        always runs" safe to ship, and it is shown every single time rather
+                        than only on the slow path.
+
+                        Steps 1 and 2 are two halves of ONE paid call: the model looks at the
+                        views and drafts in the same request, so 1 stands for the whole of it
+                        and 2 completes when the draft lands. Two ticks appearing together is
+                        honest; a second progress bar for something that was never a second
+                        request would not be. ── */}
+                    {adminCalBusy && adminCalCheck && (
+                      <div data-ssc-card="progress" style={{ marginTop: 10, border: "1px solid #DDD6FE", borderRadius: 8, background: "#FAF5FF", padding: "10px 12px" }}>
+                        <div style={{ fontWeight: 800, fontSize: 12.5, color: "#5B21B6", marginBottom: 6 }}>Reading your building…</div>
+                        <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 4 }} aria-live="polite">
+                          {[
+                            ["draft", `Looking at your ${adminCalCheck.views || 0} views`, `Looked at your ${adminCalCheck.views || 0} views`],
+                            ["draft", "Drawing a first 3D from what they show", "Drew a first 3D from what they show"],
+                            ["check", "Checking our 3D against your video, side by side", "Checked our 3D against your video"],
+                            ["done", "Correcting anything that doesn't line up", "Correcting anything that doesn't line up"],
+                          ].map(([owns, doing, done], i) => {
+                            const order = ["draft", "render", "check", "done"];
+                            const at = order.indexOf(adminCalCheck.step);
+                            const mine = order.indexOf(owns);
+                            const state = at > mine ? "done" : at === mine ? "now" : "next";
+                            return (
+                              <li key={"ssc-step-" + i} aria-current={state === "now" ? "step" : undefined}
+                                style={{ fontSize: 11.5, lineHeight: 1.5, fontWeight: state === "next" ? 500 : 700, color: state === "done" ? "#047857" : state === "now" ? "#5B21B6" : "#94A3B8" }}>
+                                {state === "done" ? "✓ " : state === "now" ? "› " : "  "}{state === "done" ? done : doing}
+                              </li>
+                            );
+                          })}
+                        </ol>
+                        <div style={{ marginTop: 6, fontSize: 11, color: "#6D28D9", lineHeight: 1.5 }}>
+                          {adminCalSlow
+                            ? "Still going. Big videos take longer — don't close the page."
+                            : "Usually about a minute. You can leave this page open and come back."}
+                        </div>
+                        {/* THE MONEY LINE. Under a rule, on every render of this card. */}
+                        <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #DDD6FE", fontSize: 11, color: "#4C1D95", fontWeight: 700, lineHeight: 1.5 }}>
+                          This is one generation. The check and the correction are part of it — you are charged $20 once, however much we have to fix.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
                 {/* The model's own reading of the building, in plain words. It used to sit in
@@ -20190,6 +20843,234 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   </div>
                 )}
               </div>
+              {/* ── STEP 4: DOES THIS MATCH YOUR BUILDING? ────────────────────────────────
+                  The builder's own frames beside our 3D of the same view, turned to face the
+                  same way, and four questions that are not generic reassurance: they are the
+                  measured failure list. Roof shape (a drafted gambrel that rendered as a
+                  gable), the porch (`porchOutFt` came back 0 times in 19 recorded
+                  generations), the wall height (7 in 74 % of them, on buildings measuring 9)
+                  and the colours.
+
+                  ⚠️ NOTHING HERE IS SAVED. This card sits above the existing field grid and
+                  the Save button, and every control in it writes the same draft spec those
+                  do. Save is one deliberate press, after four answers.
+
+                  NO SSD_CSS ON THIS SURFACE — see SSC_CAL_CSS. Inline styles, and the one
+                  responsive rule that cannot be written inline (side-by-side on a panel,
+                  stacked on a phone) is an auto-fit grid rather than a media query, so it
+                  reflows on the CONTAINER and needs nothing measured in JavaScript. ── */}
+              {adminCalCheck && !adminCalBusy && adminCalCheck.step === "done" && (
+                <div data-ssc-card="compare" style={{ border: "1px solid #DDD6FE", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 800, fontSize: 12.5, color: "#5B21B6" }}>🔍 Step 4 — Does this match your building?</span>
+                    <span style={{ fontSize: 11, color: "#64748B", fontWeight: 700 }}>
+                      {calPairs.length ? `${calPairs.length} view${calPairs.length === 1 ? "" : "s"} · ` : ""}nothing is saved yet
+                    </span>
+                  </div>
+                  {/* ⚠️ PROMOTED OUT OF THE GREY NOTES LIST INTO A BANNER. This message used to
+                      land under four other lines in "What the model saw", which is the
+                      quietest place on the panel for the loudest thing on it. Its button arms
+                      the question it is about, so a builder is never left working out which of
+                      the four the warning meant. */}
+                  {calWarnBanner && (
+                    <div role="alert" style={{ marginTop: 8, border: "1px solid #FCD34D", background: "#FFFBEB", borderRadius: 6, padding: "8px 10px", fontSize: 11.5, color: "#92400E", fontWeight: 600, lineHeight: 1.5 }}>
+                      {calWarnBanner}
+                      <div style={{ marginTop: 6 }}>
+                        <button type="button" onClick={() => setAdminCalFix(calWarnQuestion)}
+                          style={{ ...S.btn("#92400E", "#FFF"), fontSize: 11 }}>
+                          Open the {calWarnQuestion === "porch" ? "porch" : "roof"} controls
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {/* WHAT THE CHECK DID, in one quiet line or one honest list. A failed check
+                      says the CHECK could not run and never that the generation did: the
+                      builder has their draft and has been charged once either way. */}
+                  <div style={{ marginTop: 8, fontSize: 11.5, lineHeight: 1.5, fontWeight: 600, color: adminCalCheck.verdict === "matches" ? "#047857" : adminCalCheck.verdict === "corrections" ? "#5B21B6" : "#B45309" }}>
+                    {adminCalCheck.verdict === "matches" && <>✓ Checked against your video — the draft already matches. Look at it yourself anyway; you are the one who has seen the building.</>}
+                    {adminCalCheck.verdict === "corrections" && <>We checked our own 3D against your video and corrected {adminCalCheck.changed.length} thing{adminCalCheck.changed.length === 1 ? "" : "s"}:</>}
+                    {adminCalCheck.verdict === "rejected_too_many" && <>Our check thought too much of the draft was wrong to patch safely, so it changed nothing. Go through the four questions below carefully.</>}
+                    {(adminCalCheck.verdict === "skipped" || adminCalCheck.verdict === "failed") && <>We couldn't run our own check this time, so what you see is the first read. Look at it carefully against your pictures before you save. You were charged once, as usual.</>}
+                  </div>
+                  {adminCalCheck.verdict === "corrections" && adminCalCheck.changed.length > 0 && (
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "grid", gap: 3 }}>
+                      {adminCalCheck.changed.map((ch, i) => {
+                        const line = ssChangeLine(ch);
+                        return (
+                          <li key={"ssc-chg-" + i} style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
+                            <b>{line.label}</b> — {line.text}
+                            {ch.why ? <span style={{ color: "#64748B" }}> · {ch.why}</span> : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {adminCalCheck.note ? <div style={{ marginTop: 4, fontSize: 11.5, color: "#64748B", lineHeight: 1.5 }}>{adminCalCheck.note}</div> : null}
+                  {/* ── THE PAIRS ──────────────────────────────────────────────────────────
+                      One per viewpoint the FIRST pass labelled, and no more: a pair we could
+                      only make by guessing an angle would show the builder a mismatch we
+                      invented and ask them to judge it. */}
+                  {calPairs.length > 0 && (
+                    <p style={{ margin: "10px 0 6px", fontSize: 11.5, color: "#475569", lineHeight: 1.5 }}>
+                      Your pictures beside the 3D, turned to face the same way. <b>If the 3D is facing the wrong way, drag it round</b> — that is a camera we matched by machine, not a mistake in the building.
+                    </p>
+                  )}
+                  {calPairs.map((pair, i) => {
+                    const word = SS_VIEW_WORDS[pair.viewpoint] || pair.viewpoint;
+                    const spun = adminCalSpin[pair.viewpoint] || 0;
+                    const show = adminCalPairView[pair.viewpoint] || "both";
+                    const half = (kind) => (show === "both" || show === kind);
+                    return (
+                      <div key={"ssc-pair-" + pair.viewpoint} role="group" aria-label={`Comparison ${i + 1} of ${calPairs.length}: ${word}`}
+                        data-ssc-pair={pair.viewpoint}
+                        style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 6, padding: 8 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: "#0F172A" }}>{word}</span>
+                          <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>matched from your view {pair.frame}</span>
+                          <span style={{ flex: 1 }} />
+                          {/* One full-width image at a time, for a phone or for a closer look.
+                              "Both" still stacks rather than shrinking at narrow widths — see
+                              the grid below — so nothing here is ever 170 px wide. */}
+                          {[["both", "Side by side"], ["photo", "Your photo"], ["3d", "Your 3D"]].map(([k, lbl]) => (
+                            <button key={"ssc-pv-" + pair.viewpoint + k} type="button"
+                              aria-pressed={show === k}
+                              onClick={() => setAdminCalPairView((p) => ({ ...p, [pair.viewpoint]: k }))}
+                              style={{ ...S.btn(show === k ? "#5B21B6" : "#FFF", show === k ? "#FFF" : "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 10.5, padding: "2px 7px" }}>
+                              {lbl}
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: show === "both" ? "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" : "1fr", gap: 8 }}>
+                          {half("photo") && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 800, color: "#64748B", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
+                              <img src={pair.frameUrl} alt={`Your video, ${word.toLowerCase()}`}
+                                style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#0F172A", borderRadius: 6, display: "block" }} />
+                            </div>
+                          )}
+                          {half("3d") && (
+                            <div>
+                              <div style={{ fontSize: 10, fontWeight: 800, color: "#5B21B6", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
+                              {/* DRAG TO ROTATE, AND ARROW KEYS TOO. A drag-only affordance
+                                  would shut keyboard users out of the one control that
+                                  rescues a pairing the labels got wrong. The drag COMMITS on
+                                  release rather than following the pointer: each new angle is
+                                  a fresh render, and re-rendering per pointermove would make
+                                  the panel unusable to save nobody any time. */}
+                              <div tabIndex={0} role="img" data-ssc-spin={pair.viewpoint}
+                                aria-label={`The 3D we built, ${word.toLowerCase()}. Left and right arrow keys turn it; Home puts it back.`}
+                                onPointerDown={(e) => { calDragRef.current = { viewpoint: pair.viewpoint, x: e.clientX, from: spun }; }}
+                                onPointerUp={(e) => {
+                                  const d = calDragRef.current;
+                                  calDragRef.current = null;
+                                  if (!d || d.viewpoint !== pair.viewpoint) return;
+                                  // 2 px of travel to the degree, so a lap is a comfortable
+                                  // drag rather than a flick, and a click that moved a pixel
+                                  // does not re-render anything.
+                                  const moved = Math.round((e.clientX - d.x) / 2);
+                                  if (Math.abs(moved) >= 3) calSpinPair(pair.viewpoint, d.from + moved);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "ArrowLeft") { e.preventDefault(); calSpinPair(pair.viewpoint, spun - SS_SPIN_STEP_DEG); }
+                                  else if (e.key === "ArrowRight") { e.preventDefault(); calSpinPair(pair.viewpoint, spun + SS_SPIN_STEP_DEG); }
+                                  else if (e.key === "Home") { e.preventDefault(); calSpinPair(pair.viewpoint, 0); }
+                                }}
+                                style={{ cursor: "ew-resize", touchAction: "pan-y", borderRadius: 6 }}>
+                                <img src={pair.shotUrl} alt="" draggable={false}
+                                  style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "contain", background: "#E7EEF5", borderRadius: 6, display: "block", pointerEvents: "none" }} />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 11, color: "#64748B", fontWeight: 600 }}>
+                          <span>Not facing the same way? Drag it, or use ← →.</span>
+                          <button type="button" onClick={() => calSpinPair(pair.viewpoint, spun - SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
+                          <button type="button" onClick={() => calSpinPair(pair.viewpoint, spun + SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
+                          {spun !== 0 && <button type="button" onClick={() => calSpinPair(pair.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", fontSize: 11, padding: "2px 8px" }}>Reset</button>}
+                          <span aria-live="polite" style={{ color: "#94A3B8" }}>{spun ? `Turned ${spun} degrees` : ""}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {calPairs.length === 0 && (
+                    <div style={{ marginTop: 8, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
+                      We couldn't line your video frames up with the 3D this time, so there is nothing to put side by side. Open the 3D preview and compare it with your own pictures before you save.
+                    </div>
+                  )}
+                  {/* THE ROOF, IN FEET. The prompt keeps asking for ratios because the ratios
+                      measurably work; a builder cannot check a ratio against a building. Both
+                      are true at once, so the number stays a ratio on the wire and becomes
+                      feet here. */}
+                  <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, bldgW)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the side walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)}.
+                  </div>
+                  {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
+                      ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
+                      condition the Save gate uses. A device that could not render the pairs
+                      (no WebGL, a lost context, over the five seconds) has nothing to put in
+                      front of the builder, and four questions that gate nothing are worse
+                      than none — a gate that is sometimes not a gate stops being read.
+                      Consequence, said plainly: on that device the builder saves with no
+                      confirmation step, and the line above is what tells them to open the
+                      preview and compare it themselves. */}
+                  {calPairs.length > 0 && (
+                  <div role="group" aria-label="Four checks before saving" style={{ marginTop: 10, borderTop: "1px solid #E2E8F0", paddingTop: 8 }}>
+                    <div style={{ fontWeight: 800, fontSize: 12, color: "#0F172A", marginBottom: 6 }}>Four things to check — answer all four before you save</div>
+                    {SS_CHECKS.map(([key, question, hint]) => {
+                      const answer = adminCalAnswers[key] || "";
+                      return (
+                        <div key={"ssc-q-" + key} data-ssc-question={key} style={{ borderTop: "1px dashed #E2E8F0", padding: "8px 0" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#0F172A" }}>{question}</div>
+                          <div style={{ fontSize: 11, color: "#64748B", marginTop: 2, lineHeight: 1.5 }}>{hint}</div>
+                          {/* Full-width and wrapping, so the three land under the question on a
+                              phone instead of squeezing beside it. */}
+                          <div role="radiogroup" aria-label={question} style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+                            {[["yes", "Yes"], ["no", "No"], ["unsure", "Not sure"]].map(([v, lbl]) => (
+                              <button key={"ssc-a-" + key + v} type="button" role="radio" aria-checked={answer === v}
+                                onClick={() => {
+                                  setAdminCalAnswers((p) => ({ ...p, [key]: v }));
+                                  // "No" opens the fix panel in the SAME row. Never a link
+                                  // away, never a dead end.
+                                  setAdminCalFix((cur) => (v === "no" ? key : cur === key ? null : cur));
+                                }}
+                                style={{ ...S.btn(answer === v ? (v === "yes" ? "#047857" : v === "no" ? "#B91C1C" : "#64748B") : "#FFF", answer === v ? "#FFF" : "#334155"), border: "1px solid #CBD5E1", fontSize: 11.5, minHeight: 30 }}>
+                                {answer === v ? "✓ " : ""}{lbl}
+                              </button>
+                            ))}
+                            {answer && answer !== "no" && (
+                              <button type="button" onClick={() => setAdminCalFix((cur) => (cur === key ? null : key))}
+                                style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11.5, minHeight: 30 }}>
+                                {adminCalFix === key ? "Hide the controls" : "Change it anyway"}
+                              </button>
+                            )}
+                          </div>
+                          {/* "Not sure" counts as answered and leaves a mark. Forcing a builder
+                              to commit to Yes when they genuinely cannot tell is how you get
+                              people clicking Yes to get past the gate. */}
+                          {answer === "unsure" && (
+                            <div style={{ marginTop: 4, fontSize: 11, color: "#B45309", fontWeight: 600 }}>Marked "not sure" — you can change it any time below.</div>
+                          )}
+                          {adminCalFix === key && (
+                            <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "8px 10px" }}>
+                              {calFixPanel(key)}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <div aria-live="polite" style={{ marginTop: 8, fontSize: 11.5, fontWeight: 700, color: calChecksAnswered === SS_CHECKS.length ? "#047857" : "#B45309" }}>
+                      {calChecksAnswered} of {SS_CHECKS.length} answered
+                    </div>
+                  </div>
+                  )}
+                  {/* "SOMETHING IS WRONG" NEVER ENDS THE FLOW, and it says the price rather
+                      than hiding it — plus what to change about the input, so the second $20
+                      is not the same $20 twice. */}
+                  <div style={{ marginTop: 8, borderTop: "1px dashed #E2E8F0", paddingTop: 8, fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>
+                    Still not right after changing it by hand? Take a straight-on photo of the end that is wrong, add it in step 3 and generate again — a new generation is another $20.
+                  </div>
+                </div>
+              )}
               {setup3d && setup3d.onUploadModel && (
                 <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -20665,9 +21546,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 {/* Copy-JSON is the operator's escape hatch when a save path is down; a
                     builder has no use for it and no place to paste it. */}
                 {!setup3d && <button onClick={copyCalJson} style={{ ...S.btn("#FFF", "#92400E"), border: "1px solid #FCD34D", fontSize: 12 }}>Copy d3 JSON</button>}
-                <button onClick={saveCalSpec} disabled={adminCalBusy} style={{ ...S.btn(adminCalBusy ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : "pointer" }}>
+                {/* RENDERED DISABLED, NEVER HIDDEN, with the reason beside it. A builder who
+                    has just generated has four questions to answer first; one tuning a style
+                    by hand has none, and this reads exactly as it always did for them. */}
+                <button onClick={saveCalSpec} disabled={adminCalBusy || calSaveBlocked}
+                  title={calSaveBlocked ? calSaveWhy : undefined}
+                  style={{ ...S.btn(adminCalBusy || calSaveBlocked ? "#9CA3AF" : "#92400E", "#FFF"), padding: "8px 14px", fontSize: 13, cursor: adminCalBusy ? "wait" : (calSaveBlocked ? "not-allowed" : "pointer") }}>
                   {adminCalBusy ? "Saving…" : (setup3d ? "Save 3D look" : "Save to config")}
                 </button>
+              </div>
+              {/* Said whether or not anything is blocking, because "is this live yet?" is the
+                  question a builder actually has in front of a Save button. */}
+              <div data-ssc-save-why style={{ marginTop: 6, fontSize: 11.5, fontWeight: 600, lineHeight: 1.5, color: calSaveBlocked ? "#B45309" : "#166534" }}>
+                {calPairs.length ? <>{calSaveWhy}{" "}</> : null}
+                <span style={{ color: "#64748B" }}>Nothing is saved until you press Save — your customers still see the old 3D.</span>
               </div>
               {adminCalMsg && (
                 <div style={{ marginTop: 8, fontSize: 12, color: adminCalMsg.ok ? "#166534" : "#DC2626", fontWeight: 600, wordBreak: "break-all" }}>

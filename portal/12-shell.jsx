@@ -1639,7 +1639,52 @@ function Dashboard({ session }) {
       // in the success line, which is the only thing that proves the numbers reached the model
       // rather than merely sitting in a form. An older function echoes nothing and the clause
       // disappears, which is itself the right news.
-      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null, dims: data.dims || null };
+      // `frameMap` and `checkId` ride back UNTOUCHED, and they are the two the free second pass
+      // cannot work without. The map says which of the images THIS REQUEST was given shows
+      // which view of the building, and at what angle; the id is the ledger row that already
+      // paid, which is what makes the check free and single-use. An older function sends
+      // neither, and the designer treats that as "no check on this generation" rather than
+      // inventing an angle to render at.
+      return {
+        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
+        observed: data.observed || null, dims: data.dims || null,
+        frameMap: data.frameMap || null, checkId: data.checkId || null,
+      };
+    },
+    /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
+       first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR
+       BUILDING? No hold, no charge, no new gate — `calibrate_style_check` sits behind the same
+       settings_structures/edit gate as the generation and is single-use against the ledger row
+       that already paid for it.
+
+       ⚠️ A FAILED CHECK IS NOT A FAILED GENERATION, and this function is where that stops being
+       true by accident. The builder is already holding their draft. So every refusal, timeout
+       and unreachable server comes back as a verdict the panel can render as one quiet line,
+       and the only thing that throws is a 409 on the claim — which means this generation has
+       already been checked, and the caller handles it the same way.
+
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
+       is far enough above that a server which answered in time is still heard, and it bounds
+       the wait at something a person will sit through. Abandoning THIS call costs nothing,
+       which is exactly what separates it from the one above. */
+    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders }) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders },
+        signal: AbortSignal.timeout(60000),
+      });
+      // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
+      // FunctionsHttpError whose response has to be read for it, so a caller that only looked
+      // at error.message would report "Edge Function returned a non-2xx status code" to a
+      // builder for what is usually "that generation has already been checked".
+      if (error) {
+        let said = "";
+        try { said = ((await error.context.json()) || {}).error || ""; } catch (_e) { said = ""; }
+        return { ok: false, verdict: "failed", reason: "unreachable", note: said || error.message || "The check could not run.", changed: [], d3: null };
+      }
+      if (!data || !data.ok) {
+        return { ok: false, verdict: "failed", reason: "refused", note: (data && data.error) || "The check could not run.", changed: [], d3: null };
+      }
+      return data;
     },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
