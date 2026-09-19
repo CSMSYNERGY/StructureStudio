@@ -677,6 +677,113 @@ async function main() {
   draftFrameMap = FRAME_MAP;
   draftObserved = { roofNote: "Gambrel, read from the ground.", porch: "projecting", confidence: "medium" };
 
+  // ── THE SAME BANNER WITH PAIRS ON SCREEN, which is the normal outcome ─────────────────
+  // The no-pairs case above renders the panel inside the banner. With pairs it opens in its
+  // own QUESTION'S row instead — the right place, next to the pictures the answer is about,
+  // and about a thousand pixels below the button that opened it. Nothing scrolled, nothing
+  // near the button changed, and the label was gated on `!calPairs.length` so it could never
+  // read "Hide": pressing it again, the one thing a builder would try next, shut what the
+  // first press had opened.
+  await page.setViewportSize({ width: 1400, height: 800 });
+  draftObserved = {
+    roofNote: "Check this roof before saving: the bend sits so close to the peak that this will draw like a plain gable. Raise Knee rise, or move the bend nearer the wall.",
+    porch: "projecting", confidence: "low",
+  };
+  await press();
+  const bannerBtn = page.locator('[data-ssc-card="compare"] [role="alert"] button').first();
+  r.ok("the roof warning gets its banner with pairs on screen too",
+    /Open the roof controls/.test(await bannerBtn.innerText()), await bannerBtn.innerText());
+  // Put the banner at the top of the window, so "is the control it opens on screen?" is a
+  // question about the distance between them and not about where the page happened to sit.
+  await page.evaluate(() => {
+    const a = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
+    if (a) a.scrollIntoView({ block: "start" });
+  });
+  await page.waitForTimeout(300);
+  const rowState = () => page.evaluate(() => {
+    const row = document.querySelector('[data-ssc-question="roof"]');
+    const b = row ? row.getBoundingClientRect() : null;
+    const btn = document.querySelector('[data-ssc-card="compare"] [role="alert"] button');
+    return {
+      inputs: row ? row.querySelectorAll("input").length : -1,
+      top: b ? Math.round(b.top) : null,
+      inView: Boolean(b) && b.top < window.innerHeight && b.bottom > 0,
+      label: btn ? btn.innerText.trim() : "",
+      expanded: btn ? btn.getAttribute("aria-expanded") : null,
+      controls: btn ? btn.getAttribute("aria-controls") : null,
+      scrollY: Math.round(window.scrollY),
+      winH: window.innerHeight,
+    };
+  });
+  const bBefore = await rowState();
+  r.ok("the controls it names are off the bottom of the window before it is pressed",
+    bBefore.inView === false, `roof row at ${bBefore.top}, window ${bBefore.winH} tall`);
+  r.ok("and the button says so to a screen reader",
+    bBefore.expanded === "false" && bBefore.controls === "ssc-fix-roof", `${bBefore.expanded} / ${bBefore.controls}`);
+  await bannerBtn.click();
+  await page.waitForTimeout(900);
+  const bAfter = await rowState();
+  r.ok("⚠️ PRESSING IT PUTS THE CONTROL IN FRONT OF THE BUILDER", bAfter.inView === true && bAfter.inputs > 0,
+    `${bBefore.inputs} -> ${bAfter.inputs} inputs, row ${bBefore.top} -> ${bAfter.top}, scrollY ${bBefore.scrollY} -> ${bAfter.scrollY}`);
+  r.ok("⚠️ AND THE LABEL SAYS WHICH WAY THE TOGGLE IS POINTING", /Hide the roof controls/.test(bAfter.label), bAfter.label);
+  r.ok("with aria-expanded to match", bAfter.expanded === "true", String(bAfter.expanded));
+  await bannerBtn.click();
+  await page.waitForTimeout(300);
+  const bClosed = await rowState();
+  r.ok("and pressing it again closes what it opened, saying so",
+    bClosed.inputs === 0 && /Open the roof controls/.test(bClosed.label), `${bClosed.inputs} inputs, "${bClosed.label}"`);
+  await page.setViewportSize({ width: 1500, height: 1100 });
+  await page.waitForTimeout(300);
+
+  // ── A CORRECTION TO A KEY THE DRAFT NEVER CARRIED ─────────────────────────────────────
+  // applySelfCheck reports `from: before ?? null` off the two sanitised specs, and an absent
+  // key is exactly what the shape-first prompt asks the model to leave out — while the
+  // check's own prompt then asks specifically about the eave. Straight through a per-field
+  // formatter, Math.round(Number(null)) is 0 and String(null) is "null", so the list a builder
+  // is told to read line by line said "The roof edge — null → open" and "How far apart the
+  // rafter tails are — 0 in → 24 in" for a measurement nobody made.
+  const eaveSpec = draftSpec({ wallHeightFt: 9 }, 1.0);
+  checkReply = {
+    ok: true, verdict: "corrections",
+    d3: { ...eaveSpec, roof: { ...eaveSpec.roof, eave: "open", tailSpacingIn: 24 } },
+    changed: [
+      { field: "roof.eave", from: null, to: "open", why: "rafter tails visible at the corner" },
+      { field: "roof.tailSpacingIn", from: null, to: 24, why: "counted against the wall" },
+      { field: "roof.porchDepthFt", from: 6, to: null, why: "the recess the projection replaced" },
+    ],
+    checked: { eave: "changed" }, note: "", renders: 3, ms: 1800,
+  };
+  await press();
+  const changeList = await page.evaluate(() => {
+    const ul = document.querySelector('[data-ssc-card="compare"] ul');
+    return ul ? ul.innerText : "";
+  });
+  const listLine = (re) => (changeList.split("\n").find((l) => re.test(l)) || "");
+  r.ok("⚠️ NO 'null' REACHES THE BUILDER", !/null/i.test(changeList), changeList.split("\n").join(" | ").slice(0, 160));
+  r.ok("⚠️ AND NO FABRICATED ZERO EITHER", !/(^|\s)0 in →/.test(changeList), listLine(/rafter tails are/));
+  r.ok("a value the draft never had reads 'not set'", /not set →/.test(changeList), listLine(/roof edge/));
+  r.ok("the eave is in words a builder owns, not our enum",
+    /rafter tails showing/.test(changeList) && !/→ open/.test(changeList), listLine(/roof edge/));
+  r.ok("and a key the correction removed reads 'gone', not 0 ft", /→ gone/.test(changeList), listLine(/porch goes into/));
+
+  // ⚠️ AND THE BUILDER CAN PUT IT BACK. roof.eave is on the self-check's allow-list and the
+  // renderer draws rafter tails from it, but nothing in this panel could set it — so a check
+  // that turned the tails on could only be undone by paying for another generation.
+  // "No" opens the controls in the same row — the route a builder who can see the tails takes.
+  await answer("roof", "No");
+  const eaveTiles = () => page.evaluate(() => Array.from(document.querySelectorAll('[data-ssc-question="roof"] button'))
+    .filter((b) => /Rafter tails showing|Boxed in/.test(b.innerText))
+    .map((b) => ({ label: b.innerText.split("\n")[0].trim(), on: b.getAttribute("aria-pressed") === "true" })));
+  const tiles0 = await eaveTiles();
+  r.ok("the roof controls carry a roof-edge control at all", tiles0.length === 2, JSON.stringify(tiles0));
+  r.ok("and it shows what the check turned on", tiles0.some((t) => /Rafter tails/.test(t.label) && t.on), JSON.stringify(tiles0));
+  await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /Boxed in/ }).first().click();
+  await page.waitForTimeout(300);
+  const tiles1 = await eaveTiles();
+  r.ok("⚠️ AND ONE TAP PUTS THE ROOF EDGE BACK, with no second $20",
+    tiles1.some((t) => /Boxed in/.test(t.label) && t.on) && tiles1.every((t) => !/Rafter tails/.test(t.label) || !t.on),
+    JSON.stringify(tiles1));
+
   // ── The money line and the honest failure, on the same surface ────────────────────────
   checkReply = { ok: true, verdict: "skipped", reason: "off", d3: null, changed: [], checked: {}, note: "", renders: 0, ms: 5 };
   const a4 = await press();
@@ -761,8 +868,82 @@ async function main() {
   r.ok("and each one fills the card it is in", phone.imgs.every((i) => i.w >= phone.inner - 6),
     `${phone.imgs.map((i) => i.w).join(", ")} in ${phone.inner}`);
   await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "03-phone-375.png") });
+
+  // ⚠️ AND A WAY OUT OF THE COLUMN, because stacking is not the same as being legible. The
+  // panel has about 205 px inside a 375 px portal — a 68 px icon rail plus four levels of
+  // gutter — so each half above is 161 px wide, and a 16:9 frame letterboxed into a 4:3 box
+  // paints about 161 x 91 of actual picture. The Your photo / Your 3D control cannot help:
+  // the grid is already one column below ~700 px, so "full width" is that same 161 px. Our
+  // own "Preview in 3D" opens a 375-wide canvas on this very screen, so the render got the
+  // window and the builder's evidence got a stamp — and the four questions are answered
+  // against the stamp.
+  const inPanelW = phone.imgs[0] ? phone.imgs[0].w : 0;
+  await page.locator('[data-ssc-pair="front"] [data-ssc-zoom-open]').first().click();
+  await page.waitForTimeout(350);
+  const zoomed = await page.evaluate(() => {
+    const ov = document.querySelector("[data-ssc-zoom]");
+    const b = ov ? ov.getBoundingClientRect() : null;
+    return {
+      open: Boolean(ov),
+      imgs: ov ? Array.from(ov.querySelectorAll("img")).map((i) => Math.round(i.getBoundingClientRect().width)) : [],
+      width: b ? Math.round(b.width) : 0,
+      turn: ov ? Array.from(ov.querySelectorAll("button")).some((x) => /Left|Right/.test(x.innerText)) : false,
+      doc: [document.documentElement.scrollWidth, document.documentElement.clientWidth],
+    };
+  });
+  r.ok("a pair can be opened out of the panel's column", zoomed.open && zoomed.imgs.length === 2, JSON.stringify(zoomed.imgs));
+  r.ok("⚠️ AT THE WIDTH OF THE WINDOW, not the width of the column",
+    zoomed.imgs.every((w) => w >= 330) && zoomed.imgs[0] > inPanelW * 1.8, `${zoomed.imgs.join(", ")} against ${inPanelW} in the panel`);
+  r.ok("with the turn controls still there, so a bad pairing can be straightened from here", zoomed.turn);
+  r.ok("and it does not put the page into horizontal scroll", zoomed.doc[0] === zoomed.doc[1], zoomed.doc.join(" vs "));
+  await page.locator("[data-ssc-zoom]").screenshot({ path: join(shots, "04-phone-enlarged.png") });
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  r.ok("Escape closes it", (await page.evaluate(() => document.querySelectorAll("[data-ssc-zoom]").length)) === 0);
+
   await page.setViewportSize({ width: 1500, height: 1100 });
   await page.waitForTimeout(400);
+
+  // ── THE CAPTION'S NUMBER IS STEP 1'S NUMBERING, EVEN WHEN THE LAP IS STRIDED ─────────
+  // `pair.frame` is a 1-based index into the array THIS REQUEST WAS SENT, and calGenerateSet
+  // strides the lap whenever photos crowd it: with 8 frames and 8 photos it keeps
+  // max(CAL_VIDEO_MIN, CAL_PHOTO_MAX - photos) = 4 of them — walk 1, 3, 5, 7. Step 1 numbers
+  // the builder's thumbnails 1..8 by their position in the lap. So "matched from your view 2"
+  // pointed at the thumbnail step 1 calls View 3, on the one cross-reference a builder has for
+  // "that pairing looks wrong, let me go and look at that frame". The pictures were always
+  // right; only the number lied, and this panel already deleted four numbered photo slots on
+  // the rule that a label that is wrong is worse than no label.
+  STYLES[0].d3_photos = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => `${BASE}/__stub/img-p${i}.png`);
+  draftFrameMap = { front: { frame: 1, azimuthDeg: 0 }, side: { frame: 2, azimuthDeg: 90 }, eaveCorner: { frame: 4, azimuthDeg: 270 } };
+  checkReply = { ok: true, verdict: "matches", d3: null, changed: [], checked: {}, note: "", renders: 3, ms: 900 };
+  await openStyle();
+  await setDims(16, 24, 9);
+  const strided = await press();
+  r.ok("with eight photos beside it the lap is strided, not sent whole",
+    Boolean(strided.gen) && strided.gen.videoCount === 4 && strided.gen.photoUrls.length === 12,
+    `${strided.gen && strided.gen.videoCount} walk of ${strided.gen && strided.gen.photoUrls.length}`);
+  const captions = await page.evaluate(() => {
+    const lap = {};
+    for (const img of Array.from(document.querySelectorAll('img[alt^="View "]'))) {
+      lap[img.getAttribute("src")] = Number((img.getAttribute("alt") || "").replace(/\D+/g, ""));
+    }
+    return Array.from(document.querySelectorAll("[data-ssc-pair]")).map((el) => {
+      const img = el.querySelector("img");
+      const src = img ? img.getAttribute("src") : "";
+      const said = (el.textContent.match(/matched from your view (\d+)/) || [])[1];
+      return { viewpoint: el.getAttribute("data-ssc-pair"), said: said ? Number(said) : null, step1: lap[src] || null };
+    });
+  });
+  r.ok("every pair still names a view of theirs", captions.length === 3 && captions.every((c) => c.said),
+    JSON.stringify(captions));
+  r.ok("⚠️ AND THE NUMBER IT NAMES IS THE THUMBNAIL STEP 1 LABELS",
+    captions.every((c) => c.said === c.step1), captions.map((c) => `${c.viewpoint}: said ${c.said}, step 1 calls it ${c.step1}`).join(" | "));
+  // The assertion above passes trivially on an unstrided lap, where the two numberings agree.
+  // This is what proves the run actually exercised the case.
+  r.ok("and the stride really did move them apart from the request's own indices",
+    captions.some((c) => c.said !== ({ front: 1, side: 2, eaveCorner: 4 })[c.viewpoint]),
+    captions.map((c) => `${c.viewpoint}: request ${({ front: 1, side: 2, eaveCorner: 4 })[c.viewpoint]} -> lap ${c.said}`).join(" | "));
+  STYLES[0].d3_photos = [];
 
   // ── 9: no page errors ─────────────────────────────────────────────────────────────────
   r.ok("zero page errors across the whole run", errors.length === 0, errors.slice(0, 3).join(" | "));

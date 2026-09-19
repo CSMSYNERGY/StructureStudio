@@ -14178,7 +14178,9 @@ const SS_CHANGE_WORDS = {
   "roof.kneeU": ["Where the barn roof's bend sits", null],
   "roof.kneeRise": ["How steep the bottom part of the barn roof is", null],
   "roof.ridgeRise": ["How high the peak of the barn roof is", null],
-  "roof.eave": ["The roof edge", (v) => String(v)],
+  // NOT the raw enum. "open" and "fascia" are our words for it; these are the builder's, and
+  // they are the same two the roof fix panel's tiles carry so the line and the control agree.
+  "roof.eave": ["The roof edge", (v) => (String(v) === "open" ? "rafter tails showing" : "boxed in with a fascia board")],
   "roof.tailSpacingIn": ["How far apart the rafter tails are", (v) => `${Math.round(Number(v))} in`],
   "roof.porchOutFt": ["How far the porch sticks out", (v) => ssFtInWords(Number(v))],
   "roof.porchDepthFt": ["How far the porch goes into the building", (v) => ssFtInWords(Number(v))],
@@ -14196,16 +14198,28 @@ const SS_CHANGE_WORDS = {
 };
 // A ratio has no builder-readable value, so the line says which WAY it moved instead of
 // showing a number nobody can check against a building.
+//
+// ⚠️ AN ABSENT VALUE IS "not set", AND IT IS NOT RARE. applySelfCheck reports `from: before ??
+// null` and `to: after ?? null` off the two sanitised specs, and a key the draft did not carry
+// is exactly what the shape-first prompt ASKS the model to leave out ("omit both keys rather
+// than guessing") -- while the check's own prompt then asks specifically about the eave. Put
+// straight through a per-field formatter, `Math.round(Number(null))` is 0 and `String(null)` is
+// the literal "null", so the list a builder is meant to read line by line said "The roof edge —
+// null → open" and "How far apart the rafter tails are — 0 in → 24 in" for a measurement nobody
+// made. The `to` side is the same story in reverse: a porch key the kind-swap removed reads
+// "gone" rather than a fabricated 0 ft.
 function ssChangeLine(change) {
   const known = SS_CHANGE_WORDS[change.field];
   const label = known ? known[0] : change.field;
   const show = known && known[1];
+  const absent = (v) => v === null || v === undefined;
   if (!show) {
     const from = Number(change.from), to = Number(change.to);
     const way = !isFinite(from) || !isFinite(to) ? "changed" : to > from ? "increased" : "reduced";
     return { label, text: way };
   }
-  return { label, text: `${show(change.from)} → ${show(change.to)}` };
+  const word = (v, side) => (absent(v) ? (side === "to" ? "gone" : "not set") : show(v));
+  return { label, text: `${word(change.from, "from")} → ${word(change.to, "to")}` };
 }
 // Upload a list with BOUNDED CONCURRENCY, preserving order, and never throwing.
 //
@@ -15656,6 +15670,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const [adminCalFix, setAdminCalFix] = useState(null);         // which question's fix panel is open
   const [adminCalSpin, setAdminCalSpin] = useState({});         // viewpoint -> degrees turned by hand
   const [adminCalPairView, setAdminCalPairView] = useState({}); // viewpoint -> "both" | "photo" | "3d"
+  // WHICH PAIR IS OPEN FULL SIZE, and why there has to be one. This panel sits in a column
+  // about 205 px wide inside a 375 px phone -- a 68 px icon rail plus four levels of gutter --
+  // so each compare image renders 161 x 121, and a 16:9 frame letterboxed into it paints about
+  // 161 x 91 of actual picture. The Your photo / Your 3D control changes nothing there: the
+  // grid is already one column below ~700 px, so "full width" is the same 161 px. Meanwhile
+  // "Preview in 3D" opens a 375 x 530 canvas, so OUR render gets the whole viewport and the
+  // builder's own evidence never exceeds a stamp. The four questions are answered against
+  // these pictures, so they need to be escapable from the column. Up here with the other
+  // adminCal* state for the React #310 reason above.
+  const [adminCalZoom, setAdminCalZoom] = useState(null);       // viewpoint | null
   // ⚠️ THE SPEC AS IT STOOD BEFORE THIS PRESS, and it is the fix for a defect that is invisible
   // until a customer sees it. `calDraftRoof` only clears the OPPOSITE porch key when the
   // incoming draft declares one, so a correction that says nothing about the porch, merged on
@@ -17948,7 +17972,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     calShotRef.current = null;
     calPreGenRef.current = null;
     setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
-    setAdminCalSpin({}); setAdminCalPairView({});
+    setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
     // One authenticated read gives everything the customer config deliberately does not carry:
     // the reference photos (a builder's own buildings — see 093), this style's scan status, and
     // whether AI drafting is even configured on the server.
@@ -18802,7 +18826,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     calShotRef.current = null;
     calSpinReqRef.current = {};
     // Four answers about the LAST building are not four answers about this one.
-    setAdminCalAnswers({}); setAdminCalFix(null); setAdminCalSpin({}); setAdminCalPairView({});
+    setAdminCalAnswers({}); setAdminCalFix(null); setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
     setAdminCalCheck({ step: "draft", at: Date.now(), verdict: null, reason: null, note: "", changed: [], pairs: [], views: urls.length });
     // THE KEY FOR THIS INTENT (see calIdemRef): minted on the first press, reused by every retry
     // of it, dropped the moment a draft lands. Minted HERE rather than above, after both
@@ -19230,6 +19254,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Every one of these is derived. Nothing here is state, so there is no second copy of the
   // answer to "can this be saved?" that could drift from the first.
   const calPairs = (adminCalCheck && adminCalCheck.pairs) || [];
+  // ⚠️ WHICH "VIEW N" A PAIR IS ABOUT, in step 1's numbering and not the request's. `pair.frame`
+  // is a 1-based index into the array THIS GENERATION WAS SENT, and calGenerateSet strides the
+  // lap whenever photos crowd it (from five staged photos upward) -- so with 8 frames and 8
+  // photos the request carries walk 1, 3, 5, 7 and "matched from your view 2" pointed at the
+  // thumbnail step 1 labels View 3. That caption is the only cross-reference a builder has for
+  // "that pairing looks wrong, let me go and look at that frame", and it sent them to the wrong
+  // picture. The images themselves were always right; only the number lied. Resolved from the
+  // URL, which is the one thing the two lists genuinely share, and 0 (no number, no claim) for
+  // anything that is not in the lap.
+  const calLapNumber = (url) => (url ? calVideoFrames.indexOf(url) + 1 : 0);
   // ⚠️ WHICH BUILDING THE ROOF NUMBERS DESCRIBE. ssRoofInFeet turns kneeU, kneeRise and
   // ridgeRise -- every one of them a ratio of the HALF-SPAN -- into feet, so each figure in
   // "What we drew" scales with whatever width it is handed. `bldgW` is the PREVIEW's width: it
@@ -19381,6 +19415,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               <span style={{ fontSize: 11, color: "#64748B", fontWeight: 600 }}>Measure at the side wall. Most sheds are 2–12 in; flush is 0.</span>
             </div>
           </label>
+          {/* ⚠️ THE ONE CORRECTION THE PANEL COULD NOT UNDO. `roof.eave` is on the self-check's
+              allow-list — its prompt asks about it off the eave close-up — and the renderer
+              draws rafter tails when it is "open", but nothing in this panel or the field grid
+              below could set it, so a builder whose check turned the tails on could only get
+              rid of them by paying for another generation. tailSpacingIn is deliberately not
+              here: the renderer only reads it while the eave is open, so putting the edge back
+              is the whole of the undo. */}
+          <div style={{ display: "grid", gap: 4 }}>
+            <span style={calFixLabel}>The roof edge</span>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", gap: 6 }}>
+              {calFixTile((roof.eave || "fascia") !== "open", "Boxed in", "a flat board closes it off", () => calSetRoof({ eave: "fascia" }), "ssc-eave-fascia")}
+              {calFixTile(roof.eave === "open", "Rafter tails showing", "you can see the rafter ends", () => calSetRoof({ eave: "open" }), "ssc-eave-open")}
+            </div>
+          </div>
           {/* Never returned by any prompt in this pipeline, so it will always need setting by
               hand — which is why it is a visible tick here and not only a row in the grid. */}
           <label style={{ ...calFixLabel, display: "flex", alignItems: "center", gap: 6, fontWeight: 600 }}>
@@ -19526,7 +19574,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         calRunRef.current += 1;
         calShotRef.current = null;
         setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
-        setAdminCalSpin({}); setAdminCalPairView({});
+        setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
         setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
       } catch (e) {
         setAdminCalMsg({ ok: false, msg: e.message || "Save failed" });
@@ -21223,9 +21271,33 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div role="alert" style={{ marginTop: 8, border: "1px solid #FCD34D", background: "#FFFBEB", borderRadius: 6, padding: "8px 10px", fontSize: 11.5, color: "#92400E", fontWeight: 600, lineHeight: 1.5 }}>
                       {calWarnBanner}
                       <div style={{ marginTop: 6 }}>
-                        <button type="button" onClick={() => setAdminCalFix((cur) => (cur === calWarnQuestion ? null : calWarnQuestion))}
+                        {/* ⚠️ WITH PAIRS ON SCREEN THIS BUTTON HAD NO VISIBLE EFFECT AT ALL.
+                            The panel it opens renders inside its own question's row, roughly a
+                            thousand pixels below the banner and off the bottom of the window;
+                            nothing scrolled, nothing near the button changed, and the label was
+                            gated on `!calPairs.length` so it could never read "Hide". The
+                            natural response -- press it again -- shut what the first press had
+                            opened. So: scroll the row into view, and let the label say which
+                            way the toggle is pointing. aria-expanded/aria-controls close the
+                            same gap for anyone who cannot see the scroll. */}
+                        <button type="button"
+                          aria-expanded={adminCalFix === calWarnQuestion}
+                          aria-controls={"ssc-fix-" + calWarnQuestion}
+                          onClick={() => {
+                            const opening = adminCalFix !== calWarnQuestion;
+                            setAdminCalFix(opening ? calWarnQuestion : null);
+                            // After the commit, not during it: the row is taller once the panel
+                            // is in it. setTimeout rather than requestAnimationFrame because a
+                            // hidden tab starves rAF and the scroll would never happen.
+                            if (opening && calPairs.length) {
+                              setTimeout(() => {
+                                const row = document.querySelector('[data-ssc-question="' + calWarnQuestion + '"]');
+                                if (row && row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
+                              }, 0);
+                            }
+                          }}
                           style={{ ...S.btn("#92400E", "#FFF"), fontSize: 11 }}>
-                          {adminCalFix === calWarnQuestion && !calPairs.length ? "Hide" : "Open"} the {SS_FIX_WORDS[calWarnQuestion] || "roof"} controls
+                          {adminCalFix === calWarnQuestion ? "Hide" : "Open"} the {SS_FIX_WORDS[calWarnQuestion] || "roof"} controls
                         </button>
                       </div>
                       {/* ⚠️ WITH NO PAIRS THERE ARE NO QUESTIONS, so the panel this button
@@ -21237,7 +21309,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                           With pairs on screen it opens in its own question's row, which keeps
                           the fix next to the pictures the answer is about. */}
                       {!calPairs.length && adminCalFix === calWarnQuestion && (
-                        <div style={{ marginTop: 8, background: "#FFF", border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px" }}>
+                        <div id={"ssc-fix-" + calWarnQuestion} style={{ marginTop: 8, background: "#FFF", border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px" }}>
                           {calFixPanel(calWarnQuestion)}
                         </div>
                       )}
@@ -21286,7 +21358,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         style={{ marginTop: 8, border: "1px solid #E2E8F0", borderRadius: 6, padding: 8 }}>
                         <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
                           <span style={{ fontSize: 11.5, fontWeight: 800, color: "#0F172A" }}>{word}</span>
-                          <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>matched from your view {pair.frame}</span>
+                          <span style={{ fontSize: 10.5, color: "#94A3B8", fontWeight: 600 }}>
+                            {calLapNumber(pair.frameUrl)
+                              ? `matched from your view ${calLapNumber(pair.frameUrl)}`
+                              : "matched from one of your pictures"}
+                          </span>
                           <span style={{ flex: 1 }} />
                           {/* One full-width image at a time, for a phone or for a closer look.
                               "Both" still stacks rather than shrinking at narrow widths — see
@@ -21299,6 +21375,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               {lbl}
                             </button>
                           ))}
+                          {/* THE ONE THAT ESCAPES THE COLUMN. On a phone the two halves above
+                              are 161 px wide whichever of the three is pressed; this opens them
+                              at the width of the window. A button rather than a tap on the
+                              image: the 3D half already owns pointerdown for the drag. */}
+                          <button type="button" data-ssc-zoom-open={pair.viewpoint}
+                            onClick={() => setAdminCalZoom(pair.viewpoint)}
+                            style={{ ...S.btn("#FFF", "#0F172A"), border: "1px solid #CBD5E1", fontSize: 10.5, padding: "2px 7px" }}>
+                            ⤢ Bigger
+                          </button>
                         </div>
                         <div style={{ display: "grid", gridTemplateColumns: show === "both" ? "repeat(auto-fit, minmax(min(240px, 100%), 1fr))" : "1fr", gap: 8 }}>
                           {half("photo") && (
@@ -21352,6 +21437,53 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       </div>
                     );
                   })}
+                  {/* ── FULL SIZE, OUT OF THE PANEL'S COLUMN ─────────────────────────────
+                      Fixed to the viewport, so it is the window's width and not the 205 px the
+                      designer column has on a phone. The two halves stack, both at full width,
+                      with the same turn controls the pair carries -- a builder who opens this
+                      to judge a pairing must not have to close it again to straighten it. ── */}
+                  {adminCalZoom && (() => {
+                    const zp = calPairs.find((p) => p.viewpoint === adminCalZoom);
+                    if (!zp) return null;
+                    const zWord = SS_VIEW_WORDS[zp.viewpoint] || zp.viewpoint;
+                    const zSpun = adminCalSpin[zp.viewpoint] || 0;
+                    return (
+                      <div role="dialog" aria-modal="true" aria-label={`${zWord}: your picture beside the 3D`}
+                        data-ssc-zoom={zp.viewpoint}
+                        onClick={(e) => { if (e.target === e.currentTarget) setAdminCalZoom(null); }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") { e.preventDefault(); setAdminCalZoom(null); }
+                          else if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG); }
+                          else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG); }
+                        }}
+                        style={{ position: "fixed", inset: 0, zIndex: 4000, background: "rgba(15,23,42,0.94)", overflowY: "auto", padding: 10 }}>
+                        <div style={{ maxWidth: 900, margin: "0 auto" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                            <span style={{ color: "#FFF", fontWeight: 800, fontSize: 13 }}>{zWord}</span>
+                            <span style={{ color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
+                              {calLapNumber(zp.frameUrl) ? `your view ${calLapNumber(zp.frameUrl)}` : "one of your pictures"}
+                            </span>
+                            <span style={{ flex: 1 }} />
+                            <button type="button" autoFocus onClick={() => setAdminCalZoom(null)}
+                              style={{ ...S.btn("#FFF", "#0F172A"), fontSize: 12, padding: "4px 10px" }}>Close</button>
+                          </div>
+                          <div style={{ fontSize: 10, fontWeight: 800, color: "#CBD5E1", letterSpacing: 0.4, marginBottom: 3 }}>YOUR VIDEO</div>
+                          <img src={zp.frameUrl} alt={`Your video, ${zWord.toLowerCase()}, full size`}
+                            style={{ width: "100%", background: "#0F172A", borderRadius: 6, display: "block", marginBottom: 10 }} />
+                          <div style={{ fontSize: 10, fontWeight: 800, color: "#DDD6FE", letterSpacing: 0.4, marginBottom: 3 }}>YOUR 3D</div>
+                          <img src={zp.shotUrl} alt="" draggable={false}
+                            style={{ width: "100%", background: "#E7EEF5", borderRadius: 6, display: "block" }} />
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8, color: "#CBD5E1", fontSize: 11.5, fontWeight: 600 }}>
+                            <span>Not facing the same way? Turn it, or use ← →.</span>
+                            <button type="button" onClick={() => calSpinBy(zp.viewpoint, -SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
+                            <button type="button" onClick={() => calSpinBy(zp.viewpoint, SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
+                            {zSpun !== 0 && <button type="button" onClick={() => calSpinPair(zp.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), fontSize: 11, padding: "2px 8px" }}>Reset</button>}
+                            <span aria-live="polite">{zSpun ? `Turned ${zSpun} degrees` : ""}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {calPairs.length === 0 && (
                     <div style={{ marginTop: 8, fontSize: 11.5, color: "#B45309", fontWeight: 600, lineHeight: 1.5 }}>
                       {/* ⚠️ DO NOT SEND THEM TO THE 3D PREVIEW FROM HERE. One of the three
@@ -21420,7 +21552,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                             <div style={{ marginTop: 4, fontSize: 11, color: "#B45309", fontWeight: 600 }}>Marked "not sure" — you can change it any time below.</div>
                           )}
                           {adminCalFix === key && (
-                            <div style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "8px 10px" }}>
+                            /* The id the banner's button points at with aria-controls. Only one
+                               of the two panels can exist at a time -- this one needs pairs, the
+                               banner's needs none -- so the id is unique either way. */
+                            <div id={"ssc-fix-" + key} style={{ marginTop: 8, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 6, padding: "8px 10px" }}>
                               {calFixPanel(key)}
                             </div>
                           )}
