@@ -1414,6 +1414,11 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     wanted.delete(field);
   }
 
+  // WHICH KEYS THE PORCH EXCLUSION TOOK OUT, recorded by build() rather than inferred by the
+  // two passes that need it. They need it for opposite reasons and both were wrong without it:
+  // the destructive pass must not undo a removal that was the POINT of the correction, and the
+  // report must not call an applied correction a dropped one — or leave it out altogether.
+  let excluded = new Set<string>();
   // Build the merged spec and hold it to the sanitiser. Written as a function because it may run
   // TWICE — see the destructive-correction pass below.
   const build = () => {
@@ -1431,8 +1436,15 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
     // CORRECTION's values, exactly as calDraftRoof keys on the incoming draft's.
     const out = num(wanted.get("roof.porchOutFt")) ?? 0;
     const depth = num(wanted.get("roof.porchDepthFt")) ?? 0;
-    if (out > 0.5) { delete roof.porchDepthFt; delete roof.porchTruss; }
-    else if (depth > 0.5) delete roof.porchOutFt;
+    const gone = new Set<string>();
+    if (out > 0.5) {
+      delete roof.porchDepthFt; delete roof.porchTruss;
+      gone.add("roof.porchDepthFt"); gone.add("roof.porchTruss");
+    } else if (depth > 0.5) {
+      delete roof.porchOutFt;
+      gone.add("roof.porchOutFt");
+    }
+    excluded = gone;
     return sanitizeD3Spec(merged);
   };
 
@@ -1451,10 +1463,16 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
   // "fascia -> nothing" line. Any declared field that vanished this way is taken back out and
   // the spec is rebuilt once, so the draft's own value stands.
   //
-  // Only DECLARED fields are restored. A key the porch exclusion removed on purpose is a side
-  // effect of a different field's correction and stays removed.
+  // Only DECLARED fields are restored, and never one the porch exclusion removed on purpose.
+  // That exemption is load-bearing: a model that swaps the porch kind by DECLARING BOTH keys
+  // ("porchOutFt": 6, "porchDepthFt": 0) had its own porchDepthFt read as unreadable here,
+  // moved into `dropped` and taken out of `wanted`. The geometry still came out right — the
+  // exclusion fires again off the base roof on the rebuild — but the builder was told the
+  // recess had not been applied when it had, and that false line went into the info row
+  // portal-settings writes as "changes that were not applied".
   const destructive = [...wanted.keys()].filter((f) =>
-    readSpecPath(base.d3, f) !== undefined && readSpecPath((finalSpec as { d3: D3Spec }).d3, f) === undefined
+    !excluded.has(f)
+    && readSpecPath(base.d3, f) !== undefined && readSpecPath((finalSpec as { d3: D3Spec }).d3, f) === undefined
   );
   if (destructive.length) {
     for (const f of destructive) { wanted.delete(f); dropped.push(f); }
@@ -1464,12 +1482,29 @@ export function applySelfCheck(draft: unknown, read: SelfCheckRead, dims?: Known
 
   // What ACTUALLY moved, read off the two sanitised specs. A field the sanitiser clamped back to
   // where it started, or dropped outright, did not change.
+  //
+  // ⚠️ THE EXCLUDED KEYS ARE REPORTED TOO, and they are not declared. Swapping a recessed porch
+  // for a projecting one is ONE correction to the model — the prompt tells it to "give the new
+  // key and leave the other one out entirely" — and two changes to the building: the projection
+  // appears and the recess (with its truss) goes. Reporting only the declared half left the
+  // builder's "What the check changed" list saying the porch now sticks out 6 ft and never
+  // saying the recess had been removed, on the correction the baseline calls the single most
+  // visible error on the whole building. The list has to be true line by line AND complete;
+  // reading both sides off the sanitised specs is what makes it both.
   const applied: SelfCheckChange[] = [];
-  for (const field of declared) {
-    if (!wanted.has(field)) continue;
+  const report = declared.slice();
+  for (const f of excluded) if (!report.includes(f)) report.push(f);
+  for (const field of report) {
+    const proposed = wanted.has(field);
+    if (!proposed && !excluded.has(field)) continue;
     const before = readSpecPath(base.d3, field);
     const after = readSpecPath(finalSpec.d3, field);
-    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) { dropped.push(field); continue; }
+    if (JSON.stringify(before ?? null) === JSON.stringify(after ?? null)) {
+      // Only something the MODEL asked for can be "not applied". A porch key the exclusion
+      // would have removed had the draft carried one is not a proposal and belongs nowhere.
+      if (proposed) dropped.push(field);
+      continue;
+    }
     const why = read.changed.find((c) => c.field === field)?.why ?? "";
     applied.push({ field, from: before ?? null, to: after ?? null, why });
   }

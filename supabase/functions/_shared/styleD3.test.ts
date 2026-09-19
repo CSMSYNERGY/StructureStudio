@@ -1988,6 +1988,74 @@ Deno.test("⚠️ a recessed porch corrected to projecting, and back, without ei
   assertEquals(toRecessed.d3.roof.porchOutFt, undefined, "and the projection it replaced is gone");
 });
 
+Deno.test("⚠️ a porch swap reports BOTH halves, and calls neither of them un-applied", () => {
+  // Swapping the kind is one correction to the model and two changes to the building: the
+  // projection appears and the recess goes. The list the builder reads before Save said only
+  // the first half, on the correction the baseline calls the most visible error there is.
+  //
+  // Both shapes, because they fail differently. DECLARING BOTH KEYS is what the prompt tells
+  // the model not to do ("give the new key and leave the other one out entirely") and it also
+  // used to produce a FALSE `dropped` entry: the exclusion's own removal was read as a value
+  // the sanitiser could not take, so portal-settings logged "the self-check proposed 1
+  // change(s) that were not applied" about a change that had been applied.
+  const declaredBoth = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6, porchDepthFt: 0 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "the deck stands out past the end wall" },
+      { field: "roof.porchDepthFt", from: 6, to: 0, why: "nothing is cut into the end" },
+    ],
+  }));
+  assert(declaredBoth.ok, "usable");
+  if (!declaredBoth.ok) return;
+  assertEquals(declaredBoth.d3.roof.porchOutFt, 6);
+  assertEquals(declaredBoth.d3.roof.porchDepthFt, undefined, "the recess is gone from the spec");
+  assertEquals(declaredBoth.changed.map((c) => c.field), ["roof.porchOutFt", "roof.porchDepthFt"]);
+  assertEquals(declaredBoth.changed[1].from, 6, "and the line says what it was");
+  assertEquals(declaredBoth.changed[1].to, null, "and that it is now nothing");
+  assertEquals(declaredBoth.dropped, [], "nothing here was un-applied");
+
+  // The prompt-compliant shape. The recess and its truss still vanish from the spec, so they
+  // still have to appear in the list; they are just nobody's declaration.
+  const trussed = { ...DRAFT, roof: { ...DRAFT.roof, porchTruss: true } };
+  const compliant = applySelfCheck(trussed, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6 } },
+    changed: [{ field: "roof.porchOutFt", from: 0, to: 6, why: "the deck stands out past the end wall" }],
+  }));
+  assert(compliant.ok, "usable");
+  if (!compliant.ok) return;
+  assertEquals(compliant.d3.roof.porchDepthFt, undefined);
+  assertEquals(compliant.d3.roof.porchTruss, undefined);
+  assertEquals(
+    compliant.changed.map((c) => c.field),
+    ["roof.porchOutFt", "roof.porchDepthFt", "roof.porchTruss"],
+    "one declaration, three true lines",
+  );
+  assertEquals(compliant.dropped, []);
+});
+
+Deno.test("a porch key the exclusion would have removed, on a draft that never had one, is reported nowhere", () => {
+  // The other direction of the same rule. `excluded` names keys build() DELETED, which on a
+  // porchless draft deletes nothing — so there is no change to report, and nothing the model
+  // did not ask for may appear in `dropped` either. The declared half that landed nowhere
+  // still does, because the model did ask for that one.
+  const porchless = { ...DRAFT, roof: { ...DRAFT.roof, porchDepthFt: undefined } };
+  const r = applySelfCheck(porchless, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6, porchDepthFt: 0 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "posts and a deck" },
+      { field: "roof.porchDepthFt", from: 0, to: 0, why: "nothing cut in" },
+    ],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed.map((c) => c.field), ["roof.porchOutFt"]);
+  assertEquals(r.dropped, ["roof.porchDepthFt"], "declared, applied nowhere — that IS un-applied");
+  assertEquals(r.d3.roof.porchTruss, undefined);
+});
+
 Deno.test("⚠️ what is REPORTED is what landed, not what was asked for", () => {
   // The sanitiser clamps. A correction of 8 ft on a key clamped to 0..3 becomes 3, and telling
   // the builder "1 ft -> 8 ft" over a model that now reads 3 ft is a lie in the one list they
