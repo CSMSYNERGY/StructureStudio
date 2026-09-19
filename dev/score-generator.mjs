@@ -10,7 +10,9 @@
 //                it needs the service key and it reads whatever is in the database today.
 //                This is how a PROMPT change gets a before number over real history.
 //   (neither)    LIVE. Calls the paid endpoint N times per building. Costs money the day
-//                the meter arms, writes ledger rows, and needs a portal session.
+//                the meter arms, writes ledger rows, and needs a portal session. It is the
+//                only mode that can measure a change which has not run yet, so it is the one
+//                that has to send `dims` — a pass without them measures the OLD prompt.
 //
 //   node dev/score-generator.mjs --recorded
 //   node dev/score-generator.mjs --replay --runs 5
@@ -35,7 +37,13 @@
 // keeps out of the repo. --recorded needs none of it; --replay and LIVE refuse without it.
 //
 //   dev/score-corpus/lofted-barn-porch.local.json
-//   { "client_id": "...", "style_value": "...", "frames": ["https://.../walk-1.jpg", ...] }
+//   { "client_id": "...", "style_value": "...", "frames": ["https://.../walk-1.jpg", ...],
+//     "dims": { "widthFt": 16, "lengthFt": 24, "wallHeightFt": 9 } }
+//
+// `dims` IS AN INPUT AND THE SIDECAR IS WHERE INPUTS LIVE. It is the dimensions card's own
+// three numbers, and they are what the server turns into the prompt's ruler. Beside `truth`
+// in the corpus they would read as an expectation; here they read as what the builder typed,
+// which is what they are. A LIVE run without them is refused — see the sidecar check below.
 //
 // ⚠️ THE FRAMES ARE PINNED IN THAT FILE rather than read from the style row, because the
 // server does not read the style row either: calibrate_style_ai takes `photoUrls` from the
@@ -150,7 +158,30 @@ if (mode !== "recorded") {
   if (missing.length) {
     console.error(`${mode} mode needs the inputs sidecar for each building. Missing or incomplete:`);
     for (const m of missing) console.error(`   ${m.localPath}`);
-    console.error('   { "client_id": "...", "style_value": "...", "frames": ["https://...", ...] }');
+    console.error('   { "client_id": "...", "style_value": "...", "frames": ["https://...", ...],');
+    console.error('     "dims": { "widthFt": 16, "lengthFt": 24, "wallHeightFt": 9 } }');
+    process.exit(2);
+  }
+}
+
+// ⚠️ A LIVE RUN WITHOUT DIMS MEASURES THE OLD PROMPT. The server does not require them —
+// parseKnownDims(undefined) is {ok, dims: null}, deliberately, so production's older bundle
+// keeps working — so a pass with no dims SUCCEEDS and silently takes the no-ruler branch:
+// videoShapePrompt(null) is byte-identical to the pre-dims prompt, still asking the model for
+// a wall height it gets wrong in 74 % of generations, applyKnownDims is a no-op, and
+// ai_style_calls.dims is written null. The number that comes back is an "after" for a pipeline
+// with the ruler switched off, and the wall-height assertion — the dimensions card's own
+// acceptance test — is null for every run of it. A run that will not start is better than a
+// table that quietly grades the thing the change replaced.
+const dimOf = (e) => (e.local && e.local.dims) || null;
+const dimOk = (d) => !!d && Number(d.widthFt) > 0 && Number(d.lengthFt) > 0 && Number(d.wallHeightFt) > 0;
+if (mode === "live") {
+  const noDims = entries.filter((e) => !dimOk(dimOf(e)));
+  if (noDims.length) {
+    console.error("refusing: a LIVE pass measures the dimensions prompt, so every building needs its");
+    console.error("three measurements in the sidecar. Missing or incomplete:");
+    for (const m of noDims) console.error(`   ${m.localPath}  ->  "dims": { "widthFt": _, "lengthFt": _, "wallHeightFt": _ }`);
+    console.error("(--recorded and --replay do not need them: they read dims off what was already run.)");
     process.exit(2);
   }
 }
@@ -175,6 +206,10 @@ async function generate(token, entry, n) {
   const local = entry.local;
   const frames = local.frames || [];
   if (!frames.length) throw new Error(`${entry.name}: the sidecar pins no frames`);
+  // Refused above for the whole set, and again here: this is the line that spends the money,
+  // and the panel's own handler takes the same belt-and-braces posture for the same reason.
+  const dims = dimOf(entry);
+  if (!dimOk(dims)) throw new Error(`${entry.name}: the sidecar carries no dims — a live pass would measure the old prompt`);
   const r = await fetch(`${need("SUPABASE_URL")}/functions/v1/portal-settings`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, apikey: need("SUPABASE_ANON_KEY"), "Content-Type": "application/json" },
@@ -185,6 +220,10 @@ async function generate(token, entry, n) {
       source: entry.source || "video",        // "video" | "combined" | "photos"
       photoUrls: frames,                      // PINNED in the sidecar, walk order first
       videoCount: local.video_count ?? entry.video_count ?? frames.length,
+      // THE RULER. Exactly what the dimensions card sends, so the prompt this pass measures
+      // is the one a builder gets. Sent as three numbers rather than the whole sidecar
+      // object, so a stray key in a local file cannot reach the server's parser.
+      dims: { widthFt: Number(dims.widthFt), lengthFt: Number(dims.lengthFt), wallHeightFt: Number(dims.wallHeightFt) },
       // A fresh key per run, deliberately: reusing one would make wallet_hold refuse every
       // run after the first and the "three runs" would be one run printed thrice.
       idempotencyKey: `score-${Date.now()}-${n}-${Math.random().toString(36).slice(2, 8)}`,
@@ -225,6 +264,10 @@ async function replay(local, limit) {
 if (mode === "live") {
   const total = entries.length * runsWanted;
   console.log(`about to run ${entries.length} building(s) x ${runsWanted} = ${total} live generations on the scoring tenant`);
+  for (const e of entries) {
+    const d = dimOf(e);
+    console.log(`   ${e.name}: measured against ${d.widthFt} x ${d.lengthFt} ft, ${d.wallHeightFt} ft walls`);
+  }
   console.log(`if the meter is ARMED this holds $${(total * 20).toFixed(2)}. Re-run with --yes to proceed.`);
   if (!args.yes) process.exit(0);
 }
