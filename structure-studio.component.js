@@ -18589,8 +18589,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       return null;
     } finally { if (timer) clearTimeout(timer); }
   };
-  const calRunSelfCheck = async (res, urls, draftSpec, dims) => {
-    const run = calRunRef.current;
+  // `run` is THE GENERATION'S OWN run, handed in by calGenerate rather than read here. Reading
+  // it here was right only by accident: this is called before any style switch can have
+  // happened, so the two agreed -- but a caller that awaited anything first would have captured
+  // the run of whatever style was open by then and every `mine()` below would answer about the
+  // wrong building. The default keeps the hand-fix caller working unchanged.
+  const calRunSelfCheck = async (res, urls, draftSpec, dims, run = calRunRef.current) => {
     const mine = () => calRunRef.current === run;
     const settle = (patch) => { if (mine()) setAdminCalCheck((p) => ({ ...(p || {}), step: "done", ...patch })); };
     // NO LABELS, NO CHECK, and no fallback either. A uniform orbit is off by a mean of 37
@@ -18786,6 +18790,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     // onto this same base a second time rather than onto the merged draft. See calPreGenRef.
     calPreGenRef.current = adminCal.spec;
     calRunRef.current += 1;
+    // ⚠️ THE RUN THIS PRESS OWNS. openCalEditor bumps the same ref, so this is what lets
+    // everything below tell "my draft came back" from "my draft came back after the builder
+    // opened a different style". The self-check half has been guarded this way since it was
+    // written; the FIRST merge was not, and it is a functional setAdminCal -- so a draft that
+    // landed after a switch merged this building's roof, colours, wall height, foundation and
+    // roof material into the OTHER style's spec, under that style's key, and Save wrote it to
+    // building_styles.d3. One click and one Save, on a screen whose own success line says
+    // "Preview it, adjust anything, then Save". The style tabs swallow a click while this is
+    // running (see cal3dPanel), so this is the second lock on the same door.
+    const run = calRunRef.current;
+    const mine = () => calRunRef.current === run;
     calShotRef.current = null;
     calSpinReqRef.current = {};
     // Four answers about the LAST building are not four answers about this one.
@@ -18807,6 +18822,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
       // is a different generation and has to mint its own key - reusing this one would refuse it.
       calIdemRef.current = null;
+      // ANOTHER STYLE IS OPEN, so there is nothing on screen this draft is about. Said plainly
+      // and without offering it back: the spec it was merged onto is gone, and a button
+      // claiming to restore it would be a promise this panel cannot keep.
+      if (!mine()) {
+        setAdminCalMsg({ ok: false, msg: "That generation finished after you opened another style, so it has not been applied to anything. Opening a style replaces what is on screen. You were charged for it once, as usual." });
+        return;
+      }
       // ⚠️ A SERVER THAT NEVER HEARD OF `dims` MUST NOT THROW AWAY THE MEASUREMENT IT IGNORED.
       // The two halves of this feature ship by different mechanisms -- the browser bundle goes
       // out on a push to beta (Workers Builds, about two minutes), the edge function on a
@@ -18863,12 +18885,16 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // It cannot throw — see calRunSelfCheck's header — so the draft above is already safe
       // whatever happens inside it, and this needs no try of its own.
       if (setup3d.onSelfCheck) {
-        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims);
+        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims, run);
       } else {
         // An older host with no check capability. The draft is exactly what it always was.
         setAdminCalCheck((p) => ({ ...(p || {}), step: "done", verdict: "skipped", reason: "unsupported", pairs: [] }));
       }
     } catch (e) {
+      // Same test as the success path. A failure belonging to a style the builder has left is
+      // not news about the one in front of them, and setAdminCalCheck(null) would clear the new
+      // style's own state -- which openCalEditor has already set correctly.
+      if (!mine()) return;
       setAdminCalMsg({ ok: false, msg: e.message || "Could not generate from those views." });
       // The generation itself failed, so there is no draft to compare against and no compare
       // step to show. Clearing it also un-gates Save, which is right: nothing new was applied.
@@ -20674,9 +20700,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               : "Pick a style, paste its four-side photo URLs, tune the spec against the live preview, then Save (or Copy JSON into building_styles.d3)."}
           </span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+            {/* ⚠️ SWALLOWED AND ANSWERED WHILE A GENERATION IS RUNNING, the same posture as a
+                second press of Generate. openCalEditor replaces adminCal wholesale, and the
+                flow now takes up to a couple of minutes behind a four-step progress card --
+                which makes clicking away more likely, not less. A click here mid-flight used to
+                land the running generation's draft on the style it switched TO. Not `disabled`:
+                a dead tab on a screen that is already waiting reads as breakage, and this way
+                the builder is told what is happening to the thing they are paying for. */}
             {C.buildingStyles.map((s) => (
-              <button key={s.value} onClick={() => openCalEditor(s)}
-                style={{ ...S.btn(adminCal && adminCal.styleValue === s.value ? "#92400E" : "#FFF", adminCal && adminCal.styleValue === s.value ? "#FFF" : "#92400E"), border: "1px solid #FCD34D" }}>
+              <button key={s.value}
+                onClick={() => {
+                  if (adminCalBusy) { setAdminCalMsg({ ok: true, msg: "That generation is still running — give it a moment. Your other styles are here when it finishes." }); return; }
+                  openCalEditor(s);
+                }}
+                style={{ ...S.btn(adminCal && adminCal.styleValue === s.value ? "#92400E" : "#FFF", adminCal && adminCal.styleValue === s.value ? "#FFF" : "#92400E"), border: "1px solid #FCD34D", opacity: adminCalBusy ? 0.55 : 1 }}>
                 {s.label}
               </button>
             ))}
