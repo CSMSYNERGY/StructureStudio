@@ -494,6 +494,13 @@ async function main() {
     const el = document.querySelector("[data-ssc-save-why]");
     return el ? el.textContent.trim() : "";
   });
+  // Amber or green is half of what this line says. A builder reads the colour before the
+  // sentence, and four "No"s used to get the same green as four "Yes"es.
+  const saveWhyColour = () => page.evaluate(() => {
+    const el = document.querySelector("[data-ssc-save-why]");
+    return el ? getComputedStyle(el).color : "";
+  });
+  const AMBER_TEXT = "rgb(180, 83, 9)", GREEN_TEXT = "rgb(22, 101, 52)";
   await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "01-compare.png") });
   r.ok("⚠️ SAVE IS LOCKED UNTIL ALL FOUR ARE ANSWERED", (await saveEnabled()) === false);
   r.ok("and the reason is beside it, not only in a tooltip", /0 of 4 answered/.test(await saveWhy()), await saveWhy());
@@ -516,13 +523,29 @@ async function main() {
   // "No" opens the controls in the SAME row, never a link away.
   await answer("colours", "No");
   r.ok("all four answered unlocks Save", (await saveEnabled()) === true, await saveWhy());
-  r.ok("and the line stops asking and starts warning about what Save does",
-    /replaces what your customers see in 3D/.test(await saveWhy()), await saveWhy());
+  // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
+  // signal that the draft is WRONG -- satisfied the gate exactly as "Yes" does. Four "No"s
+  // with nothing changed unlocked Save under the same green "This replaces what your customers
+  // see in 3D", and pressing it wrote the untouched draft. Save is still never blocked (a
+  // builder must always be able to save); the line stops congratulating them.
+  r.ok("⚠️ A 'No' NOBODY HAS ACTED ON IS NAMED, NOT CONGRATULATED",
+    /You marked the colour as wrong/.test(await saveWhy()), await saveWhy());
+  r.ok("in amber, not the green four Yeses get", (await saveWhyColour()) === AMBER_TEXT, await saveWhyColour());
+  r.ok("and Save is still live — it is a warning, not a block", (await saveEnabled()) === true);
+  r.ok("the row says it too, the way \"not sure\" already did",
+    (await text()).includes("Marked wrong, and nothing here has changed yet"));
   const fixOpen = await page.evaluate(() => {
     const row = document.querySelector('[data-ssc-question="colours"]');
     return Boolean(row) && /Customers pick their own paint/.test(row.textContent || "");
   });
   r.ok("⚠️ \"No\" OPENS THE CONTROLS IN THE SAME ROW — never a dead end", fixOpen);
+  // AND ACTING ON IT CLEARS IT. The test is "has this field moved since the answer", not "did
+  // they open the panel", so typing a colour is what counts.
+  await page.locator('[data-ssc-question="colours"] input[type="text"]').first().fill("#123456");
+  await page.waitForTimeout(300);
+  r.ok("⚠️ AND CHANGING IT PUTS THE LINE BACK", /replaces what your customers see in 3D/.test(await saveWhy()), await saveWhy());
+  r.ok("in green", (await saveWhyColour()) === GREEN_TEXT, await saveWhyColour());
+  r.ok("and the row's warning goes with it", !(await text()).includes("Marked wrong, and nothing here has changed yet"));
 
   // The roof fix panel is the one that matters: it must never show kneeU as a number.
   await answer("roof", "No");
@@ -604,6 +627,19 @@ async function main() {
   r.ok("a slider drag writes all three gambrel numbers, including the derived one",
     before !== null && after !== null && before !== after, `${before} -> ${after}`);
   await answer("roof", "Yes");
+
+  // ⚠️ THE WHOLE GATE, ON THE WORST ANSWER A BUILDER CAN GIVE. Four "No"s and nothing
+  // touched: the draft is wrong in all four measured failure classes and the panel used to
+  // say "This replaces what your customers see in 3D ... You can change it again any time"
+  // in green, exactly as if they had agreed with every one of them.
+  await press();
+  for (const k of ["roof", "porch", "walls", "colours"]) await answer(k, "No");
+  r.ok("four \"No\"s still count as four answers", /4 of 4 answered/.test(await text()));
+  r.ok("⚠️ AND ALL FOUR ARE NAMED UNDER SAVE",
+    /You marked the roof, porch, wall height and colour as wrong/.test(await saveWhy()), await saveWhy());
+  r.ok("in amber", (await saveWhyColour()) === AMBER_TEXT, await saveWhyColour());
+  r.ok("with Save still live, because a builder must always be able to save", (await saveEnabled()) === true);
+  await page.locator('[data-ssc-card="compare"]').screenshot({ path: join(shots, "05-four-nos.png") });
 
   // ── THE WARNING BANNER HAS TO REACH A CONTROL, INCLUDING WHERE THERE ARE NO PAIRS ─────
   // The banner is a machine warning promoted out of "What the model saw", and its whole

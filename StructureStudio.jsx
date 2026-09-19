@@ -15680,6 +15680,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // these pictures, so they need to be escapable from the column. Up here with the other
   // adminCal* state for the React #310 reason above.
   const [adminCalZoom, setAdminCalZoom] = useState(null);       // viewpoint | null
+  // WHAT THE BUILDING LOOKED LIKE WHEN EACH ANSWER WAS GIVEN. `adminCalAnswers` records WHICH
+  // of the three was pressed; this records the state it was pressed ABOUT, so "No, and then
+  // they fixed it" can be told from "No, and nothing has changed since". Without it the Save
+  // gate counts answers and cannot read them -- four "No"s unlocked Save under the same green
+  // sentence four "Yes"es get. Keyed by question, same shape, cleared with it.
+  const [adminCalAnswerSig, setAdminCalAnswerSig] = useState({});
   // ⚠️ THE SPEC AS IT STOOD BEFORE THIS PRESS, and it is the fix for a defect that is invisible
   // until a customer sees it. `calDraftRoof` only clears the OPPOSITE porch key when the
   // incoming draft declares one, so a correction that says nothing about the porch, merged on
@@ -17971,7 +17977,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     calRunRef.current += 1;
     calShotRef.current = null;
     calPreGenRef.current = null;
-    setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
+    setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalAnswerSig({}); setAdminCalFix(null);
     setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
     // One authenticated read gives everything the customer config deliberately does not carry:
     // the reference photos (a builder's own buildings — see 093), this style's scan status, and
@@ -18826,7 +18832,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     calShotRef.current = null;
     calSpinReqRef.current = {};
     // Four answers about the LAST building are not four answers about this one.
-    setAdminCalAnswers({}); setAdminCalFix(null); setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
+    setAdminCalAnswers({}); setAdminCalAnswerSig({}); setAdminCalFix(null); setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
     setAdminCalCheck({ step: "draft", at: Date.now(), verdict: null, reason: null, note: "", changed: [], pairs: [], views: urls.length });
     // THE KEY FOR THIS INTENT (see calIdemRef): minted on the first press, reused by every retry
     // of it, dropped the moment a draft lands. Minted HERE rather than above, after both
@@ -19284,9 +19290,35 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     || (calDimInBand("widthFt", calDimW) ? calDimW : 0)
     || bldgW;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
+  // ⚠️ THE ONE SLICE EACH QUESTION IS ABOUT, so a "No" can be told from a "No, fixed". Cheap
+  // and exact: every fix panel writes adminCal.spec, so comparing the slice at answer time
+  // with the slice now answers "have they done anything about it?" without tracking edits.
+  // The colours question owns roofMaterial as well as the three hexes, because the colour
+  // panel sets both and a builder who changed the roof from shingle to metal has acted.
+  const calQuestionSig = (key) => {
+    const spec = (adminCal && adminCal.spec) || {};
+    const roof = spec.roof || {};
+    if (key === "roof") return JSON.stringify([roof.type, roof.pitch, roof.kneeU, roof.kneeRise, roof.ridgeRise, roof.ridgeOffset, roof.overhang, roof.eave, roof.plateBand]);
+    if (key === "porch") return JSON.stringify([roof.porchOutFt, roof.porchDepthFt, roof.porchEnd, roof.porchTruss]);
+    if (key === "walls") return String(spec.wallHeightFt);
+    return JSON.stringify([spec.colors, spec.roofMaterial]);
+  };
+  // ⚠️ ANSWERED IS NOT AGREED. calChecksAnswered counts any non-empty answer, so "No" -- the
+  // signal that the draft is wrong -- satisfied the gate exactly as "Yes" does: four "No"s
+  // with nothing touched unlocked Save under the same green "This replaces what your customers
+  // see in 3D". "Not sure" was given a visible amber note per answer and "No" got nothing that
+  // survived, because adminCalFix holds ONE key, so answering the next question closes the
+  // panel the last one opened. Save is still never blocked on it -- a builder must always be
+  // able to save -- but the line stops congratulating them.
+  const calUnfixedNoKeys = SS_CHECKS
+    .filter(([k]) => adminCalAnswers[k] === "no" && adminCalAnswerSig[k] !== undefined && adminCalAnswerSig[k] === calQuestionSig(k))
+    .map(([k]) => k);
+  const calUnfixedNos = calUnfixedNoKeys.map((k) => SS_FIX_WORDS[k] || k);
   const calSaveWhy = calChecksAnswered < SS_CHECKS.length
     ? `Answer all four questions first. ${calChecksAnswered} of ${SS_CHECKS.length} answered.`
-    : `This replaces what your customers see in 3D for ${(C.buildingStyles.find((s) => adminCal && s.value === adminCal.styleValue) || {}).label || "this style"}. You can change it again any time.`;
+    : calUnfixedNos.length
+      ? `You marked the ${calListWords(calUnfixedNos)} as wrong and ${calUnfixedNos.length === 1 ? "have not changed it" : "have not changed them"} yet. Fix ${calUnfixedNos.length === 1 ? "it" : "them"} below, or save it as it is — this is what your customers will see in 3D.`
+      : `This replaces what your customers see in 3D for ${(C.buildingStyles.find((s) => adminCal && s.value === adminCal.styleValue) || {}).label || "this style"}. You can change it again any time.`;
   // ⚠️ THE PAIRS FOLLOW THE BUILDER'S OWN CORRECTIONS. Without this the compare step was
   // frozen at the drafted shape for the whole of the confirm step: the sentence above followed
   // an edit, the elevation followed it and the docked 3D followed it, while the three pictures
@@ -19573,7 +19605,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // to — leaving them up would gate the next save on a question nobody was asked.
         calRunRef.current += 1;
         calShotRef.current = null;
-        setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalFix(null);
+        setAdminCalCheck(null); setAdminCalAnswers({}); setAdminCalAnswerSig({}); setAdminCalFix(null);
         setAdminCalSpin({}); setAdminCalPairView({}); setAdminCalZoom(null);
         setAdminCalMsg({ ok: true, msg: "Saved. Customers see this on their next page load; reopen the Designer tab to refresh it here." });
       } catch (e) {
@@ -21014,7 +21046,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   needs the portal's authenticated callbacks. ── */}
               <div style={{ border: "1px solid #FCD34D", borderRadius: 8, background: "#FFF", padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 Step 3 — Photos of the same building</span>
+                  {/* NO STEP NUMBER WHERE THERE ARE NO OTHER STEPS. Steps 1 and 2 are gated on
+                      `setup3d.onUploadPhoto`, which the public ?admin=1 operator page does not
+                      have, so this card was left announcing "Step 3" as the only card on the
+                      page. (It read "Step 2" there before the dimensions card took that
+                      number: an off-by-one that had been there a while and got wider.) The
+                      card is ungated on purpose -- pasting photo URLs still works there -- so
+                      it is the NUMBER that goes, and the copy with it: an operator filmed
+                      nothing and has no Generate button to make sharper. */}
+                  <span style={{ fontWeight: 800, fontSize: 12.5, color: "#92400E" }}>📸 {setup3d && setup3d.onUploadPhoto ? "Step 3 — " : ""}Photos of the same building</span>
                   {/* "optional" in GREY, not the amber "N of 4 added" it replaced (2026-09-16):
                       amber on this surface means something is still missing, and nothing is. */}
                   {calPhotoCount > 0
@@ -21022,8 +21062,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", background: "#F1F5F9", border: "1px solid #E2E8F0", borderRadius: 5, padding: "2px 6px" }}>optional</span>}
                 </div>
                 <p style={{ margin: "6px 0 8px", fontSize: 11.5, color: "#92400E", lineHeight: 1.5 }}>
-                  <b>Optional.</b> The video alone is enough to generate; photos make the read sharper. Stand back and
-                  photograph the <b>same building you filmed</b>: straight on, whole building in frame, in daylight.
+                  <b>Optional.</b> {setup3d && setup3d.onUploadPhoto
+                    ? <>The video alone is enough to generate; photos make the read sharper. Stand back and
+                      photograph the <b>same building you filmed</b>: straight on, whole building in frame, in daylight.</>
+                    : <>Reference photos of one real building of this style, for tuning the spec against. Straight on,
+                      whole building in frame, in daylight.</>}
                   <b> One of each side</b> is the most useful set (front, left, right, back). Pick them all at once. Stills
                   are sharper than video frames, so the roof pitch and the eave read best from these.
                 </p>
@@ -21530,6 +21573,9 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               <button key={"ssc-a-" + key + v} type="button" role="radio" aria-checked={answer === v}
                                 onClick={() => {
                                   setAdminCalAnswers((p) => ({ ...p, [key]: v }));
+                                  // AND WHAT IT WAS AN ANSWER ABOUT, so the Save line can tell
+                                  // a "No" that was acted on from one that was not.
+                                  setAdminCalAnswerSig((p) => ({ ...p, [key]: calQuestionSig(key) }));
                                   // "No" opens the fix panel in the SAME row. Never a link
                                   // away, never a dead end.
                                   setAdminCalFix((cur) => (v === "no" ? key : cur === key ? null : cur));
@@ -21550,6 +21596,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                               people clicking Yes to get past the gate. */}
                           {answer === "unsure" && (
                             <div style={{ marginTop: 4, fontSize: 11, color: "#B45309", fontWeight: 600 }}>Marked "not sure" — you can change it any time below.</div>
+                          )}
+                          {/* THE SAME COURTESY "NOT SURE" ALREADY HAD. adminCalFix holds one
+                              key, so answering the next question closes the panel this one
+                              opened: by the time a builder reaches Save, three of four "No"s
+                              have left nothing on the row but a red button. */}
+                          {answer === "no" && calUnfixedNoKeys.indexOf(key) >= 0 && (
+                            <div style={{ marginTop: 4, fontSize: 11, color: "#B91C1C", fontWeight: 600 }}>Marked wrong, and nothing here has changed yet — use the controls in this row, or save it as it is.</div>
                           )}
                           {adminCalFix === key && (
                             /* The id the banner's button points at with aria-controls. Only one
@@ -22061,7 +22114,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
               </div>
               {/* Said whether or not anything is blocking, because "is this live yet?" is the
                   question a builder actually has in front of a Save button. */}
-              <div data-ssc-save-why style={{ marginTop: 6, fontSize: 11.5, fontWeight: 600, lineHeight: 1.5, color: calSaveBlocked ? "#B45309" : "#166534" }}>
+              <div data-ssc-save-why style={{ marginTop: 6, fontSize: 11.5, fontWeight: 600, lineHeight: 1.5, color: (calSaveBlocked || calUnfixedNos.length) ? "#B45309" : "#166534" }}>
                 {calPairs.length ? <>{calSaveWhy}{" "}</> : null}
                 <span style={{ color: "#64748B" }}>Nothing is saved until you press Save — your customers still see the old 3D.</span>
               </div>

@@ -126,6 +126,18 @@ export async function main() {
     ok("⚠️ ...so it must not show Step 2 either", !(await page.locator('[data-ssc-card="dims"]').count()));
     ok("...and still offers the wall height it CAN save",
       (await page.locator("label").filter({ hasText: "Wall height (ft)" }).count()) >= 1);
+    // ⚠️ AND THE ONE CARD THAT DOES BELONG HERE CLAIMS NO STEP NUMBER. The photos card is
+    // ungated on purpose -- pasting photo URLs still works on this surface -- so with steps 1
+    // and 2 gated away it was the only card on the page, announcing itself as "Step 3". (It
+    // said "Step 2" before the dimensions card took that number: the off-by-one is older than
+    // this change and got wider.) The copy goes with the number: an operator filmed nothing.
+    const stepHeads = await page.evaluate(() => (document.body.innerText.match(/Step \d+ —/g) || []));
+    ok("⚠️ ...and no card announces a step number with no other steps on the page",
+      stepHeads.length === 0, stepHeads.join(", "));
+    ok("...the photos card is still here, under its own name",
+      (await page.getByText("Photos of the same building").count()) >= 1);
+    ok("...and it does not tell an operator about a building they filmed",
+      !(await page.getByText("same building you filmed").count()));
 
     // ── The stored recessed porch reads as Recessed ──
     ok("a stored porchDepthFt reads as Recessed", (await porchSelect(page).inputValue()) === "recessed");
