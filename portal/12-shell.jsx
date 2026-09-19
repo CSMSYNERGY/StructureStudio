@@ -1593,7 +1593,7 @@ function Dashboard({ session }) {
        A walk with NO photos goes as source "video": VIDEO_SHAPE_PROMPT, cap 8. That second
        path relies on SS_VID_FRAMES staying at 8 or below, or the server drops the extra
        frames and only `dropped` says so. */
-    onDraftFromCombined: async (photoUrls, styleValue, videoCount) => {
+    onDraftFromCombined: async (photoUrls, styleValue, videoCount, idempotencyKey, dims) => {
       // videoCount says how many of the LEADING urls are walk-around frames, so the server can
       // hand the model a prompt that describes the set it is actually being given rather than
       // asserting the whole array is one continuous lap.
@@ -1612,10 +1612,93 @@ function Dashboard({ session }) {
       // function deploy is needed for any of this: the "video" source has been live since the
       // walk-around first shipped in August.
       const source = frames >= urls.length ? "video" : "combined";
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames } });
+      // ONE PRESS IS ONE HOLD IS ONE CHARGE (2026-09-18). The designer mints this key once per
+      // press and hands the same one back on every retry of that press; the server passes it to
+      // wallet_hold, whose `wallet_tx_idem` unique index refuses a second hold for it. Forwarded
+      // rather than minted here on purpose: only the designer knows where one press ends and the
+      // next begins, and a key minted per CALL would be a key that never dedupes anything.
+      // Absent (an older caller) sends nothing, which is exactly today's behaviour.
+      //
+      // THE BUILDER'S OWN MEASUREMENTS, REQUIRED HERE AS WELL AS IN THE DESIGNER'S GATE
+      // (2026-09-19). Same posture as the videoCount refusal above and for the same reason: this
+      // is the line that spends money. A generation with no ruler costs $20 for a draft whose
+      // wall height came out of the middle of a range - 7, in 74 % of every recorded generation,
+      // on buildings measuring 9 - and nothing afterwards can tell you that is what happened.
+      //
+      // MISSING is what is refused here; OUT OF BAND is the server's to refuse, because it
+      // answers 400 before the ledger row and the wallet hold and its bands are the ones that
+      // actually bind. Two copies of the bands would be two things to drift.
+      const d = (dims && typeof dims === "object") ? dims : null;
+      if (!d || !(Number(d.widthFt) > 0) || !(Number(d.lengthFt) > 0) || !(Number(d.wallHeightFt) > 0)) {
+        throw new Error("Type the building's width, length and wall height before generating — the video cannot show us how big it is.");
+      }
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: urls, styleValue, source, videoCount: frames, idempotencyKey: idempotencyKey || undefined, dims: d } });
       if (error) throw new Error(error.message || "Generating failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Generating failed");
-      return { d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0, observed: data.observed || null };
+      // `dims` ECHOED BACK AS THE SERVER USED THEM, not as they were sent. The designer says so
+      // in the success line, which is the only thing that proves the numbers reached the model
+      // rather than merely sitting in a form. An older function echoes nothing and the clause
+      // disappears, which is itself the right news.
+      // `frameMap` and `checkId` ride back UNTOUCHED, and they are the two the free second pass
+      // cannot work without. The map says which of the images THIS REQUEST was given shows
+      // which view of the building, and at what angle; the id is the ledger row that already
+      // paid, which is what makes the check free and single-use. An older function sends
+      // neither, and the designer treats that as "no check on this generation" rather than
+      // inventing an angle to render at.
+      return {
+        d3: data.d3, frames: data.frames || 0, dropped: data.dropped || 0,
+        observed: data.observed || null, dims: data.dims || null,
+        frameMap: data.frameMap || null, checkId: data.checkId || null,
+      };
+    },
+    /* THE FREE SECOND PASS (2026-09-19). The browser renders the draft from the angles the
+       first pass labelled, and asks one narrow question: where does OUR DRAFT not match THEIR
+       BUILDING? No hold, no charge, no new gate — `calibrate_style_check` sits behind the same
+       settings_structures/edit gate as the generation and is single-use against the ledger row
+       that already paid for it.
+
+       ⚠️ A FAILED CHECK IS NOT A FAILED GENERATION, and this function is where that stops being
+       true by accident. The builder is already holding their draft. So every refusal, timeout
+       and unreachable server comes back as a verdict the panel can render as one quiet line,
+       and the only thing that throws is a 409 on the claim — which means this generation has
+       already been checked, and the caller handles it the same way.
+
+       THE CLIENT ABORT IS REAL, unlike the generation's. The server gives up at 45 s; 60 here
+       is far enough above that a server which answered in time is still heard, and it bounds
+       the wait at something a person will sit through. Abandoning THIS call costs nothing,
+       which is exactly what separates it from the one above. */
+    onSelfCheck: async ({ styleValue, checkId, photoUrls, renders }) => {
+      const { data, error } = await sb.functions.invoke("portal-settings", {
+        body: { action: "calibrate_style_check", styleValue, checkId, photoUrls, renders },
+        signal: AbortSignal.timeout(60000),
+      });
+      // A 4xx carries a body, and the body is what says WHY. supabase-js hands back a
+      // FunctionsHttpError whose response has to be read for it, so a caller that only looked
+      // at error.message would report "Edge Function returned a non-2xx status code" to a
+      // builder for what is usually "that generation has already been checked".
+      //
+      // ⚠️ AND THE SIBLING CASE, which has no body to read at all. A network failure or the
+      // 60 s abort above raises a FunctionsFetchError whose `.context` is the underlying Error,
+      // not a Response — so `.json()` throws, `said` stays empty, and `error.message` is the
+      // vendor's own fixed string, "Failed to send a request to the Edge Function". The panel
+      // renders `note` verbatim under its friendly line, so that sentence landed on the screen
+      // a builder reaches after spending $20. The 409 branch three lines up exists precisely so
+      // vendor wording never gets there; this is the same rule applied to its sibling.
+      //
+      // Matched against the class strings rather than sniffed from the error name: supabase-js
+      // has exactly three and all three are jargon a builder cannot act on. FunctionsRelayError
+      // DOES carry a Response, but a relay body has no `error` key, so it leaks the same way.
+      if (error) {
+        let said = "";
+        try { said = ((await error.context.json()) || {}).error || ""; } catch (_e) { said = ""; }
+        const vendor = /^(Failed to send a request to the Edge Function|Relay Error invoking the Edge Function|Edge Function returned a non-2xx status code)$/;
+        const mine = error.message && !vendor.test(error.message) ? error.message : "";
+        return { ok: false, verdict: "failed", reason: "unreachable", note: said || mine, changed: [], d3: null };
+      }
+      if (!data || !data.ok) {
+        return { ok: false, verdict: "failed", reason: "refused", note: (data && data.error) || "The check could not run.", changed: [], d3: null };
+      }
+      return data;
     },
     // Frames the browser cut out of a walk-around video. Same action, same gate, same
     // 10/day meter as the photo draft — `source` only picks the shape-first prompt and
@@ -1626,8 +1709,12 @@ function Dashboard({ session }) {
     // truncated, `observed` carries what the video showed about doors and vents), and the
     // photo caller wants a bare spec. One function returning two shapes is how the wrong
     // one gets read.
-    onDraftFromVideo: async (frameUrls, styleValue) => {
-      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video" } });
+    onDraftFromVideo: async (frameUrls, styleValue, idempotencyKey) => {
+      // Same key, same reason as onDraftFromCombined above. Nothing calls this today - the
+      // Generate button goes through the combined handler - but it spends the same $20 through
+      // the same meter, and a paid path that cannot be deduplicated is one press away from
+      // mattering again.
+      const { data, error } = await sb.functions.invoke("portal-settings", { body: { action: "calibrate_style_ai", photoUrls: frameUrls, styleValue, source: "video", idempotencyKey: idempotencyKey || undefined } });
       if (error) throw new Error(error.message || "Reading the video failed");
       if (!data || !data.ok || !data.d3) throw new Error((data && data.error) || "Reading the video failed");
       return { d3: data.d3, frames: data.frames || 0, observed: data.observed || null };

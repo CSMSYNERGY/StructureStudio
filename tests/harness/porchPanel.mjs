@@ -17,7 +17,8 @@
 //   7. the projecting readout ("Posts ... clear") shows, and turns amber at 7 ft walls
 //   8. the truss box shows only for a recessed porch on a gable roof; the wood box only for a
 //      projecting porch
-//   9. zero page errors
+//   9. the BUILDER-ONLY cards stay off this surface: no step 1, no step 2, no Generate
+//  10. zero page errors
 //
 // The public ?admin=1 operator page, with Supabase stubbed at the network layer (lib.mjs): no login,
 // and nothing leaves the machine, so no save ever reaches a database. It exercises the COMPILED
@@ -112,6 +113,31 @@ export async function main() {
   try {
     await openAdmin(page);
     await openStyle(page, "Harness Porch Barn");
+
+    // -- 9. WHAT AN OPERATOR IS NOT SHOWN --
+    // This page has no `setup3d`, so it has no walk-around card and no Generate button. The
+    // dimensions card was left ungated when it landed, which put a "Step 2 - The size of the
+    // building you filmed" here, with an amber "required" badge that gated nothing, above a
+    // step 3 and below no step 1 - and its width and length were pure local state that the
+    // next style click silently discarded. The wall height already has its own field here.
+    ok("the operator page has no Step 1 walk-around card",
+      !(await page.getByText("Step 1 — Walk-around video").count()));
+    ok("...and no Generate button", !(await page.getByRole("button", { name: /Generate the 3D model/ }).count()));
+    ok("⚠️ ...so it must not show Step 2 either", !(await page.locator('[data-ssc-card="dims"]').count()));
+    ok("...and still offers the wall height it CAN save",
+      (await page.locator("label").filter({ hasText: "Wall height (ft)" }).count()) >= 1);
+    // ⚠️ AND THE ONE CARD THAT DOES BELONG HERE CLAIMS NO STEP NUMBER. The photos card is
+    // ungated on purpose -- pasting photo URLs still works on this surface -- so with steps 1
+    // and 2 gated away it was the only card on the page, announcing itself as "Step 3". (It
+    // said "Step 2" before the dimensions card took that number: the off-by-one is older than
+    // this change and got wider.) The copy goes with the number: an operator filmed nothing.
+    const stepHeads = await page.evaluate(() => (document.body.innerText.match(/Step \d+ —/g) || []));
+    ok("⚠️ ...and no card announces a step number with no other steps on the page",
+      stepHeads.length === 0, stepHeads.join(", "));
+    ok("...the photos card is still here, under its own name",
+      (await page.getByText("Photos of the same building").count()) >= 1);
+    ok("...and it does not tell an operator about a building they filmed",
+      !(await page.getByText("same building you filmed").count()));
 
     // ── The stored recessed porch reads as Recessed ──
     ok("a stored porchDepthFt reads as Recessed", (await porchSelect(page).inputValue()) === "recessed");

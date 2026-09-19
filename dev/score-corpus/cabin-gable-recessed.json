@@ -1,0 +1,239 @@
+{
+ "name": "Cabin - gable, recessed porch with truss - INDICATIVE ONLY",
+ "note": "Truth = the stored d3. IT IS THE MODEL'S OWN OUTPUT, eyeballed and saved: pitch 0.42, gableVent 0.12 and colors #4a3327 are byte-identical to runs 4 and 5. Grading the model against this measures REPEATABILITY, not accuracy, and it will always score in the nineties. The style row was also re-saved 2026-09-14 16:50, after the last of these runs, so the 12 inputs on file today are not provably the 12 these runs read. Re-truth it with a tape before it gates anything.",
+ "source": "combined",
+ "video_count": 8,
+ "inputs": "local",
+ "truth": {
+  "roof": {
+   "type": "gable",
+   "pitch": 0.42,
+   "overhang": 0.8,
+   "eave": "fascia",
+   "porchEnd": "front",
+   "porchTruss": true,
+   "porchDepthFt": 6,
+   "ridgeOffset": 0
+  },
+  "colors": {
+   "body": "#4a3327",
+   "roof": "#8a8f94",
+   "trim": "#b0a081"
+  },
+  "siding": "batten",
+  "gableVent": {
+   "widthFrac": 0.12
+  },
+  "foundation": "skids",
+  "roofMaterial": "metal",
+  "wallHeightFt": 7.5
+ },
+ "priors": {
+  "fresh style": {
+   "roof": {
+    "type": "gable",
+    "pitch": 0.4
+   },
+   "colors": {},
+   "siding": null
+  }
+ },
+ "runs": [
+  {
+   "n": 1,
+   "called_at": "2026-09-11T06:22:54.304074+00:00",
+   "source": "combined",
+   "frames": 12,
+   "confidence": "high",
+   "drafted": {
+    "colors": {
+     "body": "#4a3226",
+     "roof": "#8a8f94",
+     "trim": "#a89a7c"
+    },
+    "foundation": "skids",
+    "gableVent": {
+     "widthFrac": 0.12
+    },
+    "roof": {
+     "eave": "open",
+     "overhang": 1,
+     "pitch": 0.42,
+     "porchDepthFt": 6,
+     "porchEnd": "front",
+     "ridgeOffset": 0,
+     "tailSpacingIn": 24,
+     "type": "gable"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "high",
+    "doors": "single white door centered on the front gable end, under the recessed porch",
+    "eave": "open rafter tails visible along the long side and under the porch overhang, spaced roughly 24 in on center",
+    "roofNote": "Clear symmetric gable roof with a decorative king-post/truss style timber frame filling the gable above the porch; pitch reads roughly 5:12 from the straight-on gable photo.",
+    "vents": "small louvered gable vent near the peak on each gable end",
+    "windows": "two windows on the front face flanking/near the door, plus one window on each long side wall"
+   }
+  },
+  {
+   "n": 2,
+   "called_at": "2026-09-11T13:39:42.059255+00:00",
+   "source": "combined",
+   "frames": 12,
+   "confidence": "medium",
+   "drafted": {
+    "colors": {
+     "body": "#4a3628",
+     "roof": "#7d7d7d",
+     "trim": "#a9926f"
+    },
+    "foundation": "skids",
+    "gableVent": {
+     "widthFrac": 0.12
+    },
+    "roof": {
+     "eave": "open",
+     "overhang": 1,
+     "pitch": 0.42,
+     "porchDepthFt": 6,
+     "porchEnd": "front",
+     "ridgeOffset": 0,
+     "tailSpacingIn": 24,
+     "type": "gable"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "medium",
+    "doors": "single white door on the gable-end front face, centered under the porch",
+    "eave": "open rafter tails visible along the long side, evenly spaced raw wood blocks under the metal roof edge",
+    "roofNote": "Clear symmetrical gable roof with a decorative timber king-post/truss filling the gable above a recessed corner porch; pitch read from the front gable-end frame at roughly 5:12.",
+    "vents": "small louvered gable vent near the peak of the front gable, plus a soffit/ridge-area vent visible in one shot",
+    "windows": "one window beside the front door under the porch, one more window on each long side wall further back"
+   }
+  },
+  {
+   "n": 3,
+   "called_at": "2026-09-11T15:54:33.328247+00:00",
+   "source": "combined",
+   "frames": 12,
+   "confidence": "high",
+   "drafted": {
+    "colors": {
+     "body": "#4a3626",
+     "roof": "#7d7d7d",
+     "trim": "#a89274"
+    },
+    "foundation": "skids",
+    "gableVent": {
+     "widthFrac": 0.12
+    },
+    "roof": {
+     "eave": "fascia",
+     "overhang": 0.8,
+     "pitch": 0.42,
+     "porchDepthFt": 5,
+     "porchEnd": "front",
+     "porchTruss": true,
+     "ridgeOffset": 0,
+     "type": "gable"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7.5
+   },
+   "observed": {
+    "confidence": "high",
+    "doors": "single white door on the front gable end, set back under the porch, off-center toward the left side of the wall",
+    "eave": "plain painted fascia board runs level along the eave, no exposed rafter tails visible",
+    "roofNote": "Two slopes meeting at a central ridge, symmetric gable, moderate-steep pitch read from the front gable-end frames.",
+    "vents": "small gable vent at peak of both gable ends, plus what appears to be a wall-mounted vent/AC unit under front gable peak",
+    "windows": "two windows on front gable end flanking porch area, plus one window on each long side near the front corner; rear gable end appears blank"
+   }
+  },
+  {
+   "n": 4,
+   "called_at": "2026-09-11T16:39:53.316192+00:00",
+   "source": "combined",
+   "frames": 12,
+   "confidence": "high",
+   "drafted": {
+    "colors": {
+     "body": "#4a3327",
+     "roof": "#7d7d7d",
+     "trim": "#a89272"
+    },
+    "foundation": "skids",
+    "gableVent": {
+     "widthFrac": 0.08
+    },
+    "roof": {
+     "eave": "fascia",
+     "overhang": 0.6,
+     "pitch": 0.42,
+     "porchDepthFt": 5,
+     "porchEnd": "front",
+     "porchTruss": true,
+     "ridgeOffset": 0,
+     "type": "gable"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7
+   },
+   "observed": {
+    "confidence": "high",
+    "doors": "single white door on the front gable end, under the porch",
+    "eave": "plain painted fascia board along the eaves, no exposed rafter tails visible",
+    "roofNote": "Clear symmetric gable roof with a recessed porch at the front gable end; ridge appears centered, moderate pitch consistent with a 5:12-7:12 look.",
+    "vents": "small gable vent at the peak of the front gable, and a matching one likely on the rear gable",
+    "windows": "two windows visible on front face flanking/near door, plus one on each long side wall further back"
+   }
+  },
+  {
+   "n": 5,
+   "called_at": "2026-09-14T10:30:51.540866+00:00",
+   "source": "combined",
+   "frames": 12,
+   "confidence": "high",
+   "drafted": {
+    "colors": {
+     "body": "#4a3327",
+     "roof": "#8a8f94",
+     "trim": "#b0a081"
+    },
+    "foundation": "skids",
+    "gableVent": {
+     "widthFrac": 0.12
+    },
+    "roof": {
+     "eave": "fascia",
+     "overhang": 0.8,
+     "pitch": 0.42,
+     "porchDepthFt": 6,
+     "porchEnd": "front",
+     "porchTruss": true,
+     "ridgeOffset": 0,
+     "type": "gable"
+    },
+    "roofMaterial": "metal",
+    "siding": null,
+    "wallHeightFt": 7.5
+   },
+   "observed": {
+    "confidence": "high",
+    "doors": "single door on the front gable end, under the porch, off-center next to a window",
+    "eave": "plain painted fascia board along the eaves, unbroken and level",
+    "roofNote": "Clear gable roof with symmetric pitch visible from the front gable-end views; a recessed porch at the front under the same ridge, with decorative timber trusses filling the gable above it.",
+    "vents": "small louvered gable vent near the peak on the front gable end, plus a similar vent visible on the rear gable end",
+    "windows": "one window beside the front door under the porch, plus one window on each long side wall further back"
+   }
+  }
+ ],
+ "truth_provenance": "accepted-draft"
+}

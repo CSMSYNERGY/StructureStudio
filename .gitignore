@@ -46,3 +46,13 @@ deno.lock
 # public download on every tenant site to serve one local harness.
 dev/scan-fixtures/walk-around-stub.mp4
 dev/scan-fixtures/big-photo.jpg
+
+# ⚠️ THIS REPOSITORY IS PUBLIC. A scoring corpus entry carries a measured truth, the priors
+# it is scored against, the drafts already recorded and the timestamp each run fired at —
+# and nothing else. No tenant id, no style key, no frame URLs, and no ai_style_calls row
+# ids: eight of those were committed with the corpus and taken back out on 2026-09-19. They
+# were read by nothing (scoreEntry consumes drafted, observed, source, dims and label) and
+# they are production primary keys, which is not a thing to publish for no reason. What a
+# LIVE or --replay run needs lives beside the entry in <entry>.local.json, which never
+# leaves the machine.
+dev/score-corpus/*.local.json

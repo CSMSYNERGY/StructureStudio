@@ -21,7 +21,13 @@
 import {
   sanitizePhotoUrls, parseModelSpec, parseObservedNotes, sanitizeD3Spec, combinedShapePrompt, VIDEO_SHAPE_PROMPT,
   SPEC_PROMPT, gambrelRoofWarning, flagObservedNotes, GAMBREL_MIN_BEND_DEG, modelReplyText,
+  foldOverhangInches, porchAgreementWarning, draftPorchKind, OBSERVED_PORCH_KINDS,
+  videoShapePrompt, parseKnownDims, applyKnownDims, knownDimsNote,
+  parseFrameMap, FRAME_MAP_VIEWPOINTS,
+  parseSelfCheckRenders, selfCheckPairs, selfCheckPrompt, selfCheckPairLabel, parseSelfCheck, applySelfCheck,
+  SELF_CHECK_ALLOW, SELF_CHECK_MAX_FIELDS, SELF_CHECK_VIEWPOINTS,
 } from "./styleD3.ts";
+import type { D3Spec, KnownDims } from "./styleD3.ts";
 
 function assertEquals(actual: unknown, expected: unknown, msg?: string) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
@@ -443,7 +449,10 @@ Deno.test("combinedShapePrompt: both counts are stated, and the body is carried 
   assert(p.includes('"roof": {'), "the JSON shape survives the splice");
   assert(p.includes("How to read it:"), "the reading instructions survive the splice");
   assert(p.includes('"observed"'), "the observed block survives the splice");
-  assert(p.includes("Estimate conservatively."), "the closing instruction survives the splice");
+  // The CLOSING instruction, whatever it currently says. It changed on 2026-09-19 — the old
+  // "use a typical value" was the mechanism behind every zero-variance wrong answer — and what
+  // this assertion is for is unchanged: the splice must not eat the last paragraph.
+  assert(p.includes("Do not fill a field with the middle of its stated range."), "the closing instruction survives the splice");
   assert(p.length > VIDEO_SHAPE_PROMPT.length - 400, "a splice that shortened the prompt by a lot ate something");
 });
 
@@ -867,4 +876,1405 @@ Deno.test("only the walk-around prompt learned about the projecting porch", () =
   }
   // The JSON shape is still valid JSON-with-placeholders: the line before porchOutFt gained its comma.
   assert(VIDEO_SHAPE_PROMPT.includes("porch opening>,\n"), "porchTruss is no longer the last roof key");
+});
+
+// ─── the answers that never varied (2026-09-19) ───────────────────────────────────────────
+// Three findings off 19 recorded generations, one prompt paragraph behind each:
+//
+//   * `overhang` came back EXACTLY 1.0 in 53 % of them, and in 3 of 3 on a building whose eave
+//     measures 0.15 ft. 1.0 is the top of "typically 0.3-1.5". Zero variance at a wrong value
+//     is the signature of a default, not of a measurement.
+//   * `porchOutFt` came back 0 times in 19, on a lot where a deck and posts in front of the
+//     gable end are ordinary. Two replies said "recessed"; one said there was no porch at all.
+//   * The prompt ENDED by telling the model to default: "use a typical value". That one
+//     sentence explains every zero-variance answer at once, including wall height 7 (inside
+//     6-10) and porch depth 6 (the exact midpoint of 4-8).
+//
+// These tests pin the three paragraphs that changed and the two server halves that read them.
+// SPEC_PROMPT is deliberately NOT in this list: the photo path feeds the scan card, which
+// replaces the AI's roof with a measured one, and it is out of scope for this change.
+const SHAPE_FIRST = [
+  ["VIDEO_SHAPE_PROMPT", VIDEO_SHAPE_PROMPT],
+  ["combinedShapePrompt", combinedShapePrompt(8, 4)],
+] as const;
+
+Deno.test("no prompt still offers a middle overhang to answer", () => {
+  // Across ALL THREE, including the photo path: the range whose top came back 53 % of the time.
+  for (const [name, p] of [["SPEC_PROMPT", SPEC_PROMPT], ...SHAPE_FIRST] as const) {
+    assert(!p.includes("typically 0.3-1.5"), `${name}: the range whose top was answered 53 % of the time is gone`);
+  }
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(!p.includes("use a typical value"), `${name}: the instruction to default is gone`);
+    assert(!p.includes('"overhang":'), `${name}: the feet key is not asked for any more`);
+  }
+});
+
+Deno.test("the overhang is asked in inches, with the flush case named and 0 an ordinary answer", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes('"overhangIn"'), `${name} must ask for overhangIn`);
+    const line = p.split("\n").find((l) => l.includes('"overhangIn"')) ?? "";
+    assert(line.includes("inches"), `${name}: the schema line must say inches`);
+    assert(line.includes("0 to 36"), `${name}: the schema line must give the 0 floor and a ceiling`);
+    assert(/OVERHANG:/.test(p), `${name} must still explain how to read it`);
+    assert(p.includes("in INCHES"), `${name}: the paragraph must say inches too, not only the schema line`);
+    // The flush eave named PHYSICALLY. "0" on its own is not a thing a model looks for; a wall
+    // with no shadow under the roof edge is.
+    assert(p.includes("the wall running straight up into the roof edge"), `${name} must describe a flush eave`);
+    assert(p.includes("no shadow under it"), `${name} must give the flush eave its giveaway`);
+    assert(p.includes("0 is a real answer"), `${name} must say 0 is an answer, not a failure to measure`);
+    assert(p.includes("as common as one with a deep eave"), `${name} must say flush is as ordinary as deep`);
+    assert(p.includes("2 inches and 16 inches are both common answers"), `${name} must say the two ends look nothing alike`);
+  }
+});
+
+Deno.test("the closing paragraph asks for an OMISSION, not a typical value", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes("say so in observed and OMIT the key"), `${name} must ask for the key to be left out`);
+    // Safe because absence already means "keep what is stored": three tests above pin it
+    // ("eave, tailSpacingIn and gableVent are omitted when absent", "a video reply that saw
+    // none of it", "a style that mentions neither stays byte-identical").
+    assert(p.includes("leaves the builder's existing setting alone"), `${name} must say why omitting is the better answer`);
+    assert(p.includes("Do not fill a field with the middle of its stated range"), `${name} must forbid the midpoint outright`);
+  }
+});
+
+Deno.test("both shape-first prompts force a three-way porch answer", () => {
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes('"porch": "projecting" | "recessed" | "none"'), `${name} must carry the porch key in observed`);
+    assert(/PORCH DECISION, REQUIRED:/.test(p), `${name} must say the answer is required`);
+    for (const kind of OBSERVED_PORCH_KINDS) {
+      assert(p.includes(`"${kind}"`), `${name} must name ${kind} as one of the three answers`);
+    }
+    // The two escapes a model takes when a question is merely asked rather than required.
+    assert(p.includes('Answer it even when the answer is "none"'), `${name} must close the "nothing to report" escape`);
+    assert(p.includes("answer it even when you are unsure"), `${name} must close the "I am not sure" escape`);
+    assert(p.includes("Naming a porch obliges you to give its field"), `${name} must tie the word to the number`);
+  }
+});
+
+Deno.test("the false-positive deck sentence is gone from the recessed porch", () => {
+  // "Look for the floor deck continuing past the front wall to the posts" described a
+  // PROJECTING porch exactly as well as a recessed one - a deck out to the posts is what a
+  // projecting porch IS - so it read as evidence for whichever kind the model reached first,
+  // and the recorded history reached "recessed" twice and "projecting" never. Not pinned by
+  // any test when it was cut. What replaces it are discriminators a GROUND-LEVEL walk can see.
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(!p.includes("floor deck continuing past the front wall"), `${name}: the ambiguous sentence is gone`);
+    assert(p.includes("the end wall runs UNBROKEN from the floor to the top of the wall"), `${name}: the unbroken end wall`);
+    assert(p.includes("the porch ceiling is nearly level"), `${name}: the porch ceiling against the main slope`);
+    assert(p.includes("sticks out PAST the end of the building"), `${name}: what it looks like from the side`);
+    // The recessed porch keeps the discriminator that is genuinely its own.
+    assert(p.includes("standing BACK from the end of the roof"), `${name}: the recessed porch's set-back wall survives`);
+  }
+});
+
+Deno.test("the door the wall is measured against is a real door", () => {
+  // 6.5 ft is not a door height anyone builds. A residential door is 6 ft 8 in, and it is the
+  // scale for everything else in a ground-level frame.
+  for (const [name, p] of SHAPE_FIRST) {
+    assert(p.includes("a door is about 6 ft 8 in"), `${name} measures against a real door`);
+    assert(!p.includes("about 6.5 ft"), `${name}: the old anchor is gone`);
+  }
+});
+
+Deno.test("the photo-only path is untouched by any of this", () => {
+  // Out of scope, deliberately (brief section 8). The scan card replaces the AI's roof with a
+  // measured one and never reads `observed`, so nothing here would reach a builder.
+  assert(!SPEC_PROMPT.includes("overhangIn"), "SPEC_PROMPT still asks in feet");
+  assert(SPEC_PROMPT.includes('"overhang":'), "and still asks for the same key it always did");
+  assert(!SPEC_PROMPT.includes('"porch"'), "SPEC_PROMPT has no observed block to force a porch answer into");
+});
+
+// ─── overhangIn on the wire, feet in the column ───────────────────────────────────────────
+// The conversion is NOT in the sanitiser and must not drift into it: `overhangIn` is a
+// model-reply key, and a CLAMPS entry would make it a second way to persist an eave in a
+// column the production renderer reads.
+
+Deno.test("overhangIn folds to feet, and 0 survives as a flush eave", () => {
+  const r = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhangIn":6},"colors":{},"wallHeightFt":8}`);
+  assert(r.ok, "an inches reply parses");
+  if (r.ok) {
+    assertEquals(r.d3.roof.overhang, 0.5, "6 inches is half a foot");
+    assert(!("overhangIn" in r.d3.roof), "the inches key is never stored");
+  }
+  // ⚠️ THE ONE THE WHOLE CHANGE IS FOR. A flush eave is 0, and 0 must not be read as absent -
+  // absent means "keep the builder's setting", which is the opposite of what the model said.
+  const flush = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhangIn":0},"colors":{}}`);
+  assert(flush.ok, "a flush eave parses");
+  if (flush.ok) {
+    assert("overhang" in flush.d3.roof, "0 is an answer that reaches the spec, not a missing key");
+    assertEquals(flush.d3.roof.overhang, 0, "0 inches is a flush eave");
+  }
+  // The two answers the prompt says look nothing alike must not round together.
+  const at = (inches: number) => {
+    const s = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhangIn: inches } }));
+    return s.ok ? Math.round(Number(s.d3.roof.overhang) * 1000) / 1000 : null;
+  };
+  assertEquals(at(2), 0.167, "2 inches");
+  assertEquals(at(16), 1.333, "16 inches");
+  // Over the roof's EXISTING 0..3 ft clamp: clamped by the sanitiser, no new clamp added.
+  assertEquals(at(120), 3, "the existing feet clamp does the work, so no clamp had to move");
+  assertEquals(at(-4), 0, "the 0 floor is the existing one too");
+});
+
+Deno.test("foldOverhangInches is the identity without an overhangIn, which is what keeps old replies byte-identical", () => {
+  const spec = { roof: { type: "gable", pitch: 0.42, overhang: 1 }, colors: {}, wallHeightFt: 7 };
+  assert(foldOverhangInches(spec) === spec, "no inches key: returned by reference, so nothing can drift");
+  // A reply that still answers the OLD key alone is still understood. That is what lets this
+  // commit deploy on its own, ahead of any browser release.
+  const old = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42,"overhang":0.75},"colors":{}}`);
+  assert(old.ok, "a feet reply still parses");
+  if (old.ok) assertEquals(old.d3.roof.overhang, 0.75, "the feet key still works");
+  // Junk in the inches key drops it rather than writing a 0 the model never said.
+  const junk = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhang: 0.9, overhangIn: "a couple" } }));
+  assert(junk.ok, "junk does not fail the whole spec");
+  if (junk.ok) assertEquals(junk.d3.roof.overhang, 0.9, "the reply's own feet answer survives junk inches");
+  // Inches WIN over feet in the same reply, because inches is what the prompt now asks for.
+  const both = sanitizeD3Spec(foldOverhangInches({ roof: { type: "gable", pitch: 0.4, overhang: 1.0, overhangIn: 3 } }));
+  assert(both.ok, "both keys parse");
+  if (both.ok) assertEquals(both.d3.roof.overhang, 0.25, "the asked-for key wins");
+  // Never throws on a shape that is not a spec at all.
+  assertEquals(foldOverhangInches(null), null);
+  assertEquals(foldOverhangInches("nope"), "nope");
+  assertEquals(foldOverhangInches({ roof: 5 }), { roof: 5 });
+  assertEquals(foldOverhangInches({ roof: { type: "gable", overhangIn: null } }), { roof: { type: "gable" } });
+});
+
+Deno.test("observed.porch survives as one of three words and nothing else", () => {
+  const o = parseObservedNotes(`{"observed":{"porch":"projecting","roofNote":"Gambrel, deck out front."}}`);
+  assertEquals(o!.porch, "projecting");
+  assertEquals(parseObservedNotes(`{"observed":{"porch":"Recessed"}}`)!.porch, "recessed", "case is not a different answer");
+  // A sentence is NOT an answer to a three-way question. Dropped rather than guessed at, so the
+  // "you did not answer" warning still fires instead of being silenced by a reading of the prose.
+  const prose = parseObservedNotes(`{"observed":{"porch":"there is a porch on the front","doors":"one"}}`)!;
+  assert(!("porch" in prose), "prose is not an answer");
+  assertEquals(prose.doors, "one", "and the rest of the block still survives");
+  assertEquals(parseObservedNotes(`{"observed":{"porch":"maybe"}}`), null, "an out-of-vocabulary answer alone leaves nothing to say");
+  // And it is DROPPED by the sanitiser like the rest of `observed`: it is a note, not geometry.
+  const r = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"observed":{"porch":"none"}}`);
+  assert(r.ok, "the spec still parses");
+  if (r.ok) assert(!("porch" in (r.d3 as Record<string, unknown>)), "observed.porch never reaches the stored spec");
+});
+
+// ─── porchAgreementWarning ────────────────────────────────────────────────────────────────
+const PORCH_DRAFT = { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0, porchOutFt: 6, porchEnd: "front" };
+
+Deno.test("porchAgreementWarning: agreement is silent, all three ways", () => {
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, { porch: "projecting" }), null);
+  assertEquals(porchAgreementWarning({ type: "gable", porchDepthFt: 6, porchEnd: "front" }, { porch: "recessed" }), null);
+  assertEquals(porchAgreementWarning({ type: "gable", pitch: 0.42 }, { porch: "none" }), null);
+  // A porch key sitting at 0 is not a porch: the renderer tests the NUMBER, not the key, and
+  // this has to read the draft the way the renderer draws it or it will warn about nothing.
+  assertEquals(draftPorchKind({ type: "gable", porchOutFt: 0, porchDepthFt: 0 }), "none");
+  assertEquals(porchAgreementWarning({ type: "gable", porchOutFt: 0, porchDepthFt: 0 }, { porch: "none" }), null);
+  assertEquals(draftPorchKind(PORCH_DRAFT), "projecting");
+  assertEquals(draftPorchKind({ type: "gable", porchDepthFt: 4 }), "recessed");
+  assertEquals(draftPorchKind(null), "none");
+});
+
+Deno.test("porchAgreementWarning: the 09-17 run 2 case, where the notes said porch and the roof said nothing", () => {
+  // The real one. The reply wrote "under the porch" in its own roofNote and handed back a roof
+  // with no porch key at all. Nothing caught it, because until observed.porch existed there was
+  // nowhere for a reply to state a porch except the geometry it was failing to state.
+  const w = porchAgreementWarning(
+    { type: "gambrel", kneeU: 0.72, kneeRise: 0.72, ridgeRise: 1.0 },
+    { porch: "projecting", roofNote: "Gambrel roof, dark metal, deck under the porch at the front." },
+  );
+  assert(w, "a porch in words with no porch in the numbers is a contradiction");
+  assert(w!.includes("standing out in front of one end"), "it says what the reading claimed");
+  assert(w!.includes("no porch"), "and what was actually drawn");
+  assert(w!.includes("only the building settles which"), "and that neither side can be believed over the other");
+  assert(!w!.includes("porchOutFt"), "in the builder's words, not the schema's");
+});
+
+Deno.test("porchAgreementWarning: a drafted porch the reading denies, and the wrong KIND", () => {
+  const denied = porchAgreementWarning(PORCH_DRAFT, { porch: "none" });
+  assert(denied && denied.includes("no porch") && denied.includes("standing out in front"), "the other direction is caught too");
+  const kind = porchAgreementWarning(PORCH_DRAFT, { porch: "recessed" });
+  assert(kind && kind.includes("cut into one end") && kind.includes("standing out in front"), "recessed against projecting names both");
+});
+
+Deno.test("porchAgreementWarning: a missing answer is a DIFFERENT sentence from a contradiction", () => {
+  // Two failures, two acts. "Nothing could be checked" sends the builder to look; "these two
+  // disagree" tells them the draft is wrong for certain, one way or the other. One sentence for
+  // both would send a builder with a perfectly good draft off to re-check it, which is how a
+  // warning stops being read.
+  const silent = porchAgreementWarning(PORCH_DRAFT, { roofNote: "Gambrel." });
+  assert(silent, "no answer is still worth saying");
+  assert(silent!.includes("never said whether this building has a porch"), "it names the missing answer");
+  assert(!silent!.includes("One of those is wrong"), "a missing answer is not a contradiction");
+  assert(silent!.includes("standing out in front of one end"), "and it still says what was drawn");
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, null), silent, "no observed block at all reads the same way");
+  assertEquals(porchAgreementWarning(PORCH_DRAFT, { porch: "maybe" } as never), silent, "an unparseable answer is no answer");
+  assertEquals(porchAgreementWarning(null, { porch: "none" }), null, "no roof and no porch reported is agreement, not a warning");
+});
+
+Deno.test("two warnings compose without eating each other, and the model's note stays capped at 240", () => {
+  // A draft can be wrong about the roof AND the porch. Dropping either warning would send the
+  // builder to look at half the problem, which is worse than sending them to look at all of it.
+  const roof = { type: "gambrel", kneeU: 0.55, kneeRise: 0.35, ridgeRise: 0.75, porchOutFt: 6 };
+  const observed = parseObservedNotes(JSON.stringify({ observed: { porch: "none", roofNote: "y".repeat(1000) } }))!;
+  const g = gambrelRoofWarning(roof)!, pw = porchAgreementWarning(roof, observed)!;
+  assert(g && pw, "this draft is wrong about both the roof and the porch");
+  const flagged = flagObservedNotes(observed, g, pw)!;
+  assert(flagged.roofNote!.startsWith(g), "the first warning leads");
+  assert(flagged.roofNote!.includes(pw), "and the second is not eaten by it");
+  assert(flagged.roofNote!.includes(`The model's own reading: ${"y".repeat(240)}`), "the model's own note still rides along, capped");
+  assertEquals(flagged.confidence, "low", "either warning turns the panel amber");
+  assertEquals(flagged.porch, "none", "the porch answer itself rides along untouched");
+  assert(flagged.roofNote!.length <= g.length + 1 + pw.length + 26 + 240, "two fixed warnings plus the model's 240 is the whole bound");
+  // A null among the warnings is skipped rather than joined as a gap, which is what lets the
+  // caller pass every check it has without testing each one first.
+  assertEquals(flagObservedNotes(observed, null, pw)!.roofNote, `${pw} The model's own reading: ${"y".repeat(240)}`);
+  assertEquals(flagObservedNotes(observed, null, null), observed, "no warnings at all leaves the notes alone, by reference");
+});
+
+// ─── the builder's three numbers, on the wire (2026-09-19) ───────────────────────────────
+// Wall height came back 7 in 74 % of every recorded generation and never once above 8, against
+// a measured 9. A ground-level phone has no datum to measure a wall against, so the builder is
+// asked instead, and the prompt drops the field rather than asking for a number it already has.
+//
+// EVERY TEST BELOW IS ULTIMATELY ABOUT ONE PROPERTY: with no dims, nothing changed. Production
+// runs an older browser bundle that cannot send them, against this same function, so "byte-
+// identical when absent" is not tidiness — it is the only thing standing between a beta feature
+// and every production builder's paid generation.
+
+const DIMS: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+
+Deno.test("videoShapePrompt(null) IS the constant, which is what proves production is untouched", () => {
+  // ⚠️ THE LOAD-BEARING ONE. `VIDEO_SHAPE_PROMPT` is now derived from this function rather than
+  // written beside it, so the no-dims path cannot drift from the string that has been in
+  // production since August: there is nothing to keep in step, only this identity to hold.
+  assertEquals(videoShapePrompt(null), VIDEO_SHAPE_PROMPT);
+  assertEquals(videoShapePrompt(undefined), VIDEO_SHAPE_PROMPT, "an omitted argument is the same as a null one");
+  assertEquals(videoShapePrompt(), VIDEO_SHAPE_PROMPT, "and so is no argument at all");
+  // Reference identity, not merely equal content: the function returns the base, it does not
+  // rebuild it. A rebuild would pass assertEquals and still be a second copy to get wrong.
+  assert(videoShapePrompt(null) === VIDEO_SHAPE_PROMPT, "the no-dims prompt is the same string object");
+});
+
+Deno.test("a two-argument combinedShapePrompt is byte-identical to what shipped", () => {
+  // The four shapes the existing suite already pins by content. Here they are pinned by
+  // EQUALITY against the explicit-null call, so the new third parameter cannot change what an
+  // old caller gets, and against the no-dims body, which is what "byte-identical" means.
+  for (const [v, p] of [[8, 4], [1, 1], [8, 0], [0, 4]] as const) {
+    assertEquals(combinedShapePrompt(v, p), combinedShapePrompt(v, p, null), `combinedShapePrompt(${v}, ${p})`);
+    assertEquals(combinedShapePrompt(v, p), combinedShapePrompt(v, p, undefined), `combinedShapePrompt(${v}, ${p}) undefined`);
+  }
+  // And the body really is the no-dims body, verbatim from the first blank line on.
+  const tail = VIDEO_SHAPE_PROMPT.slice(VIDEO_SHAPE_PROMPT.indexOf("\n\n"));
+  assert(combinedShapePrompt(8, 4).endsWith(tail), "the combined prompt carries the unchanged body");
+  assertEquals(combinedShapePrompt(0, 4), VIDEO_SHAPE_PROMPT, "no walk still means the video prompt, untouched");
+});
+
+Deno.test("the dims prompt states all three numbers as facts and calls them the ruler", () => {
+  for (const [name, p] of [
+    ["videoShapePrompt", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(p.includes("16 ft wide across the gable end"), `${name} states the width`);
+    assert(p.includes("24 ft long down the side"), `${name} states the length`);
+    assert(p.includes("wall is 9 ft high at the eave"), `${name} states the wall height`);
+    assert(p.includes("facts, not estimates"), `${name} says they are not to be second-guessed`);
+    assert(p.includes("they are your ruler"), `${name} names them as the scale`);
+    assert(p.includes("never against a scale of your own"), `${name} forbids substituting one`);
+  }
+  // Trailing zeros off: "9" and not "9.0". A model reconciling "9.00 ft" against a frame is being
+  // handed false precision it did not ask for.
+  assert(videoShapePrompt({ widthFt: 12, lengthFt: 16.5, wallHeightFt: 8 }).includes("16.5 ft long"), "a real fraction survives");
+  assert(!videoShapePrompt(DIMS).includes("16.0 ft"), "a whole number reads as a whole number");
+});
+
+Deno.test("⚠️ the splice does not eat the known-dimensions paragraph", () => {
+  // The sibling of "the FALSE opening sentence is gone, not merely preceded", and the same
+  // class of invisible failure. combinedShapePrompt replaces everything up to the first blank
+  // line; a ruler written ABOVE that line would vanish on every combined generation, and the
+  // prompt that went out would still read perfectly well and still return a parseable spec.
+  // The only symptom would be a wall height nobody could explain.
+  const p = combinedShapePrompt(8, 4, DIMS);
+  assert(p.includes("KNOWN DIMENSIONS, MEASURED BY THE BUILDER."), "the ruler survives the splice");
+  assert(p.startsWith("These images are all of ONE portable building"), "and the combined opening still leads");
+  assert(p.indexOf("KNOWN DIMENSIONS") > p.indexOf("The FIRST 8 images are frames"), "the ruler sits inside the inherited body");
+  assert(p.includes("How to read it:") && p.includes('"observed"'), "and the rest of the body is still there");
+});
+
+Deno.test("⚠️ the dims prompt does not ask for a wall height it already knows", () => {
+  // A number that is known must not also be estimated. If either replacement silently became a
+  // no-op — a reword of the schema line or of the WALL HEIGHT paragraph would do it — the model
+  // would be told the wall is 9 ft in one paragraph and asked to guess it in the next.
+  for (const [name, p] of [
+    ["videoShapePrompt", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(!p.includes("wallHeightFt"), `${name}: the key is gone from the schema entirely`);
+    assert(!p.includes("typically 6-10"), `${name}: and so is the range that invited a midpoint`);
+    assert(!p.includes("WALL HEIGHT: the wall at the eave, not at the peak."), `${name}: the estimate paragraph is replaced`);
+    assert(p.includes("Do not estimate it, do not report it"), `${name}: and replaced by a refusal to estimate`);
+    assert(p.includes("do not bend the other numbers to fit some other wall height"), `${name}: nor to work backwards from it`);
+  }
+  // The NO-DIMS prompt still asks, because nothing told it. Pinned here rather than trusted:
+  // a replacement applied to the base by accident would break production, not beta.
+  assert(VIDEO_SHAPE_PROMPT.includes('"wallHeightFt"'), "with no dims the model is still asked");
+  assert(VIDEO_SHAPE_PROMPT.includes("WALL HEIGHT: the wall at the eave, not at the peak."), "and still told where to measure");
+});
+
+Deno.test("the gambrel ratios are word-for-word the same with dims as without", () => {
+  // Brief section 2.1, reversing the dims design: the ratios measurably WORK (0.78 / 0.70 / 1.00
+  // against a truth of 0.72 / 0.72 / 1.00, in 3 of 3) and a mistyped width would silently corrupt
+  // anything converted from them. So dims add a ruler and change nothing about how the roof is
+  // asked for. Deliberately NOT folded into the existing "every prompt says kneeU is measured
+  // from the CENTRELINE" loop: that loop guards a real shipped defect and is not the place to
+  // hang a fourth prompt off.
+  const withDims = videoShapePrompt(DIMS), without = VIDEO_SHAPE_PROMPT;
+  for (const marker of ['"kneeU"', '"kneeRise"', '"ridgeRise"', "GAMBREL NUMBERS", "CENTRELINE", "0.7-0.85"]) {
+    assert(withDims.includes(marker), `the dims prompt still carries ${marker}`);
+  }
+  const line = (p: string, k: string) => p.split("\n").find((l) => l.includes(k)) ?? "";
+  for (const k of ['"kneeU"', '"kneeRise"', '"ridgeRise"', '"pitch"', '"overhangIn"']) {
+    assertEquals(line(withDims, k), line(without, k), `the ${k} line is unchanged by dims`);
+  }
+  const para = (p: string) => p.split("\n").find((l) => l.startsWith("GAMBREL NUMBERS")) ?? "";
+  assertEquals(para(withDims), para(without), "the whole GAMBREL NUMBERS paragraph is unchanged");
+});
+
+// ─── parseKnownDims: absent is not an error, and an error is not absent ───────────────────
+
+Deno.test("parseKnownDims: absent means null, and null is not a refusal", () => {
+  for (const raw of [undefined, null, {}]) {
+    const r = parseKnownDims(raw);
+    assert(r.ok, `${JSON.stringify(raw) ?? "undefined"} is not an error`);
+    if (r.ok) assertEquals(r.dims, null, "and it carries no dims");
+  }
+});
+
+Deno.test("parseKnownDims: three good numbers come back as three good numbers", () => {
+  const r = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  assert(r.ok, "a plain set parses");
+  if (r.ok) assertEquals(r.dims, { widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  // Numeric strings, because an <input type="number"> hands its value over as text and a
+  // caller that stringifies its own state is not doing anything wrong.
+  const s = parseKnownDims({ widthFt: "16", lengthFt: "24", wallHeightFt: "9.5" });
+  assert(s.ok, "numeric strings parse");
+  if (s.ok) assertEquals(s.dims, { widthFt: 16, lengthFt: 24, wallHeightFt: 9.5 });
+});
+
+Deno.test("⚠️ parseKnownDims: OUT OF BAND IS A REFUSAL, NOT AN ABSENCE", () => {
+  // THE WHOLE SAFETY PROPERTY, and the reason the return type carries three outcomes. If a bad
+  // number collapsed to `null`, a mistyped 140 ft width would read as "this builder sent no
+  // dimensions": the ledger row would be written, $20 would be held, and the draft would come
+  // back read against a scale nobody stated and nobody could see afterwards. A refusal is
+  // answered 400 before either of those happens.
+  const bad: [string, unknown][] = [
+    ["a width past any building anyone hauls", { widthFt: 140, lengthFt: 24, wallHeightFt: 9 }],
+    ["a width under any building at all", { widthFt: 0, lengthFt: 24, wallHeightFt: 9 }],
+    ["a length past the band", { widthFt: 16, lengthFt: 400, wallHeightFt: 9 }],
+    ["a wall height in inches", { widthFt: 16, lengthFt: 24, wallHeightFt: 108 }],
+    ["a wall height the sanitiser would silently DROP", { widthFt: 16, lengthFt: 24, wallHeightFt: 30 }],
+    ["a negative", { widthFt: -16, lengthFt: 24, wallHeightFt: 9 }],
+  ];
+  for (const [why, raw] of bad) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `${why} must be refused, never read as absent`);
+    if (!r.ok) assert(r.error.length > 10 && /Check what you typed/.test(r.error), `${why}: the builder is told what to do`);
+  }
+  // A 30 ft wall is the sharp case. sanitizeD3Spec accepts 3..20 and DROPS anything outside, so
+  // letting a 30 through would mean a prompt that states a 30 ft wall and a spec that keeps
+  // whatever the style had. Refused instead, which is why the band here is the sanitiser's own
+  // accept band and not its 5..14 clamp.
+  const thirty = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 30 });
+  assert(!thirty.ok && thirty.error.includes("wall height"), "the refusal names the field");
+});
+
+Deno.test("parseKnownDims: a missing number is refused by name, and junk never throws", () => {
+  for (const [key, raw] of [
+    ["width", { lengthFt: 24, wallHeightFt: 9 }],
+    ["length", { widthFt: 16, wallHeightFt: 9 }],
+    ["wall height", { widthFt: 16, lengthFt: 24 }],
+  ] as const) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `a set missing the ${key} is refused`);
+    if (!r.ok) assert(r.error.includes(key), `and the message names it: ${r.error}`);
+  }
+  // Junk of every shape. None of these may throw: this runs inside a function that has to
+  // ANSWER a caller, and a throw here would be a 500 on a typo.
+  for (
+    const raw of ["16x24", 16, true, [16, 24, 9], { widthFt: {}, lengthFt: [], wallHeightFt: null },
+      { widthFt: "wide", lengthFt: "long", wallHeightFt: "tall" }, { widthFt: NaN, lengthFt: 24, wallHeightFt: 9 },
+      { widthFt: Infinity, lengthFt: 24, wallHeightFt: 9 }]
+  ) {
+    const r = parseKnownDims(raw);
+    assert(!r.ok, `${JSON.stringify(raw)} is refused rather than accepted`);
+  }
+});
+
+Deno.test("parseKnownDims: the overhang is optional, and absent is not zero", () => {
+  const none = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9 });
+  assert(none.ok && none.dims && !("overhangIn" in none.dims), "no chip pressed means no key");
+  // ⚠️ 0 IS A REAL ANSWER — the flush eave the inches rewrite exists to make sayable — so it must
+  // survive as 0 and never be mistaken for "the builder did not say".
+  const flush = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 0 });
+  assert(flush.ok && flush.dims && flush.dims.overhangIn === 0, "a flush eave is an answer");
+  // The three ways a form says "nothing here".
+  for (const v of [null, undefined, ""]) {
+    const r = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: v });
+    assert(r.ok && r.dims && !("overhangIn" in r.dims), `${JSON.stringify(v)} means "read it off the video"`);
+  }
+  const deep = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 16 });
+  assert(deep.ok && deep.dims && deep.dims.overhangIn === 16, "16 inches rides along");
+  const wild = parseKnownDims({ widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 96 });
+  assert(!wild.ok, "an eight-foot eave is a typo, not an eave");
+});
+
+// ─── applyKnownDims: the builder's numbers over the model's ───────────────────────────────
+
+Deno.test("applyKnownDims with no dims is the identity, BY REFERENCE", () => {
+  // Deep-equal would pass on a rebuilt copy, and a rebuilt copy is a second place for a key to
+  // be lost. The no-dims path returns what it was given.
+  const spec = { roof: { type: "gable", pitch: 0.42, overhang: 0.5 }, colors: { body: "#fff" }, wallHeightFt: 7 };
+  assert(applyKnownDims(spec, null) === spec, "null dims returns the same object");
+  assert(applyKnownDims(spec, undefined) === spec, "absent dims returns the same object");
+  assert(applyKnownDims(spec) === spec, "no argument at all returns the same object");
+  assertEquals(applyKnownDims(spec, null), spec);
+  // Junk in, junk back out untouched: sanitizeD3Spec is the thing that judges a spec.
+  for (const junk of [null, undefined, "spec", 5, []]) assertEquals(applyKnownDims(junk, DIMS), junk);
+});
+
+Deno.test("⚠️ the builder's 9 beats the model's 7, which is the whole point", () => {
+  // 7 is what the model answered in 74 % of every recorded generation, on buildings measuring 9.
+  const reply = `{"roof":{"type":"gambrel","pitch":0.5,"kneeU":0.75,"kneeRise":0.72,"ridgeRise":1.03},"colors":{},"wallHeightFt":7}`;
+  const withOut = parseModelSpec(reply);
+  assert(withOut.ok && withOut.d3.wallHeightFt === 7, "without dims the model's answer stands");
+  const withDims = parseModelSpec(reply, DIMS);
+  assert(withDims.ok, "with dims it still parses");
+  if (withDims.ok) {
+    assertEquals(withDims.d3.wallHeightFt, 9, "the tape measure wins");
+    // Nothing else moved. The ratios are the model's job and stay the model's job (section 2.1).
+    assertEquals(withDims.d3.roof.kneeU, 0.75);
+    assertEquals(withDims.d3.roof.ridgeRise, 1.03);
+  }
+  // A model that says nothing about the wall still gets the builder's number, because the dims
+  // prompt does not ask and a reply with no wallHeightFt is the EXPECTED reply.
+  const silent = parseModelSpec(`{"roof":{"type":"gable","pitch":0.42},"colors":{}}`, DIMS);
+  assert(silent.ok && silent.d3.wallHeightFt === 9, "the expected silent reply still gets the wall");
+});
+
+Deno.test("a dims wall height outside 5-14 hits the EXISTING clamp, not a second one", () => {
+  // One clamp, not two. `sanitizeD3Spec` has drawn walls at 5..14 since before any of this, and
+  // writing the builder's number in BEFORE it is what keeps that the only place the bound lives.
+  const tall = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 16 });
+  assert(tall.ok && tall.d3.wallHeightFt === 14, "16 is drawn at 14");
+  const short = parseModelSpec(`{"roof":{"type":"gable","pitch":0.4},"colors":{}}`, { widthFt: 16, lengthFt: 24, wallHeightFt: 4 });
+  assert(short.ok && short.d3.wallHeightFt === 5, "4 is drawn at 5");
+  // And the builder is TOLD, because a silent clamp on a number they measured is the worst kind:
+  // they typed it, the preview disagrees, and nothing on screen connects the two.
+  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("drawn at 14"), "the note names what was drawn");
+  assert(knownDimsNote({ widthFt: 16, lengthFt: 24, wallHeightFt: 16 })!.includes("you gave 16 ft"), "and what was typed");
+  assertEquals(knownDimsNote(DIMS), null, "a wall inside the band is silent");
+  assertEquals(knownDimsNote(null), null, "and no dims at all is silent");
+  assertEquals(knownDimsNote(undefined), null);
+});
+
+Deno.test("⚠️ the builder's overhang is converted ONCE, not twice", () => {
+  // The trap this commit was warned about. The MODEL's `overhangIn` is consumed by
+  // foldOverhangInches one step earlier; `dims.overhangIn` is a different number from a
+  // different source. Dividing whatever is already sitting in `overhang` by 12 a second time
+  // would put a 16 in eave at 0.11 ft, which reads as flush — the exact defect the inches
+  // rewrite exists to end.
+  const reply = `{"roof":{"type":"gable","pitch":0.42,"overhangIn":16},"colors":{}}`;
+  const modelOnly = parseModelSpec(reply, DIMS);
+  assert(modelOnly.ok, "the model's inches parse with dims present");
+  if (modelOnly.ok) {
+    assertEquals(Math.round((modelOnly.d3.roof.overhang as number) * 1000) / 1000, 1.333, "16 in is 1.333 ft, converted once");
+    assert(!("overhangIn" in modelOnly.d3.roof), "and the inches key is never stored");
+  }
+  // The builder measured it, so the builder wins — same posture as the wall height above.
+  const builder = parseModelSpec(reply, { ...DIMS, overhangIn: 2 });
+  assert(builder.ok && Math.abs((builder.d3.roof.overhang as number) - 2 / 12) < 1e-9, "the chip beats the model's read");
+  // A flush chip is 0 ft and reaches the spec as 0, not as "absent".
+  const flush = parseModelSpec(reply, { ...DIMS, overhangIn: 0 });
+  assert(flush.ok && flush.d3.roof.overhang === 0, "flush means 0, and 0 is stored");
+  // No chip pressed leaves the model's read exactly alone.
+  const readIt = parseModelSpec(reply, DIMS);
+  assert(readIt.ok && (readIt.d3.roof.overhang as number) > 1, "'read it off the video' does not overwrite the reading");
+});
+
+Deno.test("nothing dims brought in survives sanitizeD3Spec except the wall height", () => {
+  // Width and length are the ruler for ONE reading, not properties of a style: one style sells
+  // at up to 21 sizes and the renderer takes its width from the customer's pick. They must never
+  // reach `building_styles.d3`, where they would be a second, lying answer.
+  const r = parseModelSpec(
+    `{"roof":{"type":"gable","pitch":0.42,"overhangIn":6},"colors":{},"widthFt":99,"lengthFt":99}`,
+    { ...DIMS, overhangIn: 6 },
+  );
+  assert(r.ok, "it parses");
+  if (!r.ok) return;
+  const flat = JSON.stringify(r.d3);
+  for (const key of ["widthFt", "lengthFt", "overhangIn", "sizeFt"]) {
+    assert(!flat.includes(key), `${key} must not reach the stored spec`);
+  }
+  assertEquals(r.d3.wallHeightFt, 9, "the wall height is the one thing that stays, because d3 already has that key");
+  assertEquals(Object.keys(r.d3.roof).sort(), ["overhang", "pitch", "type"], "and the roof carries only roof keys");
+});
+
+
+// ─── which frame goes with which view (2026-09-19) ────────────────────────────
+// EVERY TEST BELOW IS ULTIMATELY ABOUT ONE THING: an index means a position in the array THIS
+// REQUEST SENT, and nothing else. `calGenerateSet` keeps at most `12 - photos.length` frames out
+// of the lap and strides through them, so a walk of eight beside eight photographs is sent as
+// walk-1, 3, 5, 7 followed by the builder's own pictures. "Frame 5" therefore means the fifth
+// IMAGE, which on that set is a staged photograph and not a walk frame at all. Reading it as
+// "the fifth frame of the lap" is the failure this parse exists to make impossible, and it is a
+// silent one: the builder is simply shown the wrong picture beside a drawing and asked whether
+// they match.
+
+Deno.test("both shape-first prompts ask which image goes with which view; the photo path does not", () => {
+  for (const [name, p] of [
+    ["videoShapePrompt", VIDEO_SHAPE_PROMPT],
+    ["combinedShapePrompt", combinedShapePrompt(8, 4)],
+    ["videoShapePrompt(dims)", videoShapePrompt(DIMS)],
+    ["combinedShapePrompt(dims)", combinedShapePrompt(8, 4, DIMS)],
+  ] as const) {
+    assert(p.includes('"frameMap"'), `${name}: the schema carries a frameMap`);
+    assert(p.includes("FRAME MAP:"), `${name}: and a paragraph saying how to fill it`);
+    assert(p.includes("AZIMUTH:"), `${name}: and one saying what the angle means`);
+    for (const k of FRAME_MAP_VIEWPOINTS) {
+      assert(p.includes(`"${k}"`), `${name}: the schema names the ${k} viewpoint`);
+    }
+    assert(p.includes('"azimuthDeg"'), `${name}: every viewpoint carries an angle`);
+  }
+  // Out of scope, and pinned by a NEGATIVE so nobody later has to fight a test to fix the photo
+  // path properly. The scan card replaces the AI's roof with a measured one and there is no
+  // walk order in four staged photographs to index into.
+  assert(!SPEC_PROMPT.includes("frameMap"), "SPEC_PROMPT is untouched");
+  assert(!SPEC_PROMPT.includes("azimuthDeg"), "SPEC_PROMPT asks for no angles");
+});
+
+Deno.test("⚠️ the prompt numbers the IMAGES IT WAS GIVEN, not the frames of the lap", () => {
+  // The sentence is the whole contract between the model and parseFrameMap. If it ever says
+  // "frame 3 of the video" instead, every index shifts on any set where the stride dropped a
+  // frame, and nothing downstream can tell.
+  const p = combinedShapePrompt(8, 4);
+  assert(p.includes("Number the images in the order you were given them, starting at 1"),
+    "the prompt states the numbering it is going to be parsed against");
+  assert(p.includes("never one of the builder's own photographs"),
+    "and forbids naming a staged photograph");
+  assert(p.includes("LEFT OUT"), "a view with no good image is omitted rather than guessed at");
+});
+
+Deno.test("the azimuth convention is the one the rest of the prompt already uses", () => {
+  // `leanToSide` and `dormerOffsetU` have said "as seen from outside facing the doors" since
+  // they shipped. A second, silently different handedness would mirror every compare render.
+  const p = VIDEO_SHAPE_PROMPT;
+  assert(p.includes("as seen from outside facing the doors"), "right and left are defined once");
+  assert(p.includes("0 is square in front of the gable end the door is on"), "and 0 has a datum");
+  assert(p.includes("0, 45, 90, 135, 180, 225, 270 or 315"), "the eight answers are spelled out");
+});
+
+Deno.test("⚠️ the splice does not eat the frame map", () => {
+  // Same class as the known-dimensions paragraph: combinedShapePrompt replaces everything above
+  // the first blank line, and a combined set is exactly the set where the indices matter most,
+  // because it is the only one that carries photographs the model must not name.
+  const p = combinedShapePrompt(8, 4);
+  assert(p.indexOf("FRAME MAP:") > p.indexOf("The FIRST 8 images are frames"),
+    "the frame map sits inside the inherited body");
+  assert(p.includes("How to read it:"), "and the rest of the body is still there");
+});
+
+const fmReply = (frameMap: unknown, extra = "") =>
+  `{"roof":{"type":"gable","pitch":0.42},"colors":{}${extra},"frameMap":${JSON.stringify(frameMap)}}`;
+
+Deno.test("parseFrameMap reads four viewpoints out of a clean reply", () => {
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 3, azimuthDeg: 90 },
+    eaveCorner: { frame: 2, azimuthDeg: 135 },
+    corner: { frame: 4, azimuthDeg: 315 },
+  }), 4);
+  assertEquals(r, {
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 3, azimuthDeg: 90 },
+    eaveCorner: { frame: 2, azimuthDeg: 135 },
+    corner: { frame: 4, azimuthDeg: 315 },
+  });
+});
+
+Deno.test("⚠️ AN INDEX PAST THE WALK FRAMES IS DROPPED, so a photograph is never captioned as a walk view", () => {
+  // The real set this defends: eight frames and eight photographs go in as four strided frames
+  // (walk-1, 3, 5, 7) followed by eight pictures, so videoCount is 4 and images 5..12 are the
+  // builder's own. A model naming image 6 has named a photograph.
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0 },
+    side: { frame: 6, azimuthDeg: 90 },
+    corner: { frame: 12, azimuthDeg: 225 },
+  }), 4);
+  assertEquals(r, { front: { frame: 1, azimuthDeg: 0 } }, "only the real frame survives");
+  // DROPPED, not clamped, and the distinction is the point. A 6 clamped to 4 would show the
+  // builder frame 4 beside a render aimed at whatever image 6 was, with nothing saying so: a
+  // pairing the model never made, wearing the label of one it did.
+  assert(!(r && "side" in r), "a photograph is not retargeted onto the nearest frame");
+  assert(!(r && "corner" in r), "and neither is one past the end of the whole set");
+  // Zero is not an index either: the prompt says 1-based, and a 0 is a model using a different
+  // convention, which is exactly when an off-by-one must not be silently absorbed.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 0, azimuthDeg: 0 } }), 4), null);
+  assertEquals(parseFrameMap(fmReply({ front: { frame: -2, azimuthDeg: 0 } }), 4), null);
+});
+
+Deno.test("parseFrameMap: half an answer drops the whole viewpoint", () => {
+  // The pair is the unit. A frame with no azimuth is a frame there is no camera angle to render
+  // against; an azimuth with no frame is a camera aimed at nothing to compare with. Returning
+  // half would push the discovery to render time, where the only thing to do about it is drop it.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 2 } }), 4), null, "no angle, no pair");
+  assertEquals(parseFrameMap(fmReply({ side: { azimuthDeg: 90 } }), 4), null, "no frame, no pair");
+  // The older design's shape - a bare index - is not half an answer, it is the wrong shape, and
+  // it drops for the same reason rather than being read as a frame with an unknown angle.
+  assertEquals(parseFrameMap(fmReply({ front: 2 }), 4), null, "a bare index is not a pick");
+  // ...and a good viewpoint beside a half-answered one still comes through.
+  assertEquals(
+    parseFrameMap(fmReply({ front: { frame: 2 }, side: { frame: 3, azimuthDeg: 90 } }), 4),
+    { side: { frame: 3, azimuthDeg: 90 } },
+    "one bad viewpoint does not take the others with it",
+  );
+});
+
+Deno.test("parseFrameMap: an index is an integer, never something that rounds to one", () => {
+  // 2.5 is a model hedging between two frames. Rounding it would pick one on its behalf and
+  // hand the builder a confident pairing built out of a hesitation.
+  assertEquals(parseFrameMap(fmReply({ front: { frame: 2.5, azimuthDeg: 0 } }), 4), null);
+  assertEquals(parseFrameMap(fmReply({ front: { frame: "2", azimuthDeg: 0 } }), 4),
+    { front: { frame: 2, azimuthDeg: 0 } }, "a numeric string is still an integer");
+  assertEquals(parseFrameMap(fmReply({ front: { frame: "two", azimuthDeg: 0 } }), 4), null);
+});
+
+Deno.test("parseFrameMap: the angle rounds to the nearest 45 and wraps a lap either way", () => {
+  const az = (v: unknown) => {
+    const r = parseFrameMap(fmReply({ front: { frame: 1, azimuthDeg: v } }), 4);
+    return r?.front?.azimuthDeg ?? null;
+  };
+  assertEquals(az(0), 0);
+  assertEquals(az(20), 0, "20 is nearer 0 than 45");
+  assertEquals(az(30), 45, "30 is nearer 45 than 0");
+  assertEquals(az(112), 90);
+  assertEquals(az(350), 0, "and the top of the lap comes back round to 0, never 360");
+  // A model that answers -45 or 405 means 315 and 45. Refusing those would throw away a right
+  // answer over its phrasing.
+  assertEquals(az(-45), 315);
+  assertEquals(az(405), 45);
+  assertEquals(az(-360), 0);
+  // Further out than one lap either side is not an angle, it is junk - and `4000 % 360` is 40,
+  // which would round to a perfectly plausible 45 manufactured out of nothing.
+  assertEquals(az(4000), null);
+  assertEquals(az(-1000), null);
+  assertEquals(az("90"), 90, "a numeric string is still an angle");
+  assertEquals(az("north"), null);
+  assertEquals(az(null), null);
+});
+
+Deno.test("parseFrameMap: unknown viewpoints and unknown keys are dropped", () => {
+  const r = parseFrameMap(fmReply({
+    front: { frame: 1, azimuthDeg: 0, confidence: "high", note: "the door end" },
+    roofView: { frame: 2, azimuthDeg: 90 },
+    eavecorner: { frame: 3, azimuthDeg: 90 },
+  }), 4);
+  assertEquals(r, { front: { frame: 1, azimuthDeg: 0 } }, "known keys only, and only their two fields");
+});
+
+Deno.test("⚠️ parseFrameMap: no walk frames means no map, and junk never becomes a bound", () => {
+  const good = { front: { frame: 1, azimuthDeg: 0 } };
+  assertEquals(parseFrameMap(fmReply(good), 0), null, "a set with no walk frames maps nothing");
+  // THE ONE THAT WOULD HAVE BEEN INVISIBLE. `Math.floor(NaN) < 1` is FALSE, so a junk count left
+  // unguarded would make every comparison against the bound false - which reads as "accept any
+  // positive integer", the exact opposite of a bound.
+  assertEquals(parseFrameMap(fmReply(good), NaN as number), null, "NaN is not a permissive bound");
+  assertEquals(parseFrameMap(fmReply(good), undefined as unknown as number), null);
+  assertEquals(parseFrameMap(fmReply(good), -3), null);
+  assertEquals(parseFrameMap(fmReply(good), 1.9), { front: { frame: 1, azimuthDeg: 0 } }, "a fractional bound floors");
+});
+
+Deno.test("parseFrameMap: junk in, null out, never a throw", () => {
+  for (const bad of ["", "no json here", "{", "{}", '{"frameMap":null}', '{"frameMap":[]}',
+                     '{"frameMap":"front"}', '{"frameMap":{}}', '{"frameMap":{"front":null}}',
+                     '{"frameMap":{"front":[1,0]}}',
+                     // JSON.parse makes `__proto__` an OWN property rather than a setter call,
+                     // so it lands in the object - and is never read, because only the four
+                     // known viewpoints are.
+                     '{"frameMap":{"__proto__":{"frame":1,"azimuthDeg":0}}}']) {
+    assertEquals(parseFrameMap(bad, 8), null, `junk: ${bad}`);
+  }
+});
+
+Deno.test("⚠️ a frameMap in the reply NEVER reaches the stored spec", () => {
+  // sanitizeD3Spec rebuilds from known keys, so this is already true - and it has to STAY true,
+  // because production's older renderer reads `building_styles.d3` and has never heard of a
+  // frame map. Pinned here rather than assumed, with the same reason width and length are.
+  const reply = fmReply({ front: { frame: 1, azimuthDeg: 0 } });
+  const r = parseModelSpec(reply);
+  assert(r.ok, "the reply still parses to a spec");
+  if (!r.ok) return;
+  assert(!JSON.stringify(r.d3).includes("frameMap"), "no frame map in the spec");
+  assert(!JSON.stringify(r.d3).includes("azimuthDeg"), "and no angles either");
+  // And the same reply still yields the map, read separately. One model call, two readings.
+  assertEquals(parseFrameMap(reply, 4), { front: { frame: 1, azimuthDeg: 0 } });
+});
+
+Deno.test("parseFrameMap and parseObservedNotes read the same reply without disturbing each other", () => {
+  const reply = fmReply(
+    { side: { frame: 2, azimuthDeg: 90 } },
+    ',"observed":{"porch":"none","confidence":"high"}',
+  );
+  assertEquals(parseObservedNotes(reply), { porch: "none", confidence: "high" });
+  assertEquals(parseFrameMap(reply, 4), { side: { frame: 2, azimuthDeg: 90 } });
+  // The map is NOT in observed and must not drift into it: that block is builder-facing prose
+  // with 240-char caps, and this is a handful of integers nobody should ever be shown.
+  const notes = parseObservedNotes(reply);
+  assert(notes && !("frameMap" in notes), "the map stays out of the notes");
+});
+
+// ─── THE FREE SECOND PASS (2026-09-19) ────────────────────────────────────────────────────
+// What this group pins, and why each one is here rather than left to a click-through:
+//
+//  * The second call is FREE and the first one cost $20, so every input it takes has to be
+//    something the server already knows. The two functions that decide what reaches the model
+//    (parseSelfCheckRenders, selfCheckPairs) are the whole of that boundary.
+//  * A correction is model output on its way into a renderer a customer is quoted against.
+//    Three gates stand between them and all three fail silently: an allow-list that lets one
+//    key through, a cap that counts the wrong list, a sanitiser that deletes rather than
+//    clamps. None of those would throw, and none would look wrong in a screenshot.
+//  * The measured A/B says a check that "corrects" an already-good draft scores BELOW not
+//    checking at all. So the tests that matter most are the ones about NOT changing things.
+
+const JPEG = new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46]);
+const PNG = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+/** base64 of n bytes of valid-looking JPEG. */
+function jpegB64(n = JPEG.length): string {
+  const b = new Uint8Array(Math.max(JPEG.length, n));
+  b.set(JPEG);
+  let s = "";
+  for (const byte of b) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+function bytesB64(src: Uint8Array): string {
+  let s = "";
+  for (const byte of src) s += String.fromCharCode(byte);
+  return btoa(s);
+}
+const frames = (n: number) => Array.from({ length: n }, (_, i) => `https://bucket.test/f${i + 1}.jpg`);
+const render = (viewpoint: string, frame: number, base64 = jpegB64()) => ({ viewpoint, frame, base64 });
+
+/** The fixture, through the same sanitiser the ledger row went through. Throwing here rather
+ *  than limping on with an empty spec: a broken fixture must look like a broken fixture. */
+function cleanSpec(raw: unknown): D3Spec {
+  const r = sanitizeD3Spec(raw);
+  if (!r.ok) throw new Error(`the fixture is not a valid spec: ${r.error}`);
+  return r.d3;
+}
+
+// A draft of the shape the ledger actually stores: sanitizeD3Spec's own output.
+const DRAFT = {
+  roof: { type: "gambrel", kneeU: 0.78, kneeRise: 0.7, ridgeRise: 1.0, overhang: 1.0, eave: "fascia", porchDepthFt: 6 },
+  siding: "lap",
+  colors: { body: "#8b6f4e", trim: "#e8e0d0", roof: "#2a2a2a" },
+  wallHeightFt: 9,
+};
+const CLEAN: D3Spec = cleanSpec(DRAFT);
+const CHECK_DIMS: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+
+function checkReply(body: Record<string, unknown>): string {
+  return `Here is my answer.\n${JSON.stringify(body)}`;
+}
+function readOf(body: Record<string, unknown>) {
+  const r = parseSelfCheck(checkReply(body));
+  assert(!!r, "the fixture reply has to parse");
+  return r!;
+}
+
+// ── THE RENDERS ───────────────────────────────────────────────────────────────────────────
+
+Deno.test("parseSelfCheckRenders takes four good JPEGs and strips a jpeg data: prefix", () => {
+  const r = parseSelfCheckRenders([
+    render("front", 1),
+    render("side", 2),
+    { viewpoint: "eaveCorner", frame: 3, base64: `data:image/jpeg;base64,${jpegB64()}` },
+    render("corner", 4),
+  ], 8);
+  assert(r.ok, "four renders is the designed maximum, not an error");
+  if (!r.ok) return;
+  assertEquals(r.renders.map((x) => x.viewpoint), ["front", "side", "eaveCorner", "corner"]);
+  assertEquals(r.renders[2].base64, jpegB64(), "the data: prefix is gone by the time this is a payload");
+  assertEquals(r.renders[0].bytes, JPEG.length);
+});
+
+Deno.test("⚠️ seven renders are REFUSED, not sliced to four", () => {
+  // Slicing would run the check on an arbitrary four of seven views and report a verdict as
+  // though it had seen what it was sent. The cap is a contract with the browser half, and a
+  // browser that breaks it should hear about it on the first press.
+  const many = ["front", "side", "eaveCorner", "corner", "front", "side", "corner"]
+    .map((v, i) => render(v, i + 1));
+  const r = parseSelfCheckRenders(many, 8);
+  assert(!r.ok, "seven is over the cap");
+  if (r.ok) return;
+  assert(r.error.includes("4"), `the refusal names the cap: ${r.error}`);
+  assert(r.error.includes("7"), `and what was sent: ${r.error}`);
+});
+
+Deno.test("a render over 400 KB is refused, and so is a set over 1.2 MB", () => {
+  const big = parseSelfCheckRenders([render("front", 1, jpegB64(400_001))], 4);
+  assert(!big.ok, "over the per-render cap");
+  if (!big.ok) assert(/KB/.test(big.error), big.error);
+
+  // Four at 390 KB each are individually fine and together are not.
+  const set = parseSelfCheckRenders(
+    ["front", "side", "eaveCorner", "corner"].map((v, i) => render(v, i + 1, jpegB64(390_000))),
+    4,
+  );
+  assert(!set.ok, "1.56 MB is over the total");
+  if (!set.ok) assert(/1200 KB/.test(set.error), set.error);
+});
+
+Deno.test("⚠️ 'image/jpeg only' is read off the BYTES, not off the caller's label", () => {
+  // A caller can write any media type it likes into a data: URL. The only thing that settles
+  // what the bytes are is the bytes, and Anthropic is told `media_type: "image/jpeg"` either
+  // way — so a PNG through here is a lie we would be repeating upstream.
+  const lying = parseSelfCheckRenders([{ viewpoint: "front", frame: 1, base64: bytesB64(PNG) }], 4);
+  assert(!lying.ok, "a PNG labelled as nothing at all is still a PNG");
+  if (!lying.ok) assertEquals(lying.error, "The front render is not a JPEG.");
+
+  const labelled = parseSelfCheckRenders(
+    [{ viewpoint: "front", frame: 1, base64: `data:image/png;base64,${bytesB64(PNG)}` }],
+    4,
+  );
+  assert(!labelled.ok, "and an honest PNG label is refused before the bytes are even read");
+});
+
+Deno.test("parseSelfCheckRenders: one per viewpoint, known viewpoints only, frames in range", () => {
+  const dup = parseSelfCheckRenders([render("side", 1), render("side", 2)], 4);
+  assert(!dup.ok && dup.error.includes("side"), "two renders of one view is a browser bug");
+
+  const unknown = parseSelfCheckRenders([render("back", 1)], 4);
+  assert(!unknown.ok && unknown.error.includes("back"), "an unknown viewpoint is refused by name");
+
+  for (const bad of [0, -1, 9, 2.5, null, "x"]) {
+    const r = parseSelfCheckRenders([{ viewpoint: "front", frame: bad, base64: jpegB64() }], 8);
+    assert(!r.ok, `frame ${String(bad)} is not an index into this generation`);
+  }
+  // A numeric string IS an index: `num` coerces it everywhere else in this file and a model or
+  // a JSON round trip that produces "2" means 2.
+  const str = parseSelfCheckRenders([{ viewpoint: "front", frame: "2", base64: jpegB64() }], 8);
+  assert(str.ok && str.renders[0].frame === 2, "a numeric string is still an index");
+});
+
+Deno.test("parseSelfCheckRenders: junk in, a refusal out, never a throw", () => {
+  for (const bad of [null, undefined, "renders", 3, [], [null], [[]], [{}],
+                     [{ viewpoint: "front" }],
+                     [{ viewpoint: "front", frame: 1, base64: "" }],
+                     [{ viewpoint: "front", frame: 1, base64: "not base64 at all !!!" }]]) {
+    const r = parseSelfCheckRenders(bad, 4);
+    assert(!r.ok, `junk: ${JSON.stringify(bad)}`);
+    if (!r.ok) assert(r.error.length > 0 && r.error.length < 200, "and the refusal is a sentence");
+  }
+});
+
+// ── WHICH FRAMES MAY BE SHOWN ─────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ a URL the style does not own never reaches the model, and the indices do NOT shift", () => {
+  // THE ONE THIS PAIR OF FUNCTIONS EXISTS FOR. sanitizePhotoUrls accepts ANY https URL up to
+  // 600 characters and is not bucket-scoped, so if the caller's array were the frame list, one
+  // $20 generation would buy a free vision call on any twelve images on the internet.
+  //
+  // And the second half is just as load-bearing: compacting the array to remove the intruder
+  // would renumber everything after it, so the `corner` render below would be paired with the
+  // WRONG frame while looking exactly like a right answer.
+  const own = frames(4);
+  const sent = [own[0], own[1], "https://evil.test/private.jpg", own[2], own[3]];
+  const renders = [render("front", 1), render("side", 3), render("corner", 4)];
+  const parsed = parseSelfCheckRenders(renders, sent.length);
+  assert(parsed.ok, "the renders themselves are fine");
+  if (!parsed.ok) return;
+  const pairs = selfCheckPairs(sent, own, parsed.renders);
+  assertEquals(pairs.map((p) => p.viewpoint), ["front", "corner"], "the intruder's viewpoint dropped whole");
+  assertEquals(pairs[0].frameUrl, own[0]);
+  assertEquals(pairs[1].frameUrl, own[2], "position 4 is still the style's third frame, not its fourth");
+  assert(!JSON.stringify(pairs).includes("evil.test"), "nothing of the caller's URL survives");
+});
+
+Deno.test("selfCheckPairs orders canonically and drops what it cannot pair", () => {
+  const own = frames(4);
+  const parsed = parseSelfCheckRenders([render("corner", 4), render("front", 1)], 4);
+  assert(parsed.ok, "two renders");
+  if (!parsed.ok) return;
+  // Canonical, not the caller's order: two runs of one generation put the same pictures in the
+  // same places, which is what makes two transcripts comparable.
+  assertEquals(selfCheckPairs(own, own, parsed.renders).map((p) => p.viewpoint), ["front", "corner"]);
+  // A style with nothing stored pairs nothing, which the caller reads as "skip the check".
+  assertEquals(selfCheckPairs(own, [], parsed.renders), []);
+  // And a frame index past the end of the array it was sent with cannot invent a pair.
+  assertEquals(selfCheckPairs(own.slice(0, 2), own, parsed.renders).map((p) => p.viewpoint), ["front"]);
+});
+
+// ── READING THE REPLY ─────────────────────────────────────────────────────────────────────
+
+Deno.test("parseSelfCheck reads a clean matches reply out of its wrapping", () => {
+  const r = parseSelfCheck(checkReply({
+    verdict: "matches", corrections: {}, changed: [],
+    checked: { overhang: "ok", porch: "ok", roofProfile: "unclear", eave: "unclear" },
+    note: "The draft already matches.",
+  }));
+  assertEquals(r, {
+    verdict: "matches", corrections: {}, changed: [],
+    checked: { overhang: "ok", porch: "ok", roofProfile: "unclear", eave: "unclear" },
+    note: "The draft already matches.",
+  });
+});
+
+Deno.test("⚠️ an empty object is NOT read as 'it matches'", () => {
+  // `{}` is what comes back when a model wrote prose and one stray brace. Reading it as a clean
+  // pass would inflate the single number this whole feature is judged on — how often the check
+  // leaves an already-good draft alone — and it would inflate it in the flattering direction.
+  assertEquals(parseSelfCheck("{}"), null);
+  assertEquals(parseSelfCheck("I compared them and they look the same to me."), null);
+  assertEquals(parseSelfCheck('{"thoughts":"the roof looks fine"}'), null);
+  // A reply carrying ANY of the four keys the prompt asks for is an answer, even a terse one.
+  assertEquals(parseSelfCheck('{"verdict":"matches"}')?.verdict, "matches");
+});
+
+Deno.test("parseSelfCheck: an unrecognised verdict is read off the answer, never invented", () => {
+  const withChanges = parseSelfCheck(checkReply({
+    verdict: "ok", corrections: { roof: { overhang: 0.2 } },
+    changed: [{ field: "roof.overhang", from: 1, to: 0.2, why: "the eave is flush" }],
+  }));
+  assertEquals(withChanges?.verdict, "corrections", "it handed back a change, whatever it called it");
+  const without = parseSelfCheck(checkReply({ verdict: "no_changes", corrections: {}, changed: [] }));
+  assertEquals(without?.verdict, "matches", "and nothing here can manufacture one");
+});
+
+Deno.test("parseSelfCheck holds the model's prose to the same caps as observed", () => {
+  const long = "x".repeat(400);
+  const r = parseSelfCheck(checkReply({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2 } },
+    changed: [{ field: `roof.overhang${"!".repeat(100)}`, from: 1, to: 0.2, why: `a\n\n  b ${long}` }],
+    checked: { overhang: "changed", porch: "probably fine", roofProfile: 3 },
+    note: `  ${long}  `,
+  }));
+  assertEquals(r?.changed[0].field.length, 60, "a field name is an identifier, not an essay");
+  assertEquals(r?.changed[0].why.slice(0, 4), "a b ", "whitespace collapsed, like every other model note");
+  assertEquals(r?.changed[0].why.length, 240);
+  assertEquals(r?.note.length, 240);
+  assertEquals(r?.checked, { overhang: "changed" }, "out-of-vocabulary answers are dropped, not guessed at");
+});
+
+Deno.test("parseSelfCheck: junk in, null out, never a throw", () => {
+  for (const bad of ["", "{", "[]", "null", '{"changed":"lots"}', '{"changed":[null,3,[]]}',
+                     '{"corrections":[],"verdict":"matches"}']) {
+    const r = parseSelfCheck(bad);
+    assert(r === null || (Array.isArray(r.changed) && typeof r.corrections === "object"), `junk: ${bad}`);
+  }
+  // A `changed` array of rubbish yields an answer with nothing in it, which is "matches".
+  assertEquals(parseSelfCheck('{"changed":[null,3,[]]}')?.verdict, "matches");
+});
+
+// ── THE THREE GATES ───────────────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ siding, colors, wallHeightFt and sizeFt are dropped even when they are in BOTH lists", () => {
+  // The builder MEASURED the wall and the size, and colours already score 96/100. A pass that
+  // re-guesses a typed fact is a regression dressed as a feature, and `siding` is the one the
+  // sanitiser would silently reset to plain on every check.
+  const read = readOf({
+    verdict: "corrections",
+    corrections: {
+      wallHeightFt: 7, sizeFt: "12x20", siding: "panel",
+      colors: { body: "#ff0000" },
+      roof: { overhang: 0.2 },
+    },
+    changed: [
+      { field: "wallHeightFt", from: 9, to: 7, why: "looks shorter" },
+      { field: "sizeFt", from: "16x24", to: "12x20", why: "looks smaller" },
+      { field: "siding", from: "lap", to: "panel", why: "looks flat" },
+      { field: "colors.body", from: "#8b6f4e", to: "#ff0000", why: "looks red" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "the eave is flush to the wall in frame 2" },
+    ],
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "the reply is usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "corrections");
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"], "one field got through, and it is the shape one");
+  assertEquals(r.d3.wallHeightFt, 9, "the builder's wall stands");
+  assertEquals(r.d3.siding, "lap", "and their cladding");
+  assertEquals(r.d3.colors.body, "#8b6f4e", "and their colours");
+  assertEquals(r.dropped.sort(), ["colors.body", "siding", "sizeFt", "wallHeightFt"]);
+});
+
+Deno.test("⚠️ seven changed fields is a re-draft: rejected_too_many, and NONE of them applied", () => {
+  const fields = ["roof.overhang", "roof.pitch", "roof.kneeU", "roof.kneeRise", "roof.ridgeRise",
+                  "roof.eave", "roof.tailSpacingIn"];
+  const read = readOf({
+    verdict: "corrections",
+    corrections: {
+      roof: { overhang: 0.2, pitch: 0.5, kneeU: 0.7, kneeRise: 0.6, ridgeRise: 1.1, eave: "open", tailSpacingIn: 24 },
+    },
+    changed: fields.map((field) => ({ field, from: 0, to: 1, why: "different" })),
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "still a readable answer");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "rejected_too_many");
+  assertEquals(r.changed, [], "a check that rewrites everything did not check anything");
+  assertEquals(r.d3, CLEAN, "the draft comes back exactly as it went in");
+  // And SIX is fine, so the boundary is where it says it is.
+  const six = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2, pitch: 0.5, kneeU: 0.7, kneeRise: 0.6, ridgeRise: 1.1, eave: "open" } },
+    changed: fields.slice(0, 6).map((field) => ({ field, from: 0, to: 1, why: "different" })),
+  });
+  const r6 = applySelfCheck(DRAFT, six);
+  assert(r6.ok && r6.verdict === "corrections" && r6.changed.length === 6, "six is the cap, not the refusal");
+});
+
+Deno.test("the cap counts the model's own list, and one field named twice is one field", () => {
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.2 } },
+    changed: Array.from({ length: 7 }, () => ({ field: "roof.overhang", from: 1, to: 0.2, why: "flush" })),
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok && r.verdict === "corrections", "repetition is not a re-draft");
+  if (!r.ok) return;
+  assertEquals(r.changed.length, 1);
+});
+
+Deno.test("BOTH lists or neither: a correction nobody declared, and a declaration with no correction", () => {
+  const read = readOf({
+    verdict: "corrections",
+    // `roof.pitch` is corrected but never declared; `roof.kneeU` is declared but never corrected.
+    corrections: { roof: { overhang: 0.2, pitch: 1.4 } },
+    changed: [
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+      { field: "roof.kneeU", from: 0.78, to: 0.6, why: "the bend is further in" },
+    ],
+  });
+  const r = applySelfCheck(DRAFT, read);
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"]);
+  assertEquals(r.d3.roof.pitch, undefined, "an undeclared correction changes nothing");
+  assertEquals(r.d3.roof.kneeU, 0.78, "and a declaration with nothing behind it changes nothing");
+  assertEquals(r.dropped, ["roof.kneeU"]);
+});
+
+Deno.test("⚠️ a recessed porch corrected to projecting, and back, without either key surviving the other", () => {
+  // S2-E. calDraftRoof only drops the opposite key when the incoming draft DECLARES one, and
+  // sanitizeD3Spec only ever drops in the projecting-wins direction — so without the rule run
+  // here, a correction that says "this porch is recessed" would be eaten by the sanitiser and
+  // the stale projecting porch would stand. Both directions, because only one of them is free.
+  const toProjecting = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6 } },
+    changed: [{ field: "roof.porchOutFt", from: 0, to: 6, why: "the deck and posts stand out past the end wall" }],
+  }));
+  assert(toProjecting.ok, "usable");
+  if (!toProjecting.ok) return;
+  assertEquals(toProjecting.d3.roof.porchOutFt, 6);
+  assertEquals(toProjecting.d3.roof.porchDepthFt, undefined, "the recess it replaced is gone");
+
+  const projecting = { ...DRAFT, roof: { ...DRAFT.roof, porchDepthFt: undefined, porchOutFt: 6, porchTruss: true } };
+  const toRecessed = applySelfCheck(projecting, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchDepthFt: 5 } },
+    changed: [{ field: "roof.porchDepthFt", from: 6, to: 5, why: "the end wall is set back under the main roof" }],
+  }));
+  assert(toRecessed.ok, "usable");
+  if (!toRecessed.ok) return;
+  assertEquals(toRecessed.d3.roof.porchDepthFt, 5, "the correction survived the sanitiser's projecting-wins rule");
+  assertEquals(toRecessed.d3.roof.porchOutFt, undefined, "and the projection it replaced is gone");
+});
+
+Deno.test("⚠️ a porch swap reports BOTH halves, and calls neither of them un-applied", () => {
+  // Swapping the kind is one correction to the model and two changes to the building: the
+  // projection appears and the recess goes. The list the builder reads before Save said only
+  // the first half, on the correction the baseline calls the most visible error there is.
+  //
+  // Both shapes, because they fail differently. DECLARING BOTH KEYS is what the prompt tells
+  // the model not to do ("give the new key and leave the other one out entirely") and it also
+  // used to produce a FALSE `dropped` entry: the exclusion's own removal was read as a value
+  // the sanitiser could not take, so portal-settings logged "the self-check proposed 1
+  // change(s) that were not applied" about a change that had been applied.
+  const declaredBoth = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6, porchDepthFt: 0 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "the deck stands out past the end wall" },
+      { field: "roof.porchDepthFt", from: 6, to: 0, why: "nothing is cut into the end" },
+    ],
+  }));
+  assert(declaredBoth.ok, "usable");
+  if (!declaredBoth.ok) return;
+  assertEquals(declaredBoth.d3.roof.porchOutFt, 6);
+  assertEquals(declaredBoth.d3.roof.porchDepthFt, undefined, "the recess is gone from the spec");
+  assertEquals(declaredBoth.changed.map((c) => c.field), ["roof.porchOutFt", "roof.porchDepthFt"]);
+  assertEquals(declaredBoth.changed[1].from, 6, "and the line says what it was");
+  assertEquals(declaredBoth.changed[1].to, null, "and that it is now nothing");
+  assertEquals(declaredBoth.dropped, [], "nothing here was un-applied");
+
+  // The prompt-compliant shape. The recess and its truss still vanish from the spec, so they
+  // still have to appear in the list; they are just nobody's declaration.
+  const trussed = { ...DRAFT, roof: { ...DRAFT.roof, porchTruss: true } };
+  const compliant = applySelfCheck(trussed, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6 } },
+    changed: [{ field: "roof.porchOutFt", from: 0, to: 6, why: "the deck stands out past the end wall" }],
+  }));
+  assert(compliant.ok, "usable");
+  if (!compliant.ok) return;
+  assertEquals(compliant.d3.roof.porchDepthFt, undefined);
+  assertEquals(compliant.d3.roof.porchTruss, undefined);
+  assertEquals(
+    compliant.changed.map((c) => c.field),
+    ["roof.porchOutFt", "roof.porchDepthFt", "roof.porchTruss"],
+    "one declaration, three true lines",
+  );
+  assertEquals(compliant.dropped, []);
+});
+
+Deno.test("a porch key the exclusion would have removed, on a draft that never had one, is reported nowhere", () => {
+  // The other direction of the same rule. `excluded` names keys build() DELETED, which on a
+  // porchless draft deletes nothing — so there is no change to report, and nothing the model
+  // did not ask for may appear in `dropped` either. The declared half that landed nowhere
+  // still does, because the model did ask for that one.
+  const porchless = { ...DRAFT, roof: { ...DRAFT.roof, porchDepthFt: undefined } };
+  const r = applySelfCheck(porchless, readOf({
+    verdict: "corrections",
+    corrections: { roof: { porchOutFt: 6, porchDepthFt: 0 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "posts and a deck" },
+      { field: "roof.porchDepthFt", from: 0, to: 0, why: "nothing cut in" },
+    ],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed.map((c) => c.field), ["roof.porchOutFt"]);
+  assertEquals(r.dropped, ["roof.porchDepthFt"], "declared, applied nowhere — that IS un-applied");
+  assertEquals(r.d3.roof.porchTruss, undefined);
+});
+
+Deno.test("⚠️ what is REPORTED is what landed, not what was asked for", () => {
+  // The sanitiser clamps. A correction of 8 ft on a key clamped to 0..3 becomes 3, and telling
+  // the builder "1 ft -> 8 ft" over a model that now reads 3 ft is a lie in the one list they
+  // are meant to read line by line.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 8 } },
+    changed: [{ field: "roof.overhang", from: 1, to: 8, why: "a deep eave" }],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.changed, [{ field: "roof.overhang", from: 1, to: 3, why: "a deep eave" }]);
+  assertEquals(r.d3.roof.overhang, 3);
+});
+
+Deno.test("⚠️ a correction that changes nothing is not reported as a change", () => {
+  // The whole measured risk of this feature is a check that "corrects" a draft that was already
+  // right. A no-op that reached the panel as a line item would be exactly that, on paper.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 1.0, eave: "fascia" } },
+    changed: [
+      { field: "roof.overhang", from: 1, to: 1, why: "same" },
+      { field: "roof.eave", from: "fascia", to: "fascia", why: "same" },
+    ],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "matches", "nothing moved, so the draft matched");
+  assertEquals(r.changed, []);
+  assertEquals(r.dropped, ["roof.overhang", "roof.eave"]);
+});
+
+Deno.test("⚠️ a correction the sanitiser cannot read does not DELETE the value it was aimed at", () => {
+  // The sanitiser drops what it cannot draw, so `eave: "flat"` would leave the key absent — a
+  // deletion nobody asked for, reported to the builder as "fascia -> nothing". The declared
+  // field is taken back out and the spec rebuilt, so the draft's own value stands.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { eave: "flat" } },
+    changed: [{ field: "roof.eave", from: "fascia", to: "flat", why: "no rafter tails" }],
+  }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.eave, "fascia", "the draft's own value is still there");
+  assertEquals(r.changed, []);
+  assertEquals(r.verdict, "matches");
+  assertEquals(r.dropped, ["roof.eave"]);
+});
+
+Deno.test("an unknown roof type is dropped rather than taking the whole spec down with it", () => {
+  // sanitizeD3Spec REFUSES an unknown roof type instead of clamping it, and a refusal here would
+  // throw away a draft the builder has already paid for.
+  const r = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections",
+    corrections: { roof: { type: "hip", overhang: 0.2 } },
+    changed: [
+      { field: "roof.type", from: "gambrel", to: "hip", why: "four slopes" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+    ],
+  }));
+  assert(r.ok, "the spec still builds");
+  if (!r.ok) return;
+  assertEquals(r.d3.roof.type, "gambrel");
+  assertEquals(r.changed.map((c) => c.field), ["roof.overhang"], "the usable half still applied");
+  assert(r.dropped.includes("roof.type"), "and the unusable half is recorded as dropped");
+  // The three it CAN draw still go through.
+  const gable = applySelfCheck(DRAFT, readOf({
+    verdict: "corrections", corrections: { roof: { type: "gable" } },
+    changed: [{ field: "roof.type", from: "gambrel", to: "gable", why: "one slope each side" }],
+  }));
+  assert(gable.ok && gable.d3.roof.type === "gable", "a real roof type is a real correction");
+});
+
+Deno.test("applySelfCheck never mutates the draft it was handed", () => {
+  const before = JSON.stringify(DRAFT);
+  applySelfCheck(DRAFT, readOf({
+    verdict: "corrections", corrections: { roof: { porchOutFt: 6, overhang: 0.2 } },
+    changed: [
+      { field: "roof.porchOutFt", from: 0, to: 6, why: "posts" },
+      { field: "roof.overhang", from: 1, to: 0.2, why: "flush" },
+    ],
+  }));
+  assertEquals(JSON.stringify(DRAFT), before, "`drafted` on the ledger row keeps the first pass");
+});
+
+Deno.test("a matches reply leaves the draft alone and hands back no new spec", () => {
+  const r = applySelfCheck(DRAFT, readOf({ verdict: "matches", corrections: {}, changed: [] }));
+  assert(r.ok, "usable");
+  if (!r.ok) return;
+  assertEquals(r.verdict, "matches");
+  assertEquals(r.changed, []);
+  assertEquals(r.dropped, []);
+  assertEquals(r.d3, CLEAN);
+});
+
+Deno.test("a draft that cannot be read back is a refusal, not a silent 'matches'", () => {
+  const r = applySelfCheck({ nope: true }, readOf({ verdict: "matches", corrections: {}, changed: [] }));
+  assert(!r.ok, "there is no verdict to give about a building nobody drafted");
+});
+
+// ── THE PROMPT ────────────────────────────────────────────────────────────────────────────
+
+Deno.test("⚠️ the self-check prompt says three separate times that 'it matches' is a complete answer", () => {
+  // Variant G: a check that corrects an already-good draft scores 70.5 against the 74.3 of not
+  // checking at all. Permission to change nothing is the single most valuable thing in here.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes('"It matches" is a\ncorrect and expected answer'), "once in the opening");
+  assert(p.includes("a wrong correction is worse than no correction"), "once as the reason");
+  assert(p.includes('return "verdict": "matches" with "corrections": {} and\n    "changed": []'), "once in the rules");
+  assert(p.includes("That is a complete, correct answer. Stop there."), "and told to stop");
+  assert(p.includes('"unclear" is better than a guess'), "with unclear as the way out");
+});
+
+Deno.test("the self-check prompt states the builder's three measurements and forbids changing them", () => {
+  const p = selfCheckPrompt({ dims: { widthFt: 16, lengthFt: 24, wallHeightFt: 9 }, draft: CLEAN, viewpoints: ["front", "eaveCorner"] });
+  assert(p.includes("building size: 16 ft wide by 24 ft long"), "the size, as typed");
+  assert(p.includes("wall height at the eave: 9 ft"), "the wall, as typed");
+  assert(p.includes("They are facts, not your estimates"), "stated as facts");
+  assert(p.includes("Never return wallHeightFt, sizeFt, colors or siding."), "and out of bounds to change");
+  assert(p.includes("You cannot change wallHeightFt - it is measured."), "said again where the wall is discussed");
+  // The draft rides in the prompt, so the model is checking the thing that was rendered.
+  assert(p.includes('"kneeU": 0.78'), "the draft itself is in there");
+  assert(p.includes("currently 1 ft"), "with the eave it is being asked about");
+});
+
+Deno.test("⚠️ the prompt names only the viewpoints actually sent", () => {
+  // The numbered steps say "the close-up viewpoint" and "the side viewpoint". With three of the
+  // four sent, a model hunting for the missing one will read some other image as it — which is
+  // the one way this check answers confidently about a picture it never saw.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: ["eaveCorner", "front"] });
+  assert(p.includes("front (head-on at the end the door is on), eaveCorner (the close-up"), "canonical order, not the caller's");
+  assert(!p.includes("side (square to a long wall),"), "a view that was not sent is not listed");
+  assert(p.includes("never read one view as though it were another"), "and the instruction is explicit");
+  // The label each pair is introduced with uses the same words.
+  assert(selfCheckPairLabel("eaveCorner").includes("the close-up of the roof edge against the sky"), "the pair label uses the same words as the list");
+  assert(selfCheckPairLabel("side").includes("The builder's own frame comes first"), "and says which image is which");
+});
+
+Deno.test("the prompt's field cap is the one the server enforces", () => {
+  // Two numbers that have to agree and live 200 lines apart: the sentence the model reads and
+  // the constant applySelfCheck counts against.
+  const p = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes(`Change at most ${SELF_CHECK_MAX_FIELDS} fields.`), "the prompt states the cap");
+  assertEquals(SELF_CHECK_MAX_FIELDS, 6);
+});
+
+Deno.test("⚠️ every field the prompt names is on the allow-list, and nothing else is", () => {
+  // A prompt that asks for a field the server then drops trains the model to waste its answer
+  // on it, and an allow-list entry no prompt mentions is a door nobody is watching.
+  const named = ["roof.overhang", "roof.porchOutFt", "roof.porchDepthFt", "roof.eave", "roof.type",
+                 "roofMaterial", "foundation", "gableVent"];
+  for (const f of named) assert((SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} is named in the prompt`);
+  for (const f of ["wallHeightFt", "sizeFt", "siding", "colors", "colors.body", "plateBand", "roof.plateBand"]) {
+    assert(!(SELF_CHECK_ALLOW as readonly string[]).includes(f), `${f} must never be applicable`);
+  }
+});
+
+Deno.test("⚠️ the prompt states the wall the RENDER was drawn at, not the one that was typed", () => {
+  // parseKnownDims accepts 3..20 and sanitizeD3Spec clamps to the 5..14 the renderer can draw,
+  // so a measured 16 is DRAWN at 14. The prompt then tells the model "every render you are
+  // shown was drawn at exactly these dimensions" and step 1 converts a fraction of that wall
+  // into feet — so stating the 16 makes every length it reads off a render long by 16/14, in
+  // the same direction, on the one field this pass exists to fix.
+  const typed: KnownDims = { widthFt: 30, lengthFt: 40, wallHeightFt: 16 };
+  const drawn = cleanSpec(applyKnownDims({ ...DRAFT }, typed));
+  assertEquals(drawn.wallHeightFt, 14, "the fixture really is clamped");
+  const p = selfCheckPrompt({ dims: typed, draft: drawn, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("wall height at the eave: 14 ft"), "the wall as DRAWN");
+  assert(!p.includes("16 ft"), "and the typed 16 appears nowhere");
+  assert(p.includes("on a 14 ft wall is about"), "step 1 converts against the drawn wall");
+  assert(p.includes("   14/20 ft"), "and the arithmetic it hands the model uses the drawn wall too");
+  // Width and length never clamp, so they are stated exactly as typed.
+  assert(p.includes("building size: 30 ft wide by 40 ft long"), "the size is untouched");
+  // The unclamped case is unchanged, which is every ordinary building.
+  const ok = selfCheckPrompt({ dims: CHECK_DIMS, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(ok.includes("wall height at the eave: 9 ft"), "a wall inside the band still reads as typed");
+});
+
+Deno.test("⚠️ a builder who MEASURED the eave does not have it re-measured from a photograph", () => {
+  // The overhang chip is optional: null is "read it off the video", a number is a tape measure.
+  // applyKnownDims has already written it into the draft, so a check that re-reads it off a
+  // frame overwrites the measurement — on the field the prompt spends its longest step on,
+  // with the chip on the card still showing the builder's own answer afterwards.
+  const measured: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9, overhangIn: 16 };
+  const draft = cleanSpec(applyKnownDims({ ...DRAFT }, measured));
+  assertEquals(draft.roof.overhang, 16 / 12, "the fixture carries the builder's eave");
+
+  const p = selfCheckPrompt({ dims: measured, draft, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(p.includes("eave overhang: 16 in past the wall"), "it is stated as a measured fact");
+  assert(p.includes("THE BUILDER MEASURED THIS ONE TOO"), "and step 1 says so instead of asking");
+  assert(!p.includes("Do not settle on 1.0 ft"), "the re-measuring instruction is gone");
+  assert(p.includes("Never return wallHeightFt, sizeFt, colors or siding or roof.overhang."),
+    "and the rules put it beside the other measured fields");
+
+  // THE GATE, not just the wording: a model that returns it anyway is dropped.
+  const read = readOf({
+    verdict: "corrections",
+    corrections: { roof: { overhang: 0.15 } },
+    changed: [{ field: "roof.overhang", from: 1.33, to: 0.15, why: "flush in the close-up" }],
+    checked: {}, note: "",
+  });
+  const applied = applySelfCheck(draft, read, measured);
+  assert(applied.ok, "the merge is buildable");
+  assertEquals((applied as { d3: D3Spec }).d3.roof.overhang, 16 / 12, "the builder's eave stands");
+  assertEquals((applied as { dropped: string[] }).dropped, ["roof.overhang"], "and the correction is recorded as dropped");
+  assertEquals((applied as { changed: unknown[] }).changed.length, 0, "so nothing is reported as changed");
+
+  // WITHOUT a measured eave — the default, and every call production's older bundle makes —
+  // the field is still the check's to correct. That is the whole point of the eave camera.
+  const guessed: KnownDims = { widthFt: 16, lengthFt: 24, wallHeightFt: 9 };
+  const p2 = selfCheckPrompt({ dims: guessed, draft: CLEAN, viewpoints: SELF_CHECK_VIEWPOINTS });
+  assert(!p2.includes("eave overhang:"), "nothing is claimed about an eave nobody measured");
+  assert(p2.includes("Do not settle on 1.0 ft"), "and step 1 asks for it as before");
+  const applied2 = applySelfCheck(CLEAN, read, guessed);
+  assert(applied2.ok, "and so is the unmeasured one");
+  assertEquals((applied2 as { d3: D3Spec }).d3.roof.overhang, 0.15, "the correction lands");
+  // Two arguments, the shape every existing caller uses, behaves the same as no dims.
+  const applied3 = applySelfCheck(CLEAN, read);
+  assert(applied3.ok, "and the two-argument call");
+  assertEquals((applied3 as { d3: D3Spec }).d3.roof.overhang, 0.15, "and so does the two-argument call");
 });
