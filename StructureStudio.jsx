@@ -11181,6 +11181,12 @@ const SSD_CSS = [
   // tiles are really hidden -- `edges` in SSStyleStrip measures scrollWidth against clientWidth, so with
   // few enough styles to fit there is now nothing drawn along the bottom at all. On Windows the bar was
   // laid out rather than overlaid, so this also gives the tiles back the ~15px it was eating.
+  // ⚠️ THIS DOES NOT PUT MORE BUILDINGS ON SCREEN, and her words were "the scroll bar never goes away so
+  // I can't see all the buildings". The tile count is `perRow` -- C.branding.stylesPerRow, clamped 5-8 in
+  // SSStyleStrip -- and the tiles divide the strip's width between them, so a wider page gives BIGGER
+  // tiles, never more of them, and a hidden bar gives none. The half of her sentence about seeing them
+  // all is still open: it needs the strip to WRAP, which is a rewrite of the component (arrows, paging,
+  // scroll-snap and the scroll-the-picked-tile-into-view effect all assume one row), not a width change.
   '.ssd-frame [data-ss-style-strip]::-webkit-scrollbar{display:none}',
   // ── Section 02: size / roof / cladding cards, native selects and the colour select ──
   // One height token for the section's fields. 26px is the colour select's height before the redesign;
@@ -11521,8 +11527,8 @@ const SSD_CSS = [
   '.ssd-dt-head.is-toggle > *{position:relative;z-index:1}',
   '.ssd-dt-tog{font-family:inherit;flex:0 0 auto;margin:0;padding:2px 0;border:0;background:none;color:var(--ss-accent-text);font-size:11.5px;font-weight:500;line-height:1.3;white-space:nowrap;cursor:pointer}',
   '.ssd-dt-tog:hover{text-decoration:underline}',
-  '.ssd-dt-lock{max-width:var(--ssd-invoice-max);margin-inline:auto;box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
-  '.ssd-dt-cta{font-family:inherit;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:2px;width:100%;max-width:var(--ssd-invoice-max);min-height:48px;box-sizing:border-box;margin:0;margin-inline:auto;padding:8px 18px;border:0;border-radius:4px;background:var(--ss-cta);color:var(--ss-on-cta);box-shadow:0 2px 8px var(--ss-accent-shadow);text-align:left;cursor:pointer;transition:box-shadow .15s ease}',
+  '.ssd-dt-lock{max-width:var(--ssd-invoice-max);box-sizing:border-box;padding:14px;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-panel);font-size:12.5px;font-weight:500;line-height:1.45;color:var(--ss-muted)}',
+  '.ssd-dt-cta{font-family:inherit;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;column-gap:12px;row-gap:2px;width:100%;max-width:var(--ssd-invoice-max);min-height:48px;box-sizing:border-box;margin:0;padding:8px 18px;border:0;border-radius:4px;background:var(--ss-cta);color:var(--ss-on-cta);box-shadow:0 2px 8px var(--ss-accent-shadow);text-align:left;cursor:pointer;transition:box-shadow .15s ease}',
   '.ssd-dt-cta:hover{box-shadow:0 3px 12px var(--ss-accent-shadow)}',
   '.ssd-dt-cta-t{font-size:14.5px;font-weight:700;line-height:1.3}',
   '.ssd-dt-cta-s{margin-left:auto;font-size:13px;font-weight:700;line-height:1.3;text-align:right}',
@@ -11534,9 +11540,16 @@ const SSD_CSS = [
   // 960px is a WIDTH, not a threshold -- it has nothing to do with SS_DOCK_MIN_ROW_W, which is the same
   // number by coincidence and is measured on the canvas row. One token, because the footer bar below
   // takes the same value: capping only one of them leaves the two visibly mismatched.
-  // max-width and margin-inline only -- neither makes a stacking context over the plan <svg>.
+  // LEFT-ALIGNED, not centred (review 2026-09-19). The cap first shipped with margin-inline:auto, which
+  // put the card 329px inside the section header that labels it -- measured at 2560 on both surfaces, the
+  // only block on the page that did not start at its section's left edge. Every other narrow block here
+  // hugs that edge: a section 02 card measures 520px wide at the header's own left. So the token is a
+  // WIDTH and nothing else, and the card, the lock panel, the see-your-price bar and the footer content
+  // all start where the five section headers start. designerWidthCapPortal.mjs measures that on the
+  // portal surface, which is the one builders work in.
+  // max-width only -- it makes no stacking context over the plan <svg>.
   '.ssd-frame{--ssd-invoice-max:960px}',
-  '.ssd-dt{max-width:var(--ssd-invoice-max);margin-inline:auto;min-width:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface);overflow:hidden}',
+  '.ssd-dt{max-width:var(--ssd-invoice-max);min-width:0;border:1px solid var(--ss-line-card);border-radius:4px;background:var(--ss-surface);overflow:hidden}',
   // Every row draws a hairline above itself; the card clips the first one.
   '.ssd-dt-in{margin-top:-1px}',
   '.ssd-dt-row{display:flex;flex-wrap:wrap;align-items:center;column-gap:12px;row-gap:6px;min-width:0;padding:11px 14px;border-top:1px solid var(--ss-line-faint);background:var(--ss-panel)}',
@@ -11608,17 +11621,26 @@ const SSD_CSS = [
   // viewport's width (114 wide + 20 from the edge) and the bar's own right padding is 16-24, so 128px more clears
   // it at every width, with ~10px to spare if the pill measures wider elsewhere (its emoji is a font away from
   // being a different width). On a phone that leaves too little room for both buttons on one line, so they stack.
+  // BELOW xl ONLY (review 2026-09-19). The pill is fixed to the VIEWPORT; the footer content is a 960px
+  // column at the section's left edge. Once the frame is wide the reservation is dead space that pulls the
+  // buttons 128px off the column's right edge -- measured on the portal at 128px reserved against 0px
+  // needed, at 1728, 2560 and 3440. At xl the frame is at least 1180 and the bar's padding is 24, so the
+  // column ends at least 1180 - 984 = 196px inside the frame's right edge, and in the portal that edge IS
+  // the viewport's (.ss-designer-host is full-bleed beside the sidebar): 196 clears the pill's 134 with 62
+  // to spare. Below xl the column reaches the bar's edge and the reservation is real -- at 414 it measures
+  // 128px reserved against 126px needed. A frame that has no data-ssd-bp yet (before the ResizeObserver's
+  // first pass) keeps the reservation, which is the safe way round.
   '.ssd-frame.is-embedded .ssd-main.ssd-foot{padding-bottom:72px}',
-  '.ssd-frame.is-embedded .ssd-ft-btns{box-sizing:border-box;padding-right:128px}',
-  '.ssd-ft-err{max-width:var(--ssd-invoice-max);margin:0 0 12px;margin-inline:auto;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
+  '.ssd-frame.is-embedded:not([data-ssd-bp="xl"]) .ssd-ft-btns{box-sizing:border-box;padding-right:128px}',
+  '.ssd-ft-err{max-width:var(--ssd-invoice-max);margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
   // The footer's CONTENT takes the invoice cap so it lines up under the quote card; the bar itself
   // (.ssd-main.ssd-foot, above) keeps its full-bleed panel and hairline, because the stepper rail runs
   // alongside it and a narrowed band would break that line. Capping only the card left the hint and the
   // buttons stretched across the full width under a 960px invoice, which is the mismatch this avoids.
-  // Safe for the Feedback-pill clearance below (.is-embedded .ssd-ft-btns padding-right:128px): centring
-  // inside a wider bar can only move the buttons AWAY from the pill's column, never toward it, and under
-  // 960px the cap does nothing at all.
-  '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0;max-width:var(--ssd-invoice-max);margin-inline:auto}',
+  // Left-aligned with the card, for the reason the card is (see --ssd-invoice-max above): the bar is
+  // full-bleed, and its CONTENT starts where the section headers start. That is also what keeps the
+  // buttons clear of the Feedback pill without reserving room for it -- see the rule above.
+  '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0;max-width:var(--ssd-invoice-max)}',
   '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
   '.ssd-ft-hint strong{font-weight:700;color:var(--ss-ink)}',
   '.ssd-ft-btns{margin-left:auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:10px;min-width:0;max-width:100%}',
@@ -21268,13 +21290,14 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
             workbench/shelf stretch grips appeared on mousedown and vanished before anyone could
             drag one. The panel is gone now, so this is belt and braces: a column cannot reproduce
             it if anything is ever added here again. */}
-        {/* flex-basis = dispMaxW, not "1 1 auto" (Carolyn 2026-09-14, full-width designer). With
-            the 1080 cap gone, a GROWING column docked beside the 3D panel took the whole row and
-            left the svg (capped at dispMaxW) floating in the middle of it, a dead strip away from
-            the panel. Sized to the drawing, plan + docked panel are one centred pair, which is
-            why justifyContent is "center" in both states now. It still SHRINKS (0 1), so a narrow
-            row gives the plan less, never the page more. dispMaxW follows the frame only, never
-            the selection, so "the plan must not move when an item is selected" still holds. */}
+        {/* flex-basis = dispMaxW, not "1 1 auto". A GROWING column docked beside the 3D panel takes
+            the whole row and leaves the svg (capped at dispMaxW) floating in the middle of it, a dead
+            strip away from the panel. That was found on 2026-09-14, when the designer briefly ran full
+            width; it is still true inside the 1728 cap (Carolyn 2026-09-17), which only makes the row
+            narrower. Sized to the drawing, plan + docked panel are one centred pair, which is why
+            justifyContent is "center" in both states now. It still SHRINKS (0 1), so a narrow row
+            gives the plan less, never the page more. dispMaxW follows the frame only, never the
+            selection, so "the plan must not move when an item is selected" still holds. */}
         {/* Redesign S4: the column holds the plan CARD ("Floorplan" + the size), so the basis is
             dispMaxW + 34, the card's 16px padding and 1px border each side, and the drawing inside
             it is still dispMaxW. Still 0 1 and a column, for every reason above. When the row is

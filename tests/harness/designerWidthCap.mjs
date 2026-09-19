@@ -15,6 +15,11 @@
 //      are there instead — and with few styles there is neither
 //   6. the style tiles stop growing at the cap (the "images just get bigger" complaint)
 //   7. the quote card and the footer bar's content share one width and one centre line
+//   8. and they START where the section headers start — the cap is a width, not an indent
+//
+// PUBLIC PAGE ONLY. The portal wrapper carries the same 1728 cap and is measured by its own
+// harness, designerWidthCapPortal.mjs — that is the surface builders work in, and it is where
+// the embedded footer and the Feedback pill exist at all.
 //
 //   python -m http.server 8125 --bind 127.0.0.1        (repo root)
 //   node tests/harness/designerWidthCap.mjs             (exit 0 = every check held)
@@ -92,6 +97,11 @@ const measure = (page) => page.evaluate(({ capw }) => {
     tileW: tile ? Math.round(tile.getBoundingClientRect().width) : null,
     dt: box(dt),
     ft: box(ft),
+    // The five section headers, and the first card under one of them. Every narrow block on this
+    // page starts at the header's left edge — the cap is a WIDTH, never an indent.
+    heads: [...document.querySelectorAll(".ssd-sechead:not(.is-sub)")].map(box),
+    dtHead: box(document.querySelector(".ssd-dt-head")),
+    card: box(document.querySelector(".ssd-card")),
     capw,
   };
 }, { capw: CAP });
@@ -155,6 +165,21 @@ const run = async () => {
         ok(`${tag} quote card and footer share a width`, Math.abs(m.dt.w - m.ft.w) <= 1, `dt ${m.dt.w} ft ${m.ft.w}`);
         ok(`${tag} quote card and footer share a centre line`, Math.abs(m.dt.mid - m.ft.mid) <= 1,
           `dt mid ${m.dt.mid} ft mid ${m.ft.mid}`);
+        // 8. ALIGNMENT. The cap first shipped centred, which left the card sitting 329px inside the
+        //    header that labels it — the one block on the page not starting at its section's left
+        //    edge, and the suite passed 33/33 with it there. These are the checks that missed it.
+        if (m.heads.length && m.dtHead) {
+          ok(`${tag} every section header starts on one left edge`,
+            new Set(m.heads.map((h) => h.left)).size === 1, `lefts ${m.heads.map((h) => h.left).join(",")}`);
+          ok(`${tag} quote card starts at its section header's left edge`, Math.abs(m.dt.left - m.dtHead.left) <= 1,
+            `dt ${m.dt.left} head ${m.dtHead.left}`);
+          ok(`${tag} footer content starts on that same left edge`, Math.abs(m.ft.left - m.dtHead.left) <= 1,
+            `ft ${m.ft.left} head ${m.dtHead.left}`);
+          if (m.card) {
+            ok(`${tag} the quote card lines up with the cards above it`, Math.abs(m.dt.left - m.card.left) <= 1,
+              `dt ${m.dt.left} card ${m.card.left}`);
+          }
+        }
       } else {
         ok(`${tag} quote card and footer are in the page`, false, note);
       }
