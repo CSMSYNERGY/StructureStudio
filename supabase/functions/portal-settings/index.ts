@@ -6427,225 +6427,295 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       if (!contact && d.contact) contact = { id: null, name: d.contact.name, phone: d.contact.phone, email: d.contact.email };
     }
 
-    const feed = await buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true });
-    // Focus = open activities, soonest first. This is the crm_activities_focus index.
-    const { data: focus } = await admin.from("crm_activities")
-      .select("id, kind, subject, due_at, assignee_user_id, short_code")
-      .eq("client_id", clientId).eq("done", false)
-      .or(contact?.id ? `contact_id.eq.${contact.id}` : `short_code.in.(${codes.join(",") || "''"})`)
-      .order("due_at", { ascending: true, nullsFirst: false }).limit(25);
+    // ── EIGHT READS, ONE WAIT ──────────────────────────────────────────────────────────
+    // Ahsan, 2026-09-20: "it takes too much time to open this." Measured on beta before this
+    // change, against a WARM isolate (so this is not the cold-start cost documented
+    // elsewhere): crm_record took 3.8s, 4.3s and 5.4s on three consecutive opens of the same
+    // contact, and 7.5s on the first one after a page load. The record page makes exactly one
+    // call — the comments below each say why, and that is still right — but that one call was
+    // running its reads ONE AFTER ANOTHER: feed, then focus, then orders, then build, then
+    // delivery, then repairs, then the SMS config, then the people. Roughly thirteen
+    // round-trips end to end, each waiting on a result the next one never looks at.
+    //
+    // ⚠️ THEY ARE INDEPENDENT AND THE ORDER NEVER MATTERED. Everything any of them needs —
+    // `contact`, `designs`, `codes` — is already resolved above, which is why the sequential
+    // version read the same in any order. The only two real dependencies stay sequential
+    // INSIDE their own branch: delivery's stops→loads, and people/followers→roster.
+    //
+    // ⚠️ NOTHING HERE MAY MUTATE `contact`. The owner-name merge used to happen inside the
+    // people block; concurrently with the SMS branch, which reads contact.phone_digits and
+    // contact.sms_opt_out_at, that would be a read of an object another branch is replacing.
+    // The name comes back as a value and is merged AFTER the wait, below.
+    //
+    // Every branch keeps its own error handling exactly as it was, including the
+    // absent-vs-empty distinction three of them have a comment about: Promise.all rejects on
+    // the first THROW, and none of these throws — a failed read comes back on `.error` and is
+    // turned into `undefined` by the same line that always did it.
+    const [feed, focusRows, ordersOut, buildOut, delivery, repairs, sms, peopleOut] = await Promise.all([
+      buildCrmFeed(admin, clientId, { codes, contactId: contact?.id ?? null, isAdmin: true }),
+      // Focus = open activities, soonest first. This is the crm_activities_focus index.
+      admin.from("crm_activities")
+        .select("id, kind, subject, due_at, assignee_user_id, short_code")
+        .eq("client_id", clientId).eq("done", false)
+        .or(contact?.id ? `contact_id.eq.${contact.id}` : `short_code.in.(${codes.join(",") || "''"})`)
+        .order("due_at", { ascending: true, nullsFirst: false }).limit(25)
+        .then(({ data }: any) => data),
 
-    // ORDERS ON THE RECORD. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a
-    // contact, I feel like you should see the deal. You should see the orders."
-    //
-    // The deal half already existed (the designs/person reciprocal embed); this is the half
-    // that was missing, and it is the one that answers "have they actually bought anything".
-    // Joined on short_code because orders.short_code is a soft link with no FK for PostgREST
-    // to embed — the same reason OrdersView reads them separately.
-    //
-    // It rides THIS fetch rather than adding a second round-trip from the browser: the
-    // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
-    // current_client_id() and a direct read returns nothing in operator view-as.
-    // orders has NO `status` column -- verified against live 2026-08-29 (information_schema:
-    // id, client_id, short_code, order_no, total_cents, currency, total_source, ordered_at,
-    // notes, created_at, updated_at, submitter_user_id, pretax_subtotal_cents, tax_cents).
-    // Asking for it made PostgREST answer 42703 on EVERY call, for every tenant, since this
-    // block shipped -- and because only `data` was destructured, the error was dropped and
-    // `orders` fell to [], which the card renders as "No orders yet." on contacts holding
-    // real orders. There are 43 of them across three tenants. The status shown on the Orders
-    // TAB is derived from payments client-side, not stored, so nothing here needs it.
-    let orders: any[] | undefined = [];
-    if (codes.length) {
-      const { data: os, error: oe } = await admin.from("orders")
-        .select("id, order_no, short_code, total_cents, ordered_at")
-        .eq("client_id", clientId).in("short_code", codes)
-        .order("ordered_at", { ascending: false }).limit(50);
-      // A FAILED READ IS NOT AN EMPTY ONE. Leaving it undefined makes the card say "Orders
-      // appear here once the server update lands" -- the absent state the section already
-      // has -- instead of stating that a customer who has bought two buildings bought none.
-      // That distinction is written into the card's own comment; swallowing the error is
-      // exactly what defeated it.
-      orders = oe ? undefined : (os ?? []);
-    }
-    // ── BUILD, DELIVERY AND REPAIRS ON THE RECORD ──────────────────────────────────────
-    // Carolyn, 2026-08-28 @37:48: "whether you're in a contact or whether you're in a deal,
-    // it doesn't matter, you want to be able to see the contact details, the deals, the
-    // orders, the build schedule, the delivery schedule ... Repairs also."
-    //
-    // ⚠️ READ-ONLY, AND THEY STAY THEIR OWN SYSTEMS. She was explicit at @23:40 that build
-    // and delivery must NOT become pipelines: "I don't really want to change this and make
-    // it a pipeline because I've got a lot of work in both of these." So this reads
-    // schedule_stages / delivery_loads where they live; it does not mirror or re-model them.
-    //
-    // Gated per area, not on the CRM gate: a sales rep can hold contacts:view and no
-    // build_schedule:view at all, and the card must then be ABSENT rather than empty --
-    // undefined here means "not yours to see", [] means "nothing scheduled". The frontend
-    // renders those two differently, which is the same absent-vs-empty distinction the
-    // orders block above exists to protect.
-    //
-    // Rides this fetch rather than adding round-trips: the record page makes exactly one
-    // call on purpose, because a direct browser read returns nothing in operator view-as.
-    let build: any[] | undefined;
-    let stages: any[] | undefined;
-    if (canRead("build_schedule")) {
-      const [jobsRes, stRes] = await Promise.all([
-        codes.length
-          ? admin.from("build_jobs")
-              .select("id, design_short_code, stage_id, due_date, completed_at, serial, source, crew_id")
-              .eq("client_id", clientId).in("design_short_code", codes).limit(50)
-          : Promise.resolve({ data: [], error: null }),
-        // The ladder itself, because stage names are TENANT-EDITABLE. The dot bar has to
-        // draw the stages this builder actually uses, and automation keys on `kind`, never
-        // on the name -- the Monday label-rename lesson, which this table already carries.
-        admin.from("schedule_stages")
-          .select("id, name, kind, sort_order, color")
-          .eq("client_id", clientId).eq("archived", false).order("sort_order"),
-      ]);
-      build = jobsRes.error ? undefined : (jobsRes.data ?? []);
-      stages = stRes.error ? undefined : (stRes.data ?? []);
-    }
+      // ORDERS ON THE RECORD. Carolyn, 2026-08-26 33:20: "when you're in contacts, in a
+      // contact, I feel like you should see the deal. You should see the orders."
+      //
+      // The deal half already existed (the designs/person reciprocal embed); this is the half
+      // that was missing, and it is the one that answers "have they actually bought anything".
+      // Joined on short_code because orders.short_code is a soft link with no FK for PostgREST
+      // to embed — the same reason OrdersView reads them separately.
+      //
+      // It rides THIS fetch rather than adding a second round-trip from the browser: the
+      // record page makes exactly one call on purpose, because designs/orders RLS is scoped to
+      // current_client_id() and a direct read returns nothing in operator view-as.
+      // orders has NO `status` column -- verified against live 2026-08-29 (information_schema:
+      // id, client_id, short_code, order_no, total_cents, currency, total_source, ordered_at,
+      // notes, created_at, updated_at, submitter_user_id, pretax_subtotal_cents, tax_cents).
+      // Asking for it made PostgREST answer 42703 on EVERY call, for every tenant, since this
+      // block shipped -- and because only `data` was destructured, the error was dropped and
+      // `orders` fell to [], which the card renders as "No orders yet." on contacts holding
+      // real orders. There are 43 of them across three tenants. The status shown on the Orders
+      // TAB is derived from payments client-side, not stored, so nothing here needs it.
+      (async () => {
+        let orders: any[] | undefined = [];
+        if (codes.length) {
+          const { data: os, error: oe } = await admin.from("orders")
+            .select("id, order_no, short_code, total_cents, ordered_at")
+            .eq("client_id", clientId).in("short_code", codes)
+            .order("ordered_at", { ascending: false }).limit(50);
+          // A FAILED READ IS NOT AN EMPTY ONE. Leaving it undefined makes the card say "Orders
+          // appear here once the server update lands" -- the absent state the section already
+          // has -- instead of stating that a customer who has bought two buildings bought none.
+          // That distinction is written into the card's own comment; swallowing the error is
+          // exactly what defeated it.
+          orders = oe ? undefined : (os ?? []);
+        }
+        return orders;
+      })(),
+      // ── BUILD, DELIVERY AND REPAIRS ON THE RECORD ──────────────────────────────────────
+      // Carolyn, 2026-08-28 @37:48: "whether you're in a contact or whether you're in a deal,
+      // it doesn't matter, you want to be able to see the contact details, the deals, the
+      // orders, the build schedule, the delivery schedule ... Repairs also."
+      //
+      // ⚠️ READ-ONLY, AND THEY STAY THEIR OWN SYSTEMS. She was explicit at @23:40 that build
+      // and delivery must NOT become pipelines: "I don't really want to change this and make
+      // it a pipeline because I've got a lot of work in both of these." So this reads
+      // schedule_stages / delivery_loads where they live; it does not mirror or re-model them.
+      //
+      // Gated per area, not on the CRM gate: a sales rep can hold contacts:view and no
+      // build_schedule:view at all, and the card must then be ABSENT rather than empty --
+      // undefined here means "not yours to see", [] means "nothing scheduled". The frontend
+      // renders those two differently, which is the same absent-vs-empty distinction the
+      // orders block above exists to protect.
+      //
+      // Rides this fetch rather than adding round-trips: the record page makes exactly one
+      // call on purpose, because a direct browser read returns nothing in operator view-as.
+      (async () => {
+        let build: any[] | undefined;
+        let stages: any[] | undefined;
+        if (canRead("build_schedule")) {
+          const [jobsRes, stRes] = await Promise.all([
+            codes.length
+              ? admin.from("build_jobs")
+                  .select("id, design_short_code, stage_id, due_date, completed_at, serial, source, crew_id")
+                  .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+              : Promise.resolve({ data: [], error: null }),
+            // The ladder itself, because stage names are TENANT-EDITABLE. The dot bar has to
+            // draw the stages this builder actually uses, and automation keys on `kind`, never
+            // on the name -- the Monday label-rename lesson, which this table already carries.
+            admin.from("schedule_stages")
+              .select("id, name, kind, sort_order, color")
+              .eq("client_id", clientId).eq("archived", false).order("sort_order"),
+          ]);
+          build = jobsRes.error ? undefined : (jobsRes.data ?? []);
+          stages = stRes.error ? undefined : (stRes.data ?? []);
+        }
+        return { build, stages };
+      })(),
 
-    let delivery: any[] | undefined;
-    if (canRead("delivery_schedule")) {
+      (async () => {
+        let delivery: any[] | undefined;
+        if (canRead("delivery_schedule")) {
       // Stops carry the building; the LOAD carries the status. There is no delivery stages
       // table -- it is a fixed planned|out|delivered CHECK on delivery_loads -- so the dot
       // bar's delivery row is that ladder, not a configurable one.
       //
-      // Two reads and a join in JS rather than a PostgREST embed: an embed silently returns
-      // nothing when the FK it needs is not where the resolver expects, and a delivery card
-      // that is quietly always empty is the exact failure this endpoint just had with
-      // orders.status. Two explicit reads cannot fail that way.
-      const stopsRes = codes.length
-        ? await admin.from("delivery_stops")
-            .select("id, design_short_code, delivered_at, load_id, stop_order")
-            .eq("client_id", clientId).in("design_short_code", codes).limit(50)
-        : { data: [], error: null };
-      if (stopsRes.error) {
-        delivery = undefined;
-      } else {
-        const stops = stopsRes.data ?? [];
-        const loadIds = [...new Set(stops.map((s: any) => s.load_id).filter(Boolean))];
-        const loadsRes = loadIds.length
-          ? await admin.from("delivery_loads")
-              .select("id, load_no, status, load_date, departed_at, completed_at")
-              .eq("client_id", clientId).in("id", loadIds)
-          : { data: [], error: null };
-        const byId = new Map((loadsRes.data ?? []).map((l: any) => [l.id, l]));
-        delivery = stops.map((s: any) => ({ ...s, load: byId.get(s.load_id) ?? null }));
-      }
-    }
-
-    let repairs: any[] | undefined;
-    if (canRead("repairs")) {
-      // ⚠️ REPAIRS DO NOT LINK TO crm_contacts. There is no contact_id on the table -- they
-      // key on design_short_code (plus a denormalised name/phone/email captured at intake),
-      // which is why this joins on `codes` like every other section here rather than on the
-      // contact. Checked against live before writing it; the obvious .eq("contact_id", ...)
-      // would have returned nothing forever and rendered as "no repairs".
-      const rr = codes.length
-        ? await admin.from("repairs")
-            .select("id, repair_no, status, description, design_short_code, requested_at, completed_at, quote_cents")
-            .eq("client_id", clientId).in("design_short_code", codes)
-            .order("requested_at", { ascending: false }).limit(50)
-        : { data: [], error: null };
-      repairs = rr.error ? undefined : (rr.data ?? []);
-    }
-
-    // Whether this tenant can text at all, so the SMS tab can give the RIGHT reason when
-    // it is disabled. Three different things stop a text going out — no permission, no
-    // number on the contact, no registered number on the account — and one flat "not
-    // available" sends people off editing a contact that is fine. Same lesson the Email
-    // tab's hint already carries.
-    const { data: smsCfg } = await admin.from("client_settings")
-      .select("sms_number, sms_status").eq("client_id", clientId).maybeSingle();
-    const sms = {
-      ready: !!(smsCfg && smsCfg.sms_status === "active" && smsCfg.sms_number),
-      // The tenant's own number, shown in the composer so a rep knows which number the
-      // customer will see. Never the platform's, and never another tenant's.
-      from: (smsCfg && smsCfg.sms_status === "active") ? (smsCfg.sms_number ?? null) : null,
-      optedOut: !!(contact && contact.sms_opt_out_at),
-      // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
-      // rather than let someone type a message and discover it on Send. Asked as "is there a
-      // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
-      // cannot disagree about who is textable. Revocation is the opt-out above; these are two
-      // separate facts and the UI shows the right sentence for each.
-      consented: !!(contact && contact.phone_digits) && await (async () => {
-        const { data: g } = await admin.from("sms_consent_log")
-          .select("action").eq("client_id", clientId)
-          .eq("phone_digits", contact.phone_digits).eq("action", "granted")
-          .limit(1).maybeSingle();
-        return !!g;
+          // Two reads and a join in JS rather than a PostgREST embed: an embed silently returns
+          // nothing when the FK it needs is not where the resolver expects, and a delivery card
+          // that is quietly always empty is the exact failure this endpoint just had with
+          // orders.status. Two explicit reads cannot fail that way.
+          //
+          // ⚠️ THE ONE PAIR HERE THAT REALLY IS SEQUENTIAL: the load ids come out of the stops,
+          // so this branch keeps its two round-trips. It just no longer holds up the other six.
+          const stopsRes = codes.length
+            ? await admin.from("delivery_stops")
+                .select("id, design_short_code, delivered_at, load_id, stop_order")
+                .eq("client_id", clientId).in("design_short_code", codes).limit(50)
+            : { data: [], error: null };
+          if (stopsRes.error) {
+            delivery = undefined;
+          } else {
+            const stops = stopsRes.data ?? [];
+            const loadIds = [...new Set(stops.map((s: any) => s.load_id).filter(Boolean))];
+            const loadsRes = loadIds.length
+              ? await admin.from("delivery_loads")
+                  .select("id, load_no, status, load_date, departed_at, completed_at")
+                  .eq("client_id", clientId).in("id", loadIds)
+              : { data: [], error: null };
+            const byId = new Map((loadsRes.data ?? []).map((l: any) => [l.id, l]));
+            delivery = stops.map((s: any) => ({ ...s, load: byId.get(s.load_id) ?? null }));
+          }
+        }
+        return delivery;
       })(),
-    };
 
-    // ── THE OTHER PEOPLE ON THE RECORD, AND WHO IS WATCHING IT ─────────────────────────
-    // Carolyn, 2026-09-04 ~1:13:00: "This is name one and then the wife and then the phone
-    // number … it doesn't have to be husband and wife, it can be two people buying, two
-    // business partners" — each with their own phone and email (migration 190). And at
-    // 1:09:30: "we do not ever assign deals. We only assign contacts and followers"
-    // (migration 189).
-    //
-    // Contact-scoped, because both hang off the PERSON: a design record shows them once its
-    // contact has been resolved, and shows nothing when it has not. They ride this fetch for
-    // the reason everything else here does — the record page makes exactly one call, since a
-    // direct browser read returns nothing in operator view-as.
-    //
-    // undefined on a failed read, [] on an empty one. Same distinction the orders block above
-    // exists to protect, and it matters more here than usual: until the migrations are
-    // applied these two tables do not exist, and "nobody is following this customer" is a
-    // very different sentence from "we could not ask".
-    let people: any[] | undefined;
-    let followers: any[] | undefined;
-    // The tenant's roster, for the owner picker. `undefined` on a contact record we never
-    // built it for, following this file's absent-vs-empty rule: [] would tell the browser
-    // "this tenant has no team", which is never true and would hide the picker for good.
-    let team: any[] | undefined;
-    if (contact?.id) {
-      const [pplRes, folRes] = await Promise.all([
-        admin.from("crm_contact_people")
-          .select("id, ordinal, name, phone, email, is_primary, source, created_at")
-          .eq("client_id", clientId).eq("contact_id", contact.id)
-          .order("ordinal", { ascending: true }).order("created_at", { ascending: true }).limit(25),
-        admin.from("crm_contact_followers")
-          .select("id, user_id, added_at, added_reason")
-          .eq("client_id", clientId).eq("contact_id", contact.id)
-          .order("added_at", { ascending: true }).limit(50),
-      ]);
-      people = pplRes.error ? undefined : (pplRes.data ?? []);
-      followers = folRes.error ? undefined : (folRes.data ?? []);
-      // A uuid is not a person. Resolved here rather than left to the browser, which has no
-      // way to ask: client_users' only policy is client_users_select_own, so a portal user
-      // cannot read their own colleagues' rows — a follower list rendered client-side would
-      // be a column of ids. The owner is resolved in the same pass, because the record page
-      // needs the assignee's name beside the same faces.
+      (async () => {
+        let repairs: any[] | undefined;
+        if (canRead("repairs")) {
+          // ⚠️ REPAIRS DO NOT LINK TO crm_contacts. There is no contact_id on the table -- they
+          // key on design_short_code (plus a denormalised name/phone/email captured at intake),
+          // which is why this joins on `codes` like every other section here rather than on the
+          // contact. Checked against live before writing it; the obvious .eq("contact_id", ...)
+          // would have returned nothing forever and rendered as "no repairs".
+          const rr = codes.length
+            ? await admin.from("repairs")
+                .select("id, repair_no, status, description, design_short_code, requested_at, completed_at, quote_cents")
+                .eq("client_id", clientId).in("design_short_code", codes)
+                .order("requested_at", { ascending: false }).limit(50)
+            : { data: [], error: null };
+          repairs = rr.error ? undefined : (rr.data ?? []);
+        }
+        return repairs;
+      })(),
+
+      // Whether this tenant can text at all, so the SMS tab can give the RIGHT reason when
+      // it is disabled. Three different things stop a text going out — no permission, no
+      // number on the contact, no registered number on the account — and one flat "not
+      // available" sends people off editing a contact that is fine. Same lesson the Email
+      // tab's hint already carries.
+      (async () => {
+        // The config and the consent grant do NOT depend on each other, so they go together
+        // rather than one after the other — the same reason this whole block is a Promise.all.
+        const [cfgRes, grantRes] = await Promise.all([
+          admin.from("client_settings")
+            .select("sms_number, sms_status").eq("client_id", clientId).maybeSingle(),
+          contact && contact.phone_digits
+            ? admin.from("sms_consent_log")
+                .select("action").eq("client_id", clientId)
+                .eq("phone_digits", contact.phone_digits).eq("action", "granted")
+                .limit(1).maybeSingle()
+            : Promise.resolve({ data: null, error: null }),
+        ]);
+        const smsCfg = cfgRes.data;
+        return {
+          ready: !!(smsCfg && smsCfg.sms_status === "active" && smsCfg.sms_number),
+          // The tenant's own number, shown in the composer so a rep knows which number the
+          // customer will see. Never the platform's, and never another tenant's.
+          from: (smsCfg && smsCfg.sms_status === "active") ? (smsCfg.sms_number ?? null) : null,
+          optedOut: !!(contact && contact.sms_opt_out_at),
+          // ⚠️ CONSENT IS NOW REQUIRED TO SEND, so the composer has to be able to SHOW its absence
+          // rather than let someone type a message and discover it on Send. Asked as "is there a
+          // grant?" — the same question smsSend asks, deliberately, so the screen and the send path
+          // cannot disagree about who is textable. Revocation is the opt-out above; these are two
+          // separate facts and the UI shows the right sentence for each.
+          //
+          // ⚠️ The `phone_digits` test still guards the ANSWER, not just the query: a contact
+          // with no number is not consented no matter what the register happens to hold.
+          consented: !!(contact && contact.phone_digits) && !!grantRes.data,
+        };
+      })(),
+
+      // ── THE OTHER PEOPLE ON THE RECORD, AND WHO IS WATCHING IT ─────────────────────────
+      // Carolyn, 2026-09-04 ~1:13:00: "This is name one and then the wife and then the phone
+      // number … it doesn't have to be husband and wife, it can be two people buying, two
+      // business partners" — each with their own phone and email (migration 190). And at
+      // 1:09:30: "we do not ever assign deals. We only assign contacts and followers"
+      // (migration 189).
       //
-      // THE WHOLE TEAM comes back, not only the ids in use, because the record page has to
-      // offer an OWNER PICKER and the same policy that stops the browser naming a follower
-      // stops it listing candidates: without this the picker would be an empty drop-down on
-      // a screen that is already showing the current owner's name, which reads as broken
-      // rather than as unauthorised. One read serves both — resolving the ids in use out of
-      // the roster costs nothing extra, so this REPLACES the previous `.in("user_id", …)`
-      // lookup rather than adding a second round trip.
+      // Contact-scoped, because both hang off the PERSON: a design record shows them once its
+      // contact has been resolved, and shows nothing when it has not. They ride this fetch for
+      // the reason everything else here does — the record page makes exactly one call, since a
+      // direct browser read returns nothing in operator view-as.
       //
-      // ⚠️ Capped, and ordered by name so the cap is stable rather than arbitrary. A tenant
-      // with more people than this needs a search field, not a longer list — and a silently
-      // truncated picker that happens to omit the person you want is worse than one that
-      // does not pretend to be complete.
-      const { data: roster } = await admin.from("client_users")
-        .select("user_id, full_name, title").eq("client_id", clientId)
-        .order("full_name", { ascending: true }).limit(200);
-      const byId = new Map((roster ?? []).map((u: any) => [u.user_id, u.full_name ?? null]));
-      if (followers) followers = followers.map((f: any) => ({ ...f, name: byId.get(f.user_id) ?? null }));
-      contact = { ...contact, owner_name: contact.owner_user_id ? (byId.get(contact.owner_user_id) ?? null) : null };
-      team = (roster ?? []).map((u: any) => ({ userId: u.user_id, name: u.full_name ?? null, title: u.title ?? null }));
-    }
+      // undefined on a failed read, [] on an empty one. Same distinction the orders block above
+      // exists to protect, and it matters more here than usual: until the migrations are
+      // applied these two tables do not exist, and "nobody is following this customer" is a
+      // very different sentence from "we could not ask".
+      (async () => {
+        let people: any[] | undefined;
+        let followers: any[] | undefined;
+        // The tenant's roster, for the owner picker. `undefined` on a contact record we never
+        // built it for, following this file's absent-vs-empty rule: [] would tell the browser
+        // "this tenant has no team", which is never true and would hide the picker for good.
+        let team: any[] | undefined;
+        // The owner's NAME comes back as a value rather than being merged onto `contact` here.
+        // Two other branches of this Promise.all read that object while this one runs.
+        let ownerName: string | null = null;
+        if (contact?.id) {
+          const [pplRes, folRes, rosterRes] = await Promise.all([
+            admin.from("crm_contact_people")
+              .select("id, ordinal, name, phone, email, is_primary, source, created_at")
+              .eq("client_id", clientId).eq("contact_id", contact.id)
+              .order("ordinal", { ascending: true }).order("created_at", { ascending: true }).limit(25),
+            admin.from("crm_contact_followers")
+              .select("id, user_id, added_at, added_reason")
+              .eq("client_id", clientId).eq("contact_id", contact.id)
+              .order("added_at", { ascending: true }).limit(50),
+            // A uuid is not a person. Resolved here rather than left to the browser, which has no
+            // way to ask: client_users' only policy is client_users_select_own, so a portal user
+            // cannot read their own colleagues' rows — a follower list rendered client-side would
+            // be a column of ids. The owner is resolved in the same pass, because the record page
+            // needs the assignee's name beside the same faces.
+            //
+            // THE WHOLE TEAM comes back, not only the ids in use, because the record page has to
+            // offer an OWNER PICKER and the same policy that stops the browser naming a follower
+            // stops it listing candidates: without this the picker would be an empty drop-down on
+            // a screen that is already showing the current owner's name, which reads as broken
+            // rather than as unauthorised. One read serves both — resolving the ids in use out of
+            // the roster costs nothing extra, so this REPLACES the previous `.in("user_id", …)`
+            // lookup rather than adding a second round trip.
+            //
+            // ⚠️ It rides the SAME Promise.all as the two reads above now. It never depended on
+            // them — the roster is the whole tenant, not the ids they happen to mention — so
+            // waiting for them bought nothing and cost a round-trip.
+            //
+            // ⚠️ Capped, and ordered by name so the cap is stable rather than arbitrary. A tenant
+            // with more people than this needs a search field, not a longer list — and a silently
+            // truncated picker that happens to omit the person you want is worse than one that
+            // does not pretend to be complete.
+            admin.from("client_users")
+              .select("user_id, full_name, title").eq("client_id", clientId)
+              .order("full_name", { ascending: true }).limit(200),
+          ]);
+          people = pplRes.error ? undefined : (pplRes.data ?? []);
+          followers = folRes.error ? undefined : (folRes.data ?? []);
+          const roster = rosterRes.data;
+          const byId = new Map((roster ?? []).map((u: any) => [u.user_id, u.full_name ?? null]));
+          if (followers) followers = followers.map((f: any) => ({ ...f, name: byId.get(f.user_id) ?? null }));
+          ownerName = contact.owner_user_id ? (byId.get(contact.owner_user_id) ?? null) : null;
+          team = (roster ?? []).map((u: any) => ({ userId: u.user_id, name: u.full_name ?? null, title: u.title ?? null }));
+        }
+        return { people, followers, team, ownerName };
+      })(),
+    ]);
+
+    // Unpacked after the wait, and `contact` is merged HERE rather than inside a branch —
+    // see the warning on the Promise.all above.
+    const { build, stages } = buildOut;
+    const { people, followers, team, ownerName } = peopleOut;
+    const orders = ordersOut;
+    if (contact?.id) contact = { ...contact, owner_name: ownerName };
 
     // Customer uploads are NOT returned separately any more. They ride the FEED, alongside
     // the documents we generate, because Carolyn asked for exactly one place: "the top part
     // is about things to do. The bottom part is about history … instead of in two places."
     // crmFeed signs their URLs; keeping a second copy here would be the second access path
     // this file exists to avoid.
-    return json({ ok: true, kind, contact, designs, orders, feed, focus: focus ?? [], sms, build, stages, delivery, repairs, people, followers, team });
+    return json({ ok: true, kind, contact, designs, orders, feed, focus: focusRows ?? [], sms, build, stages, delivery, repairs, people, followers, team });
   }
 
   if (action === "crm_feed") {
