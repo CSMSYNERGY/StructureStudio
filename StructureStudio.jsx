@@ -4688,6 +4688,41 @@ function d3FtIn(ft) {
   return (neg ? "-" : "") + whole + "' " + inch + '"';
 }
 
+// ── HOW AN OVERHANG IS FRAMED (roof.overhangStyle, 2026-09-18) ────────────────────────
+// Carolyn paused two walk-around videos on 2026-09-18 and drew the eave she actually builds;
+// Preferred Structures had already flagged it in a live demo. There are two framings and a
+// builder genuinely sells both:
+//
+//   extended  the whole rafter runs out past the wall, so the full tail -- and the fascia hung
+//             on it -- hangs below the deck the whole way out. On a short tail (about four
+//             inches) this is what gets built, which is why it stays selectable.
+//   notched   the tail is cut back on its UNDERSIDE. The deck keeps ONE STRAIGHT PLANE out past
+//             the wall, and the underside steps back to a level soffit instead of carrying the
+//             full rafter depth out with it.
+//
+// ABSENT MEANS DERIVE IT FROM THE SIZE, at half a foot. That is what makes every style saved
+// before today render correctly with nobody editing anything. styleD3.ts deliberately never
+// emits a default -- it would fail styleD3.test.ts's deep-equal on `roof` and write the default
+// into every tenant's stored column the first time a builder saved the panel -- so the renderer,
+// the elevation drawing, the calibration panel and d3ResolveStyleSpec all ask this one function.
+//
+// Module scope, and BELOW d3FtIn on purpose: shedProfile_test, ventGable_test and porchGeom_test
+// each lift a region of this file by string anchor and run it with NO parameters, and every one
+// of those regions ends at or before "function d3FtIn(". A free variable introduced above this
+// line is a ReferenceError in the suite.
+function d3DefaultOverhangStyle(roofCfg) {
+  const r = roofCfg || {};
+  const raw = r.overhang != null ? Number(r.overhang) : D3.OVERHANG;
+  const ov = isFinite(raw) ? raw : D3.OVERHANG;
+  return ov > 0.5 ? "notched" : "extended";
+}
+function d3OverhangStyle(roofCfg) {
+  const r = roofCfg || {};
+  return (r.overhangStyle === "notched" || r.overhangStyle === "extended")
+    ? r.overhangStyle
+    : d3DefaultOverhangStyle(r);
+}
+
 // ── THE PROJECTING PORCH'S NUMBERS (roof.porchOutFt, 2026-09-17) ──────────────────────────
 // One copy, read by buildShed3DModel and by the calibration panel's readout, so the line beside
 // the depth input describes what gets built (d3TransomDormerGeom's rule).
@@ -4792,6 +4827,13 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
   const S = d3RoofAxes(roof, w, d).S;
   const H = (spec && spec.wallHeightFt) || 8;
   const OV = roof.overhang != null ? roof.overhang : 0.6;
+  // THE DRAWING LEARNS THE NOTCH TOO. This drawing exists so a builder can trust it against the
+  // 3D beside it, so the eave FINISH is drawn and not merely dimensioned: the tail blade at the
+  // roof edge, and on a notched eave the level soffit that steps the underside back toward the
+  // wall. A drawing that showed the same eave for both framings would be the "two disagreed"
+  // failure this whole component was written to prevent.
+  const OV_NOTCHED = d3OverhangStyle(roof) === "notched";
+  const TAIL_D = OV_NOTCHED ? 0.08 : 0.4;   // rafter left below the deck, outboard of the wall
   const dedup = d3RoofProfile(roof, S, H, true).dedup;
   let peak = H;
   dedup.forEach((p) => { if (p[1] > peak) peak = p[1]; });
@@ -4853,9 +4895,20 @@ function D3ElevationSVG({ spec, sizeLabel, focusKey }) {
       <line x1={X(-s2)} y1={Y(0) + 16} x2={X(s2)} y2={Y(0) + 16} stroke={DIM} strokeWidth="1" />
       {label((X(-s2) + X(s2)) / 2, Y(0) + 29, d3FtIn(S), "span", null)}
 
+      {/* THE EAVE FINISH, at whichever eaves actually project. The blade under the roof edge is
+          the rafter left outboard: deep on an EXTENDED tail, a sliver on a NOTCHED one, which
+          also gets the level soffit stepping its underside back to the wall. A shed's high end
+          is not extended at all (d3RoofProfile's vertical edge), so it gets neither. */}
+      {[eaveL, eaveR].map((e, i) => (Math.abs(e[0] - (i ? s2 : -s2)) > 1e-6 ? (
+        <g key={"eaveFinish" + i}>
+          <line x1={X(e[0])} y1={Y(e[1])} x2={X(e[0])} y2={Y(e[1] - TAIL_D)} stroke={INK} strokeWidth="1.4" />
+          {OV_NOTCHED && <line x1={X(e[0])} y1={Y(e[1] - TAIL_D)} x2={X(i ? s2 : -s2)} y2={Y(e[1] - TAIL_D)} stroke={INK} strokeWidth="1" />}
+        </g>
+      ) : null))}
+
       {/* OVERHANG, at the left eave */}
       <line x1={X(eaveL[0])} y1={Y(eaveL[1]) - 9} x2={X(-s2)} y2={Y(eaveL[1]) - 9} {...dimStroke("overhang")} />
-      {label((X(eaveL[0]) + X(-s2)) / 2, Y(eaveL[1]) - 12, d3FtIn(OV), "eave", "overhang")}
+      {label((X(eaveL[0]) + X(-s2)) / 2, Y(eaveL[1]) - 12, d3FtIn(OV), OV_NOTCHED ? "eave, notched" : "eave, extended", "overhang")}
 
       {/* PITCH -- as x:12, which is the only way a builder states a roof slope */}
       {!isGam && label(X(ru) + (X(s2) - X(ru)) / 2, Y((H + peak) / 2) - 4,
@@ -4894,8 +4947,22 @@ function d3ResolveStyleSpec(styleCfg, styleValue, globalWallHeightFt, sidingOver
   const key = String(styleValue || "").trim().toLowerCase();
   const base = D3_STYLE_DEFAULTS[key] || {};
   const o = (styleCfg && styleCfg.d3) || {};
+  const roof = { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) };
+  // THE SIZE DEFAULT for how the overhang is framed, and it is what actually fixes the eave
+  // Carolyn drew over: a style that has never heard of overhangStyle gets the framing its own
+  // overhang implies, so every existing style renders correctly with nobody editing anything.
+  //
+  // HERE rather than in styleD3.ts, deliberately. The sanitiser must never emit this default --
+  // it would fail the deep-equal on `roof` in styleD3.test.ts and write the default into every
+  // tenant's stored column the first time a builder opened and saved the panel. This layer is
+  // already the one that spreads D3_DEFAULT_ROOF over whatever the tenant actually stored, and
+  // the panel round-trips through it, so a builder who picks the derived value writes null and
+  // the column goes on recording only the exception.
+  if (roof.overhangStyle !== "notched" && roof.overhangStyle !== "extended") {
+    roof.overhangStyle = d3DefaultOverhangStyle(roof);
+  }
   return {
-    roof: { ...D3_DEFAULT_ROOF, ...(base.roof || {}), ...(o.roof || {}) },
+    roof,
     siding: sidingOverride || (o.siding !== undefined ? o.siding : (base.siding || null)),
     colors: { ...(base.colors || {}), ...(o.colors || {}) },
     // The style's default roof MATERIAL (shingle|metal) — texture + surface
@@ -6742,6 +6809,17 @@ function buildShed3DModel(THREE, p) {
   // Eave finish. An AFFIRMATIVE test on purpose: absent, null, "fascia" and any junk
   // all fall through to the fascia branch, so no tenant who has not opted in moves.
   const EAVE_OPEN = roofCfg.eave === "open";
+  // HOW THAT OVERHANG IS FRAMED. Affirmative like EAVE_OPEN, but with d3OverhangStyle's
+  // size-derived fallback, so a style that predates the field draws the framing its own
+  // overhang implies rather than whichever one happened to be hard-coded.
+  //
+  // ⚠️ THE PROFILE DOES NOT MOVE, and that is load-bearing. The notch is an EAVE DETAIL and
+  // nothing else: d3RoofProfile still puts the eave vertex at y = H on the plane u = ±S/2, so
+  // the single-slant repaint below still finds its tall band (it identifies it by all three
+  // vertices sitting at u = -S/2, and fails SILENTLY if one moves off it), the extruded cap is
+  // unchanged, and the cap-flush arithmetic, the rake boards, the fly rafters and the ridge cap
+  // are untouched -- every one of those measures OV along the GABLE end, not out over an eave.
+  const OV_NOTCHED = d3OverhangStyle(roofCfg) === "notched";
   // Raw, unpainted 2x stock for the tails. Created lazily so a model with no open eave
   // never mints it — a material built and never attached to a mesh is never reached by
   // the disposal walk, and is the one thing here that could actually leak.
@@ -7638,18 +7716,48 @@ function buildShed3DModel(THREE, p) {
       if (!EAVE_OPEN) {
         const edgeU = eaveU + nx * (D3.ROOF_T / 2 + 0.02);
         const edgeY = eaveY + ny * (D3.ROOF_T / 2 + 0.02);
-        const fascia = box(trimMat, 0.14, 0.4, L + OV * 2);
-        fascia.position.set(edgeU, edgeY - 0.14, L / 2);
+        // THE FASCIA IS WHERE THE NOTCH SHOWS. An EXTENDED tail carries the full rafter past
+        // the wall, so a 0.4 ft board hangs off the deck edge and the roof line keeps dropping
+        // as it projects. A NOTCHED tail is cut back on its underside: only NOTCH_D of rafter is
+        // left outboard, and a level soffit closes the underside back to the wall. The DECK is
+        // identical in both -- one straight plane, the same slab, the same OV -- which is the
+        // whole point: the top surface never kinks, only what hangs under it changes.
+        //
+        // The extended arithmetic is left EXACTLY as it was, float ops and all, so nothing that
+        // renders today moves by a single ulp.
+        const NOTCH_D = 0.08;                                  // ~1 in of tail left below the deck
+        const soffitY = eaveY + ny * 0.02 - NOTCH_D;           // the notch's level underside
+        const fasTop = edgeY + 0.06;                           // just under the deck's top face
+        const fasH = OV_NOTCHED ? Math.max(0.08, fasTop - soffitY) : 0.4;
+        const fascia = box(trimMat, 0.14, fasH, L + OV * 2);
+        fascia.position.set(edgeU, OV_NOTCHED ? fasTop - fasH / 2 : edgeY - 0.14, L / 2);
         rg.add(fascia);
-        eaveHangY = Math.min(eaveHangY, edgeY - 0.14 - 0.2);   // the board's bottom edge
+        eaveHangY = Math.min(eaveHangY, OV_NOTCHED ? fasTop - fasH : edgeY - 0.14 - 0.2);   // the board's bottom edge
+        if (OV_NOTCHED) {
+          // The level soffit: the underside stepping back from the fascia toward the wall. It
+          // lies BELOW the deck the whole way (the deck rises away from the eave it was measured
+          // at), so it closes the eave without ever poking through the slab. Same z extent as the
+          // fascia, so the two read as one assembly from any angle.
+          const wallU = lowEnd[0];
+          const soffitW = Math.abs(edgeU - wallU);
+          if (soffitW > 0.06) {
+            const soffit = box(trimMat, soffitW, 0.05, L + OV * 2);
+            soffit.position.set((wallU + edgeU) / 2, soffitY - 0.025, L / 2);
+            rg.add(soffit);
+          }
+        }
       } else {
         // OPEN EAVE — raw 2x rafter tails, square-cut, projecting one 2x4 depth below
         // the roof deck at 24 in on centre. On the building this was measured from it is
         // the highest-contrast element there is, and a painted fascia is precisely what
         // it is NOT: the two are alternatives, never both.
         const TAIL_W = 0.125;                 // 1.5 in stock, measured ALONG the ridge (z)
-        const TAIL_H = 0.34;                  // tall enough that the top buries in the slab
-        const TAIL_DROP = 3.5 / 12;           // visible projection below the deck underside
+        // Both sized off the framing: a NOTCHED tail is cut back, so it shows a shallower blade
+        // and needs less stock above it to stay buried. TAIL_H must keep the top inside the
+        // slab's [0.02, 0.22] band -- 0.02 - TAIL_DROP + TAIL_H -- or the tail pokes through the
+        // roof, which is why it cannot stay at 0.34 when the drop shrinks.
+        const TAIL_H = OV_NOTCHED ? 0.3 : 0.34;   // tall enough that the top buries in the slab
+        const TAIL_DROP = (OV_NOTCHED ? 1.5 : 3.5) / 12;   // visible projection below the deck underside
         // The slab underside sits at n = +0.02. Dropping the tail's bottom face
         // TAIL_DROP below that puts its top at n = +0.068 — inside the slab's
         // [0.02, 0.22] band, so nothing pokes through the roof and no daylight shows
@@ -18038,6 +18146,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const scanApplyMeasured = (m) => {
     calSet({ wallHeightFt: m.eaveFt });
     const roof = { type: m.roofType, pitch: m.pitch, overhang: m.overhangFt || 0 };
+    // DERIVED FROM THE SIZE, never measured and never asked of a model. A scan reads the roof
+    // from the ground like the walk-around does, so the notch -- an UNDERSIDE distinction -- is
+    // not in what it sees. The overhang it DID measure answers the same question honestly, and
+    // writing it down here means the builder sees the framing named in the panel before saving.
+    roof.overhangStyle = d3DefaultOverhangStyle(roof);
     if (m.roofType === "gambrel" && m.gambrel) {
       roof.kneeU = m.gambrel.kneeU; roof.kneeRise = m.gambrel.kneeRise; roof.ridgeRise = m.gambrel.ridgeRise;
     }
@@ -19769,6 +19882,27 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang (ft)
                   <input type="number" step="0.05" {...calNumProps("overhang", adminCal.spec.roof.overhang != null ? adminCal.spec.roof.overhang : 0.6, (n) => calSetRoof({ overhang: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />
+                </label>
+                {/* OVERHANG STYLE (2026-09-18). How the tail is FRAMED, which is a different
+                    question from how far it projects -- Carolyn drew both off paused walk-around
+                    frames, and a four-inch tail really is just extended.
+
+                    The metal-roof-profile idiom, for the same reason: the value runs through a
+                    normaliser and PICKING THE DEFAULT WRITES null, not the string, so the column
+                    only ever records the exception and a style that says nothing keeps deriving
+                    its framing from its own overhang. Unlike that picker the default MOVES with
+                    the number in the field above, so the option that is "already the default"
+                    changes as the builder types -- which is exactly the behaviour being offered.
+
+                    Placed here rather than with the other enum selects: it qualifies the overhang
+                    directly above it, and focusing that input highlights the eave dimension in the
+                    drawing this control changes. */}
+                <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Overhang style
+                  <select value={d3OverhangStyle(adminCal.spec.roof)} onChange={(e) => calSetRoof({ overhangStyle: e.target.value === d3DefaultOverhangStyle(adminCal.spec.roof) ? null : e.target.value })} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }}>
+                    <option value="notched">Notched rafter tail (level soffit)</option>
+                    <option value="extended">Extended rafter tail (full tail carried out)</option>
+                  </select>
+                  <span style={{ display: "block", fontWeight: 400, marginTop: 2 }}>A notched tail keeps the roof on one straight plane and steps the underside back; an extended tail carries the whole rafter out. Left alone, anything over 6 in of overhang is notched.</span>
                 </label>
                 <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Ridge offset (−0.35…0.35)
                   <input type="number" step="0.05" {...calNumProps("ridgeOffset", adminCal.spec.roof.ridgeOffset != null ? adminCal.spec.roof.ridgeOffset : 0, (n) => calSetRoof({ ridgeOffset: n }))} style={{ ...S.sel, width: "100%", boxSizing: "border-box" }} />

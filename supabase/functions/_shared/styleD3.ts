@@ -130,6 +130,27 @@ export type D3Spec = {
   claddingChoices?: string[];
 };
 
+// ── HOW AN OVERHANG IS FRAMED, DERIVED FROM HOW BIG IT IS ────────────────────────────────
+// Half a foot is the line between the two framings (2026-09-18). Under it a builder really
+// does just run the rafter out — Carolyn's own words about a four-inch tail — and above it the
+// tail gets notched so the roof keeps one straight plane with the underside stepped back.
+//
+// ⛔ NEVER ASK A MODEL FOR THIS, and note that neither prompt below mentions it. The
+// walk-around camera never leaves the ground (see VIDEO_SHAPE_PROMPT's second numbered point),
+// so the roof is only ever a silhouette — and a notch is an UNDERSIDE distinction, the one
+// thing that viewpoint cannot show. A key in the schema would be answered, confidently, from
+// nothing. The overhang SIZE the model can actually read off the silhouette answers the same
+// question honestly, which is what this exists to do.
+//
+// EXPORTED because the two PRODUCERS have to agree: the AI draft in portal-settings calls this,
+// and the browser's AR-scan path carries a hand-mirrored copy (d3DefaultOverhangStyle in both
+// designer twins) because a browser file cannot import from supabase/functions/_shared.
+export const D3_NOTCH_MIN_OVERHANG_FT = 0.5;
+export function overhangStyleFor(overhangFt: unknown): "notched" | "extended" {
+  const n = num(overhangFt);
+  return (n === null ? 0.6 : n) > D3_NOTCH_MIN_OVERHANG_FT ? "notched" : "extended";
+}
+
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object") return { ok: false, error: "A 3D spec object is required." };
   const src = raw as Record<string, any>;
@@ -191,6 +212,25 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would
   // throw on a key with no entry.
   if (rawRoof.eave === "open" || rawRoof.eave === "fascia") roof.eave = rawRoof.eave;
+  // HOW the overhang is framed, which is a different question from how far it projects.
+  // "extended" carries the whole rafter out past the wall, so the full tail — and the fascia
+  // hung on it — keeps dropping as it projects; "notched" cuts the tail back on its underside,
+  // leaving the deck on one straight plane with a level soffit stepping the underside back.
+  // Carolyn drew both off paused walk-around frames (2026-09-18) and a four-inch tail really is
+  // just extended, so both are offered rather than one replacing the other.
+  //
+  // ABSENT is deliberate and means "derive it from the overhang size" — overhangStyleFor above,
+  // and d3ResolveStyleSpec in both designer twins, at half a foot. Exactly the `eave` posture:
+  // every row that predates this field keeps its exact render, the deep-equal on `roof` in
+  // styleD3.test.ts keeps passing, and no default is silently written into a tenant's column
+  // the first time a builder opens and saves the calibration panel.
+  //
+  // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would throw on a
+  // key with no entry. ⚠️ And a key missing from THIS rebuild is dropped without a word, which
+  // looks to a builder exactly like "the save didn't work".
+  if (rawRoof.overhangStyle === "notched" || rawRoof.overhangStyle === "extended") {
+    roof.overhangStyle = rawRoof.overhangStyle;
+  }
   // A trim band across both gable ends at the top of the wall. A BOOLEAN, handled here like
   // porchTruss rather than in the numeric loop, because clamped() destructures CLAMPS[key] and
   // throws on a key with no entry. Only a real boolean is stored, and false IS stored.
