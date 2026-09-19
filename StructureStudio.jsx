@@ -11621,25 +11621,34 @@ const SSD_CSS = [
   // viewport's width (114 wide + 20 from the edge) and the bar's own right padding is 16-24, so 128px more clears
   // it at every width, with ~10px to spare if the pill measures wider elsewhere (its emoji is a font away from
   // being a different width). On a phone that leaves too little room for both buttons on one line, so they stack.
-  // BELOW xl ONLY (review 2026-09-19). The pill is fixed to the VIEWPORT; the footer content is a 960px
-  // column at the section's left edge. Once the frame is wide the reservation is dead space that pulls the
-  // buttons 128px off the column's right edge -- measured on the portal at 128px reserved against 0px
-  // needed, at 1728, 2560 and 3440. At xl the frame is at least 1180 and the bar's padding is 24, so the
-  // column ends at least 1180 - 984 = 196px inside the frame's right edge, and in the portal that edge IS
-  // the viewport's (.ss-designer-host is full-bleed beside the sidebar): 196 clears the pill's 134 with 62
-  // to spare. Below xl the column reaches the bar's edge and the reservation is real -- at 414 it measures
-  // 128px reserved against 126px needed. A frame that has no data-ssd-bp yet (before the ResizeObserver's
-  // first pass) keeps the reservation, which is the safe way round.
+  // ONLY AS MUCH AS THE PILL ACTUALLY NEEDS (review 2026-09-19). The flat 128px was right when the footer
+  // content ran the full width of the bar. It is not any more: the content is a 960px column at the
+  // section's left edge, so on a wide frame the buttons already stop hundreds of pixels short of the pill
+  // and the reservation is pure dead space that pulls them off the column's right edge -- measured on the
+  // portal at 128px reserved against 0px needed, at 1728, 2560 and 3440.
+  // So reserve the OVERLAP instead of a constant. The percentage is the bar's own content width, which is
+  // the only width CSS can read here (container queries are out -- see the frame's note; they would trap
+  // this frame's position:fixed children). The column's right edge sits (100% - 960px) + the bar's right
+  // padding inside the frame's right edge, and in the portal that edge IS the viewport's, because
+  // .ss-designer-host is full-bleed beside the sidebar. 1086px = 134 (the pill's column: 114 wide + 20
+  // from the edge) + 8 (clearance) + 960 (the invoice column) - 16 (the bar's SMALLEST right padding, at
+  // md/sm/xs) -- taking the smallest padding over-reserves by up to 8px at lg/xl, which is the safe
+  // direction. Capped at the old 128px so a phone behaves exactly as it does today.
+  // Measured on the portal, and the boundary is where it matters: 1728/2560/3440 reserve 0; a 1416-wide
+  // window (frame 1176, no stepper rail) reserves 0 where the old rule wasted 128; a 1420-wide window
+  // (frame 1180, rail in, column right edge landing exactly 134px from the viewport) reserves 16 and the
+  // buttons clear the pill by 16 -- with the breakpoint-scoped rule this replaced, that width collided.
+  // 414 still reserves the full 128. padding, not margin, so the column's own edges do not move.
   '.ssd-frame.is-embedded .ssd-main.ssd-foot{padding-bottom:72px}',
-  '.ssd-frame.is-embedded:not([data-ssd-bp="xl"]) .ssd-ft-btns{box-sizing:border-box;padding-right:128px}',
+  '.ssd-frame.is-embedded .ssd-ft{box-sizing:border-box;padding-right:clamp(0px,calc(1086px - 100%),128px)}',
   '.ssd-ft-err{max-width:var(--ssd-invoice-max);margin:0 0 12px;padding:10px 14px;border:1px solid var(--ss-danger-line);border-radius:4px;background:var(--ss-danger-wash);color:var(--ss-danger);font-size:13px;font-weight:600;line-height:1.4}',
   // The footer's CONTENT takes the invoice cap so it lines up under the quote card; the bar itself
   // (.ssd-main.ssd-foot, above) keeps its full-bleed panel and hairline, because the stepper rail runs
   // alongside it and a narrowed band would break that line. Capping only the card left the hint and the
   // buttons stretched across the full width under a 960px invoice, which is the mismatch this avoids.
   // Left-aligned with the card, for the reason the card is (see --ssd-invoice-max above): the bar is
-  // full-bleed, and its CONTENT starts where the section headers start. That is also what keeps the
-  // buttons clear of the Feedback pill without reserving room for it -- see the rule above.
+  // full-bleed, and its CONTENT starts where the section headers start. That left anchor is also what lets
+  // the embedded footer's pill clearance shrink to nothing on a wide frame -- see the rule above.
   '.ssd-ft{display:flex;flex-wrap:wrap;align-items:center;column-gap:16px;row-gap:10px;min-width:0;max-width:var(--ssd-invoice-max)}',
   '.ssd-ft-hint{margin:0;flex:1 1 200px;max-width:480px;min-width:0;font-size:12.5px;font-weight:400;line-height:1.45;color:var(--ss-muted)}',
   '.ssd-ft-hint strong{font-weight:700;color:var(--ss-ink)}',
