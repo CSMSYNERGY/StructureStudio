@@ -9068,32 +9068,54 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       // the CO ack path never rebuilds the document itself and this action is the remedy
       // it points at. The quote twin (regenerateQuotePdf) has always done this; the
       // invoice is the document customers actually sign, so it matters more here.
-      // The LATEST revision is the one the rebuilt figures reflect: migration 213 writes
-      // one design_acceptances row per revision with subject='invoice' and revision=co_no.
+      // Migration 213 writes one design_acceptances row per revision with subject='invoice'
+      // and revision=co_no, so the newest revision is the one the rebuilt figures reflect —
+      // but the certificate must be the newest acceptance that CARRIES A CUSTOMER SIGNATURE,
+      // which is not the same row. `attest_change_order` writes one of those per-revision
+      // rows with method='rep': the BUILDER's record of a verbal approval, whose own consent
+      // sentence ends "not the customer's signature". Taking the newest revision outright
+      // lets a rep-attested change order out-rank a drawn signature, and the reissue then
+      // appends nothing and overwrites the countersigned PDF with an unsigned one — the exact
+      // loss this block exists to prevent, one change order later. So the METHOD IS FILTERED
+      // IN THE QUERY, and the newest row that survives that filter is the one stamped.
       const { data: acc } = await admin.from("design_acceptances")
         .select("method, signer_name, typed_signature, signature_image_path, accepted_at, ip, consent_text, total")
         .eq("client_id", clientId).eq("short_code", shortCode).eq("subject", "invoice")
+        .in("method", ["drawn", "typed"])
         .order("revision", { ascending: false }).limit(1).maybeSingle();
       // Only a real signature earns a certificate page — the same rule the quote path
       // states: a page asserting a typed signature over an empty name claims more than
-      // the customer did. Invoices are only ever drawn/typed today (customer-accept's
-      // click branch is quote-only), so this is a guard, not a filter.
+      // the customer did. The query already filters on it; this restates the rule where the
+      // certificate is actually built, so changing one of the two cannot quietly stamp a
+      // page for a method nobody signed with.
       if (acc && (acc.method === "drawn" || acc.method === "typed")) {
         let signaturePng: Uint8Array | null = null;
         if (acc.signature_image_path) {
+          // storage.download() RESOLVES with { data: null, error } for a missing or denied
+          // object — it does NOT throw — so the failure is only visible on dl.error. That is
+          // the convention the repo already follows (portal-feedback/index.ts). The catch is
+          // kept for a genuine throw (network/abort); on its own it was dead code.
+          // A failed embed must NOT be silent: with no PNG the certificate falls through to
+          // acceptancePdf's italic branch and prints the customer's NAME under "Signed by
+          // hand on the customer quote page", which claims more than the record holds. The
+          // rebuild still ships — the facts-and-consent page beats an unsigned document —
+          // but it leaves a row saying which failure this was.
+          let failure = "";
           try {
             const dl = await admin.storage.from("signatures").download(String(acc.signature_image_path));
             if (dl.data) signaturePng = new Uint8Array(await dl.data.arrayBuffer());
+            else failure = dl.error?.message || "download returned no data and no error";
           } catch (e) {
+            failure = String(e);
+          }
+          if (failure) {
             logEdgeError({
               fn: "portal-settings", req, clientId, code: "invoice_signature_png_unreadable",
-              message: `reissue_invoice: signature image download failed: ${(e as Error).message}`,
+              message: `reissue_invoice: signature image download failed: ${failure}`,
               context: { shortCode, path: String(acc.signature_image_path) },
             }).catch(() => {});
           }
         }
-        // A failed embed must NOT be silent: the visible document would lose the
-        // countersign while design_acceptances still says it was signed.
         pdfBytes = await appendAcceptancePage(pdfBytes, {
           businessName: csRes.data?.business_name ?? null,
           quoteNumber: String(inv.invoice_number),
