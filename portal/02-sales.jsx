@@ -1370,11 +1370,23 @@ function LeadsTable({ clientId, fetchDesigns = null, isAdmin = false, onOpenDesi
 // planned|out|delivered CHECK on delivery_loads.
 const CRM_LOAD_LABEL = { planned: "Planned", out: "Out for delivery", delivered: "Delivered" };
 
-// The deal a record page is about, when it is a StructureStudio-issued quote: the design record
-// itself, or the deal picked on a contact. A quote number and no CRM estimate is the same test
-// the Pipeline's send-invoice confirm uses for "StructureStudio issues this paperwork".
+// THE DEAL ON SCREEN, whichever kind of record is showing it: the design record itself, or the
+// deal PICKED on a contact. Null on a contact with nothing picked.
+//
+// Gate on this rather than on `kind === "design"` whenever a thing belongs to one deal. The two
+// tests look interchangeable and are not: `kind` asks which URL you arrived by, this asks which
+// building you are looking at. Gating on `kind` is what forced a trip to the deal's own record to
+// see anything deal-shaped, which is the behaviour Ahsan removed on 2026-09-20 — he wants the
+// contact page to be the whole story.
+function crmContextDesign(c) {
+  return (c.kind === "design" ? c.record : (c.designs || []).find((x) => x.short_code === c.selectedCode)) || null;
+}
+
+// The deal on screen, when it is a StructureStudio-issued quote. A quote number and no CRM
+// estimate is the same test the Pipeline's send-invoice confirm uses for "StructureStudio issues
+// this paperwork".
 function crmSsQuoteDesign(c) {
-  const d = c.kind === "design" ? c.record : (c.designs || []).find((x) => x.short_code === c.selectedCode);
+  const d = crmContextDesign(c);
   return d && d.ss_quote_number && !d.ghl_estimate_number ? d : null;
 }
 
@@ -1561,7 +1573,10 @@ const CRM_TABS = [
   // A quote PDF is not something you DO. So the list moved into the History feed under the
   // Documents chip, which now carries the files themselves (crmFeed emits `quote_pdf` and
   // `floor_plan` with a url) instead of only the events describing them.
-  { key: "invoice", label: "Invoice", when: (c) => c.kind === "design", enabled: (c) => c.isAdmin && normStatus(c.record && c.record.status) === "accepted" },
+  // Follows THE DEAL, not the record kind — so it is here on a contact the moment one is picked,
+  // and the contact page no longer has to hand you off to the deal's own record to reach it.
+  { key: "invoice", label: "Invoice", when: (c) => !!crmContextDesign(c),
+    enabled: (c) => { const d = crmContextDesign(c); return c.isAdmin && normStatus(d && d.status) === "accepted"; } },
 ];
 
 // History chips. `types` is the SAME vocabulary the server emits (see _shared/crmFeed.ts's
@@ -1583,7 +1598,10 @@ const CRM_CHIPS = [
   // apart. Mirrors CRM_FEED_TYPES.document; keep the two identical.
   { key: "documents", label: "Files", types: ["change_order", "invoice_created", "invoice_sent", "quote_pdf", "floor_plan", "customer_file"] },
   { key: "deals", label: "Deals", types: ["design_created", "design_version", "accepted", "quote_opened"], when: (c) => c.kind === "contact" },
-  { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"], when: (c) => c.kind === "design" },
+  // No `when`: on a deal this is that deal's invoices, on a contact it is every invoice the
+  // contact has. Both are worth having, and gating it on the record kind was the other half of
+  // what made the deal's own record a place you had to go.
+  { key: "invoices", label: "Invoices", types: ["invoice_created", "invoice_sent"] },
   // Everything that happened, not three types two of which were never emitted — see the
   // CRM_FEED_TYPES.changelog comment in _shared/crmFeed.ts for why this read 0 on Carolyn's
   // screen. Keep the two lists identical.
@@ -2731,10 +2749,17 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
           )}
           {/* ⚠️ TWO SIBLING BUTTONS, NEVER NESTED — the Person card carries the same shape
               and the same warning: a button inside a button is invalid HTML and React will
-              not render it. THE ROW SELECTS; THE ARROW LEAVES. This does convert a list that
-              used to navigate on click into one that selects, which is a real change for
-              anyone who learned the old behaviour — the › keeps the destination one click
-              away. The glyph is there because colour alone is not a state indicator. */}
+              not render it. THE ROW SELECTS; THE CHEVRON EXPANDS. Both stay on this page.
+              The ● / ○ glyph is there because colour alone is not a state indicator.
+
+              ⚠️ THERE IS DELIBERATELY NO "open this deal's own record" ARROW. Ahsan, 2026-09-20:
+              "remove this own record arrow in there i want every thing in the contact page."
+              A third › used to sit here and navigate away. Do not add it back to solve a
+              "you can't get to X from a contact" report — that is the report saying X is still
+              gated on `kind === "design"` when it should be gated on `crmContextDesign(c)`.
+              Fix the gate; the arrow was the workaround, not the feature. The design record
+              itself still exists and the Pipeline still opens it directly — it is only no
+              longer somewhere a contact has to send you. */}
           {(data.designs || []).map((d) => {
             const sel = activeCode === d.short_code;
             // `!!d.short_code` because dealOpen starts null: without it a row whose code is
@@ -2773,10 +2798,6 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                     title={open ? "Hide this deal's details" : "Show this deal's details"}
                     style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
                       padding: "0 9px", fontSize: 12, color: "#94A3B8", cursor: "pointer" }}>{open ? "▾" : "▸"}</button>
-                  <button onClick={() => onNavigate("design", d.short_code)}
-                    title="Open this deal's own record"
-                    style={{ background: "transparent", border: "none", borderLeft: "1px solid " + (sel ? ACCENT : "#E2E8F0"),
-                      padding: "0 10px", fontSize: 15, color: "#94A3B8", cursor: "pointer" }}>›</button>
                 </div>
                 {open && (
                   <div style={{ border: "1px solid " + (sel ? ACCENT : "#E2E8F0"), borderTop: "none",
@@ -3428,7 +3449,7 @@ function CrmRecord({ kind, recordId, isAdmin = false, canEdit: canEditProp = fal
                 and the schedule already are — a second invoice button on a second screen is
                 how two sources of truth for money get built. So this routes rather than
                 duplicates, and says plainly what the customer still has to do. */}
-            {tab === "invoice" && kind === "design" && (
+            {tab === "invoice" && (kind === "design" ? record : activeDeal) && (
               <div style={{ marginBottom: 12, background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 8, padding: "10px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "#475569" }}>
                   This quote is accepted, so it can be invoiced. Invoicing happens on the order — with the
