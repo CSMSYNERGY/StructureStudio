@@ -97,6 +97,10 @@ const checkCalls = [];
 let checkReply = null;
 let checkStatus = 200;
 let draftOverhang = 1.0;
+// Steered by the script for the no-pairs case: a first pass that produced no usable labels,
+// which is the state the warning banner exists for and the one where it had no way out.
+let draftFrameMap = FRAME_MAP;
+let draftObserved = { roofNote: "Gambrel, read from the ground.", porch: "projecting", confidence: "medium" };
 
 // How many pixels differ between two JPEG data URLs, as a fraction. Decoded with the same
 // browser that drew them — there is no image decoder in node here, and shipping one to count
@@ -184,9 +188,9 @@ async function main() {
         return json(route, {
           ok: true, d3: draftSpec(body.dims, draftOverhang),
           frames: (body.photoUrls || []).length, dropped: 0,
-          observed: { roofNote: "Gambrel, read from the ground.", porch: "projecting", confidence: "medium" },
+          observed: draftObserved,
           balanceCents: 18000, dims: body.dims || null,
-          frameMap: FRAME_MAP, checkId: CHECK_ID,
+          frameMap: draftFrameMap, checkId: CHECK_ID,
         });
       }
       if (a === "calibrate_style_check") {
@@ -595,6 +599,65 @@ async function main() {
   r.ok("a slider drag writes all three gambrel numbers, including the derived one",
     before !== null && after !== null && before !== after, `${before} -> ${after}`);
   await answer("roof", "Yes");
+
+  // ── THE WARNING BANNER HAS TO REACH A CONTROL, INCLUDING WHERE THERE ARE NO PAIRS ─────
+  // The banner is a machine warning promoted out of "What the model saw", and its whole
+  // point is that a builder should not have to work out which of the four questions it was
+  // about. Its button sets adminCalFix — and the only place a fix panel renders is inside
+  // SS_CHECKS.map, which is behind `calPairs.length > 0`. So in exactly the state the banner
+  // is loudest for (no labels, or a device that could not render) the button changed nothing
+  // at all: no scroll, no message, not one node.
+  //
+  // THE WALL-HEIGHT WARNING IS THE THIRD ONE, and it was the one the banner's regex never
+  // recognised. knownDimsNote fires when a wall the builder MEASURED could not be drawn, so
+  // the preview they are about to confirm against their own frames is of another building.
+  draftFrameMap = null;
+  draftObserved = {
+    roofNote: "Check the wall height before saving: you gave 16 ft, and the 3D can only draw a wall between 5 and 14 ft, so it has been drawn at 14 ft.",
+    confidence: "low",
+  };
+  await press();
+  const noPairs = await page.evaluate(() => ({
+    pairs: document.querySelectorAll("[data-ssc-pair]").length,
+    questions: document.querySelectorAll("[data-ssc-question]").length,
+  }));
+  r.ok("a first pass with no labels shows no pairs — and so no questions to hang a fix panel on",
+    noPairs.pairs === 0 && noPairs.questions === 0, JSON.stringify(noPairs));
+  const banner = await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
+    return el ? el.textContent : "";
+  });
+  r.ok("⚠️ THE WALL-HEIGHT WARNING GETS A BANNER, like the other two",
+    /Check the wall height before saving/.test(banner), banner.slice(0, 80));
+  r.ok("and its button names the control it opens", /Open the wall height controls/.test(banner), banner.slice(-60));
+  const cardBefore = await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-card="compare"]');
+    return { text: el ? el.innerText : "", nodes: el ? el.querySelectorAll("*").length : 0 };
+  });
+  await page.locator('[data-ssc-card="compare"] [role="alert"]').getByRole("button", { name: /Open the wall height controls/ }).click();
+  await page.waitForTimeout(300);
+  const cardAfter = await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-card="compare"]');
+    const alert = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
+    return {
+      text: el ? el.innerText : "", nodes: el ? el.querySelectorAll("*").length : 0,
+      inputs: alert ? alert.querySelectorAll("input").length : 0,
+      alertText: alert ? alert.innerText : "",
+    };
+  });
+  r.ok("⚠️ AND PRESSING IT OPENS THAT CONTROL RATHER THAN DOING NOTHING",
+    cardAfter.nodes > cardBefore.nodes && cardAfter.inputs > 0,
+    `${cardBefore.nodes} -> ${cardAfter.nodes} nodes, ${cardAfter.inputs} input(s) in the banner`);
+  r.ok("and the control it opened is the wall height, in the builder's words",
+    /Floor to the top of the side wall/.test(cardAfter.alertText), cardAfter.alertText.slice(-90));
+  await page.locator('[data-ssc-card="compare"] [role="alert"]').getByRole("button", { name: /Hide the wall height controls/ }).click();
+  await page.waitForTimeout(200);
+  r.ok("and it closes again", (await page.evaluate(() => {
+    const a = document.querySelector('[data-ssc-card="compare"] [role="alert"]');
+    return a ? a.querySelectorAll("input").length : -1;
+  })) === 0);
+  draftFrameMap = FRAME_MAP;
+  draftObserved = { roofNote: "Gambrel, read from the ground.", porch: "projecting", confidence: "medium" };
 
   // ── The money line and the honest failure, on the same surface ────────────────────────
   checkReply = { ok: true, verdict: "skipped", reason: "off", d3: null, changed: [], checked: {}, note: "", renders: 0, ms: 5 };

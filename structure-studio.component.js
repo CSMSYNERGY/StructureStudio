@@ -14069,6 +14069,9 @@ const SS_CHECKS = [
   ["walls", "Are the walls the right height?", "Compare the side wall next to the door with your picture."],
   ["colours", "Are the colours close?", "Walls, trim and roof. Customers repaint it anyway, so close is fine."],
 ];
+// What each fix panel is called in a sentence. The banner's button names the one it arms, and
+// three of these four can be raised by a machine warning.
+const SS_FIX_WORDS = { roof: "roof", porch: "porch", walls: "wall height", colours: "colour" };
 // What each viewpoint is, in words a builder owns. "eaveCorner" is our name for it.
 const SS_VIEW_WORDS = {
   front: "The end with the door",
@@ -19364,10 +19367,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // other lines in "What the model saw". Both open with a fixed sentence, which is what makes
   // them findable from here without a second copy of either rule living in the browser.
   const calRoofNote = (adminCalVideo.observed && adminCalVideo.observed.roofNote) || "";
-  const calWarnBanner = /^Check (this roof|the porch) before saving/.test(calRoofNote) ? calRoofNote : null;
+  //
+  // THREE WARNINGS OPEN WITH THAT SENTENCE, NOT TWO. `knownDimsNote` -- "Check the wall height
+  // before saving: you gave 16 ft, and the 3D can only draw a wall between 5 and 14 ft" -- was
+  // written after the other two and never added here, so the one warning that says a number
+  // the builder MEASURED could not be drawn was the one that never got a banner. It is also
+  // the loudest of the three, because the preview they are about to confirm against their own
+  // frames is then of a different building.
+  //
+  // `flagObservedNotes` joins the warnings in the order gambrel, porch, knownDims, and `^`
+  // only ever sees the first, so this reads whichever fired first and arms that one's panel.
+  const calWarnBanner = /^Check (this roof|the porch|the wall height) before saving/.test(calRoofNote) ? calRoofNote : null;
   // Which question a machine warning belongs to, so the banner can arm that question's fix
   // panel rather than leaving the builder to work out which of the four it was about.
-  const calWarnQuestion = !calWarnBanner ? null : /^Check the porch/.test(calWarnBanner) ? "porch" : "roof";
+  const calWarnQuestion = !calWarnBanner ? null
+    : /^Check the porch/.test(calWarnBanner) ? "porch"
+    : /^Check the wall height/.test(calWarnBanner) ? "walls"
+    : "roof";
   // ⚠️ FOUR ANSWERS BEFORE SAVE, and only when there is something to answer about. A builder
   // who has just generated is looking at their own pictures beside our 3D, and the four
   // questions are the measured failure list — roof shape, porch, wall height, colours. An
@@ -20993,7 +21009,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <div style={{ marginTop: 8, fontSize: 12, color: "#0F172A" }}>
                     <b>What the model saw</b>
                     <div style={{ marginTop: 6, display: "grid", gap: 3, fontSize: 11.5, color: "#334155" }}>
-                      {adminCalVideo.observed.roofNote && <div><b>Roof:</b> {adminCalVideo.observed.roofNote}</div>}
+                      {/* `roofNote` is the field the server composes its machine warnings into,
+                          so it carries the porch and wall-height ones as well. Labelling all
+                          three "Roof:" files two of them under the wrong heading. */}
+                      {adminCalVideo.observed.roofNote && <div><b>{calWarnQuestion === "porch" ? "Porch:" : calWarnQuestion === "walls" ? "Wall height:" : "Roof:"}</b> {adminCalVideo.observed.roofNote}</div>}
                       {adminCalVideo.observed.eave && <div><b>Eave:</b> {adminCalVideo.observed.eave}</div>}
                       {adminCalVideo.observed.doors && <div><b>Doors:</b> {adminCalVideo.observed.doors}</div>}
                       {adminCalVideo.observed.windows && <div><b>Windows:</b> {adminCalVideo.observed.windows}</div>}
@@ -21047,11 +21066,24 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     <div role="alert" style={{ marginTop: 8, border: "1px solid #FCD34D", background: "#FFFBEB", borderRadius: 6, padding: "8px 10px", fontSize: 11.5, color: "#92400E", fontWeight: 600, lineHeight: 1.5 }}>
                       {calWarnBanner}
                       <div style={{ marginTop: 6 }}>
-                        <button type="button" onClick={() => setAdminCalFix(calWarnQuestion)}
+                        <button type="button" onClick={() => setAdminCalFix((cur) => (cur === calWarnQuestion ? null : calWarnQuestion))}
                           style={{ ...S.btn("#92400E", "#FFF"), fontSize: 11 }}>
-                          Open the {calWarnQuestion === "porch" ? "porch" : "roof"} controls
+                          {adminCalFix === calWarnQuestion && !calPairs.length ? "Hide" : "Open"} the {SS_FIX_WORDS[calWarnQuestion] || "roof"} controls
                         </button>
                       </div>
+                      {/* ⚠️ WITH NO PAIRS THERE ARE NO QUESTIONS, so the panel this button
+                          arms has nowhere to render and the button did nothing at all: no
+                          scroll, no message, not one node changed. That is the state the
+                          banner was promoted out of the grey notes list FOR -- the model could
+                          not line the frames up, or the device could not render, and the
+                          warning is all the builder has. So the panel opens here instead.
+                          With pairs on screen it opens in its own question's row, which keeps
+                          the fix next to the pictures the answer is about. */}
+                      {!calPairs.length && adminCalFix === calWarnQuestion && (
+                        <div style={{ marginTop: 8, background: "#FFF", border: "1px solid #FDE68A", borderRadius: 6, padding: "8px 10px" }}>
+                          {calFixPanel(calWarnQuestion)}
+                        </div>
+                      )}
                     </div>
                   )}
                   {/* WHAT THE CHECK DID, in one quiet line or one honest list. A failed check
