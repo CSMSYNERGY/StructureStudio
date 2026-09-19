@@ -120,6 +120,12 @@ async function main() {
   const { browser, ctx } = await launch({ width: 1500, height: 1100 });
   await ctx.addInitScript(([ref, s]) => {
     try { window.localStorage.setItem(`sb-${ref}-auth-token`, JSON.stringify(s)); } catch (_e) {}
+    // COUNT THE RENDERS. Every off-screen shot ends in exactly one toDataURL, and each shot
+    // opens its own WebGL context, so this is the cheapest true measure of how many contexts
+    // a burst of presses asks for. Nothing else on this surface reads a canvas back.
+    window.__ssShots = 0;
+    const orig = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (...a) { window.__ssShots += 1; return orig.apply(this, a); };
   }, [REF, SESSION]);
   const page = await ctx.newPage();
   const errors = collectErrors(page);
@@ -326,6 +332,54 @@ async function main() {
       const el = document.querySelector("[data-ssc-spin]");
       return Boolean(el) && el.tabIndex === 0 && /arrow keys turn it/i.test(el.getAttribute("aria-label") || "");
     }));
+
+  // ── DRAG TO ROTATE, which is the escape hatch for a pairing the labels got wrong ──────
+  // The frame map is a machine's reading of where a camera stood. When it is wrong the
+  // builder can see it instantly and can do nothing about it without this control, so it is
+  // the difference between "your 3D is wrong" and "your 3D is facing the other way".
+  const shotSrc = (vp) => page.evaluate((v) => {
+    const el = document.querySelector(`[data-ssc-pair="${v}"]`);
+    const img = el ? el.querySelectorAll("img")[1] : null;
+    return img ? img.getAttribute("src") : "";
+  }, vp);
+  const spun0 = await shotSrc("side");
+  await page.locator('[data-ssc-pair="side"]').getByRole("button", { name: /Right/ }).click();
+  await page.waitForFunction((b) => {
+    const el = document.querySelector('[data-ssc-pair="side"]');
+    const img = el ? el.querySelectorAll("img")[1] : null;
+    return Boolean(img) && img.getAttribute("src") !== b;
+  }, spun0, { timeout: 60000 }).catch(() => {});
+  r.ok("⚠️ TURNING A PAIR RE-RENDERS ITS 3D HALF", (await shotSrc("side")) !== spun0);
+  r.ok("and it says how far, out loud", /Turned 15 degrees/.test(await text()));
+  // A HELD ARROW KEY. Auto-repeat fires keydown every few tens of milliseconds, and each
+  // render opens its own off-screen WebGL context — browsers cap those hard. The renders
+  // have to coalesce onto the last angle asked for rather than queue up one per press.
+  const spinEl = page.locator('[data-ssc-spin="side"]');
+  await spinEl.focus();
+  const shotsBefore = await page.evaluate(() => window.__ssShots);
+  // ⚠️ DISPATCHED IN ONE EVALUATE, NOT TWELVE press() CALLS. Each Playwright press is a round
+  // trip, which spaces them further apart than a render takes — so they never overlap and the
+  // pile-up this is measuring cannot happen. Real auto-repeat fires every few tens of
+  // milliseconds with nothing between; this is that.
+  await page.evaluate(() => {
+    const el = document.querySelector('[data-ssc-spin="side"]');
+    el.focus();
+    for (let i = 0; i < 12; i++) el.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  });
+  await page.waitForFunction(() => /Turned 195 degrees/.test(document.body.innerText), null, { timeout: 60000 }).catch(() => {});
+  r.ok("⚠️ A BURST OF PRESSES LANDS ON THE LAST ANGLE, NOT THE FIRST",
+    /Turned 195 degrees/.test(await text()), (await text()).match(/Turned \d+ degrees/g) || []);
+  // ⚠️ THE ASSERTION THAT MAKES THE GUARD LOAD-BEARING. Without it each keydown opens its
+  // own off-screen WebGL context, and twelve presses is twelve live contexts against a
+  // browser limit near sixteen — with the docked panel and the page's own already in use.
+  // "It landed on the right angle" passes either way; this is what does not.
+  const burst = (await page.evaluate(() => window.__ssShots)) - shotsBefore;
+  r.ok("⚠️ AND IT TOOK A HANDFUL OF RENDERS, NOT TWELVE — the contexts coalesce",
+    burst > 0 && burst <= 4, `${burst} renders for 12 presses`);
+  r.ok("and the page survived it — nothing thrown", errors.length === 0, errors.slice(0, 2).join(" | "));
+  await page.locator('[data-ssc-pair="side"]').getByRole("button", { name: /Reset/ }).click();
+  await page.waitForFunction(() => !/Turned \d+ degrees/.test(document.body.innerText), null, { timeout: 60000 }).catch(() => {});
+  r.ok("Reset puts it back to where the model said the camera was", !/Turned \d+ degrees/.test(await text()));
 
   // ── 3: the eave camera earns its place ────────────────────────────────────────────────
   // Re-generate with the ONE field moved and nothing else, then count the pixels that moved

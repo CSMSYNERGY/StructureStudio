@@ -15633,6 +15633,12 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // re-render between the drag and the shot must not change what is drawn.
   const calShotRef = useRef(null);      // { params, frameMap } | null
   const calSpinReqRef = useRef({});     // viewpoint -> the degrees last asked for
+  // Which pairs have a render in flight. Arrow keys AUTO-REPEAT: held down, the handler
+  // fires every few tens of milliseconds, and without this each press would open its own
+  // off-screen WebGL context. Browsers cap live contexts hard and this repo has been bitten
+  // by exactly that. One in flight per pair, and the one that is running picks up whatever
+  // angle was asked for while it ran.
+  const calSpinBusyRef = useRef({});    // viewpoint -> true while a render is running
   // Where a drag started, and how far it has travelled since. A ref, because a pointermove
   // that re-rendered the panel would fight the drag it is trying to follow.
   const calDragRef = useRef(null);      // { viewpoint, x, from } | null
@@ -18559,22 +18565,50 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     if (!held || !pair) return;
     const run = calRunRef.current;
     const deg = ((Math.round(nextDeg) % 360) + 360) % 360;
+    // The angle goes on screen immediately, whether or not a render can start yet: the
+    // readout and the live region are what tell a builder the key did something.
     calSpinReqRef.current = { ...calSpinReqRef.current, [viewpoint]: deg };
     setAdminCalSpin((p) => ({ ...p, [viewpoint]: deg }));
-    const shots = await calShootWithin(held.params, {
-      ...held.frameMap,
-      [viewpoint]: { frame: pair.frame, azimuthDeg: ((pair.azimuthDeg + deg) % 360 + 360) % 360 },
-    });
-    if (calRunRef.current !== run || !shots) return;
-    const s = shots.find((x) => x.viewpoint === viewpoint);
-    if (!s) return;
-    // LAST GESTURE WINS. A builder who dragged twice while the first render was still going
-    // must not watch it snap back to the angle they have already left. Read off a REF rather
-    // than out of a setState updater: an updater that fired a second setState would run twice
-    // under StrictMode and is a side effect in a place React is allowed to replay.
-    if (calSpinReqRef.current[viewpoint] !== deg) return;
-    setAdminCalCheck((p) => (p ? { ...p, pairs: (p.pairs || []).map((x) => (x.viewpoint === viewpoint ? { ...x, shotUrl: s.url } : x)) } : p));
+    // ⚠️ ONE RENDER IN FLIGHT PER PAIR. A held arrow key repeats every few tens of
+    // milliseconds and each render opens its own off-screen WebGL context; browsers cap
+    // live contexts hard. The render already running re-reads the ref when it finishes and
+    // goes round again if the angle moved, so nothing is dropped — it is coalesced.
+    if (calSpinBusyRef.current[viewpoint]) return;
+    calSpinBusyRef.current = { ...calSpinBusyRef.current, [viewpoint]: true };
+    try {
+      for (;;) {
+        const want = calSpinReqRef.current[viewpoint];
+        // ⚠️ ONE VIEWPOINT, NOT THE WHOLE MAP. ssSelfCheckCameras builds a camera per key it
+        // finds, so handing it `held.frameMap` here would re-render all three pairs to
+        // update the one that moved — three encodes at 95-300 ms each, on every drag, to
+        // throw two of them away. The other pairs are already on screen and have not moved.
+        const shots = await calShootWithin(held.params, {
+          [viewpoint]: { frame: pair.frame, azimuthDeg: ((pair.azimuthDeg + want) % 360 + 360) % 360 },
+        });
+        if (calRunRef.current !== run) return;
+        // LAST GESTURE WINS. A builder who dragged twice while the first render was still
+        // going must not watch it snap back to the angle they have already left. Read off a
+        // REF rather than out of a setState updater: an updater that fired a second setState
+        // would run twice under StrictMode and is a side effect where React may replay it.
+        const stillWanted = calSpinReqRef.current[viewpoint] === want;
+        const s = shots && shots.find((x) => x.viewpoint === viewpoint);
+        if (s && stillWanted) {
+          setAdminCalCheck((p) => (p ? { ...p, pairs: (p.pairs || []).map((x) => (x.viewpoint === viewpoint ? { ...x, shotUrl: s.url } : x)) } : p));
+        }
+        // A render that could not be taken at all ends the loop rather than spinning on a
+        // device that cannot render: the angle on screen is still the one they asked for.
+        if (stillWanted || !shots) break;
+      }
+    } finally {
+      calSpinBusyRef.current = { ...calSpinBusyRef.current, [viewpoint]: false };
+    }
   };
+  // ⚠️ THE STEP IS TAKEN FROM THE REF, NOT FROM THE RENDER'S OWN COPY OF THE ANGLE. React
+  // batches, so a held arrow key fires a dozen keydowns before a single re-render lands and
+  // every one of them would read the SAME `spun` out of its closure, compute the same
+  // `spun + 15`, and the building would turn fifteen degrees and stop. The ref is the only
+  // thing that knows what has already been asked for.
+  const calSpinBy = (viewpoint, delta) => calSpinPair(viewpoint, (calSpinReqRef.current[viewpoint] || 0) + delta);
 
   // ─── Generate the shape from the video, plus the photos when there are any ────────────
   // The button Carolyn asked for at 09-04 17:00: "once they have changed it, there will be a,
@@ -20967,7 +21001,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                                   the panel unusable to save nobody any time. */}
                               <div tabIndex={0} role="img" data-ssc-spin={pair.viewpoint}
                                 aria-label={`The 3D we built, ${word.toLowerCase()}. Left and right arrow keys turn it; Home puts it back.`}
-                                onPointerDown={(e) => { calDragRef.current = { viewpoint: pair.viewpoint, x: e.clientX, from: spun }; }}
+                                onPointerDown={(e) => { calDragRef.current = { viewpoint: pair.viewpoint, x: e.clientX, from: calSpinReqRef.current[pair.viewpoint] || 0 }; }}
                                 onPointerUp={(e) => {
                                   const d = calDragRef.current;
                                   calDragRef.current = null;
@@ -20979,8 +21013,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                                   if (Math.abs(moved) >= 3) calSpinPair(pair.viewpoint, d.from + moved);
                                 }}
                                 onKeyDown={(e) => {
-                                  if (e.key === "ArrowLeft") { e.preventDefault(); calSpinPair(pair.viewpoint, spun - SS_SPIN_STEP_DEG); }
-                                  else if (e.key === "ArrowRight") { e.preventDefault(); calSpinPair(pair.viewpoint, spun + SS_SPIN_STEP_DEG); }
+                                  if (e.key === "ArrowLeft") { e.preventDefault(); calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG); }
+                                  else if (e.key === "ArrowRight") { e.preventDefault(); calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG); }
                                   else if (e.key === "Home") { e.preventDefault(); calSpinPair(pair.viewpoint, 0); }
                                 }}
                                 style={{ cursor: "ew-resize", touchAction: "pan-y", borderRadius: 6 }}>
@@ -20992,8 +21026,8 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                         </div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 6, fontSize: 11, color: "#64748B", fontWeight: 600 }}>
                           <span>Not facing the same way? Drag it, or use ← →.</span>
-                          <button type="button" onClick={() => calSpinPair(pair.viewpoint, spun - SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
-                          <button type="button" onClick={() => calSpinPair(pair.viewpoint, spun + SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
+                          <button type="button" onClick={() => calSpinBy(pair.viewpoint, -SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>↺ Left</button>
+                          <button type="button" onClick={() => calSpinBy(pair.viewpoint, SS_SPIN_STEP_DEG)} style={{ ...S.btn("#FFF", "#5B21B6"), border: "1px solid #DDD6FE", fontSize: 11, padding: "2px 8px" }}>Right ↻</button>
                           {spun !== 0 && <button type="button" onClick={() => calSpinPair(pair.viewpoint, 0)} style={{ ...S.btn("#FFF", "#64748B"), border: "1px solid #E2E8F0", fontSize: 11, padding: "2px 8px" }}>Reset</button>}
                           <span aria-live="polite" style={{ color: "#94A3B8" }}>{spun ? `Turned ${spun} degrees` : ""}</span>
                         </div>
