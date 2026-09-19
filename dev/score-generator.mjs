@@ -39,10 +39,16 @@
 // in .assetsignore, so nothing here is served from a tenant's site.
 //
 // ─── THE INPUTS ARE NOT IN THE CORPUS, AND THAT IS DELIBERATE ───────────────────────────
-// THIS REPOSITORY IS PUBLIC. A corpus entry carries the truth, the priors and the recorded
-// drafts — none of which names anyone — and says `"inputs": "local"`. The tenant id, the
-// style key and the pinned frame URLs live beside it in <entry>.local.json, which .gitignore
-// keeps out of the repo. --recorded needs none of it; --replay and LIVE refuse without it.
+// THIS REPOSITORY IS PUBLIC. A corpus entry carries the truth, the priors, the recorded
+// drafts and each run's timestamp — and nothing else — and says `"inputs": "local"`. The
+// tenant id, the style key and the pinned frame URLs live beside it in <entry>.local.json,
+// which .gitignore keeps out of the repo. --recorded needs none of it; --replay and LIVE
+// refuse without it.
+//
+// The entries carried their ai_style_calls row `id` until 2026-09-19. Nothing read it — this
+// file selects it and drops it, and scoreEntry never sees it — so eight production primary
+// keys sat in a public repo to no end. `n` and `called_at` say which run is which without
+// naming a row.
 //
 //   dev/score-corpus/lofted-barn-porch.local.json
 //   { "client_id": "...", "style_value": "...", "frames": ["https://.../walk-1.jpg", ...],
