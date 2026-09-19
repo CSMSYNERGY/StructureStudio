@@ -70,7 +70,7 @@ import {
   norm as attrNorm,
   resolveBuildingContext,
 } from "../_shared/attributeLines.ts";
-import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, overhangStyleFor, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
+import { sanitizeD3Spec, sanitizePhotoUrls, parseModelSpec, modelReplyText, parseObservedNotes, gambrelRoofWarning, flagObservedNotes, SPEC_PROMPT, VIDEO_SHAPE_PROMPT, combinedShapePrompt } from "../_shared/styleD3.ts";
 import { guardDecision, mediaList } from "../_shared/styleSaveGuard.ts";
 import { buildCrmFeed } from "../_shared/crmFeed.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
@@ -3800,17 +3800,18 @@ function colorSaveReason(err: { message?: string; code?: string }, label: string
       return failed;
     }
 
-    // ── HOW THE OVERHANG IS FRAMED: DERIVED, NEVER ASKED FOR ───────────────────────────
+    // ── HOW THE OVERHANG IS FRAMED: NOT ASKED FOR, AND NOT WRITTEN DOWN EITHER ─────────
     // Neither prompt mentions overhangStyle, and that is the point rather than an oversight.
     // The walk-around camera never leaves the ground (VIDEO_SHAPE_PROMPT says so in its own
     // second numbered point), so the roof is only ever a silhouette — and a notched tail is an
     // UNDERSIDE distinction, the one thing that viewpoint cannot show. Ask for it and the model
-    // answers anyway, from nothing. The overhang SIZE it CAN read off the silhouette settles the
-    // same question honestly, which is what overhangStyleFor does, here and in the AR-scan path.
+    // answers anyway, from nothing.
     //
-    // Set on the SANITISED spec on purpose: the value is one of two literals this function
-    // chose, not anything the model sent, so it cannot smuggle a key past the whitelist rebuild.
-    drafted.d3.roof.overhangStyle = overhangStyleFor(drafted.d3.roof.overhang);
+    // A first cut derived it from the overhang HERE and set it on the sanitised spec. That is
+    // deleted: the overhang the model DID read off the silhouette is already stored, and
+    // d3OverhangStyle derives the framing from it in the renderer every time it draws. Writing
+    // the derived answer into the draft would freeze it, after which a builder correcting the
+    // overhang in the calibration panel would no longer re-frame the eave.
 
     // ── CAPTURE ────────────────────────────────────────────────────────────────────
     // Token usage was previously PARSED AND DISCARDED. Storing it is what makes "do tell

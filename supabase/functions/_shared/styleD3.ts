@@ -130,27 +130,6 @@ export type D3Spec = {
   claddingChoices?: string[];
 };
 
-// ── HOW AN OVERHANG IS FRAMED, DERIVED FROM HOW BIG IT IS ────────────────────────────────
-// Half a foot is the line between the two framings (2026-09-18). Under it a builder really
-// does just run the rafter out — Carolyn's own words about a four-inch tail — and above it the
-// tail gets notched so the roof keeps one straight plane with the underside stepped back.
-//
-// ⛔ NEVER ASK A MODEL FOR THIS, and note that neither prompt below mentions it. The
-// walk-around camera never leaves the ground (see VIDEO_SHAPE_PROMPT's second numbered point),
-// so the roof is only ever a silhouette — and a notch is an UNDERSIDE distinction, the one
-// thing that viewpoint cannot show. A key in the schema would be answered, confidently, from
-// nothing. The overhang SIZE the model can actually read off the silhouette answers the same
-// question honestly, which is what this exists to do.
-//
-// EXPORTED because the two PRODUCERS have to agree: the AI draft in portal-settings calls this,
-// and the browser's AR-scan path carries a hand-mirrored copy (d3DefaultOverhangStyle in both
-// designer twins) because a browser file cannot import from supabase/functions/_shared.
-export const D3_NOTCH_MIN_OVERHANG_FT = 0.5;
-export function overhangStyleFor(overhangFt: unknown): "notched" | "extended" {
-  const n = num(overhangFt);
-  return (n === null ? 0.6 : n) > D3_NOTCH_MIN_OVERHANG_FT ? "notched" : "extended";
-}
-
 export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object") return { ok: false, error: "A 3D spec object is required." };
   const src = raw as Record<string, any>;
@@ -219,11 +198,18 @@ export function sanitizeD3Spec(raw: unknown): { ok: true; d3: D3Spec } | { ok: f
   // Carolyn drew both off paused walk-around frames (2026-09-18) and a four-inch tail really is
   // just extended, so both are offered rather than one replacing the other.
   //
-  // ABSENT is deliberate and means "derive it from the overhang size" — overhangStyleFor above,
-  // and d3ResolveStyleSpec in both designer twins, at half a foot. Exactly the `eave` posture:
-  // every row that predates this field keeps its exact render, the deep-equal on `roof` in
-  // styleD3.test.ts keeps passing, and no default is silently written into a tenant's column
-  // the first time a builder opens and saves the calibration panel.
+  // ABSENT is deliberate and means "derive it from the overhang size, AT RENDER TIME" —
+  // d3OverhangStyle in both designer twins, at half a foot. Exactly the `eave` posture: every
+  // row that predates this field keeps its exact render, and the deep-equal on `roof` in
+  // styleD3.test.ts keeps passing.
+  //
+  // ⚠️ NOTHING ANYWHERE WRITES THE DERIVED VALUE DOWN, and that is load-bearing rather than
+  // tidiness: not this sanitiser, not d3ResolveStyleSpec, not the AI draft above, not the AR
+  // scan. The moment a derived value is stored, raising the style's overhang stops re-framing
+  // its eave and the field silently stops following the number it is documented to follow.
+  // Only a builder's explicit pick in the calibration panel ever stores the key. (A first cut
+  // derived it in d3ResolveStyleSpec, which is the layer the panel posts straight back — so it
+  // froze into every tenant's column on the first save.)
   //
   // Not in the numeric loop above: `clamped()` destructures CLAMPS[key] and would throw on a
   // key with no entry. ⚠️ And a key missing from THIS rebuild is dropped without a word, which

@@ -1,11 +1,30 @@
-// The eave, MEASURED: notched against extended, at a 4 in and a 12 in overhang.
+// The eave, MEASURED: notched against extended, at a 4 in and a 12 in overhang, on a FASCIA
+// eave and on an OPEN one.
 //
-// Carolyn paused two walk-around videos on 2026-09-18 and drew the eave she builds. The claim
-// this script exists to check is a geometric one and it is easy to believe without evidence:
-// that the roof's TOP PLANE is untouched by the framing choice, and that ONLY what hangs under
-// it moves. So it reads the real scene graph out of the real renderer (the COMPILED artifact the
-// browser loads) and prints, for each variant: the slab's top face at the eave and at the ridge,
-// the lowest point of the eave finish, and what that is relative to the wall plate.
+// WHAT THIS EXISTS TO SETTLE. Carolyn paused two walk-around videos on 2026-09-18 and drew the
+// eave she builds: "that two by four they notch it ... so the top here goes straight out", and
+// Preferred Structures' version of the same complaint, "your overhang keeps going down, and we
+// actually sit it on the top". So there are three claims to check and they are not the same
+// claim, which is exactly how the first cut of this script shipped a number that passed while
+// the headline was false:
+//
+//   1. THE DECK DOES NOT MOVE. The framing choice may not touch the roof's top plane — same
+//      projection, same y extent, to the float. "The top goes straight out."
+//   2. A NOTCHED TAIL IS CUT BACK TO THE DECK. The finished eave must hang nothing below the
+//      roof plane but the soffit board that closes it — stated as a RELATION to the deck's own
+//      underside, so it holds at any pitch and any overhang rather than being a lucky constant.
+//   3. ⚠️ AND THE ONE THAT CANNOT BE MET HERE, printed rather than asserted, because a reader
+//      will otherwise assume it was forgotten. The eave still finishes BELOW THE WALL PLATE at
+//      a deep overhang, and no eave detail can change that: d3RoofProfile puts the roof plane
+//      THROUGH the plate at y = H, so the deck's own outer TOP corner is already below the
+//      plate before anything is hung on it — this script prints that corner beside every
+//      finish it measures. Lifting the eave back over the plate means giving the rafter its
+//      depth above the plate (a birdsmouth seat), which moves the profile, the gable ends, the
+//      rakes, the cap and every render that exists. It is a separate change.
+//
+//   4. AND NOTHING MOVES ON AN OPEN EAVE. Those rafter tails were measured off a real building;
+//      "notched" is a fascia-eave distinction and must not reach them. Asserted by measuring
+//      both framings on an open eave and requiring every number to be identical.
 //
 //   python -m http.server 8125 --bind 127.0.0.1 --directory <repo root>
 //   node tests/harness/overhangNotch.mjs
@@ -14,31 +33,41 @@
 import { launch, stubSupabase, collectErrors, openDesigner, reporter, shotsDir } from "./lib.mjs";
 import { pickStyle, openEditor, sceneMeshes, shot } from "./gableProbe.mjs";
 
-const W = 12, L = 16, SIZE = `${W}x${L}`, H = 8;
+const W = 12, L = 16, SIZE = `${W}x${L}`, H = 8, PITCH = 0.4;
 const TRIM = "#b0a081", BODY = "#4a3327";
+const TAIL_WOOD = "#8b7355";   // D3_COLORS.bench — the raw 2x stock an open eave's tails are cut from
 
-const d3 = (overhang, overhangStyle) => ({
-  roof: { type: "gable", pitch: 0.4, ridgeOffset: 0, eave: "fascia", overhang, overhangStyle },
+// The slope, in the renderer's own terms: ny is the normal's vertical component (cos of the
+// pitch angle), SIN is how much height a foot measured ALONG the slope gives up.
+const NY = Math.cos(Math.atan(PITCH));
+const SIN = Math.sin(Math.atan(PITCH));
+const ROOF_T = 0.2, DECK_N = 0.02, SOFFIT_T = 0.05;
+
+const d3 = (overhang, overhangStyle, eave) => ({
+  roof: { type: "gable", pitch: PITCH, ridgeOffset: 0, eave, overhang, overhangStyle, tailSpacingIn: 24 },
   colors: { body: BODY, roof: "#8a8f94", trim: TRIM },
   siding: "panel", foundation: "slab", roofMaterial: "shingle", wallHeightFt: H,
 });
 const CLADS = ["panel"].map((id) => ({ id, rate: 0, basis: "sqft_option", label: null, charged: false }));
 const style = (value, label, spec) => ({ value, label, img: null, sizes: [SIZE], sizeInclusions: {}, sizeInclusionQty: {}, d3: spec });
 
-// Four variants: both framings at a 4 in tail and at a 12 in tail. The 4 in pair is the case
-// Carolyn says builders really do just extend; the 12 in pair is where the two diverge visibly.
-const VARIANTS = [
-  { tag: "ext-4in", label: "Extended 4in", ov: 4 / 12, st: "extended" },
-  { tag: "notch-4in", label: "Notched 4in", ov: 4 / 12, st: "notched" },
-  { tag: "ext-12in", label: "Extended 12in", ov: 1.0, st: "extended" },
-  { tag: "notch-12in", label: "Notched 12in", ov: 1.0, st: "notched" },
-];
+// Eight variants: both framings, at a 4 in tail and a 12 in tail, on both eave finishes. The
+// 4 in pair is the case Carolyn says builders really do just extend; the 12 in pair is where
+// the two diverge visibly; the OPEN pairs are the regression guard — they must not diverge at all.
+const VARIANTS = [];
+for (const eave of ["fascia", "open"]) {
+  for (const [ovTag, ov] of [["4in", 4 / 12], ["12in", 1.0]]) {
+    for (const st of ["extended", "notched"]) {
+      VARIANTS.push({ tag: `${eave}-${st}-${ovTag}`, label: `${eave} ${st} ${ovTag}`, ov, ovTag, st, eave });
+    }
+  }
+}
 
 export const CONFIG = {
   clientId: "harness-overhang",
   branding: { companyName: "Harness Sheds", accentColor: "#1D4ED8", headerBg: "#FFFFFF", tagline: null, logo: null },
   contactFields: ["name", "email", "phone"],
-  buildingStyles: VARIANTS.map((v) => style(v.tag, v.label, d3(v.ov, v.st))),
+  buildingStyles: VARIANTS.map((v) => style(v.tag, v.label, d3(v.ov, v.st, v.eave))),
   defaultSizes: [SIZE],
   sizePricing: Object.fromEntries(VARIANTS.map((v) => [v.tag, { [SIZE]: { widthFt: W, lengthFt: L, basePrice: 9000 } }])),
   options: [], colors: [], claddingOptions: Object.fromEntries(VARIANTS.map((v) => [v.tag, CLADS])), wallHeightOptions: {},
@@ -52,8 +81,9 @@ export const FIXTURES = {
 
 // The roof MESHES that matter, picked by shape rather than by name — nothing in the scene graph
 // is labelled. On a 12x16 gable the ridge runs along z (the 16 ft axis), so a roof slab is a long
-// box rotated about z, the fascia is the thin tall trim board at the outermost |x|, and a soffit
-// (notched only) is the thin FLAT trim board out there with it.
+// box rotated about z, the fascia is the thin tall trim board at the outermost |x|, a soffit
+// (notched only) is the thin FLAT trim board out there with it, and an open eave's rafter tails
+// are the raw-wood boxes.
 function eaveParts(meshes) {
   const roof = meshes.filter((m) => m.group === "roof" && m.geom === "BoxGeometry");
   const far = Math.max(...roof.map((m) => m.max[0]));
@@ -62,17 +92,26 @@ function eaveParts(meshes) {
   // ⚠️ The RAKE boards are trim too, and they run the WHOLE slope, so their bbox reaches the
   // eave as surely as the fascia does. Everything below is bounded in x for that reason.
   const trim = atEave.filter((m) => m.color === TRIM);
-  // The fascia is the tall, narrow trim board standing at the roof edge.
-  const tall = trim.filter((m) => m.max[1] - m.min[1] >= m.max[0] - m.min[0] && m.max[0] - m.min[0] < 0.5);
+  // The fascia is the tall, narrow trim board standing at the roof edge. ⚠️ BOUNDED ABOVE too:
+  // on an open eave there IS no fascia, and without a ceiling this filter reported the gable
+  // corner trim -- 0.14 wide and a full 8 ft tall, so "taller than it is wide" is true of it --
+  // as one, which reads as the 3D building a fascia it does not build. A fascia is at most a
+  // rafter deep.
+  const tall = trim.filter((m) => m.max[1] - m.min[1] >= m.max[0] - m.min[0]
+    && m.max[1] - m.min[1] < 1.0 && m.max[0] - m.min[0] < 0.5);
   // A soffit is a THIN, level board no longer than the overhang -- never a rake, which is 0.32 deep.
   const flat = trim.filter((m) => m.max[1] - m.min[1] < 0.12 && m.max[0] - m.min[0] < 2.5 && m.min[1] < 9);
-  // The roof deck: the big non-trim box whose x extent reaches the eave.
-  const slab = atEave.filter((m) => m.color !== TRIM).sort((a, b) => (b.max[2] - b.min[2]) - (a.max[2] - a.min[2]))[0] || null;
+  // The roof deck: the big non-trim box whose x extent reaches the eave (the ridge cap is the
+  // same length but lives at the ridge, so `atEave` has already dropped it).
+  const slab = atEave.filter((m) => m.color !== TRIM && m.color !== TAIL_WOOD)
+    .sort((a, b) => (b.max[2] - b.min[2]) - (a.max[2] - a.min[2]))[0] || null;
+  const tails = atEave.filter((m) => m.color === TAIL_WOOD);
   return {
     far,
     slab,
     fascia: tall.sort((a, b) => b.max[0] - a.max[0])[0] || null,
     soffit: flat.sort((a, b) => (b.max[0] - b.min[0]) - (a.max[0] - a.min[0]))[0] || null,
+    tails,
     trimCount: trim.length,
   };
 }
@@ -83,6 +122,8 @@ async function chooseSize(page) {
   await sel.first().selectOption({ label: SIZE });
   await page.waitForTimeout(500);
 }
+
+const f4 = (n) => (n === null ? "  (none)" : (n >= 0 ? " " : "") + n.toFixed(4));
 
 async function probe(v, ok, shots) {
   const { browser, ctx } = await launch({ width: 1280, height: 900 });
@@ -98,27 +139,50 @@ async function probe(v, ok, shots) {
     await openEditor(page);
     const meshes = await sceneMeshes(page);
     const p = eaveParts(meshes);
-    // The deck's top face, at the outermost eave and back at the ridge: two points that pin the
-    // plane. The slab is ONE rotated box, so its world bbox gives both corners directly.
+    // THE DECK'S OWN OUTER CORNERS. The slab is ONE rotated box that rises away from the eave,
+    // so its lowest bbox corner IS the deck's underside at the outer edge, and the top corner
+    // out there is one deck thickness further up the normal.
+    const deckUnder = p.slab ? p.slab.min[1] : null;
+    const deckTopOuter = deckUnder === null ? null : deckUnder + ROOF_T * NY;
+    // THE FINISH: the lowest point of whatever the renderer actually built out there. On a
+    // fascia eave that is the fascia board; on an open eave it is the rafter tails.
+    const finish = v.eave === "open"
+      ? (p.tails.length ? Math.min(...p.tails.map((t) => t.min[1])) : null)
+      : (p.fascia ? p.fascia.min[1] : null);
     const out = {
-      tag: v.tag, ov: v.ov, st: v.st,
+      tag: v.tag, ov: v.ov, ovTag: v.ovTag, st: v.st, eave: v.eave,
       deckOutX: p.slab ? p.slab.max[0] : null,
-      deckTopAtEave: p.slab ? p.slab.min[1] : null,   // low corner of the rotated slab = the eave end
-      deckTopAtRidge: p.slab ? p.slab.max[1] : null,
+      deckUnder, deckTopOuter,
+      deckLowY: p.slab ? p.slab.min[1] : null,
+      deckHighY: p.slab ? p.slab.max[1] : null,
+      finish,
       fascia: p.fascia ? { x: p.fascia.max[0], top: p.fascia.max[1], bottom: p.fascia.min[1], h: p.fascia.max[1] - p.fascia.min[1] } : null,
       soffit: p.soffit ? { fromX: p.soffit.min[0], toX: p.soffit.max[0], y: p.soffit.max[1] } : null,
+      tailCount: p.tails.length,
       trimCount: p.trimCount,
     };
-    console.log(`\n[${v.tag}] overhang ${(v.ov * 12).toFixed(0)} in, ${v.st}`);
-    console.log(`  deck outer face x      ${out.deckOutX.toFixed(4)}   (wall plate at x = ${(W / 2).toFixed(2)})`);
-    console.log(`  deck bbox y            ${out.deckTopAtEave.toFixed(4)} .. ${out.deckTopAtRidge.toFixed(4)}`);
-    console.log(`  fascia                 x ${out.fascia.x.toFixed(4)}  y ${out.fascia.bottom.toFixed(4)}..${out.fascia.top.toFixed(4)}  (${out.fascia.h.toFixed(4)} tall)`);
-    console.log(`  fascia bottom vs plate ${(out.fascia.bottom - H >= 0 ? "+" : "")}${(out.fascia.bottom - H).toFixed(4)} ft`);
-    console.log(`  soffit                 ${out.soffit ? `x ${out.soffit.fromX.toFixed(4)}..${out.soffit.toX.toFixed(4)} at y ${out.soffit.y.toFixed(4)}` : "(none)"}`);
+    console.log(`\n[${v.tag}] eave ${v.eave}, overhang ${(v.ov * 12).toFixed(0)} in, ${v.st}`);
+    console.log(`  deck outer face x        ${f4(out.deckOutX)}   (wall plate at x = ${(W / 2).toFixed(2)})`);
+    console.log(`  deck bbox y              ${f4(out.deckLowY)} .. ${f4(out.deckHighY)}`);
+    console.log(`  deck TOP corner vs plate ${f4(out.deckTopOuter - H)} ft   <- nothing hung here can finish above this`);
+    console.log(`  eave finish y            ${f4(out.finish)}`);
+    console.log(`  EAVE FINISH VS PLATE     ${f4(out.finish - H)} ft`);
+    console.log(`  below the deck underside ${f4(out.deckUnder - out.finish)} ft`);
+    console.log(`  fascia                   ${out.fascia ? `x ${f4(out.fascia.x)}  y ${f4(out.fascia.bottom)}..${f4(out.fascia.top)}  (${out.fascia.h.toFixed(4)} tall)` : "(none)"}`);
+    console.log(`  soffit                   ${out.soffit ? `x ${f4(out.soffit.fromX)}..${f4(out.soffit.toX)} at y ${f4(out.soffit.y)}` : "(none)"}`);
+    console.log(`  rafter tails             ${out.tailCount}`);
     await shot(page, `${shots}/${v.tag}.png`, { eye: [W / 2 + 9, H + 0.6, 4], at: [W / 2 - 0.5, H - 0.2, 0] });
-    ok(`[${v.tag}] the eave has a fascia`, !!out.fascia);
-    ok(`[${v.tag}] a soffit closes the underside iff the tail is notched`, !!out.soffit === (v.st === "notched"),
-      out.soffit ? "soffit present" : "no soffit");
+
+    if (v.eave === "open") {
+      ok(`[${v.tag}] an open eave builds rafter tails`, out.tailCount > 0, `${out.tailCount} tails`);
+      ok(`[${v.tag}] an open eave builds NO fascia`, !out.fascia);
+      ok(`[${v.tag}] an open eave builds NO soffit`, !out.soffit);
+    } else {
+      ok(`[${v.tag}] the eave has a fascia`, !!out.fascia);
+      ok(`[${v.tag}] a soffit closes the underside iff the tail is notched`, !!out.soffit === (v.st === "notched"),
+        out.soffit ? "soffit present" : "no soffit");
+      ok(`[${v.tag}] a fascia eave builds NO rafter tails`, out.tailCount === 0, `${out.tailCount} tails`);
+    }
     return out;
   } finally {
     await ctx.close(); await browser.close();
@@ -131,38 +195,79 @@ export async function main() {
   const got = {};
   for (const v of VARIANTS) got[v.tag] = await probe(v, ok, shots);
 
-  // THE CLAIM: the framing choice does not touch the deck. Same overhang, both framings — the
-  // slab's outer face and its whole y extent must be identical to the float.
-  for (const ov of ["4in", "12in"]) {
-    const e = got[`ext-${ov}`], n = got[`notch-${ov}`];
-    ok(`${ov}: the deck projects exactly as far either way`, Math.abs(e.deckOutX - n.deckOutX) < 1e-6,
-      `ext ${e.deckOutX.toFixed(6)} notched ${n.deckOutX.toFixed(6)}`);
-    ok(`${ov}: the deck's top plane is untouched by the framing`,
-      Math.abs(e.deckTopAtEave - n.deckTopAtEave) < 1e-6 && Math.abs(e.deckTopAtRidge - n.deckTopAtRidge) < 1e-6,
-      `ext ${e.deckTopAtEave.toFixed(6)}..${e.deckTopAtRidge.toFixed(6)} notched ${n.deckTopAtEave.toFixed(6)}..${n.deckTopAtRidge.toFixed(6)}`);
-    ok(`${ov}: a notched tail hangs LESS below the deck than an extended one`,
-      n.fascia.bottom > e.fascia.bottom + 0.05,
-      `ext bottom ${e.fascia.bottom.toFixed(4)} notched ${n.fascia.bottom.toFixed(4)} (plate ${H})`);
+  for (const eave of ["fascia", "open"]) {
+    for (const [ovTag, ov] of [["4in", 4 / 12], ["12in", 1.0]]) {
+      const e = got[`${eave}-extended-${ovTag}`], n = got[`${eave}-notched-${ovTag}`];
+
+      // ── CLAIM 1: THE FRAMING CHOICE DOES NOT TOUCH THE DECK ──────────────────────────────
+      ok(`${eave} ${ovTag}: the deck projects exactly as far either way`, Math.abs(e.deckOutX - n.deckOutX) < 1e-6,
+        `ext ${f4(e.deckOutX)} notched ${f4(n.deckOutX)}`);
+      ok(`${eave} ${ovTag}: the deck's top plane is untouched by the framing`,
+        Math.abs(e.deckLowY - n.deckLowY) < 1e-6 && Math.abs(e.deckHighY - n.deckHighY) < 1e-6,
+        `ext ${f4(e.deckLowY)}..${f4(e.deckHighY)} notched ${f4(n.deckLowY)}..${f4(n.deckHighY)}`);
+
+      if (eave === "open") {
+        // ── CLAIM 4: AN OPEN EAVE IS NOT A NOTCH'S BUSINESS ────────────────────────────────
+        // The regression that shipped once: OV_NOTCHED is DERIVED from overhang > 0.5 ft, so
+        // tying the tail dimensions to it re-cut the exposed tails of every shipped open-eave
+        // style — the Urban's signature look — with nobody touching a setting. Every measured
+        // number here has to be identical, not merely close.
+        ok(`open ${ovTag}: naming a framing changes NOTHING about an open eave`,
+          Math.abs(e.finish - n.finish) < 1e-6 && e.tailCount === n.tailCount && e.trimCount === n.trimCount,
+          `ext finish ${f4(e.finish)} (${e.tailCount} tails) notched ${f4(n.finish)} (${n.tailCount} tails)`);
+        // …and the tails hang where the building was measured: 3.5 in below the deck underside.
+        for (const g of [e, n]) {
+          // 3.5 in measured ALONG THE SLOPE NORMAL, which is how the renderer drops them
+          // (eaveY + ny * (DECK_N - TAIL_DROP)) -- so the VERTICAL gap is ny times that.
+          ok(`[${g.tag}] the tails hang the MEASURED 3.5 in below the deck`,
+            Math.abs((g.deckUnder - g.finish) - NY * (3.5 / 12)) < 2e-3,
+            `${f4(g.deckUnder - g.finish)} ft below the deck underside, expected ${f4(NY * (3.5 / 12))}`);
+        }
+        continue;
+      }
+
+      // ── CLAIM 2: A NOTCHED TAIL IS CUT BACK TO THE DECK ──────────────────────────────────
+      // Stated as a RELATION: the finish is the deck's own underside, less one soffit board,
+      // whatever the overhang. That is what "the underside is cut back" means, and it is why
+      // this is not a constant lifted off the extended case.
+      ok(`fascia ${ovTag}: a notched tail finishes ONE SOFFIT BOARD below the deck, nothing more`,
+        Math.abs((n.deckUnder - n.finish) - SOFFIT_T) < 2e-3,
+        `${f4(n.deckUnder - n.finish)} ft below the deck underside (soffit is ${SOFFIT_T})`);
+      ok(`fascia ${ovTag}: an extended tail still carries the full rafter below the deck`,
+        (e.deckUnder - e.finish) > 0.15,
+        `${f4(e.deckUnder - e.finish)} ft below the deck underside`);
+      ok(`fascia ${ovTag}: the soffit is hung ON the deck's underside`,
+        !!n.soffit && Math.abs(n.soffit.y - n.deckUnder) < 2e-3,
+        n.soffit ? `soffit top ${f4(n.soffit.y)} vs deck underside ${f4(n.deckUnder)}` : "no soffit");
+      ok(`fascia ${ovTag}: the soffit reaches the wall`, !!n.soffit && Math.abs(n.soffit.fromX - W / 2) < 2e-3,
+        n.soffit ? `soffit starts at x ${f4(n.soffit.fromX)}, wall at ${W / 2}` : "no soffit");
+
+      // ── CLAIM 3: WHAT IS LEFT BELOW THE PLATE IS THE ROOF'S OWN DESCENT, AND NOTHING ELSE ─
+      // The notch removes the framing depth from what hangs below the plate. What remains is
+      // arithmetic on the roof plane itself: the height the projection gives up to the slope,
+      // less the deck's own normal offset, plus the one soffit board. An identity, at both
+      // overhangs — so it cannot be satisfied by a number that happens to land right.
+      const predicted = ov * SIN - NY * DECK_N + SOFFIT_T;
+      ok(`fascia ${ovTag}: below the plate, a notched eave leaves ONLY the roof plane's own drop`,
+        Math.abs((H - n.finish) - predicted) < 3e-3,
+        `measured ${f4(H - n.finish)} ft, roof-plane arithmetic ${f4(predicted)} ft`);
+      // And the honest limit, asserted rather than left implied: NOTHING hung at this eave can
+      // finish above the deck's own outer top corner, which is already below the plate at 12 in.
+      ok(`fascia ${ovTag}: the finish is at or below the deck's own outer top corner`,
+        n.finish <= n.deckTopOuter + 1e-6 && e.finish <= e.deckTopOuter + 1e-6,
+        `notched ${f4(n.finish)} / extended ${f4(e.finish)} vs deck top ${f4(n.deckTopOuter)}`);
+    }
   }
-  // ⚠️ MEASURED, AND IT CORRECTS THE OBVIOUS GUESS. The first draft of this script asserted that
-  // an extended eave drops FURTHER as the overhang grows than a notched one does. It does not, and
-  // it cannot: both eaves ride the SAME deck plane, so the height the eave finish loses between a
-  // 4 in and a 12 in tail is the slope, and the slope is shared. What the notch removes is a
-  // CONSTANT — the rafter depth cut off the underside — so the two run parallel, offset by that one
-  // number at every overhang. Pinned as an equality, because drift in either direction would mean
-  // the framing had started moving the deck.
-  const dExt = got["ext-4in"].fascia.bottom - got["ext-12in"].fascia.bottom;
-  const dNot = got["notch-4in"].fascia.bottom - got["notch-12in"].fascia.bottom;
-  const gap4 = got["notch-4in"].fascia.bottom - got["ext-4in"].fascia.bottom;
-  const gap12 = got["notch-12in"].fascia.bottom - got["ext-12in"].fascia.bottom;
-  console.log(`\nhow much lower the eave finish sits when the overhang goes 4in -> 12in:`);
-  console.log(`  extended ${dExt.toFixed(4)} ft   notched ${dNot.toFixed(4)} ft   (the shared deck slope)`);
-  console.log(`how much the notch lifts the eave finish:`);
-  console.log(`  at 4in +${gap4.toFixed(4)} ft   at 12in +${gap12.toFixed(4)} ft   (constant: the rafter cut away)`);
-  ok("both framings lose the SAME height to the slope — the deck is shared", Math.abs(dExt - dNot) < 1e-6,
-    `extended ${dExt.toFixed(4)} vs notched ${dNot.toFixed(4)}`);
-  ok("the notch lifts the eave finish by a constant, whatever the overhang", Math.abs(gap4 - gap12) < 1e-6 && gap4 > 0.1,
-    `4in +${gap4.toFixed(4)} ft, 12in +${gap12.toFixed(4)} ft`);
+
+  // ── THE TABLE THE WRITE-UP QUOTES ──────────────────────────────────────────────────────
+  console.log(`\n  eave     framing    overhang   eave finish vs plate   deck TOP corner vs plate`);
+  for (const v of VARIANTS) {
+    const g = got[v.tag];
+    console.log(`  ${v.eave.padEnd(8)} ${v.st.padEnd(10)} ${v.ovTag.padEnd(10)} ${f4(g.finish - H)} ft            ${f4(g.deckTopOuter - H)} ft`);
+  }
+  console.log(`\n⚠️ Every row finishes BELOW the plate, and the right-hand column is why: the deck's own`);
+  console.log(`   outer corner is already under it. The notch removes the FRAMING depth from what hangs`);
+  console.log(`   below — it cannot lift the roof plane, which is where the remaining drop comes from.`);
 
   console.log(`\nshots in ${shots}`);
   if (failed().length) { console.error(`\n${failed().length} check(s) FAILED`); process.exit(1); }
