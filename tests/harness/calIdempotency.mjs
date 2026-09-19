@@ -175,18 +175,19 @@ async function main() {
   // Open a style and wait for ITS saved frames to be the ones on screen — by URL, not by count,
   // because both styles' laps are eight views long.
   //
-  // THEN CONFIRM THE WALL HEIGHT, because since 2026-09-19 Generate is also gated on the
+  // THEN CONFIRM ALL THREE MEASUREMENTS, because since 2026-09-19 Generate is also gated on the
   // dimensions card (tests/harness/calDims.mjs is what tests that gate). Both styles here have
-  // sizes of their own, so the width and the length pre-fill; the wall height pre-fills from
-  // C.wallHeightFt and has to be touched. One click, and this harness is back to measuring the
-  // one thing it is about — which key goes out with which press.
+  // sizes of their own, so all three boxes arrive pre-filled — the width and length off the
+  // price list, the wall height off the style's saved spec — and every pre-filled number has to
+  // be looked at before the money button unlocks. Three clicks, and this harness is back to
+  // measuring the one thing it is about: which key goes out with which press.
   const openStyle = async (label, key) => {
     await page.getByRole("button", { name: label, exact: true }).first().click();
     await page.waitForFunction((want) => {
       const got = Array.from(document.querySelectorAll('img[alt^="View "]')).map((i) => i.getAttribute("src"));
       return got.length === want.length && got.every((u, i) => u === want[i]);
     }, STYLES.find((s) => s.key === key).d3_video_frames, { timeout: 20000 });
-    await page.locator("input.ssc-dim-in").nth(2).click();
+    for (const i of [0, 1, 2]) await page.locator("input.ssc-dim-in").nth(i).click();
     await page.waitForTimeout(150);
     return genUnlocks();
   };

@@ -15619,7 +15619,22 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Up here with the other adminCal* state on purpose, and this is not filing: the last hook in
   // this component sits above a `calibrationOnly` early return, and a useState added down beside
   // its handlers is React #310 on the operator path. This file has shipped that.
-  const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, wallPrefilled: false, wallSeen: false, wallBlank: false });
+  //
+  // ⚠️ ALL THREE ARE PRE-FILLED, SO ALL THREE HAVE TO BE LOOKED AT. `wallSeen` shipped alone,
+  // on the reasoning two paragraphs up -- "a pre-filled 7 styled like a finished answer is the
+  // thing that gets generated with" -- and width and length are pre-filled by exactly the same
+  // move: openCalEditor seeds them from the median row of this style's price list. They are a
+  // plausible number for a building nobody has looked at, rendered in ordinary grey, and one
+  // tap on the wall height used to turn the badge green over all three. `sizePrefilled` is
+  // whether the seed happened at all (a style with no sizes leaves them blank, and a blank
+  // field asks for itself), and widthSeen/lengthSeen are the same finger-on-it test.
+  //
+  // `wallBad` is the out-of-band number the builder typed and we cannot store. It has to be
+  // REMEMBERED rather than dropped: calSetDim refused 25 by returning, which left the style's
+  // old 7 standing in the spec, the box repainting that 7 on blur, and the gate open -- because
+  // focusing the field had already marked it confirmed. The keystrokes that were thrown away
+  // were the ones that satisfied the confirmation.
+  const [adminCalDims, setAdminCalDims] = useState({ widthFt: "", lengthFt: "", overhangIn: null, sizePrefilled: false, widthSeen: false, lengthSeen: false, wallPrefilled: false, wallSeen: false, wallBlank: false, wallBad: "" });
   // ─── THE FREE SECOND PASS, AND THE BUILDER'S OWN LOOK AT IT (2026-09-19) ───────────────
   // `adminCalCheck` is the whole of it, from the moment Generate is pressed to the moment the
   // builder saves:
@@ -17889,9 +17904,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       widthFt: ownMid ? ownMid.w : "",
       lengthFt: ownMid ? ownMid.h : "",
       overhangIn: null,
+      // The seed is a PRICE LIST row, not a measurement, so it is marked as one. Blank fields
+      // need no flag: an empty box asks for itself.
+      sizePrefilled: Boolean(ownMid),
+      widthSeen: false,
+      lengthSeen: false,
       wallPrefilled: Number(spec.wallHeightFt) > 0,
       wallSeen: false,
       wallBlank: false,
+      wallBad: "",
     });
     setAdminCal({
       styleValue: s.value,
@@ -18281,8 +18302,20 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // 0 WHILE THE BOX IS BLANK, and the spec untouched underneath it (see calSetDim and
   // adminCalDims.wallBlank). The gate reads this, so a cleared wall height locks Generate the
   // way a cleared width does -- without a 0 ever reaching the spec that Save writes.
-  const calDimH = adminCalDims.wallBlank ? 0 : (Number(adminCal && adminCal.spec && adminCal.spec.wallHeightFt) || 0);
+  // AND THE OUT-OF-BAND NUMBER STAYS ON SCREEN, which is the whole of the fix. A 25 typed over
+  // a stored 7 is not storable (see calSetDim) but it IS what the builder believes, so it is
+  // what the box shows, what the band check fails on and what the gate refuses over -- exactly
+  // how the width behaves. Reverting to the 7 silently was the defect: the box agreed with the
+  // spec, the badge went green, and the generation went out measured against a number the
+  // builder had just tried to replace.
+  const calWallBad = adminCalDims.wallBad === "" || adminCalDims.wallBad == null ? null : Number(adminCalDims.wallBad);
+  const calDimH = adminCalDims.wallBlank ? 0
+    : calWallBad != null ? calWallBad
+      : (Number(adminCal && adminCal.spec && adminCal.spec.wallHeightFt) || 0);
   const calDimInBand = (key, n) => isFinite(n) && n > 0 && n >= CAL_DIM_BANDS[key][0] && n <= CAL_DIM_BANDS[key][1];
+  // "width", "width and length", "width, length and wall height" — one copy, because the gate
+  // line now has two lists to build and two hand-rolled joins would drift apart.
+  const calListWords = (xs) => (xs.length < 2 ? (xs[0] || "") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
   // Named in the order they are asked for, so the gate line reads like the card looks.
   const calDimsMissing = [
     calDimInBand("widthFt", calDimW) ? null : "width",
@@ -18298,9 +18331,26 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // a pre-filled 7 styled like a finished answer is the thing that gets generated with. The
   // `unconfirmed` version is the GATE's, and it waits until nothing else is missing so the line
   // under the button asks for one thing at a time rather than listing everything at once.
-  const calWallNeedsLook = Boolean(adminCal) && adminCalDims.wallPrefilled && !adminCalDims.wallSeen && calDimInBand("wallHeightFt", calDimH);
-  const calWallUnconfirmed = calWallNeedsLook && !calDimsMissing.length;
-  const calDimsReady = Boolean(adminCal) && !calDimsMissing.length && !calWallNeedsLook;
+  //
+  // ONE RULE, THREE FIELDS. Width and length are seeded from the style's price list and were
+  // neither marked nor gated, so a building nobody had measured could be generated against the
+  // median row of a catalog -- and the server states all three to the model as "KNOWN
+  // DIMENSIONS, MEASURED BY THE BUILDER ... facts, not estimates, and they are your ruler".
+  // Two thirds of that ruler was a price-list artefact. The seed stays (it saves typing and it
+  // is usually right); the green tick waits until each one has been looked at.
+  const calDimNeedsLook = (key, n, prefilled, seen) => Boolean(adminCal) && prefilled && !seen && calDimInBand(key, n);
+  const calWidthNeedsLook = calDimNeedsLook("widthFt", calDimW, adminCalDims.sizePrefilled, adminCalDims.widthSeen);
+  const calLengthNeedsLook = calDimNeedsLook("lengthFt", calDimL, adminCalDims.sizePrefilled, adminCalDims.lengthSeen);
+  const calWallNeedsLook = calDimNeedsLook("wallHeightFt", calDimH, adminCalDims.wallPrefilled, adminCalDims.wallSeen);
+  // Named in the order the card asks for them, same as calDimsMissing, so the gate line reads
+  // like the card looks.
+  const calDimsUnlooked = [
+    calWidthNeedsLook ? "width" : null,
+    calLengthNeedsLook ? "length" : null,
+    calWallNeedsLook ? "wall height" : null,
+  ].filter(Boolean);
+  const calWallUnconfirmed = calDimsUnlooked.length > 0 && !calDimsMissing.length;
+  const calDimsReady = Boolean(adminCal) && !calDimsMissing.length && !calDimsUnlooked.length;
   // WARN, NEVER REFUSE (brief S2-D). Every one of these is usually a typo and is sometimes the
   // building: a builder calibrating against a real shed on their own lot may well have filmed a
   // size their catalog does not sell yet, and refusing that would be refusing the truth.
@@ -18343,12 +18393,23 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // height (ft)" field below renders that 8 as though it were the value. A measured 9 would
       // be gone with nothing on screen saying so.
       //
-      // So a blank is recorded in this card (wallBlank) and an out-of-band number is refused
-      // outright. Both leave the last storable value standing, and both leave the gate refusing
-      // -- which is what a required field that has not been answered is supposed to do.
-      if (v === "") { setAdminCalDims((p) => (p.wallBlank ? p : { ...p, wallBlank: true })); return; }
-      if (!calDimInBand("wallHeightFt", Number(v))) return;
-      setAdminCalDims((p) => (p.wallBlank ? { ...p, wallBlank: false } : p));
+      // So a blank is recorded in this card (wallBlank) and an out-of-band number is recorded
+      // too (wallBad). Both leave the last storable value standing in the SPEC, and both leave
+      // the gate refusing -- which is what a required field that has not been answered is
+      // supposed to do.
+      //
+      // ⚠️ RECORDED, NOT DISCARDED. `if (!inBand) return;` was a silent no-op: with a stored
+      // wall underneath it the spec never moved, calDimH kept reading the old number, the box
+      // repainted it on blur and the gate OPENED -- because focusing the field is the
+      // confirmation, so the very keystrokes that were thrown away marked the old value as
+      // checked. The generation then went out measured against the number the builder was
+      // trying to replace, under a green tick, with nothing on screen to say so. The server
+      // would have refused the same value by name ("A wall height of 25 feet does not look
+      // right - it has to be between 3 and 20"), and that sentence was unreachable through
+      // this box. Now the typed number stays on screen and the card says the band.
+      if (v === "") { setAdminCalDims((p) => (p.wallBlank && p.wallBad === "" ? p : { ...p, wallBlank: true, wallBad: "" })); return; }
+      if (!calDimInBand("wallHeightFt", Number(v))) { setAdminCalDims((p) => ({ ...p, wallBlank: false, wallBad: v })); return; }
+      setAdminCalDims((p) => (p.wallBlank || p.wallBad !== "" ? { ...p, wallBlank: false, wallBad: "" } : p));
       calSet({ wallHeightFt: v });
       return;
     }
@@ -18364,7 +18425,10 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     return {
       ...base,
       onFocus: (e) => {
-        if (key === "wallHeightFt") setAdminCalDims((p) => (p.wallSeen ? p : { ...p, wallSeen: true }));
+        // One flag per field, because one finger on the wall height says nothing about the two
+        // numbers above it.
+        const flag = key === "wallHeightFt" ? "wallSeen" : key === "widthFt" ? "widthSeen" : "lengthSeen";
+        setAdminCalDims((p) => (p[flag] ? p : { ...p, [flag]: true }));
         base.onFocus(e);
       },
       onBlur: (e) => { if (e.target.value === "") calSetDim(key, ""); base.onBlur(e); },
@@ -18469,8 +18533,15 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       : `${calPhotosWithWalk} of your ${calPhotoCount} images will be read alongside it, since the walk-around keeps at least ${CAL_VIDEO_MIN} of the ${CAL_PHOTO_MAX} views.`}`
     // VIDEO FIRST, THEN THE SIZE. Both are required, and a builder with neither should be sent
     // to film before they are sent to measure: the video is the long errand.
-    : calDimsMissing.length ? `Type the building's ${calDimsMissing.length === 1 ? calDimsMissing[0] : `${calDimsMissing.slice(0, -1).join(", ")} and ${calDimsMissing[calDimsMissing.length - 1]}`} in step 2 — the video cannot show us how big it is, and everything else is measured against those numbers.`
-    : calWallUnconfirmed ? "Check the wall height in step 2. We filled it in from this style's own settings, and it is the number a video gets wrong most often — tap it to confirm it matches the building you filmed."
+    // THE BAND, IN THE SAME WORDS THE SERVER USES. parseKnownDims refuses 3..20 by name, and
+    // that sentence could never be reached through this box because the box refused first and
+    // said nothing. Ahead of calDimsMissing, which would otherwise call a typed 25 a missing
+    // wall height.
+    : calWallBad != null ? `A wall height of ${calWallBad} ft does not look right — it has to be between ${CAL_DIM_BANDS.wallHeightFt[0]} and ${CAL_DIM_BANDS.wallHeightFt[1]} feet. Check what you typed in step 2.`
+    : calDimsMissing.length ? `Type the building's ${calListWords(calDimsMissing)} in step 2 — the video cannot show us how big it is, and everything else is measured against those numbers.`
+    : calWallUnconfirmed ? (calDimsUnlooked.length === 1 && calWallNeedsLook
+      ? "Check the wall height in step 2. We filled it in from this style's own settings, and it is the number a video gets wrong most often — tap it to confirm it matches the building you filmed."
+      : `Check the ${calListWords(calDimsUnlooked)} in step 2 — we filled ${calDimsUnlooked.length === 1 ? "it" : "them"} in from this style's price list and its saved 3D, not from the building you filmed. Tap ${calDimsUnlooked.length === 1 ? "it" : "each one"} to confirm.`)
     : (calGenerateReady && calGenerateReady.urls.length > calGenerateReady.videoCount)
       ? `Ready — one generation, reading ${calGenerateReady.urls.length} views: ${calGenerateReady.videoCount} from the walk-around and ${calGenerateReady.urls.length - calGenerateReady.videoCount} of your photos, measured against your ${calDimW} × ${calDimL} ft.`
     : `Ready — one generation, reading the ${calGenerateReady ? calGenerateReady.urls.length : calVideoFrames.length} walk-around views, measured against your ${calDimW} × ${calDimL} ft. Photos in step 3 are optional.`;
@@ -18734,7 +18805,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // A DRAFT LANDED, so this intent is finished and the money for it is spent. The next press
       // is a different generation and has to mint its own key - reusing this one would refuse it.
       calIdemRef.current = null;
-      applyDraftedShape(res.d3);
+      // ⚠️ A SERVER THAT NEVER HEARD OF `dims` MUST NOT THROW AWAY THE MEASUREMENT IT IGNORED.
+      // The two halves of this feature ship by different mechanisms -- the browser bundle goes
+      // out on a push to beta (Workers Builds, about two minutes), the edge function on a
+      // separate manual deploy -- so there is a real window in which the new bundle sends
+      // `dims` to a portal-settings that has no parseKnownDims. In that window the prompt still
+      // asks for a wall height, the reply still carries the model's guess, and calShapeMerged's
+      // `(d3 && d3.wallHeightFt) || spec.wallHeightFt` puts that guess over the number the
+      // builder was just required to type and confirm. The step-2 box reads the same slice, so
+      // it flips to the model's number too; wallSeen is already true, so nothing turns amber
+      // and Save writes the guess into building_styles.d3, which is what production renders
+      // from. A two-minute window leaves a permanently wrong wall height behind it.
+      //
+      // The echo is what tells us, and it is the only thing that can: an older function returns
+      // no `dims`. Deploy the edge function first (the brief's stage 4 before stage 5) and this
+      // never fires -- it is the belt for a rollback, a failed deploy, or a stage taken out of
+      // order.
+      const echoedDims = Boolean(res && res.dims && res.dims.widthFt);
+      const draftD3 = echoedDims ? res.d3 : { ...((res && res.d3) || {}), wallHeightFt: dims.wallHeightFt };
+      applyDraftedShape(draftD3);
       // THE SERVER SAYS WHAT IT READ. This used to guess from a local constant that had to be
       // kept in step with the edge function by hand, and a count that drifts is worse than no
       // count — it reports a truncation that did not happen, or hides one that did.
@@ -18752,9 +18841,11 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // that proves the numbers reached the model rather than merely sitting in a form: an
       // older function that has never heard of dims echoes nothing and this clause disappears,
       // which is exactly the news a builder would want at that moment.
-      const ruler = (res && res.dims && res.dims.widthFt)
+      const ruler = echoedDims
         ? ` Measured against your ${res.dims.widthFt} × ${res.dims.lengthFt} ft with ${res.dims.wallHeightFt} ft walls.`
-        : "";
+        // SAID OUT LOUD, because the builder typed three numbers and two of them were not used.
+        // Silence here reads as "measured", which is the one thing it was not.
+        : ` Your measurements did not reach this server, so the shape was read from the video alone — we have kept your ${dims.wallHeightFt} ft wall height rather than the model's guess.`;
       setAdminCalMsg({
         ok: true,
         msg: `Read ${used} view${used === 1 ? "" : "s"}`
@@ -18770,7 +18861,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // It cannot throw — see calRunSelfCheck's header — so the draft above is already safe
       // whatever happens inside it, and this needs no try of its own.
       if (setup3d.onSelfCheck) {
-        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, res.d3), dims);
+        await calRunSelfCheck(res, urls, calShapeMerged(calPreGenRef.current || adminCal.spec, draftD3), dims);
       } else {
         // An older host with no check capability. The draft is exactly what it always was.
         setAdminCalCheck((p) => ({ ...(p || {}), step: "done", verdict: "skipped", reason: "unsupported", pairs: [] }));
@@ -20734,17 +20825,34 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                     : null}
                 </p>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 8 }}>
+                  {/* ⚠️ AMBER UNTIL IT HAS BEEN LOOKED AT, exactly like the wall height below and
+                      for exactly the same reason. These two are pre-filled from the MEDIAN ROW
+                      OF THE PRICE LIST, which is a number about what this style sells and not
+                      about the building in the video -- and the server states all three to the
+                      model as measurements the builder took. Grey on white read as a finished
+                      answer, and one tap on the wall height turned the badge green over all
+                      three. The seed stays; the tick waits. */}
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Width (ft) — the gable end
                     {/* fontSize dropped from S.sel on purpose: an inline size beats the class, and
                         the class is what carries the 16px that stops iOS zooming on every tap. */}
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 12"
                       {...calDimProps("widthFt", adminCalDims.widthFt)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: calDimInBand("widthFt", calDimW) ? "#CBD5E1" : "#F59E0B" }} />
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWidthNeedsLook || !calDimInBand("widthFt", calDimW)) ? "#F59E0B" : "#CBD5E1", background: calWidthNeedsLook ? "#FFFBEB" : "#FFF" }} />
+                    {calWidthNeedsLook && (
+                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: "#B45309" }}>
+                        From your price list — tap to confirm it matches what you filmed.
+                      </span>
+                    )}
                   </label>
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Length (ft) — down the side
                     <input className="ssc-dim-in" type="number" step="0.5" min="4" inputMode="decimal" placeholder="e.g. 24"
                       {...calDimProps("lengthFt", adminCalDims.lengthFt)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: calDimInBand("lengthFt", calDimL) ? "#CBD5E1" : "#F59E0B" }} />
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calLengthNeedsLook || !calDimInBand("lengthFt", calDimL)) ? "#F59E0B" : "#CBD5E1", background: calLengthNeedsLook ? "#FFFBEB" : "#FFF" }} />
+                    {calLengthNeedsLook && (
+                      <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: "#B45309" }}>
+                        From your price list — tap to confirm it matches what you filmed.
+                      </span>
+                    )}
                   </label>
                   {/* THE SAME SLICE AS THE "Wall height (ft)" FIELD FURTHER DOWN, said out loud
                       right under the box so nobody edits one and wonders why the other moved.
@@ -20756,11 +20864,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   <label style={{ fontSize: 11, color: "#92400E", fontWeight: 700 }}>Wall height at the eave (ft)
                     <input className="ssc-dim-in" type="number" step="0.5" min="3" inputMode="decimal" placeholder="e.g. 9"
                       {...calDimProps("wallHeightFt", calDimH)}
-                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: calWallNeedsLook ? "#FFFBEB" : "#FFF" }} />
-                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: calWallNeedsLook ? "#B45309" : "#94A3B8" }}>
-                      {calWallNeedsLook
-                        ? "From this style's settings — tap to confirm it matches what you filmed."
-                        : "The same wall height as the field further down."}
+                      style={{ ...S.sel, fontSize: undefined, width: "100%", boxSizing: "border-box", borderColor: (calWallNeedsLook || !calDimInBand("wallHeightFt", calDimH)) ? "#F59E0B" : "#CBD5E1", background: (calWallNeedsLook || calWallBad != null) ? "#FFFBEB" : "#FFF" }} />
+                    <span style={{ display: "block", marginTop: 2, fontSize: 10.5, fontWeight: 600, color: (calWallNeedsLook || calWallBad != null) ? "#B45309" : "#94A3B8" }}>
+                      {calWallBad != null
+                        ? `We can only store a wall between ${CAL_DIM_BANDS.wallHeightFt[0]} and ${CAL_DIM_BANDS.wallHeightFt[1]} ft, so this one is not saved yet.`
+                        : calWallNeedsLook
+                          ? "From this style's settings — tap to confirm it matches what you filmed."
+                          : "The same wall height as the field further down."}
                     </span>
                   </label>
                 </div>

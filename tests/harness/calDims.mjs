@@ -88,6 +88,12 @@ const generateCalls = [];
 // Every save_style_d3 body, so the one assertion that cannot be made anywhere else — what this
 // card writes into building_styles.d3 — is made against the wire rather than against the screen.
 const saveCalls = [];
+// ⚠️ THE DEPLOY WINDOW, AS A SWITCH. The browser bundle reaches beta on a push (Workers Builds,
+// about two minutes) and portal-settings is deployed by hand, so there is a real window in which
+// the new bundle talks to a function that has never heard of `dims`. Flipped to false below,
+// this stub IS that function: it ignores the field, answers with the model's own wall height and
+// echoes nothing back.
+let edgeEchoesDims = true;
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
@@ -149,12 +155,14 @@ async function main() {
         // sanitiser, and `dims` is echoed back AS USED. Echoing a model-invented 7.5 here instead
         // would be a stub that disagrees with the function it stands in for, and the "one slice,
         // two views" assertion below would be measuring the stub.
-        const dims = body.dims || null;
+        const dims = edgeEchoesDims ? (body.dims || null) : null;
         return json(route, {
           ok: true,
           d3: {
             roof: { type: "gambrel", pitch: 0.5, overhang: dims && dims.overhangIn != null ? dims.overhangIn / 12 : 0.8 },
-            wallHeightFt: dims ? dims.wallHeightFt : 7.5,
+            // 7 is not a random stand-in: it is what the model answered in 74 % of every
+            // recorded generation, on buildings measuring 9.
+            wallHeightFt: dims ? dims.wallHeightFt : 7,
             siding: null, colors: { body: "#00ff00" },
           },
           frames: (body.photoUrls || []).length, dropped: 0,
@@ -194,6 +202,10 @@ async function main() {
   const dimIn = page.locator("input.ssc-dim-in");
   const widthIn = dimIn.nth(0), lengthIn = dimIn.nth(1), wallIn = dimIn.nth(2);
   const gen = page.getByRole("button", { name: /Generate the 3D model/ });
+  // Amber is the card's one visual claim: "this number is not a measurement yet". Read off the
+  // computed style rather than the source, so a border set somewhere else still counts.
+  const AMBER = "rgb(245, 158, 11)";
+  const borderOf = (loc) => loc.evaluate((el) => getComputedStyle(el).borderTopColor);
 
   const genEnabled = () => page.evaluate(() => {
     const b = Array.from(document.querySelectorAll("button")).find((x) => /Generate the 3D model/.test(x.textContent || ""));
@@ -243,15 +255,29 @@ async function main() {
   r.ok("the wall height pre-fills from the style's saved spec", (await wallIn.inputValue()) === "7", await wallIn.inputValue());
 
   await shotCard("01-required-wall-unconfirmed");
-  r.ok("A PRE-FILLED WALL HEIGHT KEEPS GENERATE LOCKED", (await genEnabled()) === false);
-  r.ok("and the line underneath says to check it, not that something is missing",
-    /Check the wall height/.test(await whyLine()), (await whyLine()).slice(0, 90));
+  r.ok("PRE-FILLED NUMBERS KEEP GENERATE LOCKED", (await genEnabled()) === false);
+  // ⚠️ ALL THREE, NOT JUST THE WALL. Width and length are seeded from the median row of this
+  // style's PRICE LIST, and the server states all three to the model as measurements the
+  // builder took. Until 2026-09-19 they were grey, unmarked and outside the gate, so one tap on
+  // the wall height turned the badge green over two numbers nobody had looked at.
+  r.ok("and the line names all three, not just the wall height",
+    /Check the width, length and wall height/.test(await whyLine()), (await whyLine()).slice(0, 140));
+  r.ok("the width is amber while it is still the price list's number", (await borderOf(widthIn)) === AMBER, await borderOf(widthIn));
+  r.ok("and so is the length", (await borderOf(lengthIn)) === AMBER, await borderOf(lengthIn));
+  r.ok("and the card says where those two came from",
+    (await page.evaluate(() => document.body.innerText)).includes("From your price list"));
 
   // TOUCHING IS THE CONFIRMATION. No tick box in front of the money button — a checkbox gets
   // ticked, not read, and this is an act the builder would perform anyway if the number were wrong.
   await wallIn.click();
   await page.waitForTimeout(150);
-  r.ok("touching it unlocks the button", (await genEnabled()) === true, await whyLine());
+  r.ok("⚠️ ONE TAP ON THE WALL DOES NOT CONFIRM THE SIZE", (await genEnabled()) === false, await whyLine());
+  r.ok("and the line drops to the two that are left", /Check the width and length/.test(await whyLine()), (await whyLine()).slice(0, 140));
+  await widthIn.click();
+  await lengthIn.click();
+  await page.waitForTimeout(150);
+  r.ok("touching all three unlocks the button", (await genEnabled()) === true, await whyLine());
+  r.ok("and the width stops being amber once it has been looked at", (await borderOf(widthIn)) !== AMBER, await borderOf(widthIn));
   await shotCard("02-confirmed-and-ready");
   r.ok("and the ready line names the size it will measure against",
     /measured against your 16 × 24 ft/.test(await whyLine()), (await whyLine()).slice(0, 120));
@@ -392,7 +418,63 @@ async function main() {
   await setDim(wallIn, 9);
   r.ok("and typing a storable number puts the card back in business", (await genEnabled()) === true, await whyLine());
 
-  // ── 10: nothing slipped through ───────────────────────────────────────────────────────────
+  // ── 10: AN OUT-OF-BAND WALL HEIGHT IS REFUSED ON SCREEN, NOT IN SILENCE ─────────────────
+  // The regression, end to end: calSetDim refused an out-of-band number by RETURNING. With a
+  // stored wall underneath it the spec never moved, calDimH kept reading the old value, the box
+  // repainted it on blur -- and the gate OPENED, because focusing the field is the
+  // confirmation, so the keystrokes that were thrown away were the ones that marked the old
+  // number as checked. A generation then went out measured against the number the builder was
+  // trying to replace, under a green "✓ 16 × 24 ft, 7 ft walls", with nothing on screen saying
+  // anything had been refused. The width has always behaved correctly here; this is the wall
+  // height catching up with it.
+  const nGen = generateCalls.length;
+  await setDim(wallIn, 25);
+  r.ok("the number the builder typed stays on screen", (await wallIn.inputValue()) === "25", await wallIn.inputValue());
+  r.ok("⚠️ AND IT LOCKS GENERATE — a refused keystroke cannot confirm the old value",
+    (await genEnabled()) === false, await whyLine());
+  r.ok("the line names the band, in the words the server would have used",
+    /between 3 and 20/.test(await whyLine()), (await whyLine()).slice(0, 140));
+  r.ok("the wall box is amber", (await borderOf(wallIn)) === AMBER, await borderOf(wallIn));
+  r.ok("and the card is NOT showing a green tick over it",
+    !(await page.evaluate(() => document.body.innerText)).includes("ft walls"),
+    (await page.evaluate(() => (document.querySelector('[data-ssc-card="dims"]') || {}).innerText || "")).slice(0, 80));
+  await shotCard("05-wall-out-of-band");
+  r.ok("nothing was generated while it was refused", generateCalls.length === nGen, `${generateCalls.length - nGen} calls`);
+  await setDim(wallIn, 9);
+  r.ok("a storable number clears the refusal", (await genEnabled()) === true, await whyLine());
+  const a8 = await press("press 8 (after an out-of-band wall)");
+  r.ok("and the wire carries the corrected number, never the refused one",
+    Boolean(a8) && a8.dims.wallHeightFt === 9, JSON.stringify(a8 && a8.dims));
+
+  // ── 11: AN OLDER SERVER IGNORES THE MEASUREMENTS; IT MUST NOT DESTROY THEM ─────────────
+  // In the deploy window the prompt still asks for a wall height, the reply still carries the
+  // model's guess, and calShapeMerged's `(d3 && d3.wallHeightFt) || spec.wallHeightFt` put that
+  // guess over the number the builder had just been required to type and confirm. The step-2
+  // box reads the same slice, so it flipped to the model's number too; wallSeen was already
+  // true, so nothing turned amber, and Save wrote the guess into building_styles.d3 -- the
+  // table production renders from. A two-minute window left a permanently wrong wall behind it.
+  edgeEchoesDims = false;
+  await openStyle("Barn", "barn");
+  await setDim(widthIn, 16);
+  await setDim(lengthIn, 24);
+  await setDim(wallIn, 9);
+  const a9 = await press("press 9 (a server that has not been updated)");
+  r.ok("the browser sends the measurements anyway", Boolean(a9) && a9.dims && a9.dims.wallHeightFt === 9, JSON.stringify(a9 && a9.dims));
+  r.ok("⚠️ AND THE TYPED WALL HEIGHT SURVIVES THE MODEL'S GUESS", (await wallIn.inputValue()) === "9", await wallIn.inputValue());
+  r.ok("the field further down agrees with it", (await lowerWall.inputValue()) === "9", await lowerWall.inputValue());
+  const oldServerText = await page.evaluate(() => document.body.innerText);
+  r.ok("and the panel says the measurements did not reach the server",
+    /measurements did not reach this server/.test(oldServerText));
+  r.ok("without claiming a ruler it never had", !/Measured against your 16 × 24 ft with/.test(oldServerText));
+  const nSaves3 = saveCalls.length;
+  await page.getByRole("button", { name: /^Save 3D look$/ }).first().click();
+  for (let i = 0; i < 100 && saveCalls.length === nSaves3; i++) await page.waitForTimeout(100);
+  const sv3 = saveCalls[nSaves3] || null;
+  r.ok("⚠️ AND SAVE WRITES THE MEASUREMENT, NOT THE GUESS", Boolean(sv3) && sv3.d3 && sv3.d3.wallHeightFt === 9,
+    JSON.stringify(sv3 && sv3.d3 && sv3.d3.wallHeightFt));
+  edgeEchoesDims = true;
+
+  // ── 12: nothing slipped through ───────────────────────────────────────────────────────────
   const missing = generateCalls.filter((c) => !c.dims || !(c.dims.widthFt > 0) || !(c.dims.lengthFt > 0) || !(c.dims.wallHeightFt > 0)).length;
   r.ok("EVERY generation on the wire carried a complete set of dims", missing === 0, `${missing} of ${generateCalls.length} without`);
   r.ok("every generation still carried its idempotency key", generateCalls.filter((c) => !c.idempotencyKey).length === 0);
