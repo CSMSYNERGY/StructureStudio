@@ -14055,6 +14055,10 @@ const SS_SLOW_MS = 90000;
 // How far one arrow key turns a compare render. 15° is small enough to land on a frame's own
 // angle and big enough that a builder is not pressing it forty times.
 const SS_SPIN_STEP_DEG = 15;
+// How long a hand edit has to settle before the compare pairs are re-shot. The gambrel sliders
+// fire on every pixel of a drag and each render opens its own off-screen WebGL context, so this
+// is what turns a drag into one re-shoot instead of eighty.
+const SS_RESHOOT_MS = 400;
 // The four questions, in the order they are asked, and they are not generic reassurance: they
 // are the measured failure list. Roof shape (the 09-16 gambrel that drew as a gable), porch
 // (`porchOutFt` returned 0 times in 19 recorded generations), wall height (7 in 74 % of them,
@@ -14122,6 +14126,20 @@ function ssFtInWords(ft) {
   const m = /^(-?\d+)' (\d+)"$/.exec(s || "");
   if (!m) return s;
   return m[2] === "0" ? `${m[1]} ft` : `${m[1]} ft ${m[2]} in`;
+}
+
+// The part of a spec a compare render can actually show, as one string. Used to decide whether
+// the pictures under "Does this match your building?" are still of the building on screen: a
+// fix panel writes a brand-new spec object on every keystroke, so keying that decision on the
+// object itself would re-render the whole set per character. Deliberately includes the colours
+// -- the shots are drawn in the draft's own colours, and "are the colours right?" is one of the
+// four questions.
+function ssShotSig(spec) {
+  if (!spec) return "";
+  return JSON.stringify([
+    spec.roof || null, spec.wallHeightFt ?? null, spec.siding ?? null, spec.colors || null,
+    spec.foundation ?? null, spec.roofMaterial ?? null, spec.gableVent ?? null,
+  ]);
 }
 
 // The roof, in feet, for the confirm step. The prompt keeps asking for ratios because the
@@ -18512,7 +18530,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
     const params = calShotParams(draftSpec, dims);
     const shots = await calShootWithin(params, res.frameMap);
     if (!mine()) return;
-    calShotRef.current = { params, frameMap: res.frameMap };
+    calShotRef.current = { params, frameMap: res.frameMap, sig: ssShotSig(params.style3d) };
     // The pairs exist whatever happens to the CHECK: a builder who can see their own frame
     // beside our 3D can answer the four questions without any help from a second model call.
     const pairs = (shots || []).map((s) => ({
@@ -18567,7 +18585,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       const p2 = calShotParams(after, dims);
       const reshot = await calShootWithin(p2, res.frameMap);
       if (!mine() || !reshot) return;
-      calShotRef.current = { params: p2, frameMap: res.frameMap };
+      calShotRef.current = { params: p2, frameMap: res.frameMap, sig: ssShotSig(p2.style3d) };
       setAdminCalCheck((p) => ({
         ...(p || {}),
         pairs: (p && p.pairs ? p.pairs : []).map((pair) => {
@@ -18587,6 +18605,13 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // It re-renders rather than interpolating: there is nothing to interpolate between. One
   // model build and one encode, kicked per COMMITTED gesture (pointer up, or a key press),
   // never per pointermove.
+  // ⚠️ THE BUILDING AS IT STANDS NOW, not as it stood when the pictures were taken.
+  // calShotParams captures `style3d` BY VALUE, and every fix panel writes adminCal.spec -- a
+  // different object. A builder who answered "No" and switched the roof to a shed watched the
+  // sentence, the elevation and the docked 3D all change while the compare pairs stayed
+  // gambrels, and turning one re-rendered the OLD building at a new angle: the strongest
+  // possible signal that their correction did not take.
+  const calLiveShotParams = (held) => (adminCal && adminCal.spec ? { ...held, style3d: adminCal.spec } : held);
   const calSpinPair = async (viewpoint, nextDeg) => {
     const held = calShotRef.current;
     const pair = adminCalCheck && (adminCalCheck.pairs || []).find((p) => p.viewpoint === viewpoint);
@@ -18610,7 +18635,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
         // finds, so handing it `held.frameMap` here would re-render all three pairs to
         // update the one that moved — three encodes at 95-300 ms each, on every drag, to
         // throw two of them away. The other pairs are already on screen and have not moved.
-        const shots = await calShootWithin(held.params, {
+        const shots = await calShootWithin(calLiveShotParams(held.params), {
           [viewpoint]: { frame: pair.frame, azimuthDeg: ((pair.azimuthDeg + want) % 360 + 360) % 360 },
         });
         if (calRunRef.current !== run) return;
@@ -19110,6 +19135,58 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   const calSaveWhy = calChecksAnswered < SS_CHECKS.length
     ? `Answer all four questions first. ${calChecksAnswered} of ${SS_CHECKS.length} answered.`
     : `This replaces what your customers see in 3D for ${(C.buildingStyles.find((s) => adminCal && s.value === adminCal.styleValue) || {}).label || "this style"}. You can change it again any time.`;
+  // ⚠️ THE PAIRS FOLLOW THE BUILDER'S OWN CORRECTIONS. Without this the compare step was
+  // frozen at the drafted shape for the whole of the confirm step: the sentence above followed
+  // an edit, the elevation followed it and the docked 3D followed it, while the three pictures
+  // the builder is actually being asked to judge did not. That is the one place on this panel
+  // where a stale picture is not cosmetic -- every "No" opens a fix panel, so every hand
+  // correction was guaranteed to leave them comparing against a building they had replaced.
+  //
+  // DEBOUNCED, and one pass re-shoots every pair off one model build. This is what
+  // calRunSelfCheck already does after a server correction; this is the same thing on a hand
+  // edit. Keyed on a signature rather than on the spec object, because calSet returns a new one
+  // per keystroke, and the ref carries the signature of the building it holds pictures of so a
+  // pass that has just been taken does not immediately re-take itself.
+  //
+  // THE HAND-TURNED ANGLE SURVIVES. A builder who dragged a pair round to face their own frame
+  // and then fixed the roof must not watch it snap back to the angle the labels chose.
+  //
+  // Placed here rather than up with the other adminCal* hooks because it closes over
+  // calShootWithin and calLiveShotParams, which are declared above it. It is unconditional and
+  // sits far above this component's one early return (calibrationOnly), so hook order is fixed
+  // whichever way the panel renders.
+  const calShotSig = calPairs.length ? ssShotSig(adminCal && adminCal.spec) : "";
+  useEffect(() => {
+    const held = calShotRef.current;
+    if (!calShotSig || !held || held.sig === calShotSig) return undefined;
+    const run = calRunRef.current;
+    let live = true;
+    const t = setTimeout(async () => {
+      const params = calLiveShotParams(held.params);
+      // Aimed where the builder left it, not where the labels put it.
+      const aimed = {};
+      for (const vp of Object.keys(held.frameMap || {})) {
+        const e = held.frameMap[vp];
+        const turn = calSpinReqRef.current[vp] || 0;
+        aimed[vp] = turn ? { ...e, azimuthDeg: ((Number(e.azimuthDeg) + turn) % 360 + 360) % 360 } : e;
+      }
+      const shots = await calShootWithin(params, aimed);
+      if (!live || calRunRef.current !== run) return;
+      // A device that could not re-render keeps the pictures it has rather than being left with
+      // none. They are of the shape before the edit, which is wrong — but the docked 3D and the
+      // elevation beside them both follow the edit, so there is still something true on screen.
+      if (!shots || !shots.length) return;
+      calShotRef.current = { params, frameMap: held.frameMap, sig: calShotSig };
+      setAdminCalCheck((p) => (p ? {
+        ...p,
+        pairs: (p.pairs || []).map((pair) => {
+          const s = shots.find((x) => x.viewpoint === pair.viewpoint);
+          return s ? { ...pair, shotUrl: s.url } : pair;
+        }),
+      } : p));
+    }, SS_RESHOOT_MS);
+    return () => { live = false; clearTimeout(t); };
+  }, [calShotSig]);
   // ── THE FIX PANELS ──────────────────────────────────────────────────────────────────────
   // Everything a builder can change here is stated as a thing on a building, never as a field
   // name, and the panel opens INSIDE the row of the question it answers. "No" must never be a

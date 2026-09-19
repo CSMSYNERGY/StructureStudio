@@ -17,8 +17,8 @@
 //    4. the pairs pair the frame the model named with the render of that view
 //    5. ⚠️ THE CORRECTION IS MERGED ONTO THE PRE-GENERATION SPEC, ONCE. A correction that says
 //       nothing about the porch must not resurrect the porch kind the draft replaced
-//    6. the four questions gate Save, "not sure" counts as answered, and "No" opens the
-//       controls in the same row
+//    6. the four questions gate Save, "not sure" counts as answered, "No" opens the controls
+//       in the same row, and ⚠️ A HAND FIX REACHES THE PICTURES the builder is judging
 //    7. the roof numbers reach the builder in FEET and never as a ratio, measured against the
 //       building the RENDERS were drawn at rather than against whatever the preview is showing
 //    8. 375 px: no horizontal overflow, and no image squeezed into half a phone
@@ -87,6 +87,9 @@ const draftSpec = (dims, overhang) => ({
 });
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+
+// Long enough for the browser's own SS_RESHOOT_MS debounce plus one off-screen render pass.
+const SS_RESHOOT_SETTLE = 2500;
 
 const genCalls = [];
 const checkCalls = [];
@@ -531,6 +534,51 @@ async function main() {
   r.ok("and the roof edge is asked for in INCHES on this panel too",
     /How far the roof sticks out past the wall \(in\)/.test(roofFix.text));
   await page.locator('[data-ssc-question="roof"]').screenshot({ path: join(shots, "02-roof-fix.png") });
+
+  // ⚠️ A HAND FIX HAS TO REACH THE PICTURES. calShotParams captures `style3d` BY VALUE, so
+  // the pairs used to be frozen at the drafted shape for the whole confirm step: the sentence,
+  // the elevation and the docked 3D all followed an edit and the three comparisons did not.
+  // Every "No" opens a fix panel, so every hand correction hit this — and turning a pair
+  // afterwards re-rendered the OLD building at a new angle, which reads as "I changed it, it
+  // took a picture, and nothing happened".
+  //
+  // Measured on the PIXELS, not just on the src: a re-encode of the same building would change
+  // the data URL and prove nothing. One slant against a barn roof is a different silhouette.
+  const pairBeforeFix = await shotSrc("front");
+  await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /One slant/ }).click();
+  await page.waitForFunction((b) => {
+    const el = document.querySelector('[data-ssc-pair="front"]');
+    const img = el ? el.querySelectorAll("img")[1] : null;
+    return Boolean(img) && img.getAttribute("src") !== b;
+  }, pairBeforeFix, { timeout: 60000 }).catch(() => {});
+  const pairAfterFix = await shotSrc("front");
+  r.ok("⚠️ CHANGING THE ROOF BY HAND RE-SHOOTS THE COMPARE PAIRS", pairAfterFix !== pairBeforeFix);
+  r.ok("and the new picture is a DIFFERENT BUILDING, not a re-encode of the same one",
+    (await pixelDelta(page, pairBeforeFix, pairAfterFix)) > 0.01,
+    ((await pixelDelta(page, pairBeforeFix, pairAfterFix)) * 100).toFixed(2) + "% of pixels");
+  // ⚠️ AND SO DOES THE ROTATE CONTROL, which reads calShotRef's captured params rather than
+  // the spec. Turning any picture changes it, so "the src moved" proves nothing here — the
+  // question is WHICH BUILDING came back. Turn it, put it back with Reset, and the render at
+  // the original angle has to be the SHED again. Drawn from the stale params it would be the
+  // gambrel, and would land back on pairBeforeFix instead.
+  const spunAfterFix = await shotSrc("front");
+  await page.locator('[data-ssc-pair="front"]').getByRole("button", { name: /Right/ }).click();
+  await page.waitForFunction((b) => {
+    const el = document.querySelector('[data-ssc-pair="front"]');
+    const img = el ? el.querySelectorAll("img")[1] : null;
+    return Boolean(img) && img.getAttribute("src") !== b;
+  }, spunAfterFix, { timeout: 60000 }).catch(() => {});
+  await page.locator('[data-ssc-pair="front"]').getByRole("button", { name: /Reset/ }).click();
+  await page.waitForTimeout(1500);
+  const pairReset = await shotSrc("front");
+  const dShed = await pixelDelta(page, pairReset, pairAfterFix);
+  const dBarn = await pixelDelta(page, pairReset, pairBeforeFix);
+  r.ok("⚠️ AND THE ROTATE CONTROL DRAWS THE CORRECTED BUILDING, not the replaced one",
+    dShed < 0.01 && dBarn > 0.01, `${(dShed * 100).toFixed(2)}% from the shed, ${(dBarn * 100).toFixed(2)}% from the barn roof`);
+  // Back to the barn roof, so the slider assertions below are about the panel they were written
+  // for. The re-shoot rides along with it.
+  await page.locator('[data-ssc-question="roof"]').getByRole("button", { name: /Barn roof/ }).click();
+  await page.waitForTimeout(SS_RESHOOT_SETTLE);
 
   // Dragging the sliders must not be able to build the roof the warning refuses. The unit
   // test proves that over the whole grid; this proves the slider is wired to the function.
