@@ -19,7 +19,8 @@
 //       nothing about the porch must not resurrect the porch kind the draft replaced
 //    6. the four questions gate Save, "not sure" counts as answered, and "No" opens the
 //       controls in the same row
-//    7. the roof numbers reach the builder in FEET and never as a ratio
+//    7. the roof numbers reach the builder in FEET and never as a ratio, measured against the
+//       building the RENDERS were drawn at rather than against whatever the preview is showing
 //    8. 375 px: no horizontal overflow, and no image squeezed into half a phone
 //    9. zero page errors throughout
 //
@@ -444,6 +445,33 @@ async function main() {
   r.ok("and no ratio reaches the compare card at all",
     !/0\.\d\d/.test((body.match(/What we drew:[^\n]*/) || [""])[0]),
     (body.match(/What we drew:[^\n]*/) || [""])[0]);
+
+  // ── 7b: MEASURED AGAINST THE BUILDING THE PICTURES ARE OF ─────────────────────────────
+  // ssRoofInFeet turns kneeU, kneeRise and ridgeRise — all three RATIOS OF THE HALF-SPAN —
+  // into feet, so the sentence is only true of the width it is handed. The card used to hand
+  // it `bldgW`, the PREVIEW's width: seeded from the style's median catalog size and moved by
+  // the "Preview on" picker, with nothing to do with the building that was filmed. The
+  // pictures beside the sentence are rendered at the width the builder TYPED.
+  //
+  // This draft is ridgeRise 1.0, so the peak IS the half-span and the two answers are far
+  // apart: 8 ft against the catalog 16, 12 ft against the typed 24. A builder holding a tape
+  // to a 24 ft building was being told its peak stood 8 ft above the wall.
+  await setDims(24, 30, 9);
+  const a3b = await press();
+  r.ok("the renders are taken at the size that was typed",
+    Boolean(a3b.gen) && a3b.gen.dims && a3b.gen.dims.widthFt === 24, JSON.stringify(a3b.gen && a3b.gen.dims));
+  const spanLine = async () => ((await text()).match(/What we drew:[^\n]*/) || [""])[0];
+  r.ok("⚠️ AND THE ROOF READOUT IS MEASURED AGAINST THAT SAME SIZE, not the preview's",
+    /the peak is 12 ft above the wall/.test(await spanLine()), await spanLine());
+  // The preview is still parked on the catalog 16x24. Moving it must not rewrite one number in
+  // a sentence about a building that has already been rendered and is already on screen.
+  const spanBefore = await spanLine();
+  const showIt = page.getByRole("button", { name: /Show it on 24 × 30/ });
+  r.ok("the preview really is still on the catalog size", (await showIt.count()) > 0, String(await showIt.count()));
+  await showIt.first().click();
+  await page.waitForTimeout(600);
+  r.ok("⚠️ AND MOVING THE PREVIEW DOES NOT REWRITE THE ROOF NUMBERS",
+    (await spanLine()) === spanBefore, await spanLine());
 
   // ── 6: the four questions gate Save ───────────────────────────────────────────────────
   const saveEnabled = () => page.evaluate(() => {

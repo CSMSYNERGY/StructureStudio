@@ -19085,6 +19085,25 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // Every one of these is derived. Nothing here is state, so there is no second copy of the
   // answer to "can this be saved?" that could drift from the first.
   const calPairs = (adminCalCheck && adminCalCheck.pairs) || [];
+  // ⚠️ WHICH BUILDING THE ROOF NUMBERS DESCRIBE. ssRoofInFeet turns kneeU, kneeRise and
+  // ridgeRise -- every one of them a ratio of the HALF-SPAN -- into feet, so each figure in
+  // "What we drew" scales with whatever width it is handed. `bldgW` is the PREVIEW's width: it
+  // is seeded from the style's median catalog size and moved by the "Preview on" picker, and it
+  // has nothing to do with the building that was filmed. The pictures beside the sentence were
+  // rendered by calShotParams at the width the builder TYPED.
+  //
+  // Handing the readout `bldgW` therefore measured the roof against a different building from
+  // the one on screen -- and pressing the optional "Show it on W x L" button moved the stated
+  // peak height with no change to the spec and no change to the renders. On a style with no
+  // catalog sizes the preview can still be parked on the PREVIOUS style's size, which is how a
+  // 30 ft span came to be described as a 12 ft one.
+  //
+  // The render's own span first, because the pairs are frozen at press time while the
+  // dimensions card stays editable afterwards; then the typed width; then the preview's, which
+  // is all there is before a generation has been pressed.
+  const calReadoutW = (calShotRef.current && calShotRef.current.params && Number(calShotRef.current.params.bldgW))
+    || (calDimInBand("widthFt", calDimW) ? calDimW : 0)
+    || bldgW;
   const calChecksAnswered = SS_CHECKS.filter(([k]) => adminCalAnswers[k]).length;
   const calSaveWhy = calChecksAnswered < SS_CHECKS.length
     ? `Answer all four questions first. ${calChecksAnswered} of ${SS_CHECKS.length} answered.`
@@ -19141,7 +19160,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                   style={{ width: "100%", display: "block" }} />
                 <span style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#94A3B8", fontWeight: 600 }}><span>shallow</span><span>steep</span></span>
               </label>
-              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, bldgW)}</div>
+              <div style={{ fontSize: 11, color: "#64748B", lineHeight: 1.5 }}>{ssRoofInFeet(roof, calReadoutW)}</div>
             </div>
           ) : (
             /* "{n} in 12", because that is what a framing square is marked in and what a
@@ -21075,7 +21094,7 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
                       are true at once, so the number stays a ratio on the wire and becomes
                       feet here. */}
                   <div style={{ marginTop: 10, fontSize: 11.5, color: "#334155", lineHeight: 1.5 }}>
-                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, bldgW)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the side walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)}.
+                    <b>What we drew:</b> {ssRoofInFeet(adminCal.spec.roof, calReadoutW)} The roof sticks out {Math.round((Number(adminCal.spec.roof.overhang) || 0) * 12)} in past the wall, and the side walls are {ssFtInWords(Number(adminCal.spec.wallHeightFt) || D3.WALL_H)}.
                   </div>
                   {/* ── THE FOUR QUESTIONS ───────────────────────────────────────────────
                       ONLY WHERE THERE IS SOMETHING TO ANSWER THEM AGAINST, which is the same
