@@ -29,11 +29,15 @@
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Play:wght@700&display=swap" onload="this.onload=null;this.rel='stylesheet'"/>
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Play:wght@700&display=swap"/></noscript>
 <link rel="icon" type="image/png" href="/assets/favicon.png"/>
-<!-- #root has no max-width (Carolyn 2026-09-14: she drew over the empty gutters left and right
-     of the designer and asked for it to flow full width WITHOUT bigger buttons). It was 1080px.
-     Buttons are fixed px and the plan svg keeps its own dispMaxW cap, so only the page frame
-     widens. portal/06-3d.jsx DesignerTab dropped the same cap. -->
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{margin:0 auto}</style>
+<!-- #root caps at 1728px and centres (Carolyn 2026-09-17: on a 32" screen the designer
+     "stretches forever" and the images just get bigger, so she asked to frame it at about a
+     27" screen with even gutters). This REPLACES the 2026-09-14 call for full width, which
+     was made on a normal monitor where the gutters read as wasted space - the cap before
+     that was 1080px, which is what she was reacting to then. Buttons are fixed px and the
+     plan svg keeps its own dispMaxW cap, so only the page frame moves, and below 1728
+     nothing changes at all. portal/06-3d.jsx DesignerTab carries the same cap, and the scan
+     fixture at dev/scan-fixtures/mount-designer.html mirrors this line. -->
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F8FAFC}#root{max-width:1728px;margin:0 auto}</style>
 </head><body><div id="root"></div>
 <!-- SELF-HOSTED, deliberately not a CDN. These three libraries are this page's only external
      dependencies, and one blocked or failed third-party request used to blank the page
@@ -56,7 +60,7 @@
 <script src="/vendor/react-dom-18.2.0.production.min.js"></script>
 <script src="/vendor/supabase-js-2.112.1.umd.min.js"></script>
 
-<script defer src="/structure-studio.component.compiled.js?v=78a06b19" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
+<script defer src="/structure-studio.component.compiled.js?v=3448e715" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script>
 <script defer src="/index.mount.compiled.js?v=d2c0f3eb" onerror="(window.__ssScriptFail=window.__ssScriptFail||[]).push(this.src)"></script><script data-ss-app="designer">
 /* ── Dependency boot guard ────────────────────────────────────────────────────────────────
    The three /vendor/ tags above are this page's only library dependencies, and the app
