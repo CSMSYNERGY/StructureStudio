@@ -11404,7 +11404,21 @@ const SSD_CSS = [
   // step show "Get quote" in full on the public page, as the portal already did. Rail rows only: a
   // banner or warning row has an empty rail cell (.is-note) and stays exactly as tall as its content.
   '.ssd-frame[data-ssd-bp="xl"] .ssd-row[data-ss-step]{min-height:120px}',
-  '.ssd-rail{display:none}',
+  // overflow-anchor:none, and it is load-bearing, not tidying (Ahsan 2026-09-21, measured live on the
+  // beta portal at a 2772px-wide designer host). The rail is the ONE part of the page that changes when
+  // SSStepWatcher names a different current step: .ssd-step.is-current takes the label from 11.5px to
+  // 12.5px and ssdFitRailCell can swap the full label for the short one. Both happen inside an
+  // absolutely-placed cell, so the document's height never moves -- but Chrome had chosen a node INSIDE
+  // this cell as the scroller's anchor, and compensated for the shift by scrolling the host 19px.
+  // That closed a loop with the watcher: at the bottom it said "Get quote", the rail redrew, Chrome
+  // scrolled up 19px, 19px is no longer "at the end" so the watcher said "Options & layout", the rail
+  // redrew, Chrome scrolled back down, and round again every 500ms -- the page visibly bouncing and the
+  // rail strobing between two steps, with NOTHING in the app calling scrollTo (proven: the scrollTop
+  // setter, scrollTo, scrollIntoView and focus were all instrumented and took 0 hits over 25s).
+  // Taking the rail out of anchor selection is the surgical half of the fix: the content column still
+  // anchors normally, so a late-loading image above the fold cannot jump the page. The other half is the
+  // hysteresis in SSStepWatcher -- either alone stops this, and both are cheap.
+  '.ssd-rail{display:none;overflow-anchor:none}',
   '.ssd-frame[data-ssd-bp="xl"] .ssd-rail{display:block;position:relative;min-height:1px;background:var(--ss-panel);border-right:1px solid var(--ss-line-card)}',
   '.ssd-main{min-width:0;padding:22px 24px 0}',
   '.ssd-frame[data-ssd-bp="lg"] .ssd-main{padding:20px 20px 0}',
@@ -12329,6 +12343,9 @@ function ssdRevealPlan(svgEl, force) {
 function SSStepWatcher({ ids, onChange }) {
   const markRef = useRef(null);
   const lastRef = useRef(undefined);
+  // Whether the last measure counted as "at the end", so the next one can apply hysteresis to it
+  // (see the band in measure()). A ref, not state: it must not re-render anything by itself.
+  const atEndRef = useRef(false);
   const cbRef = useRef(onChange);
   cbRef.current = onChange;
   const idsKey = ids.join(",");
@@ -12351,7 +12368,21 @@ function SSStepWatcher({ ids, onChange }) {
       const line = viewTop + h * 0.35;
       const sTop = scroller ? scroller.scrollTop : window.scrollY;
       const sMax = scroller ? scroller.scrollHeight - scroller.clientHeight : document.documentElement.scrollHeight - window.innerHeight;
-      const atEnd = sTop > 0 && sMax - sTop < 2;
+      // "At the end", with hysteresis. It used to be `sMax - sTop < 2`, and 2px is a knife edge on a
+      // page whose scroll maximum is FRACTIONAL -- which it is at any browser zoom that is not 100%
+      // (measured on the beta portal at 67%: sMax 659, scrollTop 659.1). Landing either side of that
+      // edge swaps this function's answer between `lastSeen` (the bottom section, "Get quote") and
+      // `atLine` (the section under the 35% line, which on a tall viewport is stuck on the huge
+      // plan/3D section), and each swap re-renders the rail, which Chrome's scroll anchoring answered
+      // by scrolling the host ~19px -- straight back across the edge. See the overflow-anchor note on
+      // .ssd-rail in SSD_CSS for the other half of that loop.
+      // So: the end now STARTS within 24px of the bottom and only RELEASES at 72px. A nudge of any
+      // size a re-render can produce is inside the gap, so the answer cannot flip without the customer
+      // actually scrolling. 24 is about a line of text; 72 is three of them, far enough that a
+      // deliberate scroll away from the bottom still reads as leaving it.
+      const dist = sMax - sTop;
+      const atEnd = sTop > 0 && (atEndRef.current ? dist < 72 : dist < 24);
+      atEndRef.current = atEnd;
       const hold = SSD_STEP_HOLD;
       if (hold && keys.indexOf(hold.key) !== -1) {
         if (hold.settledAt === null) {                 // the smooth scroll may still be running
