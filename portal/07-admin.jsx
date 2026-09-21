@@ -688,7 +688,7 @@ function AdmClientPicker({ clients, current, onPick, onClose }) {
               <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
             </div>
             {c.client_id === current && <AdmChip tone="on">Current</AdmChip>}
-            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed — full access to every feature">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
           </button>
         ))}
@@ -1440,7 +1440,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
               <div style={{ fontSize: 11.5, color: "#94A3B8" }}>{c.client_id}</div>
             </div>
             {c.client_id === sel && <AdmChip tone="on">Selected</AdmChip>}
-            {c.billingExempt ? <AdmChip tone="good" title="Not billed">Comped</AdmChip>
+            {c.billingExempt ? <AdmChip tone="good" title="Not billed — full access to every feature">Comped</AdmChip>
               : c.discountPercent > 0 ? <AdmChip tone="on" title="Account discount">−{c.discountPercent}%</AdmChip> : null}
             {can3D && (() => {
               const on = has3D(c);
@@ -1504,7 +1504,7 @@ function AdmClients({ clients, features, sel, onPick, onOpenAccount, onFlash, on
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #F1F5F9" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
               <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
-              <span>Non-billable — CSM Synergy's own, demo or testing account (skips the billing gate)</span>
+              <span>Non-billable — CSM Synergy's own, demo or testing account (full access to every feature, never charged)</span>
             </label>
             <div style={{ marginTop: 10, maxWidth: 220, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
               <label style={S.lbl}>Account discount %</label>
@@ -1766,6 +1766,21 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
     const n = Math.round(Number(pct));
     if (!Number.isFinite(n) || n < 0 || n > 100) { onFlash({ err: "Discount must be a whole number from 0 to 100." }); return; }
     if (n > 0 && !exempt && !allFeat && picked.length === 0) { onFlash({ err: "Choose which features the discount applies to, or select “Every feature”." }); return; }
+    // Ticking this box is no longer just "stop charging them" — since 2026-09-21 it hands the
+    // account every paid feature and free AI generations (migration 228). One mis-click on a
+    // real builder gives away about $755/mo, so the grant is spelled out before it is saved.
+    // Only on the transition OFF→ON: re-saving a discount on an already-comped demo account
+    // must not nag.
+    const turningOn = exempt && !(clientRow && clientRow.billingExempt);
+    if (turningOn && !window.confirm(
+      `Make ${label} non-billable?
+
+`
+      + `This switches on Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D free `
+      + `(about $755/mo), and makes AI generations free.
+
+`
+      + `Use it for our own, demo and test accounts only.`)) return;
     setBillBusy(true);
     try {
       const r = await adminApi("set_billing", { clientId, billingExempt: exempt, discountPercent: n, discountFeatures: allFeat ? [] : picked, exemptUntil: until });
@@ -1868,19 +1883,32 @@ function AdmAccount({ clientId, clientRow, label, features, onFlash, onReloadCli
       </div>
 
       <div style={S.card}>
-        <CardHead title="Billing posture" desc="An attribute of the account, not of a purchase — it follows them onto every feature they add later." />
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
-          <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} />
-          <span>Non-billable — skips the billing gate entirely</span>
+        <CardHead title="Billing posture" desc="How this account is billed. Both settings belong to the ACCOUNT, not to a purchase." />
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "#1E293B", cursor: "pointer" }}>
+          <input type="checkbox" checked={exempt} onChange={(e) => setExempt(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>
+            Non-billable — full access to every feature, and never charged
+            <span style={{ display: "block", fontSize: 12, color: "#64748B", marginTop: 2, fontWeight: 400 }}>
+              More than skipping the billing gate: it switches on Scheduling, QuickBooks Sync, Real-Time Pricing,
+              the CRM and 3D with no subscription, and makes AI generations free. For CSM Synergy's own, demo and
+              test accounts only.
+            </span>
+          </span>
         </label>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 12 }}>
           <div style={{ width: 180, opacity: exempt ? 0.5 : 1, pointerEvents: exempt ? "none" : "auto" }}>
             <label style={S.lbl}>Account discount %</label>
             <input value={pct} onChange={(e) => setPct(e.target.value)} inputMode="numeric" style={S.input} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>
+              Follows them onto every feature they add later.
+            </div>
           </div>
           <div style={{ width: 200 }}>
             <label style={S.lbl}>Free until (optional)</label>
             <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} style={S.input} />
+            <div style={{ fontSize: 11.5, color: "#64748B", marginTop: 4, lineHeight: 1.4 }}>
+              Keeps them working until this date. Does not include the paid add-ons.
+            </div>
           </div>
         </div>
         {!exempt && Number(pct) > 0 && (

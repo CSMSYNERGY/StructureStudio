@@ -1388,14 +1388,21 @@ function Dashboard({ session }) {
   // a frontend shipped ahead of the backend — which is exactly what happened on 2026-08-19,
   // when this landed on beta before the migration could be applied.
   //
-  // `granted` is emitted ONLY by the new portal-billing and only for features an operator
-  // actually comped, so this is correct in BOTH worlds: against the old function it is
-  // undefined and only operators see 3D; against the new one it honours real grants. It also
-  // cannot be widened by a blanket, ever, which is the property that matters for a feature
-  // whose whole point is "not all clients need to see it" (Carolyn 2026-08-18).
+  // `granted` is emitted ONLY by portal-billing, and only for features this tenant genuinely
+  // holds as a comp rather than a purchase, so reading it keeps the copy honest ("switched on
+  // for you by Structure Studio", never "included in your plan").
+  //
+  // ⚠️ AMENDED 2026-09-21 (migration 228). `granted` is no longer grants alone: portal-billing
+  // now also puts a NON-BILLABLE or INTERNAL account's grantable features in that array, so
+  // ticking Non-billable switches 3D on without a second trip to the Early access card. That
+  // is a deliberate widening and it is still not a blanket — the server names each feature and
+  // filters it through `grantable`, so an ordinary tenant is unaffected and a paying one is
+  // never told their purchase was a comp. The reason for keeping the browser on `granted`
+  // rather than on `features` is unchanged, and is now about honesty of copy rather than
+  // reach: `features` cannot distinguish a comp from a purchase.
   //
   // When view_3d goes on sale, add the subscription check here — do NOT fold it back into
-  // featureOn, or the blanket returns with it.
+  // featureOn, which would widen it by a blanket rather than feature by feature.
   // View-as reads the VIEWED tenant's grant, for every operator (Carolyn 2026-09-15) — the
   // old `isOperator ||` blanket showed a 3D tab on a builder who was never granted it. A null
   // viewedCtx is still loading and reads as on, the same rule featureOn uses. On the

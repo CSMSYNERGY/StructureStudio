@@ -1215,6 +1215,13 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   const liveSubs = subs.filter((s) => s.status !== "cancelled");
   const liveFeatures = {}; liveSubs.forEach((s) => { const p = planById[s.plan_id]; if (p) liveFeatures[p.feature] = s; });
   const baseLive = !!liveFeatures["simple_layout"];
+  // NON-BILLABLE ACCOUNT. Since 2026-09-21 the operator's Non-billable flag confers every
+  // feature (migration 228), but the tiles below are built from liveFeatures — REAL
+  // subscription rows — so without this a comped account sees a full price list with working
+  // Subscribe buttons for things it already has, and can put a real charge through for them.
+  // Deliberately keyed on entitlement.exempt rather than on `features`: this asks "is this
+  // account billable", which is a different question from "may it use X".
+  const comped = !!(data && data.entitlement && data.entitlement.exempt);
 
   // The Structure Studio Suite bundles everything except Self Serve Displays. When it's chosen
   // (in the cart) or already live, its member features are covered — shown "Included" and not
@@ -1270,7 +1277,7 @@ function BillingView({ viewingLabel = null, section = "all" }) {
   const creditCents = Math.min(cartCredit, grossDueCents);
   const dueTodayCents = grossDueCents - creditCents;
   const creditSources = cart.flatMap(([f]) => (upgradeCredits[f] && upgradeCredits[f].sources) || []);
-  const selectable = features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
+  const selectable = !comped && features.some((f) => f.availability === "available" && !liveFeatures[f.feature]);
 
   // ── Wallet top-up (migration 164) ──────────────────────────────────────────────────
   // Bounds come from the server so the floor and cap live in one place
@@ -1412,7 +1419,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
   });
 
   const toggleFeature = (f) => {
-    if (f.availability !== "available" || liveFeatures[f.feature] || busy) return;
+    if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy) return;
     if (memberCovered(f.feature)) return;                      // covered by the Suite — not separately selectable
     // Only block REMOVING the required base (it's in `sel` and the click would delete it);
     // re-adding must always work. Blocking both directions stranded the cart: selecting the
@@ -1436,7 +1443,7 @@ This charges the card they have on file.`)) { setBusy(false); return; }
     });
   };
   const setInterval_ = (f, iv) => {
-    if (f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
+    if (comped || f.availability !== "available" || liveFeatures[f.feature] || busy || memberCovered(f.feature)) return;
     setSel((p) => ({ ...p, [f.feature]: iv }));
   };
 
@@ -1552,7 +1559,22 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
       {msg && msg.ok && <div style={S.okMsg}>{msg.ok}</div>}
 
       {showSub && (<>
+      {/* COMPED ACCOUNT. Replaces the scarcity pitch rather than sitting beside it — an
+          account that pays nothing has no rate to lock in, and "only the first 15 builders"
+          over a price list they cannot buy from reads as a bug. */}
+      {comped && (
+        <div style={{ background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 20, lineHeight: 1 }}>✓</span>
+          <div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: "#166534", letterSpacing: "-0.01em" }}>Your account is comped</div>
+            <div style={{ fontSize: 12.5, color: "#15803D", marginTop: 1 }}>
+              Every feature is switched on for you by Structure Studio, and there's nothing to pay. The prices below are for reference only.
+            </div>
+          </div>
+        </div>
+      )}
       {/* Founding-price banner — scarcity marker above all the pricing. */}
+      {!comped && (
       <div style={{ background: "linear-gradient(90deg, #3D3672 0%, #1B7895 100%)", color: "#FFF", borderRadius: 10, padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <span style={{ fontSize: 20, lineHeight: 1 }}>⭐</span>
         <div>
@@ -1560,6 +1582,7 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
           <div style={{ fontSize: 12.5, color: "#DCE7F0", marginTop: 1 }}>Only for the first 15 builders — lock in this rate on the features you select while founding pricing is open.</div>
         </div>
       </div>
+      )}
 
       {data && data.configured === false && plans.length > 0 && (
         <div style={{ background: "#EEF2FF", border: "1px solid #C7D2FE", borderRadius: 8, padding: "10px 14px", color: "#3D3672", fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
@@ -1846,17 +1869,21 @@ This bills the card ${viewingLabel} has on file.`)) { setBusy(false); return; }
             {features.filter((f) => !liveFeatures[f.feature]).map((f) => {
               const soon = f.availability !== "available";
               const covered = memberCovered(f.feature);
-              const veiled = soon || covered;   // shows an overlay + dims + blocks interaction
+              // A comped account is veiled the same way a Suite member is: every tile carries
+              // the overlay, nothing is clickable, and the price stays legible underneath. The
+              // existing mechanic already does exactly that, so this is one more reason to
+              // veil rather than a second, parallel way of dimming a card.
+              const veiled = soon || covered || comped;   // shows an overlay + dims + blocks interaction
               const iv = sel[f.feature];
               const on = !!iv;
               const shown = f.plans[iv || "annual"];
               const lockedBase = f.required && !baseLive;
               return (
-                <div key={f.feature} onClick={covered ? undefined : () => toggleFeature(f)}
+                <div key={f.feature} onClick={(covered || comped) ? undefined : () => toggleFeature(f)}
                   style={{ position: "relative", border: on ? `2px solid ${ACCENT}` : "1px solid #E2E8F0", borderRadius: 10, padding: on ? 15 : 16, cursor: veiled ? "default" : "pointer", overflow: "hidden" }}>
                   {veiled && (
                     <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2, pointerEvents: "none" }}>
-                      <span style={{ transform: "rotate(-12deg)", background: covered ? "#EDE9FE" : "#FEF3C7", color: covered ? "#5B21B6" : "#B45309", border: `1px solid ${covered ? "#C4B5FD" : "#FDE68A"}`, borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{covered ? "Included in the Suite" : (f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon")}</span>
+                      <span style={{ transform: "rotate(-12deg)", background: comped ? "#DCFCE7" : covered ? "#EDE9FE" : "#FEF3C7", color: comped ? "#166534" : covered ? "#5B21B6" : "#B45309", border: `1px solid ${comped ? "#BBF7D0" : covered ? "#C4B5FD" : "#FDE68A"}`, borderRadius: 8, padding: "6px 16px", fontSize: 13, fontWeight: 800, letterSpacing: 1.5, textTransform: "uppercase", whiteSpace: "nowrap" }}>{comped ? "Included" : covered ? "Included in the Suite" : (f.feature === "self_serve_displays" ? "Coming 2027" : "Coming soon")}</span>
                     </div>
                   )}
                   <div style={{ opacity: veiled ? 0.45 : 1 }}>

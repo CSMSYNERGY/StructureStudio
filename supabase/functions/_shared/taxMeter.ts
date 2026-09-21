@@ -129,6 +129,24 @@ export async function chargeTaxCalculation(
     if (acctErr) return { charged: false, reason: "error" };
     if (acct?.metered_exempt === true) return { charged: false, reason: "exempt" };
 
+    // 2b. NON-BILLABLE ACCOUNTS generate free too (Carolyn 2026-09-21: Non-billable means
+    //     "full access to everything", and she was asked about this one specifically
+    //     because it is real model spend rather than a feature flag).
+    //     Deliberately a SECOND lookup rather than a widening of metered_exempt: the two
+    //     answer different questions and both must keep working. metered_exempt is the
+    //     per-wallet override for a tenant who IS billed; billing_exempt is the account
+    //     posture, set from the Billing posture card, and carries the whole entitlement
+    //     map with it (portal-billing, _shared/featureCheck.ts, migration 228).
+    //     Checked only after metered_exempt misses, so a wallet-exempt tenant still costs
+    //     one query, and an absent client_settings row is simply not exempt.
+    const { data: cs, error: csErr } = await admin
+      .from("client_settings")
+      .select("billing_exempt")
+      .eq("client_id", opts.clientId)
+      .maybeSingle();
+    if (csErr) return { charged: false, reason: "error" };
+    if (cs?.billing_exempt === true) return { charged: false, reason: "exempt" };
+
     // 3. The debit. Negative amount, kind 'debit' — the shape wallet_transactions' CHECK
     //    expects and the one wallet_capture uses for held charges.
     const { data: bal, error: creditErr } = await admin.rpc("wallet_credit", {
