@@ -15678,7 +15678,17 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
   // true -> false with the designer still mounted — an operator revoking view_3d, or a
   // grant simply reaching its expiry. The render site is gated on view3dOn as well; this
   // clears the state sitting behind that gate so nothing stale survives a re-grant.
-  useEffect(() => { if (!view3dOn && dock3D) setDock3D(false); }, [view3dOn, dock3D]);
+  // ...and DROPS ANY SNAPSHOT ALREADY TAKEN. The state behind the gate is not just the panel: a shot
+  // captured while the grant was live outlives it in a ref, and downloadPDF and the inventory-unit PDF
+  // both push `render3DSnapshotRef.current` on sight. Losing 3D mid-session and then downloading a
+  // quote would otherwise still hand the customer a 3D page. submitQuote reads view3dOn directly, so
+  // this is belt to its braces rather than the only guard.
+  useEffect(() => {
+    if (!view3dOn) {
+      if (dock3D) setDock3D(false);
+      if (render3DSnapshotRef.current) { render3DSnapshotRef.current = null; setHas3DSnapshot(false); }
+    }
+  }, [view3dOn, dock3D]);
   // Latest captured 3D snapshot ({ url, w, h } — a JPEG data-URL) — becomes
   // page 2 of the quote PDF on submit/download. Kept in a ref (it's large and
   // never rendered); has3DSnapshot mirrors it for button labels.
@@ -19925,8 +19935,19 @@ function StructureStudioInner({ config, embedded = false, onSaved = null, openDe
       // An armed shot always wins — if the rep framed the building deliberately, that is
       // the view the customer should see. Only when nobody opened 3D at all do we render a
       // default one, so a quote is never sent without a picture of the building.
-      let shot3d = render3DSnapshotRef.current;
-      if (!shot3d) {
+      //
+      // ⚠️ BOTH HALVES ARE GATED ON view3dOn, AND THE SECOND ONE IS THE BUG (Nevin Friesen, reported
+      // by Carolyn 2026-09-21: "when he emails a quote, it is still sending the 3D view"). A tenant
+      // with 3D switched off can never open the viewer, so render3DSnapshotRef is ALWAYS null for
+      // them — which fell straight into the default render below and put a 3D sheet on every single
+      // quote they sent. "A quote is never sent without a picture of the building" was written for a
+      // tenant who HAS 3D; for one who does not, the plan sheet is the picture of the building.
+      // This one line covers the estimate AND the invoice: both are built server-side by
+      // _shared/quotePdf.ts, which appends `designs.image_url` — this very PDF — so anything that
+      // does not get in here cannot reach either document. It also leaves view3dImageUrl null, so
+      // the portal's order screen stops showing a 3D card for them too.
+      let shot3d = view3dOn ? render3DSnapshotRef.current : null;
+      if (!shot3d && view3dOn) {
         shot3d = await renderDefault3DShot({
           bldgW, bldgH, items, itemTypes: ITEMS, frontWall,
           painted: sel.paint === "Painted", paintBody: paintColors.body, paintTrim: paintColors.trim,
