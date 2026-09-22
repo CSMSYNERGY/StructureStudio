@@ -1,20 +1,19 @@
-// Is the designer actually USABLE on a big screen? Objective checks, both surfaces, four widths.
+// How many buildings fit in one row, and does the scrollbar tell the truth?
 //
-// Ahsan, 2026-09-21: "at around 50% it starts to break and I cannot see properly", and "make the
-// screen responsive for all this screens, so if the user opens this app on a 33 inch screen it's
-// easier to read and easier to select everything". stepRailStability.mjs covers the page bouncing;
-// this one covers the rest of that sentence, as things a machine can measure rather than opinions:
+// Ahsan, 2026-09-22: "bigger than 27 inches the scroll bar should disappear and all the buildings
+// should show in a single row if it fits; if it does not fit then show the scroll bar, but keep the
+// card size same, so in the bigger screens you can add more buildings side by side in a single row."
 //
-//   1. the designer frames itself instead of stretching to the monitor
-//   2. nothing inside it overflows sideways
-//   3. no single form field grows past a readable measure (the "label here, control over there"
-//      problem is a WIDTH problem, and 960px is the invoice column the quote already uses)
-//   4. every control a builder has to hit is still a real target
-//   5. the stepper rail still shows words, not a bare numbered dot
-//   6. section headings and their content start on the same left edge
+// Before this change the tiles DIVIDED the strip's width between them, so a wider screen gave bigger
+// tiles and never more of them -- which is why Carolyn's "I can't see all the buildings" survived the
+// width cap. ssStripTileW fixes the tile width against a 1618px reference instead, and ssdFitStrip
+// lets the strip alone run past the 1728px frame, so extra width buys extra TILES.
 //
-//   python -m http.server 8131 --bind 127.0.0.1   (repo root)
-//   SS_BASE=http://127.0.0.1:8131 node tests/harness/wideViewportAudit.mjs
+// The fixture has ELEVEN styles on purpose: more than perRow (8), so a laptop still overflows and the
+// bar is still right to show, and few enough that a wide screen fits them all and the bar must vanish.
+//
+//   python -m http.server 8151 --bind 127.0.0.1   (repo root)
+//   SS_BASE=http://127.0.0.1:8151 node tests/harness/styleStripFit.mjs
 import { chromium } from "@playwright/test";
 import { reporter, shotsDir } from "./lib.mjs";
 
@@ -22,7 +21,8 @@ const REF = "jzeamjbhdrsbygdnphbm";
 const BASE = process.env.SS_BASE || "http://127.0.0.1:8131";
 const CLIENT = "pw-demo-barns";
 const CAP = 1728;          // the frame Carolyn asked for on 2026-09-17
-const FIELD_MAX = 1000;    // a shade over --ssd-invoice-max (960px), the widest a single control should read
+const REF_TILE = 194;      // (1618 - 7*10) / 8, the tile width at the 1728px frame with perRow 8
+const REF_STRIP_W = 1618;  // SS_STRIP_REF_W: where dividing-the-space stops and the fixed card takes over
 
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 const jwt = (p) => `${b64({ alg: "HS256", typ: "JWT" })}.${b64(p)}.c3R1Yg`;
@@ -71,67 +71,36 @@ const VIEWPORTS = [
   { zoom: "67%", width: 2293, height: 1038, dsf: 0.8375 },
   { zoom: "50%", width: 3072, height: 1390, dsf: 0.625 },
   { zoom: "33%", width: 4655, height: 2107, dsf: 0.4125 },
+  { zoom: "32in-4K", width: 3840, height: 2000, dsf: 1 },
 ];
 
 const AUDIT = `(() => {
   const frame = document.querySelector(".ssd-frame");
-  const r = (el) => el.getBoundingClientRect();
-  const fr = r(frame);
-  const seen = (el) => { const b = r(el); const cs = getComputedStyle(el); return b.width > 0 && b.height > 0 && cs.visibility !== "hidden" && cs.display !== "none"; };
-
-  // 2. anything sticking out sideways of the frame. The style strip is the ONE sanctioned exception
-  // (ssdFitStrip, 2026-09-22: a row of pictures wants the monitor, everything else wants the framed
-  // reading measure) -- so it is excluded HERE and checked on its own terms below, rather than this
-  // check being softened until it catches nothing.
-  const stripWrap = (() => { const st = frame.querySelector("[data-ss-style-strip]"); return st ? st.parentElement : null; })();
-  const inStrip = (el) => Boolean(stripWrap && (el === stripWrap || stripWrap.contains(el)));
-  const overflow = [];
-  for (const el of frame.querySelectorAll("*")) {
-    if (!seen(el) || inStrip(el)) continue;
-    const b = r(el);
-    if (b.right > fr.right + 1 || b.left < fr.left - 1) {
-      // a horizontally scrolling strip is allowed to have children outside it — it clips them
-      let clipped = false;
-      for (let p = el.parentElement; p && p !== frame; p = p.parentElement) {
-        const ox = getComputedStyle(p).overflowX;
-        if (ox === "auto" || ox === "scroll" || ox === "hidden") { clipped = true; break; }
-      }
-      if (!clipped) overflow.push((el.className || el.tagName || "").toString().slice(0, 46) + " w=" + Math.round(b.width));
-    }
-  }
-
-  // 3. how wide a single form control gets
-  const fields = [...frame.querySelectorAll("input, select, textarea")].filter(seen);
-  const widest = fields.reduce((a, el) => { const w = r(el).width; return w > a.w ? { w, name: (el.className || el.name || el.tagName).toString().slice(0, 40) } : a; }, { w: 0, name: "" });
-
-  // 4. hit targets
-  const controls = [...frame.querySelectorAll("button, input, select, [role='tab'], a[href]")].filter(seen);
-  const tiny = controls.filter((el) => { const b = r(el); return b.height < 16 || b.width < 16; })
-    .map((el) => { const b = r(el); return (el.className || el.tagName).toString().slice(0, 34) + " " + Math.round(b.width) + "x" + Math.round(b.height); });
-
-  // 5. the rail still says words
-  const rails = [...frame.querySelectorAll(".ssd-step")].filter(seen);
-  const wordless = rails.filter((b) => b.getAttribute("data-ssd-fit") === "none").length;
-
-  // 6. section headings and their content share a left edge
-  const heads = [...frame.querySelectorAll(".ssd-sechead")].filter(seen).map((h) => Math.round(r(h).left));
-  const headSpread = heads.length ? Math.max(...heads) - Math.min(...heads) : 0;
-
+  const strip = frame.querySelector("[data-ss-style-strip]");
+  const wrap = strip.parentElement;
+  const tiles = [...strip.children];
+  const t0 = tiles[0].getBoundingClientRect();
+  const sr = strip.getBoundingClientRect();
+  // A tile counts as ON SCREEN only if the whole card is inside the scroller's own box.
+  const whole = tiles.filter((t) => { const b = t.getBoundingClientRect(); return b.left >= sr.left - 1 && b.right <= sr.right + 1; }).length;
   const host = document.querySelector(".ss-designer-host");
   const sc = host || document.scrollingElement;
   return {
-    frameW: Math.round(fr.width),
+    frameW: Math.round(frame.getBoundingClientRect().width),
+    tileW: Math.round(t0.width),
+    tiles: tiles.length,
+    wrapW: Math.round(wrap.getBoundingClientRect().width),
+    stripCw: strip.clientWidth,
+    grew: wrap.style.getPropertyValue("--ssd-strip-w") || "",
+    overflows: strip.scrollWidth > strip.clientWidth + 1,
+    wholeOnScreen: whole,
+    // A laid-out horizontal scrollbar eats height from the scroller's content box.
+    barPx: strip.offsetHeight - strip.clientHeight,
+    sbWidth: getComputedStyle(strip).scrollbarWidth || "auto",
+    arrows: frame.querySelectorAll(".ssd-strip-arrow").length,
     sideways: sc ? sc.scrollWidth - sc.clientWidth : 0,
-    overflow: overflow.slice(0, 6), overflowCount: overflow.length,
-    widestField: Math.round(widest.w), widestFieldName: widest.name,
-    controls: controls.length, tiny: tiny.slice(0, 6), tinyCount: tiny.length,
-    scRight: sc ? Math.round(sc.getBoundingClientRect().left + sc.clientWidth) : 0,
-    rails: rails.length, wordless, headSpread, heads: heads.slice(0, 8),
-    // The strip's own terms: it may leave the frame, it may NOT leave the scroller, and it must
-    // still start on the same left edge as the section heading that labels it.
-    stripRight: stripWrap ? Math.round(r(stripWrap).right) : 0,
-    stripLeft: stripWrap ? Math.round(r(stripWrap).left) : 0,
-    headLeft: heads.length ? Math.min(...heads) : 0,
+    needed: Math.round(tiles.length * t0.width + (tiles.length - 1) * 10 + 24),
+    stripRight: Math.round(sr.right), scRight: sc ? Math.round(sc.getBoundingClientRect().left + sc.clientWidth) : 0,
   };
 })()`;
 
@@ -189,26 +158,49 @@ async function run(surface, v, shots, ok) {
     if (await sel.count()) await sel.first().selectOption({ label: SIZE });
     await page.waitForTimeout(2600);
     a = await page.evaluate(AUDIT);
-    await page.screenshot({ path: `${shots}/${surface}-${v.zoom.replace("%", "")}.png` });
+    await page.screenshot({ path: `${shots}/${surface}-${v.zoom.replace(/[^A-Za-z0-9-]/g, "")}.png` });
   } catch (e) { a = { error: String((e && e.message) || e) }; }
   await browser.close();
 
   const tag = `${surface} ${v.zoom} (${v.width}px)`;
   if (a.error) { ok(`${tag} drove the designer`, false, a.error); return; }
-  ok(`${tag} the designer frames itself, not the monitor`, a.frameW <= CAP + 2, `frame ${a.frameW}px`);
-  ok(`${tag} nothing overflows the frame sideways`, a.overflowCount === 0, a.overflow.join(" ; "));
+  // A tile NEVER grows past the reference card, and once the strip has that much room it IS the
+  // reference card -- below it the old divide-the-space rule still wins, which is what keeps every
+  // laptop exactly as it was.
+  ok(`${tag} a card never grows past the reference size`, a.tileW <= REF_TILE, `tile ${a.tileW}px`);
+  if (a.stripCw >= REF_STRIP_W) ok(`${tag} at full width a card IS the reference size`, a.tileW === REF_TILE, `tile ${a.tileW}px`);
+  ok(`${tag} the strip never spills past the scroller`, a.stripRight <= a.scRight + 1, `strip right ${a.stripRight} vs ${a.scRight}`);
   ok(`${tag} the page does not scroll sideways`, a.sideways <= 1, `${a.sideways}px`);
-  ok(`${tag} no field grows past a readable measure`, a.widestField <= FIELD_MAX, `widest ${a.widestField}px (${a.widestFieldName})`);
-  ok(`${tag} every control is still a real hit target`, a.tinyCount === 0, `${a.tinyCount}: ${a.tiny.join(" ; ")}`);
-  ok(`${tag} every rail step still shows words`, a.wordless === 0, `${a.wordless} of ${a.rails} bare`);
-  ok(`${tag} section headings share one left edge`, a.headSpread <= 1, `spread ${a.headSpread}px`);
-  ok(`${tag} the strip may leave the frame but not the scroller`, a.stripRight <= a.scRight + 1, `strip right ${a.stripRight} vs scroller ${a.scRight}`);
-  ok(`${tag} the strip still starts under its own heading`, Math.abs(a.stripLeft + 12 - a.headLeft) <= 1, `strip ${a.stripLeft} + 12 vs heading ${a.headLeft}`);
+  // The whole of Ahsan's sentence, as one relationship: the bar and the arrows appear EXACTLY when
+  // something is really hidden, and never otherwise. `fits` is measured from the tiles, not assumed
+  // from the viewport -- at 2293px eleven 194px cards genuinely do not fit, and a bar there is right.
+  const fits = a.needed <= a.stripCw;
+  if (fits) {
+    ok(`${tag} all ${a.tiles} buildings show in one row`, a.wholeOnScreen === a.tiles, `${a.wholeOnScreen} of ${a.tiles}`);
+    ok(`${tag} nothing hidden, so no scrollbar`, !a.overflows && a.barPx === 0, `overflows ${a.overflows}, bar ${a.barPx}px`);
+    ok(`${tag} nothing hidden, so no arrows`, a.arrows === 0, `${a.arrows} arrows`);
+  } else {
+    // Headless Chrome overlays its scrollbars no matter what ::-webkit-scrollbar asks for, so the
+    // laid-out height is 0 here and cannot be the assertion. The thing 2026-09-17 actually changed,
+    // and the thing Ahsan asked to have back, is whether the bar is SUPPRESSED -- so check that.
+    ok(`${tag} it does not fit, so the scrollbar is not suppressed`, a.overflows && a.sbWidth !== "none", `overflows ${a.overflows}, scrollbar-width ${a.sbWidth}`);
+    ok(`${tag} it does not fit, so an arrow shows`, a.arrows >= 1, `${a.arrows} arrows`);
+  }
+  // The product requirement itself: a screen bigger than 27" has to fit a normal catalog.
+  // The product bar, on the device Ahsan means rather than on a zoomed-out laptop. 3840 is a 32" 4K
+  // at 100%; the portal loses 240px of it to the side menu and the strip starts at the CENTRED
+  // frame's left edge, so it has the right-hand gutter to grow into and nothing more. That is the
+  // deliberate trade: the strip stays under its own section heading instead of reclaiming the left
+  // gutter too. It costs about 550px, and at 3840 there is still room to spare.
+  if (v.width >= 3800 && v.dsf >= 1) {
+    ok(`${tag} a 32in 4K screen fits the whole catalog`, fits, `needs ${a.needed}px, strip has ${a.stripCw}px`);
+    ok(`${tag} the strip really did grow past the frame`, a.wrapW > a.frameW, `strip ${a.wrapW} vs frame ${a.frameW}`);
+  }
   ok(`${tag} no page or console errors`, errors.length === 0, errors.slice(0, 2).join(" | "));
 }
 
 async function main() {
-  const shots = shotsDir("wideViewportAudit");
+  const shots = shotsDir("styleStripFit");
   const { ok, failed } = reporter();
   console.log(`BASE ${BASE}`);
   for (const surface of ["portal", "public"]) for (const v of VIEWPORTS) await run(surface, v, shots, ok);

@@ -11461,20 +11461,19 @@ const SSD_CSS = [
   '.ssd-tile.is-on .ssd-tile-art{background:linear-gradient(var(--ss-tile-sel-top),var(--ss-tile-sel-bottom))}',
   '.ssd-strip-arrow{font-family:inherit;position:absolute;top:50%;transform:translateY(-50%);z-index:2;width:30px;height:30px;box-sizing:border-box;margin:0;padding:0;border-radius:50%;border:1px solid var(--ss-line);background:rgba(255,255,255,.96);box-shadow:0 2px 8px var(--ssd-primary-a18);color:var(--ss-ink);font-size:18px;font-weight:700;line-height:26px;cursor:pointer;transition:border-color .15s ease}',
   '.ssd-strip-arrow:hover{border-color:var(--ss-primary-line)}',
-  // The strip still scrolls sideways, but shows no scrollbar (Carolyn 2026-09-17: "the scroll bar never
-  // goes away"). Exactly the treatment .ssd-pb-full already uses: scrollbar-width for Firefox (set inline
-  // on the scroller in SSStyleStrip) and this rule for Chrome and Safari. The arrows and the edge fades
-  // are the overflow affordance and they are strictly better than a bar, because they appear ONLY when
-  // tiles are really hidden -- `edges` in SSStyleStrip measures scrollWidth against clientWidth, so with
-  // few enough styles to fit there is now nothing drawn along the bottom at all. On Windows the bar was
-  // laid out rather than overlaid, so this also gives the tiles back the ~15px it was eating.
-  // ⚠️ THIS DOES NOT PUT MORE BUILDINGS ON SCREEN, and her words were "the scroll bar never goes away so
-  // I can't see all the buildings". The tile count is `perRow` -- C.branding.stylesPerRow, clamped 5-8 in
-  // SSStyleStrip -- and the tiles divide the strip's width between them, so a wider page gives BIGGER
-  // tiles, never more of them, and a hidden bar gives none. The half of her sentence about seeing them
-  // all is still open: it needs the strip to WRAP, which is a rewrite of the component (arrows, paging,
-  // scroll-snap and the scroll-the-picked-tile-into-view effect all assume one row), not a width change.
-  '.ssd-frame [data-ss-style-strip]::-webkit-scrollbar{display:none}',
+  // ── The strip's scrollbar, and why it is BACK (Ahsan 2026-09-22) ──
+  // 2026-09-17 painted the bar out for Chrome and Safari here, and set scrollbar-width:none inline,
+  // because Carolyn said "the scroll bar never goes away so I can't see all the buildings". That
+  // answered the wrong half of her sentence: hiding a bar shows no more buildings, and the reason it
+  // never went away was that the strip ALWAYS overflowed -- tiles divided the strip's width between
+  // them, so a wider page gave bigger tiles, never more of them.
+  // ssStripTileW fixes the tile width instead, so extra width now buys extra TILES, and on a screen
+  // wider than the 1728px frame a normal catalog simply fits. When it fits there is nothing past the
+  // edge, so overflow-x:auto draws no bar at all and `edges` draws no arrows -- the bar goes away by
+  // there being nothing hidden. When it does not fit, the bar is the truth and Ahsan asked for it:
+  // "if it does not fit then show the scroll bar".
+  // So this rule is GONE, and the inline scrollbarWidth is "thin" again. Do not reinstate either
+  // without reading both calls: the two of them asked for opposite things five days apart.
   // ── Section 02: size / roof / cladding cards, native selects and the colour select ──
   // One height token for the section's fields. 26px is the colour select's height before the redesign;
   // the native selects were 28 and come down to it, so a card row of mixed controls lines up.
@@ -12031,10 +12030,18 @@ function ssdFitAttr(el, name, values, fits) {
 // write one React renders too. The ResizeObserver only SCHEDULES the fit, one frame later, for the reason
 // SSDesignerFrame gives: a layout write inside the callback is a window "ResizeObserver loop" error, and
 // an app_errors row, on every change.
-function useSsdFit(fit, deps) {
+// `watch` (optional) names ONE more element to observe, for a fit whose own element stops reporting
+// size changes once the fit has pinned it. ssdFitStrip is that case: it writes a width, so neither the
+// strip nor its parent (both inside the capped frame) changes size when the window goes from 3440 to
+// 2560 — the frame is 1728 in both — and without this the strip keeps a width the page no longer has
+// and scrolls it sideways. designerWidthCap.mjs walks one page down through 3440/2560/1728/414 and is
+// what caught it; a harness that reloads per width never sees it.
+function useSsdFit(fit, deps, watch) {
   const elRef = useRef(null);
   const fitRef = useRef(fit);
   fitRef.current = fit;
+  const watchRef = useRef(watch);
+  watchRef.current = watch;
   const offRef = useRef(null);
   const attach = useCallback((el) => {
     if (offRef.current) { offRef.current(); offRef.current = null; }
@@ -12044,7 +12051,11 @@ function useSsdFit(fit, deps) {
     const run = () => { raf = 0; fitRef.current(el); };
     const later = () => { if (!raf) raf = requestAnimationFrame(run); };
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(later) : null;
-    if (ro) ro.observe(el);
+    if (ro) {
+      ro.observe(el);
+      const extra = typeof watchRef.current === "function" ? watchRef.current(el) : null;
+      if (extra && extra !== el) ro.observe(extra);
+    }
     const fonts = typeof document !== "undefined" ? document.fonts : null;
     if (fonts && fonts.addEventListener) fonts.addEventListener("loadingdone", later);
     offRef.current = () => {
@@ -12066,6 +12077,54 @@ function ssdFitRailCell(btn) {
     const label = btn.querySelector(v ? ".ssd-step-label.is-short" : ".ssd-step-label.is-full");
     return !label || label.scrollHeight <= label.clientHeight + 1;
   });
+}
+
+// The style strip is the ONE block allowed out of the 1728px frame (Ahsan 2026-09-22: on a screen
+// bigger than 27" "you can add more buildings side by side in a single row"). Everything else on the
+// page is text or a form and wants the framed reading measure; a row of pictures wants the monitor.
+//
+// It grows to the RIGHT only, so it still starts under its section heading and reads as the same
+// column running on, rather than as a detached full-bleed band. Width, never margin: a negative margin
+// would move its left edge off the heading.
+//
+// ⚠️ WHY THIS CANNOT OSCILLATE, which matters on this page of all pages (see the overflow-anchor note
+// on .ssd-rail). Both numbers it reads -- the scroller's content right edge, and the wrapper's own LEFT
+// edge -- are independent of the width it writes, so the second pass computes the same answer as the
+// first. It also never changes the strip's HEIGHT: tiles are a fixed aspect ratio inside a fixed
+// column width, so nothing below moves and scroll anchoring has nothing to correct.
+//
+// Below the frame's cap there is no room to the right, `grow` lands under the natural width, and the
+// property is removed -- so every laptop keeps exactly today's layout.
+// The element the strip is allowed to grow into: the first ancestor WIDER than the designer frame,
+// which is exactly the one supplying the frame's gutters — `.ss-designer-host` in the portal, <body>
+// on the public page. Deliberately not ssdScrollerOf: that one requires the ancestor to be overflowing
+// right now, and on a tall screen the portal host is not, which would fall through to the whole
+// viewport and hand the strip the 240px the side menu is standing in.
+function ssdStripRoom(frameEl) {
+  if (!frameEl) return null;
+  const fw = frameEl.clientWidth;
+  for (let p = frameEl.parentElement; p && p !== document.documentElement; p = p.parentElement) {
+    if (p.clientWidth > fw + 1) return p;
+  }
+  return document.documentElement;
+}
+function ssdFitStrip(wrap) {
+  const parent = wrap.parentElement;
+  if (!parent || !parent.clientWidth) return;   // hidden portal tab
+  // The wrapper's NATURAL width is its parent's content box plus the 12px it pulls out on each side
+  // with its negative margin. Measuring the parent alone under-reads it by 24px and the fit then
+  // "grows" the strip to something SMALLER than it already was — which on a 414px phone quietly cost
+  // it 20px. Caught by designerWidthCap.mjs, not by reasoning.
+  const nat = parent.clientWidth + 2 * SS_STRIP_PAD;
+  wrap.style.removeProperty("--ssd-strip-w");
+  const room = ssdStripRoom(wrap.closest(".ssd-frame"));
+  if (!room) return;
+  const box = room.getBoundingClientRect();
+  // clientWidth, not the box's width: it excludes a vertical scrollbar, which on Windows is laid out
+  // and really does take ~15px away from what the strip can have.
+  const right = box.left + (room.clientLeft || 0) + room.clientWidth;
+  const grow = Math.floor(right - wrap.getBoundingClientRect().left - SS_STRIP_EDGE);
+  if (grow > nat + 1) wrap.style.setProperty("--ssd-strip-w", grow + "px");
 }
 
 // Progress bar: see the data-ssd-pb-form / data-ssd-pb-cur rules in SSD_CSS.
@@ -12501,9 +12560,32 @@ function SSStepWatcher({ ids, onChange }) {
 // rings it instead, so it is exactly as tall as its neighbours.)
 const SS_STRIP_GAP = 10;
 const SS_STRIP_PAD = 12; // sideways; also the scroll-padding, so snap positions line up
+// The strip's content width when the designer is at its 1728px frame: 1728 - 62 (the stepper rail)
+// - 48 (.ssd-main's 24px sides) = 1618, and the wrapper's -12px margins and the scroller's own 12px
+// padding cancel out. Measured, not guessed: at perRow 8 that gives (1618 - 7*10) / 8 = 193.5px, and
+// designerWidthCap.mjs reads a real tile as 194px wide.
+const SS_STRIP_REF_W = 1618;
+// A tile's width once the strip has stopped dividing its space (Ahsan 2026-09-22: "keep the card size
+// same so in the bigger screens you can add more buildings side by side in a single row"). perRow is
+// still the builder's control and still means the same thing -- how big a tile is -- it is just read
+// against a FIXED reference width now instead of against whatever monitor is in front of the customer.
+// Below 1728 the old `divide 100% by n` rule is still the smaller of the two and still wins, so every
+// laptop is byte-for-byte unchanged; above it the tile stops growing and the extra width buys MORE
+// tiles instead. That is the half of Carolyn's 2026-09-17 "I can't see all the buildings" that the
+// width cap could not touch -- see the note on [data-ss-style-strip] in SSD_CSS.
+const ssStripTileW = (n) => Math.round((SS_STRIP_REF_W - (n - 1) * SS_STRIP_GAP) / n);
+// How far short of the scroller's right edge the widened strip stops. 24px is .ssd-main's own side
+// padding, so the strip ends where the framed content would have ended if the frame reached that far
+// -- the right margin reads as deliberate rather than as the tiles running into the window edge.
+const SS_STRIP_EDGE = 24;
 function SSStyleStrip({ styles, value, onPick, perRow, S, disabled }) {
   const n = Math.min(8, Math.max(5, Math.round(Number(perRow)) || 8));
   const ref = useRef(null);
+  // Lets the strip alone run past the designer's 1728px frame on a wider screen (see ssdFitStrip).
+  // React renders `width: var(--ssd-strip-w, auto)` on this element and ssdFitStrip only ever writes
+  // the custom property, never `width`, so the two never overwrite each other -- the rule useSsdFit's
+  // comment lays down.
+  const growRef = useSsdFit(ssdFitStrip, [n, styles.length], (el) => ssdStripRoom(el.closest(".ssd-frame")));
   // Which ends have tiles hidden past them. Both false = no overflow = no arrows, no fade.
   const [edges, setEdges] = useState({ left: false, right: false });
   const measure = useCallback(() => {
@@ -12557,12 +12639,20 @@ function SSStyleStrip({ styles, value, onPick, perRow, S, disabled }) {
   };
   const side = (dir) => (dir < 0 ? "left" : "right");
   return (
-    <div style={{ position: "relative", margin: `-8px -${SS_STRIP_PAD}px -6px` }}>
+    <div ref={growRef} style={{ position: "relative", margin: `-8px -${SS_STRIP_PAD}px -6px`, width: "var(--ssd-strip-w, auto)", maxWidth: "none" }}>
       <div ref={ref} data-ss-style-strip={n}
         style={{ position: "relative", display: "grid", gridAutoFlow: "column",
-          gridAutoColumns: `max(120px, calc((100% - ${(n - 1) * SS_STRIP_GAP}px) / ${n}))`,
+          gridAutoColumns: `min(${ssStripTileW(n)}px, max(120px, calc((100% - ${(n - 1) * SS_STRIP_GAP}px) / ${n})))`,
           gap: SS_STRIP_GAP, overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory",
-          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "none" }}>
+          // scrollbarWidth "thin", not "none" (Ahsan 2026-09-22: "if it does not fit then show the
+          // scroll bar"). overflow-x:auto only draws a bar when there really IS something past the
+          // edge, and with a fixed tile width a wide screen usually has nothing past the edge -- so
+          // the bar Carolyn complained about on 2026-09-17 ("the scroll bar never goes away") goes
+          // away on its own, by there being nothing hidden, rather than by being painted over.
+          // ⚠️ On a laptop with more styles than fit, the bar IS back. That is honest -- tiles are
+          // hidden there -- but it is a visible reversal of the 09-17 change and Carolyn should hear
+          // it from us rather than notice it.
+          scrollPaddingInline: SS_STRIP_PAD, padding: `8px ${SS_STRIP_PAD}px 12px`, scrollbarWidth: "thin" }}>
         {styles.map((s) => {
           const active = value === s.value;
           // A keyboard user picks a tile like a button: Enter or Space. On a locked plan the fieldset's

@@ -154,10 +154,19 @@ const run = async () => {
           `row ${m.rowW} vs ${DOCK_MIN_ROW_W} (+40 band)`);
       }
 
-      // 5. the strip scrolls but draws no bar
-      ok(`${tag} style strip shows no scrollbar`,
-        m.stripScrollbarWidth === "none" && (m.stripScrollbarPx === 0 || m.stripScrollbarPx === null),
-        `scrollbar-width ${m.stripScrollbarWidth}, gutter ${m.stripScrollbarPx}px`);
+      // 5. the strip's scrollbar tells the truth.
+      // ⚠️ THIS CHECK WAS INVERTED ON 2026-09-22, AND ON PURPOSE. It used to demand
+      // scrollbar-width:none at every width, from Carolyn 2026-09-17 ("the scroll bar never goes
+      // away"). Ahsan then asked for the opposite conditional — "if it does not fit then show the
+      // scroll bar" — and ssStripTileW made that reachable by fixing the card size, so a wide screen
+      // genuinely has nothing hidden and the bar goes away by itself. Suppressing it is now the bug.
+      // Do not flip this back without reading both calls; they asked for opposite things five days apart.
+      ok(`${tag} style strip does not suppress its scrollbar`, m.stripScrollbarWidth !== "none",
+        `scrollbar-width ${m.stripScrollbarWidth}`);
+      if (!m.stripOverflows) {
+        ok(`${tag} nothing hidden, so no bar takes space`, m.stripScrollbarPx === 0 || m.stripScrollbarPx === null,
+          `gutter ${m.stripScrollbarPx}px`);
+      }
 
       // 7. the invoice column
       if (m.dt && m.ft) {
@@ -212,8 +221,10 @@ const run = async () => {
     await few.waitForTimeout(600);
     const fm = await measure(few);
     ok(`few styles: the strip does not overflow`, fm.stripOverflows === false, `scroll gap ${fm.stripOverflows}`);
-    ok(`few styles: no arrows and no bar`, fm.arrows === 0 && fm.stripScrollbarWidth === "none",
-      `arrows ${fm.arrows}, scrollbar-width ${fm.stripScrollbarWidth}`);
+    // Nothing overflows, so there is nothing for either affordance to point at — the bar is not
+    // painted out any more (see check 5), it simply has nothing to scroll.
+    ok(`few styles: no arrows, and no bar takes space`, fm.arrows === 0 && (fm.stripScrollbarPx === 0 || fm.stripScrollbarPx === null),
+      `arrows ${fm.arrows}, gutter ${fm.stripScrollbarPx}px`);
     await few.screenshot({ path: `${shots}/few-styles-2560.png` });
     await few.close();
 
