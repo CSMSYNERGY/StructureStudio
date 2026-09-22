@@ -1071,10 +1071,21 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         //   2. Clearing billing_exempt on a tenant with no active subscription LOCKS them
         //      out immediately — the gate has nothing to let them in on. Order matters:
         //      set the discount first, let them subscribe, then remove the exemption.
+        //      ⚠️ Since 2026-09-21 (migration 228) that is worse than it was: billing_exempt
+        //      confers EVERY feature, so clearing it takes away Scheduling, QuickBooks Sync,
+        //      Real-Time Pricing, the CRM and 3D as well as the base gate. The response note
+        //      below now says so; it used to talk about discounts only.
         const clientId = reqStr(p.clientId, "clientId");
         const { data: exists } = await sb.from("client_configs")
           .select("client_id").eq("client_id", clientId).maybeSingle();
         if (!exists) throw new Error(`Unknown builder: ${clientId}`);
+
+        // Prior posture, read BEFORE the upsert, so the note below can talk about what
+        // actually CHANGED. The card sends billingExempt on every save, so "false" on its
+        // own says nothing — an account that was already billable is not being locked out.
+        const { data: priorCs } = await sb.from("client_settings")
+          .select("billing_exempt").eq("client_id", clientId).maybeSingle();
+        const wasExempt = Boolean(priorCs?.billing_exempt);
 
         const patch: Record<string, unknown> = { client_id: clientId, updated_at: new Date().toISOString() };
         if (p.billingExempt !== undefined) patch.billing_exempt = p.billingExempt === true;
@@ -1110,12 +1121,22 @@ Deno.serve(withErrorLog("admin-catalog", async (req: Request) => {
         // Warn the operator when the change cannot take effect on its own.
         const { data: live } = await sb.from("billing_subscriptions")
           .select("id").eq("client_id", clientId).neq("status", "cancelled").limit(1);
+        // Clearing the comp flag is the destructive direction, so it speaks first: it is
+        // the one change here that can take a working portal away from someone.
+        const clearedExempt = wasExempt && p.billingExempt === false;
+        const hasLive = Boolean(live && live.length);
+        const note = clearedExempt && !hasLive
+          ? "Saved — but this tenant is now BILLABLE with no active subscription, so they are locked out of the portal as of right now, and Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off. Tick Non-billable again, or give them a Free until date, until they subscribe."
+          : clearedExempt
+          ? "Saved. Non-billable is off, so this tenant now keeps only what their subscription covers — Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM and 3D are switched off unless they are paying for them."
+          : hasLive
+          ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
+          : "Saved.";
         return json({
           ok: true,
-          hasLiveSubscription: Boolean(live && live.length),
-          note: live && live.length
-            ? "Saved. This tenant already has a live subscription — the gateway holds its amount, so a discount change applies only to features they subscribe to from now on."
-            : "Saved.",
+          hasLiveSubscription: hasLive,
+          clearedExempt,
+          note,
         });
       }
       // ── card payments: the per-tenant merchant of record (migration 174) ──────────

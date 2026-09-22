@@ -1,5 +1,11 @@
 -- 169_internal_account: CSM Synergy's own tenants get everything, always.
 --
+-- ⚠️ AMENDED 2026-09-21 — SEE MIGRATION 228. The section below headed "WHY A NEW FLAG
+--    RATHER THAN WIDENING billing_exempt" no longer describes the code. billing_exempt
+--    now confers every feature too, because the fact it rested on — that every pre-gate
+--    tenant was exempt — stopped being true once those builders started paying. This
+--    file's SQL is unchanged and still correct; only its reasoning is superseded.
+--
 -- THE BUG THIS FIXES (Carolyn, 2026-08-30): "when we setup CRM perimeters for billing you
 -- also locked the Structure Studio account out. I need Structure Studio account to always be
 -- comped on everything."

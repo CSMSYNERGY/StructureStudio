@@ -30,6 +30,8 @@ function makeAdmin(opts: {
   priceError?: boolean;
   account?: { metered_exempt: boolean } | null;
   accountError?: boolean;
+  settings?: { billing_exempt: boolean } | null;
+  settingsError?: boolean;
   creditError?: boolean;
   balance?: number;
 }) {
@@ -53,6 +55,13 @@ function makeAdmin(opts: {
             opts.accountError
               ? { data: null, error: { message: "boom" } }
               : { data: opts.account ?? null, error: null },
+          );
+        }
+        if (table === "client_settings") {
+          return Promise.resolve(
+            opts.settingsError
+              ? { data: null, error: { message: "boom" } }
+              : { data: opts.settings ?? null, error: null },
           );
         }
         return Promise.resolve({ data: null, error: null });
@@ -104,6 +113,32 @@ Deno.test("an EXEMPT tenant charges nothing — wallet_credit would not have che
   const { admin, calls } = makeAdmin({ price: { price_cents: 250, active: true }, account: { metered_exempt: true } });
   const r = await chargeTaxCalculation(admin, base);
   assertEquals(r, { charged: false, reason: "exempt" });
+  assertEquals(calls.rpc.length, 0);
+});
+
+Deno.test("a NON-BILLABLE account charges nothing, even with no wallet exemption", async () => {
+  // billing_exempt is the account posture set from the Billing posture card, and since
+  // 2026-09-21 it means full access to everything — including free AI generations
+  // (Carolyn, asked about this one specifically because it is real model spend).
+  // Separate from metered_exempt, which is the per-wallet override for a BILLED tenant.
+  const { admin, calls } = makeAdmin({
+    price: { price_cents: 250, active: true },
+    account: { metered_exempt: false },
+    settings: { billing_exempt: true },
+  });
+  const r = await chargeTaxCalculation(admin, base);
+  assertEquals(r, { charged: false, reason: "exempt" });
+  assertEquals(calls.rpc.length, 0);
+});
+
+Deno.test("a client_settings read failure refuses rather than charging blind", async () => {
+  const { admin, calls } = makeAdmin({
+    price: { price_cents: 250, active: true },
+    account: { metered_exempt: false },
+    settingsError: true,
+  });
+  const r = await chargeTaxCalculation(admin, base);
+  assertEquals(r, { charged: false, reason: "error" });
   assertEquals(calls.rpc.length, 0);
 });
 

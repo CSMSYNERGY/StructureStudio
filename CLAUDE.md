@@ -432,8 +432,10 @@ Rules that are easy to break and expensive to get wrong:
    `featureOn("schedule_builds")` — the viewed tenant's entitlement in view-as, your own
    otherwise; no operator blanket since 2026-09-15. **PAY-ONLY (Carolyn 2026-08-04): "No one gets
    grandfathered into this."** portal-billing's `PAID_ONLY_FEATURES` set excludes
-   `schedule_builds` from the exempt/transition blankets — a real subscription is the only
-   tenant path in; do not "fix" that back to the blanket. The plans' `availability` flip
+   `schedule_builds` from the transition blanket — for a **customer**, a real subscription is
+   the only path in; do not "fix" that back to the blanket. ⚠️ **Since 2026-09-21 (migration
+   228) a NON-BILLABLE account (`billing_exempt`) does get it**, along with every other paid
+   feature — that flag is now an entitlement grant, not just a billing posture. The plans' `availability` flip
    (coming_soon → available) **has been thrown** — migration `094_scheduler_available`, live
    and verified 2026-08-07 at $195/mo · $1,950/yr with `price_visible = true`. The second
    launch switch, the hand-authored What's New entry, is still pending.
@@ -550,10 +552,14 @@ same way, modelled on scheduling:
 - ⚠️ **QuickBooks is mounted TWICE** — the top-level tab and Settings → QuickBooks. Both are
   gated; gating only the tab leaves `/portal/settings/quickbooks` open, and that is a link
   people have.
-- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds` and, since
-  2026-08-08, `quickbooks_sync`. Everything else is granted free to `exempt` and free-period
-  tenants by the blanket, so a gate on a non-pay-only feature is decorative — every tenant
-  predating the billing gate is exempt. QuickBooks had been **sold but never enforced** since
+- **PAY-ONLY set** (`portal-billing`'s `PAID_ONLY_FEATURES`): `schedule_builds`, `quickbooks_sync`
+  (2026-08-08), `on_demand_pricing` (2026-08-28) and `crm` (2026-08-29). Everything else is
+  granted free to free-period tenants by the transition blanket, so a gate on a non-pay-only
+  feature is weak on its own. ⚠️ **`billing_exempt` is NOT one of those blankets any more** —
+  since 2026-09-21 (migration 228) it short-circuits ahead of this set and confers everything,
+  including free metered AI. That was made safe by a fact about the data, not the code: the
+  only exempt tenants left are demo/test/internal ones. **Re-check that before relying on it**
+  (the query is in migration 228). QuickBooks had been **sold but never enforced** since
   migration 092: the tab checked `canAdmin` only, so any admin used it free and buying it
   changed nothing. Before flipping it, exactly one tenant had a live QuickBooks connection
   (`structure-studio`, CSM Synergy's own), so no builder lost a working integration.
@@ -563,8 +569,9 @@ same way, modelled on scheduling:
 **The billing gate (live 2026-07-28).** A new tenant with no active *required* subscription (Simple Layout) lands on Billing instead of a working portal. Nav stays fully visible with padlocks — they can see the whole product, and clicking anything lands on the gate, which embeds the plan picker for an owner/admin so paying happens where it's explained. **An operator viewing a locked tenant sees the same gate (2026-09-15)** — only the Accounts / Admin / Projects consoles stay open, so they can switch away; `gateLockedFor` in the shell exempts exactly those three nav items. A **failed** payment gets a 7-day grace period (warning banner + countdown, access continues) rather than locking a paying customer out over an expired card; a **cancellation** locks immediately. The customer-facing designer link is deliberately **never** gated — a tenant's own shoppers must not see a billing wall.
 
 Two things that are easy to get wrong:
-- **Existing tenants were grandfathered.** Every tenant that predates the gate was set `client_settings.billing_exempt = true` before it shipped, so the gate only ever applies to accounts created afterwards. Do not "clean up" those flags — flipping one to `false` on a tenant with no subscription locks a live customer out of their account instantly.
-- **Internal accounts use the checkbox, not the flag.** The admin console's New client form has **Non-billable — CSM Synergy internal / demo / testing**, off by default, which has `admin-catalog` create the `client_settings` row with `billing_exempt = true`. Use it for demos and test tenants instead of hand-editing the database.
+- **Existing tenants were grandfathered.** Every tenant that predates the gate was set `client_settings.billing_exempt = true` before it shipped, so the gate only ever applies to accounts created afterwards. Those flags have since been cleared as those builders started paying — as of 2026-09-21 only demo/test/internal accounts still carry one. Do not "clean up" what is left — flipping one to `false` on a tenant with no subscription locks that account out instantly, and now also strips five paid features.
+- ⚠️ **`billing_exempt` means FULL ACCESS, not just "don't charge them" (2026-09-21, migration 228).** Ticking **Non-billable** hands the account every paid feature — Scheduling, QuickBooks Sync, Real-Time Pricing, the CRM, 3D — plus free metered AI generations, worth about $755/mo. It is for our own, demo and test accounts. To let a real builder keep working without paying yet, use **Free until** instead: that keeps the base product open and deliberately does **not** include the add-ons.
+- **Internal accounts use the checkbox, not the flag.** The admin console's New client form has **Non-billable — CSM Synergy internal / demo / testing**, off by default, which has `admin-catalog` create the `client_settings` row with `billing_exempt = true`. Use it for demos and test tenants instead of hand-editing the database. `internal_account` (migration 169) is a separate column with no UI; it confers nothing extra now beyond permitting a sending domain on one of our own apexes.
 
 ## Architectural concepts
 
